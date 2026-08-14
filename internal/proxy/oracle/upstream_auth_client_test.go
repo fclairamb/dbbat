@@ -33,11 +33,27 @@ func TestBuildClientAuthPhase1Layout(t *testing.T) {
 		DriverName:  "drv",
 	}
 
-	body := buildClientAuthPhase1("ADMIN", ident, logonModeNoNewPass)
+	sess := &session{}
+	body := buildClientAuthPhase1(
+		sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq), "ADMIN", ident, logonModeNoNewPass, false)
 
-	wantHeader := []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, 0x00, 0x01}
+	// The preamble go-ora v3 puts on the wire — 03 76 <seq> 00 from PutTTCFunc
+	// (TTCVersion >= 18), then the 0x01 username-present marker. dbbat used to
+	// send 03 76 00 01: one byte short, and the upstream answered ORA-03120.
+	// ... then user_id_len and the logon mode as compressed ints, then the
+	// fixed [01 01 05 01 01] pair-count block.
+	wantPreamble := []byte{
+		byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00, 0x01,
+		0x01, 0x05, 0x01, byte(logonModeNoNewPass), 0x01, 0x01, 0x05, 0x01, 0x01,
+	}
+
+	wantHeader := wantPreamble[:5]
 	if !bytes.HasPrefix(body, wantHeader) {
 		t.Fatalf("phase1 body does not start with %x: got %x", wantHeader, body[:8])
+	}
+
+	if !bytes.HasPrefix(body, wantPreamble) {
+		t.Fatalf("phase1 preamble mismatch:\n got %x\nwant %x", body[:len(wantPreamble)], wantPreamble)
 	}
 
 	wantClr := append([]byte{0x05}, []byte("ADMIN")...)
@@ -55,6 +71,93 @@ func TestBuildClientAuthPhase1Layout(t *testing.T) {
 		}
 
 		pos += idx
+	}
+}
+
+// TestSyntheticAuthHeader covers the branch the builder tests never reach: they
+// all run on a session with no captured client packet, so they only ever see
+// the 4-byte default. A regression that always returned 4 bytes would pass every
+// one of them while breaking every client that negotiated the narrow framing.
+func TestSyntheticAuthHeader(t *testing.T) {
+	t.Parallel()
+
+	// A client Phase 1 payload: 2 data flags, then the body.
+	payload := func(body ...byte) *TNSPacket {
+		return &TNSPacket{Payload: append([]byte{0x00, 0x00}, body...)}
+	}
+
+	cases := []struct {
+		name   string
+		phase1 *TNSPacket
+		want   []byte
+	}{
+		{
+			// python_thin.pcapng: 03 76 01 | 01 | 01 04 …
+			name:   "narrow client framing is matched",
+			phase1: payload(0x03, 0x76, 0x01, 0x01, 0x01, 0x04, 0x01, 0x01),
+			want:   []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq},
+		},
+		{
+			// go_ora_cursor_reexec.pcapng: 03 76 01 00 | 01 | 01 06 …
+			name:   "extended client framing is matched",
+			phase1: payload(0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x06, 0x01, 0x01),
+			want:   []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00},
+		},
+		{
+			name:   "no captured packet falls back to the modern width",
+			phase1: nil,
+			want:   []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00},
+		},
+		{
+			// A wide (OCI) body says nothing about the width, so the header must
+			// not be narrowed on the guess — see ttcAuthFuncHeaderLen.
+			name: "wide client framing is not read as narrow",
+			phase1: payload(
+				0x03, 0x76, 0x02, 0x00, 0x03,
+				0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+				0x12, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+				0x06, 's', 'y', 's', 't', 'e', 'm',
+				0x0d, 0x00, 0x00, 0x00, 0x0d,
+				'A', 'U', 'T', 'H', '_', 'T', 'E', 'R', 'M', 'I', 'N', 'A', 'L',
+			),
+			want: []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sess := &session{clientAuthPhase1Pkt: tc.phase1}
+
+			got := sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
+			if !bytes.Equal(got, tc.want) {
+				t.Fatalf("syntheticAuthHeader = %x, want %x", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildClientAuthPhase1NarrowFuncHeader confirms the narrow header reaches
+// the packet, not just the helper: a client that negotiated the 3-byte framing
+// must get a synthetic Phase 1 that opens the same way.
+func TestBuildClientAuthPhase1NarrowFuncHeader(t *testing.T) {
+	t.Parallel()
+
+	sess := &session{clientAuthPhase1Pkt: &TNSPacket{
+		Payload: []byte{0x00, 0x00, 0x03, 0x76, 0x01, 0x01, 0x01, 0x04, 0x01, 0x01},
+	}}
+
+	body := buildClientAuthPhase1(
+		sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq),
+		"ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, logonModeNoNewPass, false)
+
+	want := []byte{
+		byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x01,
+		0x01, 0x05, 0x01, byte(logonModeNoNewPass), 0x01, 0x01, 0x05, 0x01, 0x01,
+	}
+	if !bytes.HasPrefix(body, want) {
+		t.Fatalf("narrow phase1 preamble mismatch:\n got %x\nwant %x", body[:len(want)], want)
 	}
 }
 
@@ -80,18 +183,17 @@ func TestBuildClientAuthPhase2Layout(t *testing.T) {
 		DriverName:  "drv",
 	}
 
-	body := buildClientAuthPhase2("ADMIN", ident, sec, logonModeNoNewPass|logonModeUserAndPass)
+	sess := &session{}
+	body := buildClientAuthPhase2(
+		sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq),
+		"ADMIN", ident, sec, logonModeNoNewPass|logonModeUserAndPass, false)
 
-	if body[0] != byte(TTCFuncPiggyback) {
-		t.Fatalf("phase2 body[0] = %x, want piggyback %x", body[0], byte(TTCFuncPiggyback))
-	}
-
-	if body[1] != PiggybackSubAuth2 {
-		t.Fatalf("phase2 body[1] = %x, want sub %x", body[1], PiggybackSubAuth2)
-	}
-
-	if body[2] != 0x00 {
-		t.Fatalf("phase2 body[2] = %x, want 0x00", body[2])
+	// 03 73 02 00 — PutTTCFunc's Phase 2 header on a TTCVersion >= 18 session,
+	// matching testdata/go_ora_cursor_reexec.pcapng. Then the 0x01
+	// username-present marker and the compressed user_id_len.
+	wantHeader := []byte{byte(TTCFuncPiggyback), PiggybackSubAuth2, authPhase2FuncSeq, 0x00, 0x01, 0x01, 0x05}
+	if !bytes.HasPrefix(body, wantHeader) {
+		t.Fatalf("phase2 body does not start with %x: got %x", wantHeader, body[:len(wantHeader)])
 	}
 
 	authSessKeyIdx := bytes.Index(body, []byte("AUTH_SESSKEY"))
@@ -135,7 +237,10 @@ func TestBuildClientAuthPhase2NoSpeedyKeyFor6949(t *testing.T) {
 		encPassword:      strings.Repeat("02", 32),
 	}
 
-	body := buildClientAuthPhase2("ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, sec, logonModeNoNewPass)
+	sess := &session{}
+	body := buildClientAuthPhase2(
+		sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq),
+		"ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, sec, logonModeNoNewPass, false)
 
 	if bytes.Contains(body, []byte("AUTH_PBKDF2_SPEEDY_KEY")) {
 		t.Fatalf("phase2 for 6949 must not include AUTH_PBKDF2_SPEEDY_KEY")
@@ -157,7 +262,7 @@ func TestPhase1ResponseParserHappyPath(t *testing.T) {
 
 	stream := buildSyntheticAuthPhase1Response(encServerKey, salt, csk, "8192", "10", VerifierType18453)
 
-	if !parseAuthMessageStream(stream, resp, false) {
+	if !parseAuthMessageStream(stream, resp, false, false) {
 		t.Fatalf("parseAuthMessageStream returned false on a complete stream")
 	}
 
@@ -201,11 +306,11 @@ func TestPhase1ResponseParserSplitAcrossPackets(t *testing.T) {
 
 	half := len(stream) / 2
 
-	if parseAuthMessageStream(stream[:half], resp, false) {
+	if parseAuthMessageStream(stream[:half], resp, false, false) {
 		t.Fatalf("parseAuthMessageStream returned true on partial stream")
 	}
 
-	if !parseAuthMessageStream(stream, resp, false) {
+	if !parseAuthMessageStream(stream, resp, false, false) {
 		t.Fatalf("parseAuthMessageStream did not finish on full stream")
 	}
 }
@@ -225,7 +330,7 @@ func TestPhase1ResponseSurfacesOracleError(t *testing.T) {
 
 	resp := &upstreamAuthResponse{properties: map[string]string{}}
 
-	if !parseAuthMessageStream(stream, resp, false) {
+	if !parseAuthMessageStream(stream, resp, false, false) {
 		t.Fatalf("parseAuthMessageStream did not finish on a complete stream")
 	}
 
@@ -427,8 +532,8 @@ func scrapePhase2KVValues(payload []byte) (string, string, error) {
 
 	body := payload[ttcDataFlagsSize+2:]
 
-	encClient := findKVByKeyBytes(body, []byte("AUTH_SESSKEY"))
-	encPw := findKVByKeyBytes(body, []byte("AUTH_PASSWORD"))
+	encClient := findKVByKeyBytes(body, []byte("AUTH_SESSKEY"), false)
+	encPw := findKVByKeyBytes(body, []byte("AUTH_PASSWORD"), false)
 
 	if encClient == "" || encPw == "" {
 		return "", "", errPhase2MissingKey
@@ -577,7 +682,7 @@ func TestParseAuthMessageStreamCapturesChallengeTrailer(t *testing.T) {
 	wantTrailer := stream[len(stream)-syntheticAuthTailLen:]
 
 	resp := &upstreamAuthResponse{properties: map[string]string{}}
-	if !parseAuthMessageStream(stream, resp, false) {
+	if !parseAuthMessageStream(stream, resp, false, false) {
 		t.Fatalf("parseAuthMessageStream returned false on a complete stream")
 	}
 

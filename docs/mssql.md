@@ -396,7 +396,8 @@ statement split across a packet boundary cannot slip past.
 The enforcement order is the one every other proxy uses: revocation → quotas →
 the grant's static controls (`read_only`, `block_ddl`, `block_copy`,
 password-change) → the approval gate. Only a statement that clears all four
-reaches the upstream.
+reaches the upstream. The database-switch refusal rides in the same pass as the
+static controls but is **not** one of them — see below.
 
 A refusal is answered as an `ERROR` (number 50000, class 16) followed by a
 `DONE` with `DONE_ERROR` — the shape a real SQL Server statement error takes, so
@@ -510,6 +511,103 @@ allowed bulk-load message still goes through the pipeline: the rows carry no
 statement to check, but they do consume the grant's quota and belong in the
 audit trail.
 
+### `USE <db>`, and what is deliberately not enforced next to it
+
+TDS pins nothing. The LOGIN7 database field sets the session's *initial* context,
+and `buildUpstreamLogin` rewrites it with the server row's `DatabaseName` — but
+nothing stops a later batch from moving elsewhere, and the proxy does not even
+observe the move (post-login `ENVCHANGE` is never parsed). Since `queries`
+carries no database column of its own, a session that switched would have every
+subsequent statement recorded against the database its grant *does* cover.
+
+`session.checkDatabaseSwitch` therefore refuses a `USE` naming anything but the
+session's own database, alongside `ValidateQuery` and on every statement in
+`statement.enforce` — so `sp_executesql N'USE otherdb'` and a resolved prepared
+handle are refused exactly like a plain SQLBatch. The refusal is **independent of
+the grant's controls**: a full-write grant on one database is not a grant on
+another, the same reasoning behind Oracle's `ALTER SESSION SET CONTAINER` block.
+It is answered as the ordinary statement refusal (`ERROR` 50000, class 16, then
+`DONE_ERROR`), so the driver raises a normal SQL error and the connection stays
+usable.
+
+`USE <this session's database>` is allowed, under the dbbat entry's name or the
+real one, folding case — SQL Server's own database names are case-insensitive
+under the default collation, so an exact match would refuse a driver re-stating
+its own database in another casing.
+
+The scan (`shared.MSSQLUseTargets`) walks the **whole batch**, not just its
+leading statement, because a T-SQL batch is genuinely multi-statement and needs
+no separator: `SELECT 1` ⏎ `USE otherdb` is one ordinary batch, and an anchored
+check would be a fig leaf. Scanning for a keyword mid-statement is only safe
+because the scan steps over string literals and quoted identifiers whole
+(`INSERT INTO t VALUES ('USE otherdb')` names no database) and because `USE` is
+reserved in T-SQL, so it cannot appear as a bare column or alias. The two
+constructs that spell it without switching anything — `OPTION (USE PLAN …)` and
+`OPTION (USE HINT (…))` — are skipped by name. A `USE` whose target dbbat cannot
+read is refused, not forwarded.
+
+### Dynamic SQL, and how far the checks reach into it
+
+`EXEC('<statement>')` runs the literal's contents as a batch of its own. That
+breaks the invariant everything above rests on — that no statement begins inside
+a string literal — and it broke it for *every* control, not just the switch
+refusal: `EXEC('DELETE FROM t')` starts with `EXEC`, so the prefix-shaped
+classifiers behind `read_only` and `block_ddl` saw no write at all.
+
+`session.validateStatement` therefore unwraps the decidable forms and runs the
+**same** checks over the inner statement that the outer batch gets — a second,
+laxer rule set for dynamic SQL would turn every control into a suggestion:
+
+| Form | Treatment |
+|------|-----------|
+| `EXEC('…')`, `EXECUTE('…')`, incl. `N'…'`, `EXEC (` with a space, `''` doubling | statement text extracted and checked |
+| `sp_executesql` sent as **batch text** (`EXEC [sys.]sp_executesql …`), statement passed **positionally** — `N'…'` first | same |
+| …statement passed **by name** — `@stmt` / `@statement` / `@tsql` / `@rpccall`, in any argument order | same |
+| `sp_executesql` sent as an **RPC** | already enforced, unchanged — see "RPC is enforced, not log-only" |
+| dynamic SQL nested inside dynamic SQL | **refused** (`ErrDynamicSQLNotCheckable`) rather than unwrapped further |
+| `sp_executesql` whose statement argument cannot be located at all | **refused**, same error |
+| `EXEC(@sql)`, `EXEC sp_executesql @sql`, `@stmt = @sql`, `EXEC('USE ' + @db)` | **not checked** — see below |
+| `EXEC dbo.some_proc`, `EXEC dbo.p @a = 1` | an ordinary procedure call, not dynamic SQL: opaque, and already failed closed under a restrictive grant on the RPC path |
+
+Which parameter names can carry the statement is **one list**
+(`shared.IsMSSQLStatementParamName`), shared with the RPC path. It was briefly
+two, and the copy that did not know the aliases was a bypass: T-SQL passes any
+procedure's arguments by name in any order, so
+`EXEC sp_executesql @params = N'@x int', @stmt = N'DROP TABLE Foo'` is the same
+call as the positional one, and the batch scanner walked past it as an inert
+string literal. Two lists of "what names the statement" is the same drift hazard
+as two implementations of "may this session change database".
+
+Not finding the statement argument is treated as **refused**, never as "nothing
+to check". The keyword says a statement is being run; failing to find it means
+dbbat is looking in the wrong place, which is exactly the condition a bypass
+hides in.
+
+**dbbat validates dynamic SQL only when the statement text is a literal.** The
+extraction is a static read of the batch, so it can only see what is written in
+the batch. `EXEC(@sql)` — and any concatenation that builds the text at runtime —
+is assembled by the server from values dbbat never sees, so **it reaches the
+database unvalidated**: no `read_only`, no `block_ddl`, no `block_copy`, no
+database-switch refusal. That is a real gap, stated plainly rather than papered
+over; closing it would need dbbat to evaluate T-SQL, which it does not do. It is
+not refused outright either, because a blanket refusal of variable-built dynamic
+SQL would break ordinary application code. If that boundary matters for a target,
+constrain the login dbbat connects with.
+
+Unwrapping stops at one level. A `EXEC('EXEC(''…'')')` is refused, not unwrapped
+again: recursion has to stop somewhere, and stopping *silently* would leave a
+hole the exact shape of the one the unwrapping closed.
+
+**Three-part names are out of scope, deliberately.**
+`SELECT * FROM otherdb.dbo.t` reaches another database with no switch to
+intercept, and so does a cross-database `INSERT`, a synonym, or a view defined
+over one. Enforcing a per-database boundary against arbitrary cross-database
+references needs a real T-SQL parser — dbbat has none, and a half-parser here
+would be worse than an honest limitation. A grant is scoped to a server row, and
+on SQL Server that row's reach is whatever the **upstream credentials** can see:
+if cross-database access matters, constrain the login dbbat connects with. The
+same applies to linked servers (`OPENQUERY`, four-part names).
+
 ### Approval holds
 
 Holds go through the shared gate (`docs/approvals.md`). While a statement is
@@ -614,6 +712,13 @@ Plainly, so nobody assumes more coverage than there is:
 - **Result sets behind an unmodelled token.** `COMPUTE BY` (`ALTMETADATA` /
   `ALTROW`) and Always Encrypted column metadata desynchronise the accountant,
   so those queries get a row count from the tail DONE and no captured rows.
+- **What a variable-built `EXEC` will say.** `EXEC('…')` with a literal is
+  unwrapped and checked (see above); `EXEC(@sql)` is assembled at runtime and
+  reaches the database with no control applied to it.
+- **A cross-database reference that never switches database.** `USE otherdb` is
+  refused (see above), but `otherdb.dbo.t` in an ordinary statement is not
+  detected — nor is a synonym, a view, or a linked-server `OPENQUERY` that
+  reaches one. Constrain the upstream login if that boundary matters.
 - **Transaction Manager requests** (`0x0E`): `BEGIN` / `COMMIT` / `ROLLBACK`
   issued through the protocol rather than as SQL are relayed untouched and do
   not appear in the query history.
@@ -761,5 +866,20 @@ make test-integration-mssql
 | `MSSQL_TEST_IMAGE` | Upstream SQL Server image (default `mcr.microsoft.com/mssql/server:2022-latest`) |
 
 Microsoft publishes that image for **linux/amd64 only**, so on Apple Silicon it
-runs under emulation if it runs at all. The CI job (`ubuntu-24.04`, in
-`.github/workflows/integration.yml`) is where it is expected to pass.
+runs under emulation. The CI job (`ubuntu-24.04`, in
+`.github/workflows/integration.yml`) is where it is expected to pass — but
+"expected to pass in CI" is not the same as "cannot be run here", and the
+difference mattered: the suite spent a release carrying no `-race` on the theory
+that nobody on arm64 could run it under the detector. Measured through Rosetta
+on an M-series host, the whole suite (175 cases) ran green in **3m39s** with
+`-race` on, SQL Server reaching *ready for client connections* in ~6s per
+container.
+
+So this target runs under `-race` like every other integration suite, and the
+detector reported nothing. That is a real result rather than a lucky one: the
+TDS session already guards the state the Oracle and PostgreSQL proxies were
+caught racing on — the in-flight statement behind `pendingMu`, the byte snapshot
+and in-session grant counters behind `statsMu`, the hold flags behind `heldMu`,
+the prepared-handle map behind `preparedMu` — each a per-concern lock, none of
+them session-wide. See `docs/oracle.md`, "The suite runs under `-race`", for
+what the detector found where that discipline was missing.

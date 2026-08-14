@@ -172,7 +172,68 @@ Always blocked, regardless of grant controls (even for non-read-only grants):
 | `COM_DEBUG` | Server diagnostics, requires SUPER |
 | `STMT_BULK_EXECUTE` (MariaDB) | Not supported by go-mysql server side; refused |
 
-`COM_INIT_DB` (USE database) is allowed but logged — it changes session state we want visibility into.
+### Switching database mid-session
+
+A dbbat grant is issued on one server row, and `queries` carries no database
+column of its own — only `connection_id`, with `connections.database_id` pinned
+at auth. A session that moves to another database is therefore not merely
+reaching data its grant never covered: every statement it runs afterwards is
+*attributed* to the granted database. So a switch is refused outright, whatever
+the grant says — a full-write grant on one database is not a grant on another,
+which is the same reasoning behind Oracle's `ALTER SESSION SET CONTAINER` block.
+
+A client can ask two ways, and both land on the same decision
+(`handler.switchDatabase` in `internal/proxy/mysql/intercept.go`):
+
+| Path | Treatment |
+|------|-----------|
+| `COM_INIT_DB` | refused unless it names the session's own database; logged either way |
+| `USE <db>` as `COM_QUERY` text | same, and answered by the proxy — an allowed `USE` never reaches the upstream |
+| `USE <db>` as `COM_STMT_PREPARE` | refused for every target: there is no OK packet to answer a prepare with, and MySQL does not accept `USE` as a preparable statement anyway |
+| `PREPARE s FROM '<literal>'` whose literal is a `USE` | refused for every target, same reasoning — see below |
+
+`USE <the granted database>` stays allowed under either name — the dbbat entry's
+or the real one — because clients emit it routinely on connect. The comparison
+is exact (MySQL's own case sensitivity for database names is
+filesystem-dependent, so exact is the fail-closed direction).
+
+The target is parsed off the comment-normalized scratch copy under the **MySQL**
+dialect (`internal/proxy/shared/usedb.go`, `sqlcomments.go`), so `USE/**/otherdb`,
+`USE # x⏎otherdb` and `USE/*!50100*/otherdb` are all read as the switches they
+are. The match is anchored at the start of the statement, which is sound rather
+than merely convenient: `USE` can only begin a statement, and the client leg does
+not negotiate `CLIENT_MULTI_STATEMENTS`, so one `COM_QUERY` carries one
+statement. Anything trailing the target other than a `;` is refused rather than
+parsed.
+
+#### `PREPARE … FROM`, and how far the switch check reaches into it
+
+`PREPARE s FROM 'USE otherdb'` followed by `EXECUTE s` performs exactly that
+switch, one statement later, through text every check above steps over —
+`PREPARE` matches no write or DDL keyword and no blocked pattern. It is the MySQL
+spelling of SQL Server's `EXEC('<literal>')`, and it is closed the same way:
+`shared.MySQLPreparedText` extracts the literal (both quote characters, `''`
+doubling, backslash escapes, comments, case folding) and the extracted text goes
+through the same `handler.switchDatabase` decision as a direct `USE`. Unwrapping
+stops at one level — a nested `PREPARE` is refused
+(`ErrPreparedTextNotCheckable`), not unwrapped again, because stopping *silently*
+would leave a hole the exact shape of the one this closes. So is a literal dbbat
+cannot read whole, including `FROM 'USE ' 'otherdb'` (MySQL concatenates adjacent
+literals, so dbbat would only have half the statement).
+
+Two limits, stated plainly rather than implied away:
+
+- **`PREPARE s FROM @sql` is not checked.** The text is assembled by the server
+  from values dbbat never sees, so nothing about it is statically decidable —
+  same for `CONCAT('USE ', @db)`. It is **not** refused either: a blanket refusal
+  of variable-built `PREPARE` would break ordinary application code. If that
+  boundary matters for a target, constrain the login dbbat connects with.
+- **Only the database-switch decision reaches inside the literal.** The grant's
+  controls still see the outer statement, so `PREPARE s FROM 'DELETE FROM t'`
+  is invisible to `read_only` and `PREPARE s FROM 'DROP TABLE t'` to `block_ddl`.
+  That is the broader "dynamic SQL is opaque to the grant controls" problem —
+  shared with Oracle's `BEGIN EXECUTE IMMEDIATE '…'; END;` — and it is tracked
+  as its own piece of work rather than half-solved here.
 
 ## Database Model
 

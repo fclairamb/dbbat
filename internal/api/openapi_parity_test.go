@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/fclairamb/dbbat/internal/auth/oidc"
 	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/notify"
@@ -109,16 +110,35 @@ func ginPathToSpecPath(path string) string {
 	return strings.Join(segments, "/")
 }
 
-// newParityTestServer builds the fully-featured router. Two route families are
-// registered conditionally on configuration — the Slack OAuth login routes and
-// the inbound Slack interactions webhook — and both are documented, so they
-// must be enabled here or they would look like spec-only paths.
+// newParityTestServer builds the fully-featured router. Four route families
+// are registered conditionally on configuration — the Slack OAuth login
+// routes, the generic OIDC login routes, the inbound Slack interactions
+// webhook and the MCP endpoint — and all are documented, so they must be
+// enabled here or they would look like spec-only paths.
 func newParityTestServer(t *testing.T) *Server {
 	t.Helper()
 
 	server, dataStore := setupTestServer(t)
 
+	// setupTestServer builds a bare config, so the MCP endpoint's shipped
+	// default (on) has to be restated. TestDefaultConfigEnablesMCP in
+	// internal/config is what pins that default itself.
+	server.config.MCP.Enabled = true
+
 	server.oauthProviders["slack"] = slack.NewProvider("test-client-id", "test-client-secret", "T0TEST")
+
+	// Constructing the OIDC provider does no network I/O (discovery is lazy),
+	// so an offline route-parity run is fine.
+	oidcProvider, err := oidc.NewProvider(oidc.Config{
+		Issuer:       "https://issuer.example.test",
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+	})
+	if err != nil {
+		t.Fatalf("failed to build oidc provider: %v", err)
+	}
+
+	server.oauthProviders[oidc.ProviderName] = oidcProvider
 
 	notifier, err := notify.NewSlackNotifier(
 		config.SlackNotifyConfig{

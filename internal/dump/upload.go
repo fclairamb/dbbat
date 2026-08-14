@@ -24,6 +24,8 @@ import (
 	// without any cloud dependency.
 	_ "gocloud.dev/blob/fileblob"
 	_ "gocloud.dev/blob/s3blob"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // Recorder persists the blob key of an uploaded capture on its connection row.
@@ -62,6 +64,9 @@ const (
 	uploadRetryDelay = 2 * time.Second
 	uploadTimeout    = 5 * time.Minute
 )
+
+// goroutineNameUpload is what a panic in one queued upload is logged under.
+const goroutineNameUpload = "capture upload"
 
 // UploaderOptions configures OpenUploader.
 type UploaderOptions struct {
@@ -404,7 +409,13 @@ func (u *Uploader) work(ctx context.Context) {
 	defer u.wg.Done()
 
 	for uid := range u.jobs {
-		u.uploadWithRetry(ctx, uid)
+		// Per job rather than around the loop: a panic must not end the process,
+		// and must not retire this worker either — a proxy that silently stopped
+		// shipping captures is worse than one that loses a single upload. See
+		// safe.RunMaintenance.
+		safe.RunMaintenance(ctx, u.logger, goroutineNameUpload, func() {
+			u.uploadWithRetry(ctx, uid)
+		})
 	}
 }
 

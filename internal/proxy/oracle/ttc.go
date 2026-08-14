@@ -28,16 +28,37 @@ const (
 	TTCFuncOVersion     TTCFunctionCode = 0x0B // OVERSION — version request
 	TTCFuncOALL8        TTCFunctionCode = 0x0E // OALL8 — parse+execute (legacy)
 	TTCFuncQueryResult  TTCFunctionCode = 0x10 // Query result with row data
-	TTCFuncOFETCH       TTCFunctionCode = 0x11 // OFETCH — fetch rows
+	TTCFuncOFETCH       TTCFunctionCode = 0x11 // TTC piggyback message type — see below
 	TTCFuncOCANCEL      TTCFunctionCode = 0x14 // OCANCEL — cancel query
 )
 
+// TTCFuncOFETCH keeps its name for continuity, but the name is wrong and the
+// distinction cost a hung client, so it is written down here rather than left
+// to be rediscovered:
+//
+//   - 0x11 is the TTC **piggyback message type**, not a fetch. Byte 1 is a TTC
+//     *function code* — 0x69 close-cursors, 0x6b (an OCI session piggyback),
+//     0x87 set-end-to-end-attrs, 0x98 set-schema — and never a cursor id.
+//   - A real fetch is message type 0x03 with function 0x05 (TNS_FUNC_FETCH),
+//     which is what every recording in testdata/ shows and what dbbat labels
+//     PIGGYBACK.
+//
+// dbbat used to carry a fetch decoder keyed on this constant, reading a cursor
+// id as a big-endian uint16 at bytes 1..3 — a fiction for any frame Oracle
+// actually sends: on `11 6b 04 …` it read 0x6b04 = 27396 and refused it as a
+// re-execution of a cursor nobody opened. That decoder and the re-execution
+// gate behind it are gone (the intent is recorded in docs/oracle.md, "Cursor
+// re-execution"); see interceptClientMessage and clientCallNumber.
+const ttcPiggybackMessageType = TTCFuncOFETCH
+
 // Piggyback sub-operation codes (byte 1 when func=0x03).
 const (
-	PiggybackSubClose   byte = 0x09 // Close cursor
-	PiggybackSubExecSQL byte = 0x5e // Execute with SQL (OALL8 equivalent)
-	PiggybackSubAuth1   byte = 0x76 // AUTH Phase 1
-	PiggybackSubAuth2   byte = 0x73 // AUTH Phase 2
+	PiggybackSubReexecDML byte = 0x04 // Re-execute an already-parsed non-SELECT cursor
+	PiggybackSubLogoff    byte = 0x09 // Session logoff — carries no cursor id (see below)
+	PiggybackSubReexecSel byte = 0x4e // Re-execute + fetch an already-parsed SELECT cursor
+	PiggybackSubExecSQL   byte = 0x5e // Execute with SQL (OALL8 equivalent)
+	PiggybackSubAuth1     byte = 0x76 // AUTH Phase 1
+	PiggybackSubAuth2     byte = 0x73 // AUTH Phase 2
 )
 
 // Execute-with-SQL sub-operation codes for func=0x11.
@@ -46,6 +67,15 @@ const (
 	execSubOpJDBC   byte = 0x69 // DBeaver, JDBC thin driver
 	execSubOpPython byte = 0x98 // Python oracledb thin driver
 )
+
+// subOpCloseCursors is the same wire byte as execSubOpJDBC, and deliberately
+// spelled out separately because it is the same *frame* seen from the other
+// end: `0x11`/`0x69` is Oracle's close-cursors piggyback, and a client that has
+// a statement to run staples that execute behind the close list in the same
+// packet — which is why dbbat first met this byte as "the JDBC/DBeaver execute"
+// (docs/oracle.md). Both readings are needed: the close list is decoded first,
+// then the trailing execute, matching wire order.
+const subOpCloseCursors = execSubOpJDBC
 
 // ttcDataFlagsSize is the size of the data flags prefix in a TNS Data payload.
 const ttcDataFlagsSize = 2
@@ -68,6 +98,19 @@ func extractTTCPayload(tnsDataPayload []byte) []byte {
 	}
 
 	return tnsDataPayload[ttcDataFlagsSize:]
+}
+
+// ttcOpFunction names the TTC function a message carries, which for a
+// piggyback (message type 0x11) is byte 1 and not the message type at all.
+// It exists so the "TTC message" log line says `func=OFETCH op=0x6b` instead of
+// claiming a fetch that no client ever sent — the misreading this whole
+// distinction was rediscovered through.
+func ttcOpFunction(ttcPayload []byte) string {
+	if len(ttcPayload) < 2 {
+		return "?"
+	}
+
+	return fmt.Sprintf("0x%02x", ttcPayload[1])
 }
 
 // String returns a human-readable name for the TTC function code.
@@ -111,9 +154,50 @@ func IsPiggybackExecSQL(ttcPayload []byte) bool {
 	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubExecSQL
 }
 
-// IsPiggybackClose checks if a piggyback payload is a close cursor message.
-func IsPiggybackClose(ttcPayload []byte) bool {
-	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubClose
+// IsPiggybackCursorReexec reports whether a piggyback payload re-executes a
+// cursor the client already parsed — no statement text on the wire, only the
+// cursor id.
+//
+// This is the shape every modern thin client actually sends when it re-runs a
+// statement (verified on captures from go-ora and python-oracledb thin, see
+// docs/oracle.md): sub-op 0x4e for a SELECT, sub-op 0x04 for anything else.
+// The SQL-less OALL8 that decodeOALL8 reports is the same idea in the legacy
+// (pre-v315) framing.
+func IsPiggybackCursorReexec(ttcPayload []byte) bool {
+	if len(ttcPayload) < 2 {
+		return false
+	}
+
+	switch ttcPayload[1] {
+	case PiggybackSubReexecSel, PiggybackSubReexecDML:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsPiggybackLogoff reports whether a func-0x03 payload is the session logoff.
+//
+// It was called IsPiggybackClose and believed to close a cursor, with the byte
+// right after it read as the cursor id. It does neither. Every recording in
+// testdata/ carries exactly one of these frames, as the very last thing the
+// client sends, three or four bytes long — `03 09 <seq>` optionally followed by
+// the 23ai token byte — and there is no room in it for a cursor id at all. The
+// byte that used to be deleted on is the TTC sequence number, so every session
+// teardown evicted an unrelated tracker entry. The real close list is the
+// `0x11`/`0x69` piggyback (decodeCloseCursors).
+func IsPiggybackLogoff(ttcPayload []byte) bool {
+	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubLogoff
+}
+
+// IsCloseCursorsPiggyback reports whether a payload is Oracle's close-cursors
+// piggyback: message type 0x11 (TNS_MSG_TYPE_PIGGYBACK), function 0x69
+// (TNS_FUNC_CLOSE_CURSORS). Say nothing about what follows the close list in
+// the same packet — that is decodeCloseCursors' and the exec path's business.
+func IsCloseCursorsPiggyback(ttcPayload []byte) bool {
+	return len(ttcPayload) > 1 &&
+		TTCFunctionCode(ttcPayload[0]) == TTCFuncOFETCH &&
+		ttcPayload[1] == subOpCloseCursors
 }
 
 // IsExecSQL checks if a func=0x11 payload is an execute-with-SQL message

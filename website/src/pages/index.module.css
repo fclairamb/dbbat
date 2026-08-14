@@ -35,6 +35,21 @@
   background: var(--ifm-background-surface-color);
 }
 
+.compliance {
+  padding: 4rem 0;
+  text-align: center;
+}
+
+.compliance p {
+  max-width: 46rem;
+  margin: 0 auto 1rem;
+}
+
+.complianceCaveat {
+  font-style: italic;
+  opacity: 0.85;
+}
+
 .codeBlock {
   background: var(--ifm-code-background);
   padding: 1rem 2rem;

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	dockercontainer "github.com/moby/moby/api/types/container"
 	_ "github.com/sijms/go-ora/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,11 +25,25 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/mcp"
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-const defaultOracleImage = "gvenzl/oracle-xe:18.4.0-slim"
+// defaultOracleImage is the image every host and every environment starts by
+// default. It is the 23ai Free image rather than `gvenzl/oracle-xe:18.4.0-slim`
+// for two reasons: 23ai is the version the proxy work is validated against (see
+// the client-compatibility tables in docs/oracle.md), and the XE image is
+// published for linux/amd64 only — under emulation on an Apple Silicon Mac it
+// dies during instance startup (ORA-27300 / ORA-00442), so the whole suite gave
+// a developer no signal at all.
+//
+// 18c XE coverage is not lost: .github/workflows/integration.yml runs the suite
+// a second time with ORACLE_TEST_IMAGE pinned to the XE image.
+const defaultOracleImage = "gvenzl/oracle-free:23-slim"
 
+// oracleTestImage returns the Oracle image the suite starts. ORACLE_TEST_IMAGE
+// overrides defaultOracleImage.
 func oracleTestImage() string {
 	if img := os.Getenv("ORACLE_TEST_IMAGE"); img != "" {
 		return img
@@ -60,6 +75,17 @@ func oracleTestService() string {
 
 // startOracleContainer starts an Oracle XE container for testing.
 func startOracleContainer(t *testing.T) (testcontainers.Container, string, int) {
+	return startOracleContainerWith(t, false)
+}
+
+// startOracleContainerWith is startOracleContainer plus the one knob the
+// container-hosted OCI client needs: `hostGateway` gives the container a
+// `host.docker.internal` entry pointing back at the Docker host, so a client
+// run *inside* it (see oci_client_integration_test.go) can dial a proxy the
+// test bound on the host. It is off for every other test — the entry costs
+// nothing but it also buys nothing, and `host-gateway` is a Docker-20.10-and-up
+// feature we would rather not make every Oracle test depend on.
+func startOracleContainerWith(t *testing.T, hostGateway bool) (testcontainers.Container, string, int) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -84,6 +110,12 @@ func startOracleContainer(t *testing.T) (testcontainers.Container, string, int) 
 		ExposedPorts: []string{"1521/tcp"},
 		Env:          env,
 		WaitingFor:   wait.ForLog("DATABASE IS READY TO USE!").WithStartupTimeout(timeout),
+	}
+
+	if hostGateway {
+		req.HostConfigModifier = func(hc *dockercontainer.HostConfig) {
+			hc.ExtraHosts = append(hc.ExtraHosts, hostGatewayAlias+":host-gateway")
+		}
 	}
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -263,7 +295,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{UserID: user.UID, DatabaseID: db.UID, GrantedBy: user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{}}})
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{
@@ -420,3 +452,141 @@ func TestIntegration_VersionDetection(t *testing.T) {
 
 // Silence unused import warning for json
 var _ = json.Marshal
+
+// TestIntegration_MCPExecutesThroughTheProxy is the Oracle half of the MCP
+// phase-2 spec: an agent's statement must reach the database by dialing dbbat's
+// own Oracle listener as the API key's owner, never by an internal path.
+//
+// It therefore asserts the two things that would break if the loopback client
+// were wired wrong — rows come back, and the statement shows up in the ordinary
+// query history attributed to the key's user — rather than re-testing the
+// enforcement the rest of this suite already covers.
+//
+// Note for whoever runs this: every containered Oracle test in this package
+// currently dies at startup with ORA-00442 on an Apple Silicon workstation
+// (XE refuses a second single-instance start under emulation). This one is no
+// different; it is meant for the CI job that runs `make test-e2e-oracle`.
+func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
+	ctx := context.Background()
+
+	oracleContainer, oracleHost, oraclePort := startOracleContainer(t)
+	defer func() { _ = oracleContainer.Terminate(ctx) }()
+
+	pgContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "postgres:15-alpine",
+			ExposedPorts: []string{"5432/tcp"},
+			Env: map[string]string{
+				"POSTGRES_DB":       "dbbat_test",
+				"POSTGRES_USER":     "test",
+				"POSTGRES_PASSWORD": "test",
+			},
+			WaitingFor: wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60 * time.Second),
+		},
+		Started: true,
+	})
+	require.NoError(t, err)
+	defer func() { _ = pgContainer.Terminate(ctx) }()
+
+	pgHost, _ := pgContainer.Host(ctx)
+	pgPort, _ := pgContainer.MappedPort(ctx, "5432")
+	pgDSN := fmt.Sprintf("postgres://test:test@%s:%s/dbbat_test?sslmode=disable", pgHost, pgPort.Port())
+
+	dataStore, err := store.New(ctx, pgDSN)
+	require.NoError(t, err)
+
+	defer dataStore.Close()
+
+	require.NoError(t, dataStore.Migrate(ctx))
+
+	// The proxy matches the username on the wire against the API key's owner,
+	// and the upstream credentials come from the server row — so the dbbat user
+	// is deliberately not the Oracle one.
+	//
+	// Lowercase on purpose: Oracle clients uppercase the username on the wire and
+	// the proxy lowercases it again before looking the dbbat user up
+	// (session.authenticateClient), so a dbbat user stored as "SYSTEM" can never
+	// be found. This fixture used to create exactly that and failed the whole
+	// test at the first Execute with "user not found: SYSTEM".
+	user, err := dataStore.CreateUser(ctx, "agent", "$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
+	require.NoError(t, err)
+
+	encryptionKey := []byte("0123456789012345678901234567890X")
+
+	service := oracleTestService()
+	db, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:              service,
+		Host:              oracleHost,
+		Port:              oraclePort,
+		DatabaseName:      service,
+		OracleServiceName: &service,
+		Username:          "system",
+		Password:          "oracle",
+		Protocol:          store.ProtocolOracle,
+	}, encryptionKey)
+	require.NoError(t, err)
+
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
+	require.NoError(t, err)
+
+	_, plainKey, err := dataStore.CreateAPIKey(ctx, user.UID, "agent-key", nil, encryptionKey)
+	require.NoError(t, err)
+
+	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.Default())
+	go func() { _ = proxy.Start("127.0.0.1:0") }()
+
+	defer func() { _ = proxy.Shutdown(ctx) }()
+
+	require.Eventually(t, func() bool { return proxy.Addr() != nil }, 5*time.Second, 50*time.Millisecond)
+
+	executor := mcp.NewLoopbackExecutor(mcp.LoopbackListeners{Oracle: proxy.Addr().String()})
+
+	result, err := executor.Execute(ctx, mcp.ExecRequest{
+		Protocol: store.ProtocolOracle,
+		// The dbbat entry's name, not the upstream SERVICE_NAME: the session
+		// resolver does an exact GetServerByName lookup on it.
+		Database:         service,
+		UpstreamDatabase: service,
+		Username:         user.Username,
+		APIKey:           plainKey,
+		SQL:              "SELECT 42 AS answer FROM dual",
+		MaxRows:          10,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	assert.False(t, result.Truncated)
+	assert.Equal(t, []string{"ANSWER"}, result.Columns)
+
+	// The row cap is applied while reading, not after.
+	capped, err := executor.Execute(ctx, mcp.ExecRequest{
+		Protocol:         store.ProtocolOracle,
+		Database:         service,
+		UpstreamDatabase: service,
+		Username:         user.Username,
+		APIKey:           plainKey,
+		SQL:              "SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 100",
+		MaxRows:          5,
+	})
+	require.NoError(t, err)
+	assert.Len(t, capped.Rows, 5)
+	assert.True(t, capped.Truncated, "a result set larger than max_rows must be reported as truncated")
+
+	// Nothing about MCP is a special path, so the statements land in the
+	// ordinary query history.
+	require.Eventually(t, func() bool {
+		queries, listErr := dataStore.ListQueries(ctx, store.QueryFilter{Limit: 50})
+		if listErr != nil {
+			return false
+		}
+
+		for i := range queries {
+			if strings.Contains(queries[i].SQLText, "42 AS answer") {
+				return true
+			}
+		}
+
+		return false
+	}, 30*time.Second, 250*time.Millisecond, "an agent's statement must be logged like any other")
+}

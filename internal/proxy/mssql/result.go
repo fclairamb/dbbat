@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -651,7 +652,9 @@ func (s *session) recordQuery(ctx context.Context, pending *pendingQuery, outcom
 
 	hasRows := len(outcome.rows) > 0
 
-	go s.persistQuery(ctx, pending.approvalUID, record, outcome, hasRows, bytesTransferred)
+	go safe.RunGuarded(ctx, s.logger, goroutineNameQueryRecord, func() {
+		s.persistQuery(ctx, pending.approvalUID, record, outcome, hasRows, bytesTransferred)
+	})
 
 	s.chargeGrant(bytesTransferred)
 }
@@ -666,6 +669,11 @@ func (s *session) persistQuery(
 	bytesTransferred int64,
 ) {
 	sink := s.server.rowWriter.NewSink()
+
+	// The sink never escapes this call, but a panic between Resolve and Flush
+	// would strand the rows already queued against it. Fail is a no-op once
+	// Resolve has run, so this only bites on the panic path.
+	defer sink.Fail()
 
 	queryUID := approvalUID
 	held := queryUID != uuid.Nil
@@ -728,9 +736,9 @@ func (s *session) completeHeldQuery(ctx context.Context, queryUID uuid.UUID, err
 		return
 	}
 
-	go func() {
+	go safe.RunGuarded(ctx, s.logger, goroutineNameHeldQueryCompletion, func() {
 		if err := s.server.store.UpdateQueryCompletion(ctx, queryUID, nil, nil, &errText, false, false); err != nil {
 			s.logger.DebugContext(ctx, "MSSQL failed to complete a held query", slog.Any("error", err))
 		}
-	}()
+	})
 }

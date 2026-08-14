@@ -593,6 +593,123 @@ test.describe("Observability Features", () => {
     expect(content).toBeTruthy();
   });
 
+  test("should verify the audit chains from the audit page", async ({
+    authenticatedPage,
+  }) => {
+    // The store-wide audit chain only reports a head once something has been
+    // audited, and a freshly provisioned test store has nothing in
+    // `audit_log`. Create and immediately revoke an API key: both are audited,
+    // and the key never outlives the test.
+    const apiBase = new URL(authenticatedPage.url()).origin + "/api/v1";
+    const auth =
+      "Basic " + Buffer.from("admin:admintest").toString("base64");
+    const created = await authenticatedPage.request.post(`${apiBase}/keys`, {
+      headers: { Authorization: auth },
+      data: { name: `e2e-chain-verification-${Date.now()}` },
+    });
+    expect(created.ok()).toBeTruthy();
+    const createdKey = (await created.json()) as { id: string };
+    const revoked = await authenticatedPage.request.delete(
+      `${apiBase}/keys/${createdKey.id}`,
+      { headers: { Authorization: auth } },
+    );
+    expect(revoked.ok()).toBeTruthy();
+
+    await authenticatedPage.goto("audit");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const card = authenticatedPage.getByTestId("chain-verification-card");
+    await expect(card).toBeVisible();
+
+    // The caveat is the point of the panel as much as the verdict is: the
+    // answer comes from the server being audited, and the CLI is what someone
+    // who does not trust it runs.
+    await expect(
+      authenticatedPage.getByTestId("chain-verification-caveat"),
+    ).toContainText("dbbat audit verify");
+    await expect(
+      authenticatedPage.getByTestId("chain-verification-docs-link"),
+    ).toHaveAttribute("href", /audit-chain/);
+
+    // The store-wide audit chain reports a head, and the head is copyable —
+    // recording it outside the database is the ritual this panel exists for.
+    // A walk's outcome is cached for a minute, so an answer computed before
+    // the key above was created can legitimately come back headless: click
+    // again until the cache has turned over.
+    const headMac = authenticatedPage.getByTestId("audit-head-mac");
+    await expect(async () => {
+      await authenticatedPage.getByTestId("verify-chains-button").click();
+      await expect(headMac).toBeVisible({ timeout: 10000 });
+    }).toPass({ timeout: 120000, intervals: [5000] });
+    await expect(headMac).toHaveText(/^[0-9a-f]{16,}$/);
+    await expect(
+      authenticatedPage.getByTestId("audit-head-mac-copy"),
+    ).toBeEnabled();
+
+    // All three chains are walked: audit_log, the per-connection query chains
+    // and the per-capture result-row chains.
+    for (const chain of ["audit", "queries", "rows"]) {
+      const row = authenticatedPage.getByTestId(`chain-result-${chain}`);
+      await expect(row).toBeVisible();
+      await expect(row).toHaveAttribute("data-verified", "true", {
+        timeout: 30000,
+      });
+      await expect(
+        authenticatedPage.getByTestId(`chain-result-${chain}-status`),
+      ).toHaveText(/Verified/);
+      // Cached or fresh, the panel says which — it never presents a
+      // remembered walk as one run for this request.
+      await expect(
+        authenticatedPage.getByTestId(`chain-result-${chain}-freshness`),
+      ).toHaveText(/Walked for this request|Cached result/);
+      // No chain is broken, so no break block should be rendered.
+      await expect(
+        authenticatedPage.getByTestId(`chain-result-${chain}-break`),
+      ).toHaveCount(0);
+    }
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/audit-chain-verification.png",
+      fullPage: true,
+    });
+  });
+
+  test("should hide chain verification from a viewer", async ({
+    authenticatedPage,
+    browser,
+  }) => {
+    await authenticatedPage.goto("audit");
+    await authenticatedPage.waitForLoadState("networkidle");
+    await expect(
+      authenticatedPage.getByTestId("chain-verification-card"),
+    ).toBeVisible();
+
+    // A genuinely separate browser context, signed in as viewer: reusing
+    // authenticatedPage's Page would stay signed in as admin.
+    const viewerContext = await browser.newContext();
+    const page = await viewerContext.newPage();
+    await page.goto("/");
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByTestId("login-logo").waitFor({ state: "visible" });
+    await page.getByTestId("login-username").fill("viewer");
+    await page.getByTestId("login-password").fill("viewer");
+    await page.getByTestId("login-submit").click();
+    await page.waitForURL((url) => !url.pathname.includes("/login"), {
+      timeout: 10000,
+    });
+
+    await page.goto("audit");
+    await page.waitForLoadState("networkidle");
+
+    // A viewer may read the audit list but the verify endpoints answer 403,
+    // so the panel must not be offered at all.
+    await expect(page).toHaveURL(/\/audit/);
+    await expect(page.getByTestId("chain-verification-card")).toHaveCount(0);
+    await expect(page.getByTestId("verify-chains-button")).toHaveCount(0);
+
+    await viewerContext.close();
+  });
+
   test("should navigate to queries page", async ({ authenticatedPage }) => {
     await authenticatedPage.goto("queries");
     await authenticatedPage.waitForLoadState("load");

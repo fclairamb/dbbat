@@ -170,31 +170,6 @@ func TestHandleOALL8_PasswordChangeBlocked(t *testing.T) {
 	assert.ErrorIs(t, err, shared.ErrPasswordChangeBlocked)
 }
 
-func TestHandleOFETCH_LinksToCursor(t *testing.T) {
-	t.Parallel()
-	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
-
-	// First, register a cursor via OALL8
-	_ = s.handleOALL8(buildOALL8("SELECT * FROM emp", nil, 7))
-	// Clear the pending query (as if response was received)
-	s.tracker.pendingQuery = nil
-
-	// Now fetch should link to the cursor
-	require.NoError(t, s.handleOFETCH(buildOFETCH(7, 100)))
-
-	require.NotNil(t, s.tracker.pendingQuery)
-	assert.Equal(t, "SELECT * FROM emp", s.tracker.pendingQuery.cursor.sql)
-}
-
-func TestHandleOFETCH_UnknownCursor(t *testing.T) {
-	t.Parallel()
-	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
-
-	// OFETCH for cursor that doesn't exist
-	require.NoError(t, s.handleOFETCH(buildOFETCH(99, 100)))
-	assert.Nil(t, s.tracker.pendingQuery)
-}
-
 func TestHandleOCLOSE_CleansCursor(t *testing.T) {
 	t.Parallel()
 	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
@@ -245,6 +220,13 @@ func TestCompleteQuery_SetsDuration(t *testing.T) {
 	assert.Nil(t, s.tracker.pendingQuery)
 }
 
+// TestWriteTTCError checks the frame a refusal ends the client's call with.
+//
+// It used to assert a TTC Response (0x08) carrying fixed-width big-endian
+// fields, which is what the proxy emitted and what no Oracle client parses —
+// the assertions passed while every refused statement hung a real client. The
+// layout it now pins is the OER (0x04) a server actually ends a call with; the
+// field-level coverage lives in ttc_oer_encode_test.go.
 func TestWriteTTCError(t *testing.T) {
 	t.Parallel()
 	client, proxyEnd := net.Pipe()
@@ -262,24 +244,18 @@ func TestWriteTTCError(t *testing.T) {
 		assert.NoError(t, err)
 	}()
 
-	// Read the TNS packet from client side
 	pkt, err := readTNSPacket(client)
 	require.NoError(t, err)
 	assert.Equal(t, TNSPacketTypeData, pkt.Type)
 
-	// Verify it's a Response
 	fc, err := parseTTCFunctionCode(pkt.Payload)
 	require.NoError(t, err)
-	assert.Equal(t, TTCFuncResponse, fc)
+	assert.Equal(t, TTCFuncOERR, fc, "a server ends a call with an OER, not a Response")
 
-	// Verify error code is present in payload
-	// Error code is at offset 4 (2 data flags + 1 func code + 1 seq)
-	require.Greater(t, len(pkt.Payload), 8)
-	errCode := binary.BigEndian.Uint32(pkt.Payload[4:8])
-	assert.Equal(t, uint32(1031), errCode)
-
-	// Verify error message is in the payload
-	assert.Contains(t, string(pkt.Payload), "ORA-01031")
+	info := decodeOERAt(extractTTCPayload(pkt.Payload), 0)
+	require.NotNil(t, info, "the frame must decode as an end-of-call OER")
+	assert.Equal(t, 1031, info.ErrorCode)
+	assert.Equal(t, "ORA-01031: insufficient privileges", info.ErrorMessage)
 }
 
 func TestParseResponseRowsAffected(t *testing.T) {

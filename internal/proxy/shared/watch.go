@@ -1,12 +1,15 @@
 package shared
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // Client TCP keepalive settings. With no approval timeout, a hold ends only on
@@ -91,6 +94,10 @@ type WatchedConn struct {
 	stopped chan struct{} // closed when the watcher goroutine has exited
 }
 
+// GoroutineNameParkWatcher is what a panic in the park read-watch is logged
+// under.
+const GoroutineNameParkWatcher = "approval hold client read-watch"
+
 // NewWatchedConn wraps conn.
 func NewWatchedConn(conn net.Conn) *WatchedConn {
 	return &WatchedConn{Conn: conn}
@@ -166,7 +173,13 @@ func (w *WatchedConn) Park() <-chan struct{} {
 	w.stopped = stopped
 	w.mu.Unlock()
 
-	go w.watch(gone, stopped)
+	// The watcher's own `defer close(stopped)` is what releases Unpark, which
+	// blocks on it — that is safe.RunGuarded's precondition. WatchedConn has no
+	// logger of its own (it wraps a net.Conn, nothing more), so the panic
+	// reports through slog.Default().
+	go safe.RunGuarded(context.Background(), nil, GoroutineNameParkWatcher, func() {
+		w.watch(gone, stopped)
+	})
 
 	return gone
 }

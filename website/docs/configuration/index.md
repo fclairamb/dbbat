@@ -272,6 +272,27 @@ removes.
 | `DBB_AUTH_CACHE_TTL_SECONDS` | Cache entry TTL | `300` |
 | `DBB_AUTH_CACHE_MAX_SIZE` | Maximum cache entries | `10000` |
 
+### Single sign-on / OIDC (optional)
+
+The generic OpenID Connect provider signs users in with your own identity
+provider — Google Workspace, Okta, Microsoft Entra, Keycloak, Authentik. Every
+sign-in is carried by an ID token DBBat verifies against the issuer's JWKS, and
+the code flow always uses PKCE (S256).
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_OIDC_ISSUER` | Issuer URL. Setting it enables the provider |
+| `DBB_OIDC_CLIENT_ID` | Client ID (required once the issuer is set) |
+| `DBB_OIDC_CLIENT_SECRET` | Client secret (required once the issuer is set) |
+| `DBB_OIDC_SCOPES` | Scopes to request (default `openid email profile`) |
+| `DBB_OIDC_DISPLAY_NAME` | Login-button label (default `SSO`) |
+| `DBB_OIDC_EMAIL_DOMAINS` | Optional comma-separated allowlist checked against the verified email claim |
+| `DBB_OIDC_GROUPS_CLAIM` | ID-token claim carrying directory group membership (default `groups`) |
+| `DBB_OIDC_ROLE_MAPPING` | Binds roles to directory groups, e.g. `admin=db-admins,viewer=analysts`. Applied on every login |
+
+See [Single sign-on (OIDC)](./sso.md) for the redirect URI, per-provider setup
+snippets, and what it takes to make each IdP emit groups in the first place.
+
 ### Slack OAuth (optional)
 
 | Variable | Description |
@@ -279,8 +300,80 @@ removes.
 | `DBB_SLACK_AUTH_CLIENT_ID` | Slack app client ID |
 | `DBB_SLACK_AUTH_CLIENT_SECRET` | Slack app client secret |
 | `DBB_SLACK_AUTH_TEAM_ID` | Restrict sign-in to one workspace |
-| `DBB_SLACK_AUTH_AUTO_CREATE_USERS` | Auto-provision new users (default `true`) |
-| `DBB_SLACK_AUTH_DEFAULT_ROLE` | Role assigned to auto-provisioned users (default `connector`) |
+
+### User auto-provisioning (all login providers)
+
+These two apply to **every** OAuth/OIDC provider — Slack, the generic OIDC
+issuer, and anything added later.
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_AUTH_AUTO_CREATE_USERS` | Let a verified identity with no local account provision one on first login (default `true`) |
+| `DBB_AUTH_DEFAULT_ROLE` | Role such an account starts with, and the floor `DBB_OIDC_ROLE_MAPPING` never digs below (default `connector`). Must name a real role — `admin`, `viewer` or `connector` — or DBBat refuses to start |
+
+#### Per-provider overrides
+
+One knob for every provider is the right default, and not enough when two
+providers carry different levels of trust: a tightly-gated Entra tenant where
+auto-provisioning is exactly what you want, next to a Slack workspace that also
+contains contractors and should only admit accounts an admin created by hand.
+Append the provider's name to either variable to override it for that provider
+alone:
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_AUTH_AUTO_CREATE_USERS_<PROVIDER>` | Overrides `DBB_AUTH_AUTO_CREATE_USERS` for one provider |
+| `DBB_AUTH_DEFAULT_ROLE_<PROVIDER>` | Overrides `DBB_AUTH_DEFAULT_ROLE` for one provider |
+
+`<PROVIDER>` is the provider's key: `SLACK` or `OIDC`. Each setting resolves
+per-provider first, then instance-wide, then the built-in default — so the
+example above is two variables:
+
+```bash
+DBB_AUTH_AUTO_CREATE_USERS=true          # the OIDC issuer may mint accounts
+DBB_AUTH_AUTO_CREATE_USERS_SLACK=false   # Slack may not
+DBB_AUTH_DEFAULT_ROLE_OIDC=viewer        # and its accounts start as viewers
+```
+
+The same thing in a config file, where the overrides are ordinary nested keys:
+
+```yaml
+auth:
+  auto_create_users: true
+  providers:
+    slack:
+      auto_create_users: false
+    oidc:
+      default_role: "viewer"
+```
+
+Two failure modes are startup errors rather than an override that quietly does
+nothing, since both would leave the deployment with the policy it was trying to
+change: a per-provider role goes through the same exact-match check as the
+instance-wide one, and an unknown provider name — `DBB_AUTH_AUTO_CREATE_USERS_OKTA`,
+say — is refused outright.
+
+Turning auto-provisioning off for a provider gates account *creation*, not
+sign-in: an account an admin created by hand still logs in through it, which is
+the entire point of the setting.
+
+The legacy `DBB_SLACK_AUTH_*` names below stay instance-wide. They are aliases
+for the pair above, not per-provider settings — use
+`DBB_AUTH_AUTO_CREATE_USERS_SLACK` to gate Slack specifically.
+
+They used to be called `DBB_SLACK_AUTH_AUTO_CREATE_USERS` and
+`DBB_SLACK_AUTH_DEFAULT_ROLE`, back when Slack was the only login provider.
+Those names are still accepted, so nothing breaks on upgrade; the `DBB_AUTH_*`
+setting wins whenever both are present, whichever source each came from — an
+`auth.default_role` in your config file beats a `DBB_SLACK_AUTH_DEFAULT_ROLE`
+left over in the environment, and vice versa.
+
+The role name is matched **exactly**. `DBB_AUTH_DEFAULT_ROLE=Admin` is a startup
+error naming the spelling it wants, not a silent `admin`: before these settings
+moved, the value was read raw and never checked, so a mis-cased one matched no
+role and granted nothing at all. Folding it now would hand every
+auto-provisioned user of that deployment real admin rights on an upgrade alone,
+which is not a change an upgrade gets to make quietly.
 
 ### Slack notifications & interactivity (optional)
 
@@ -422,8 +515,13 @@ mssql:
 slack_auth:
   client_id: "..."
   client_secret: "..."
+
+auth:
   auto_create_users: true
   default_role: "connector"
+  providers:            # optional per-provider overrides
+    slack:
+      auto_create_users: false
 
 slack_notify:
   bot_token: "xoxb-..."

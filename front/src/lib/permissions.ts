@@ -37,6 +37,10 @@ export const canViewQueries = (roles: string[] | undefined): boolean => hasAnyRo
 export const canViewAudit = (roles: string[] | undefined): boolean => hasAnyRole(roles, ['admin', 'viewer']);
 
 // Admin-only permissions
+// The chain-verification endpoints are narrower than the audit list a viewer
+// may read: they answer 403 for anyone but an admin, so the UI must not offer
+// a button that cannot work.
+export const canVerifyChains = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canCreateUser = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canCreateDatabase = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canCreateGrant = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
@@ -48,6 +52,7 @@ export const canUpdateDatabase = (roles: string[] | undefined): boolean => hasRo
 export const canResetPassword = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canManageGrantDefinitions = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canManageUserGroups = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
+export const canManageServerGroups = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canApproveGrantRequest = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canRequestGrant = (roles: string[] | undefined): boolean =>
   hasAnyRole(roles, ['admin', 'connector', 'viewer']);

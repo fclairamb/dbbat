@@ -672,7 +672,7 @@ A grant carries no access rules of its own: controls, quotas and approval gating
 |-------|-------------|
 | `grant_definition_id` | The definition to instantiate — its uid **or** its slug. A slug always resolves to the current version. |
 | `user_id` | Who receives the access. |
-| `database_id` | Which server. Must be within the definition's `database_uids` scope when it has one. |
+| `database_id` | Which server. Must belong to one of the definition's `server_group_uids` when it has any. |
 | `starts_at` | Optional; defaults to now. The window's *length* comes from the definition. |
 
 The definition must be active. A deactivated one cannot be assigned — and grants already issued from it have stopped authorising connections anyway.
@@ -1022,6 +1022,83 @@ Returns a list of audit log events. **Requires admin or viewer role.**
   ]
 }
 ```
+
+### Verify the Audit Chain
+
+```
+GET /api/v1/audit/verify
+```
+
+Walks the store-wide HMAC audit chain and reports the chain head plus the first
+record that does not add up. **Requires admin role.**
+
+**Response:**
+
+```json
+{
+  "chain": "audit",
+  "verified": true,
+  "entries": 1284,
+  "head_seq": 1284,
+  "head_mac": "9f2c…",
+  "unverifiable_pre_anchor_entries": 37,
+  "checked_at": "2026-08-10T09:14:02Z",
+  "cached": false
+}
+```
+
+A broken chain answers `200` with `"verified": false` and a `break` object
+(`uid`, `chain_seq`, `reason`) naming the first bad record. The response never
+contains the chain key or the content of any audited record.
+
+:::warning Not equivalent to `dbbat audit verify`
+
+This answer is served by the DBBat process being audited, so a compromised
+instance can return `"verified": true` without walking anything. The CLI runs
+where the key lives and can be run by someone who does not trust the server.
+
+The answer is also cached, so it can be up to 60 seconds old: a chain broken
+moments ago keeps reporting `"verified": true` until the cached walk expires.
+This is a monitoring signal, not a point-in-time attestation. See
+[Tamper-Evident Audit Log](/docs/features/audit-chain).
+
+:::
+
+A walk is `O(rows)`: outcomes are cached for a minute (`cached`, `checked_at`)
+and at most one walk runs at a time per instance.
+
+### Verify the Query Chains
+
+```
+GET /api/v1/audit/verify/queries
+```
+
+Walks the per-connection query chains. **Requires admin role.**
+
+**Query Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `connection` | Verify only this connection's chain (also reports that chain's head) |
+
+**Response:**
+
+```json
+{
+  "chain": "queries",
+  "verified": true,
+  "connections": 412,
+  "statements": 98213,
+  "chains_with_truncated_prefix": 3,
+  "checked_at": "2026-08-10T09:14:02Z",
+  "cached": false
+}
+```
+
+`chains_with_truncated_prefix` counts chains missing their oldest statements —
+what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a long-lived session. That
+is expected housekeeping, not tampering. The response never contains SQL text,
+parameters or any other statement content.
 
 ---
 

@@ -102,6 +102,19 @@ jobs:
         run: bun run generate-client
         working-directory: front
 
+      # `scripts/build-frontend.sh` regenerates the client on every
+      # `make build-front`, so a stale `schema.ts` never breaks a local build —
+      # it just turns up as an unexplained modified file in the working tree,
+      # which is invisible until it is noise in someone else's session. This is
+      # the only signal that the committed types have fallen behind
+      # `internal/api/openapi.yml`.
+      - name: Check generated API types are committed
+        run: |
+          if ! git diff --exit-code front/src/api/schema.ts; then
+            echo "::error file=front/src/api/schema.ts::generated API types are out of date with internal/api/openapi.yml — run 'cd front && bun run generate-client' and commit the result"
+            exit 1
+          fi
+
       - name: Lint frontend
         run: bun run lint
         working-directory: front
@@ -113,6 +126,35 @@ jobs:
       - name: Build frontend
         run: bun run build
         working-directory: front
+
+      # Same deal one file over: the TanStack Router plugin re-emits
+      # `routeTree.gen.ts` as part of `bun run build`, so a stale one is
+      # likewise only ever visible as a dirty tree. It has to be checked after
+      # the build rather than next to the types, because the build *is* its
+      # generator.
+      #
+      # What makes this comparison sound is that the generator's output is a
+      # pure function of the route files — which it is, but only from
+      # `@tanstack/router-generator` 1.167.25 onwards. Earlier versions ended
+      # their sort with the route-node object itself as the tiebreaker, so every
+      # node compared equal and the order that survived was whatever the
+      # parallel `readdir` recursion in `getRouteNodes` happened to build. Two
+      # runs over identical sources could then differ by a couple of hundred
+      # lines. `front/bun.lock` pins the generator and `bun install` above
+      # installs from it into a fresh process, so this job always compares two
+      # outputs of the *same* generator.
+      #
+      # Locally that guarantee has one more precondition CI does not: a `make
+      # dev` Vite server keeps the plugin it imported at startup, so one that
+      # outlived a dependency bump writes this file with the superseded
+      # generator. `front/vite.config.ts` warns when it detects that; see
+      # `specs/done/2026/08/2026-08-11-02-routetree-generator-nondeterminism.md`.
+      - name: Check generated route tree is committed
+        run: |
+          if ! git diff --exit-code front/src/routeTree.gen.ts; then
+            echo "::error file=front/src/routeTree.gen.ts::generated route tree is out of date — run 'cd front && bun run build' and commit the result"
+            exit 1
+          fi
 
       - name: Upload frontend artifacts
         uses: actions/upload-artifact@v7.0.1
@@ -270,6 +312,15 @@ jobs:
           DBB_KEY: MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
           DBB_LISTEN_API: ":8080"
           DBB_RATE_LIMIT_ENABLED: "false"
+          # Keep in step with front/e2e/global-setup.ts, which configures the
+          # same provider for local runs: the users spec asserts on the roles
+          # the directory mapping owns. Discovery is lazy, so this issuer is
+          # never dialled — nothing signs in through it.
+          DBB_OIDC_ISSUER: https://oidc.invalid.test
+          DBB_OIDC_CLIENT_ID: dbbat-e2e
+          DBB_OIDC_CLIENT_SECRET: dbbat-e2e-secret
+          DBB_OIDC_DISPLAY_NAME: Test SSO
+          DBB_OIDC_ROLE_MAPPING: viewer=analysts
 
       - name: Run Playwright tests
         run: bun run test:e2e:chromium

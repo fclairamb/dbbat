@@ -29,6 +29,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -249,10 +250,21 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	storeDSN := fmt.Sprintf("postgres://%s:%s@%s/dbbat_test?sslmode=disable",
 		upstreamUsr, upstreamPwd, net.JoinHostPort(storeHost, strconv.Itoa(storePort)))
 
-	dataStore, err := store.New(ctx, storeDSN)
+	// The master key is what the store derives its HMAC subkey from, so passing
+	// it here is what makes the tamper-evident query chain active for the whole
+	// suite — the same configuration a serving process always has. Without it
+	// every proxied query would be written unchained, and the chain assertions
+	// below would silently pass on nothing.
+	fixtureEncKey := make([]byte, 32)
+	for i := range fixtureEncKey {
+		fixtureEncKey[i] = byte(i + 1)
+	}
+
+	dataStore, err := store.New(ctx, storeDSN, store.Options{EncryptionKey: fixtureEncKey})
 	require.NoError(t, err)
 	t.Cleanup(func() { dataStore.Close() })
 	require.NoError(t, dataStore.Migrate(ctx))
+	require.True(t, dataStore.ChainEnabled(), "the fixture store must chain its query rows")
 
 	hash, err := crypto.HashPassword(fixturePass)
 	require.NoError(t, err)
@@ -260,10 +272,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	user, err := dataStore.CreateUser(ctx, fixtureUser, hash, []string{"connector"})
 	require.NoError(t, err)
 
-	encKey := make([]byte, 32)
-	for i := range encKey {
-		encKey[i] = byte(i + 1)
-	}
+	encKey := fixtureEncKey
 
 	db, err := dataStore.CreateServer(ctx, &store.Server{
 		Name:         upstreamDB,
@@ -277,7 +286,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	}, encKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{UserID: user.UID, DatabaseID: db.UID, GrantedBy: user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{}}})
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{
@@ -359,7 +368,7 @@ func (f *fixture) replaceGrant(ctx context.Context, controls []string) {
 	dbUID, err := uuid.Parse(f.dbUID)
 	require.NoError(f.t, err)
 
-	_, err = f.store.CreateGrant(ctx, &store.Grant{UserID: f.user.UID, DatabaseID: dbUID, GrantedBy: f.user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: controls}})
+	_, err = testsupport.CreateGrantWithControls(ctx, f.t, f.store, f.user.UID, dbUID, controls)
 	require.NoError(f.t, err)
 }
 
@@ -565,6 +574,14 @@ func TestIntegration_ResultCapture_KeepsPrefixOnLimit(t *testing.T) {
 				continue
 			}
 
+			// A query with rows to store is inserted *bare* and completed only
+			// once the capture has landed, so results_truncated is not readable
+			// until then. DurationMs is the marker for that second write —
+			// reading the row as soon as it appears is a race the test loses.
+			if queries[i].DurationMs == nil {
+				return false
+			}
+
 			selectUID = queries[i].UID.String()
 			truncated = queries[i].ResultsTruncated
 
@@ -590,7 +607,9 @@ func TestIntegration_ResultCapture_KeepsPrefixOnLimit(t *testing.T) {
 
 		stored = result.TotalRows
 
-		return stored > 0
+		// The prefix is written in batches, so the first non-zero count is not
+		// the final one.
+		return stored >= int64(maxResultRows)
 	}, 10*time.Second, 100*time.Millisecond, "the captured prefix should be stored, not discarded")
 
 	assert.EqualValues(t, maxResultRows, stored,
@@ -699,8 +718,80 @@ func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {
 	require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
 	assert.Equal(t, 0, got)
 
-	_, err = conn.Exec(ctx, "INSERT INTO ro (id) VALUES (1)")
+	// pgx defaults to the extended protocol, so this is a Parse refusal.
+	const extendedSQL = "INSERT INTO ro (id) VALUES (1)"
+
+	_, err = conn.Exec(ctx, extendedSQL)
 	require.Error(t, err, "insert must be refused under a read-only grant")
+
+	// And the same refusal down the simple query protocol.
+	const simpleSQL = "INSERT INTO ro (id) VALUES (2)"
+
+	_, err = conn.Exec(ctx, simpleSQL, pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "insert must be refused under a read-only grant (simple protocol)")
+
+	// The connection must survive both refusals: an extended-protocol refusal
+	// owes the client exactly one ReadyForQuery, and only on its Sync.
+	require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
+	assert.Equal(t, 0, got, "neither refused insert may have reached upstream")
+
+	f.assertBlockedQueryLogged(ctx, extendedSQL)
+	f.assertBlockedQueryLogged(ctx, simpleSQL)
+}
+
+// assertBlockedQueryLogged is the point of spec
+// 2026-08-09-log-blocked-statements-pg-oracle: a statement dbbat refused must
+// leave a queries row behind, carrying the refusal as `error`, attributed to
+// the connection, with duration and rows_affected at zero — and exactly one
+// such row, even though the extended protocol pipelines a Bind and an Execute
+// behind the Parse that was refused.
+func (f *fixture) assertBlockedQueryLogged(ctx context.Context, sql string) {
+	f.t.Helper()
+
+	var matches []store.Query
+
+	require.Eventually(f.t, func() bool {
+		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 500})
+		if err != nil {
+			return false
+		}
+
+		matches = nil
+
+		for i := range queries {
+			if queries[i].SQLText == sql {
+				matches = append(matches, queries[i])
+			}
+		}
+
+		return len(matches) > 0
+	}, 10*time.Second, 100*time.Millisecond, "the refused statement %q was never logged", sql)
+
+	require.Len(f.t, matches, 1, "a refused statement must be logged exactly once")
+
+	row := matches[0]
+	require.NotNil(f.t, row.Error, "a refused statement must be logged with its refusal as error")
+	assert.NotEmpty(f.t, *row.Error)
+	require.NotNil(f.t, row.DurationMs)
+	assert.InDelta(f.t, 0, *row.DurationMs, 0.001, "a refused statement never ran")
+	require.NotNil(f.t, row.RowsAffected)
+	assert.Equal(f.t, int64(0), *row.RowsAffected)
+
+	// It joins to the user and the database like any other query.
+	conn, err := f.store.GetConnectionByUID(ctx, row.ConnectionID)
+	require.NoError(f.t, err)
+	assert.Equal(f.t, f.user.UID, conn.UserID)
+
+	// And it is an ordinary link in the connection's HMAC chain: `queries` is
+	// chained per connection, so a refusal row that appended twice, or out of
+	// order, or not at all, breaks the walk `dbbat audit verify --queries`
+	// does. This is the assertion that covers the extended-query path's
+	// discard-until-Sync handling on the real wire.
+	result, err := f.store.VerifyQueryChain(ctx, row.ConnectionID)
+	require.NoError(f.t, err)
+	assert.Nil(f.t, result.Break, "a refusal row must be a valid link in the connection's query chain")
+	assert.False(f.t, result.TruncatedPrefix, "nothing was retained away; the chain starts at seq 1")
+	assert.Positive(f.t, result.Verified, "the chain walk must actually cover rows")
 }
 
 // TestIntegration_BlockDDL_BlocksCreateTable verifies block_ddl rejects DDL
@@ -721,8 +812,22 @@ func TestIntegration_BlockDDL_BlocksCreateTable(t *testing.T) {
 	_, err = conn.Exec(ctx, "INSERT INTO ddl (id) VALUES (1)")
 	require.NoError(t, err, "DML should still be allowed under block_ddl")
 
-	_, err = conn.Exec(ctx, "CREATE TABLE blocked_ddl (id int)")
+	const extendedSQL = "CREATE TABLE blocked_ddl (id int)"
+
+	_, err = conn.Exec(ctx, extendedSQL)
 	require.Error(t, err, "CREATE TABLE must be refused under a block_ddl grant")
+
+	const simpleSQL = "CREATE TABLE blocked_ddl_simple (id int)"
+
+	_, err = conn.Exec(ctx, simpleSQL, pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "CREATE TABLE must be refused under a block_ddl grant (simple protocol)")
+
+	// DML still works afterwards: neither refusal desynchronised the session.
+	_, err = conn.Exec(ctx, "INSERT INTO ddl (id) VALUES (2)")
+	require.NoError(t, err, "the session must survive a refused statement")
+
+	f.assertBlockedQueryLogged(ctx, extendedSQL)
+	f.assertBlockedQueryLogged(ctx, simpleSQL)
 }
 
 // TestIntegration_BlockCopy_BlocksCopy verifies block_copy rejects COPY.

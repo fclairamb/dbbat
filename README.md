@@ -1,8 +1,8 @@
 # DBBat - Database Observability Proxy
 
-**Give your devs access to prod.**
+**Give your devs — and your AI agents — access to prod.**
 
-A transparent database proxy for query observability, access control, and safety. Speaks **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, and **MongoDB** wire protocols. Every query logged. Every connection tracked.
+A transparent database proxy that gives developers and AI agents controlled access to production databases. Speaks **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, **MongoDB**, and **Microsoft SQL Server** wire protocols, so unmodified clients, drivers, and agent tools connect as usual. Every query logged. Every connection tracked.
 
 ## Documentation
 
@@ -11,17 +11,20 @@ Full documentation is available at **[dbbat.com](https://dbbat.com)**:
 - [Installation](https://dbbat.com/docs/installation/docker)
 - [Configuration](https://dbbat.com/docs/configuration)
 - [API Reference](https://dbbat.com/docs/api)
+- [Tamper-Evident Audit Log](https://dbbat.com/docs/features/audit-chain)
+- [Compliance](https://dbbat.com/docs/compliance)
 
 ## Why DBBat?
 
 **The Problem:**
 - Production databases should not be directly accessible to developers for security and compliance reasons
 - Developers often need access to production data to diagnose issues, debug problems, and understand user behavior
+- AI agents increasingly need the same access — to investigate incidents, answer data questions, run migrations — with even less inherent trust than a human operator
 - Traditional solutions are binary: either full access (risky) or no access (blocks troubleshooting)
 
 **The Solution:**
 
-DBBat acts as a monitoring proxy that allows controlled developer access to production databases with:
+DBBat acts as a monitoring proxy that allows controlled access to production databases — for humans and AI agents alike — with:
 - **Complete monitoring**: Every query and result is logged with full traceability
 - **Strict limitations**: Time-windowed access, fine-grained controls, query quotas, and data transfer limits
 - **Full audit trail**: Track who accessed what, when, and what data they retrieved
@@ -37,19 +40,20 @@ DBBat acts as a monitoring proxy that allows controlled developer access to prod
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` (`DBB_LISTEN_MYSQL`) | `caching_sha2_password` (default), `mysql_clear_password`; TLS terminated at proxy |
 | MariaDB | MySQL wire (same listener) | `:3307` (`DBB_LISTEN_MYSQL`) | Same as MySQL — `mysql_native_password` not supported, `STMT_BULK_EXECUTE` refused |
 | MongoDB | MongoDB wire (`OP_MSG`, hand-rolled) | `:27018` (`DBB_LISTEN_MONGO`) | `SCRAM-SHA-256` or `PLAIN`-over-TLS at the proxy; upstream via `SCRAM-SHA-256` — see [docs/mongodb.md](docs/mongodb.md) |
+| SQL Server | TDS (hand-rolled) | `:1434` (`DBB_LISTEN_MSSQL`) | PRELOGIN + encapsulated TLS + LOGIN7, SQL auth only (no NTLM/Kerberos/Entra) — see [docs/mssql.md](docs/mssql.md). 1434/tcp is free: the SQL Server Browser that owns 1434 is UDP-only |
 
-Each engine has its own listener; enable only the ones you need by setting the matching `DBB_LISTEN_*` environment variable. PostgreSQL is enabled by default; Oracle/MySQL/MongoDB listen on their default ports unless explicitly disabled in config.
+Each engine has its own listener; enable only the ones you need by setting the matching `DBB_LISTEN_*` environment variable. PostgreSQL is enabled by default; Oracle/MySQL/MongoDB/SQL Server listen on their default ports unless explicitly disabled in config.
 
 Any of these upstreams can be reached directly or through an **SSH bastion** — see [SSH tunnels](#3b-reach-a-server-through-an-ssh-bastion-optional).
 
 ## Features
 
-- **Multi-engine proxy**: PostgreSQL, Oracle, MySQL/MariaDB, MongoDB on independent listeners
+- **Multi-engine proxy**: PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server on independent listeners
 - **User Management**: Local user database with username/password (Argon2id) and `admin`/`viewer`/`connector` roles
 - **API Keys**: Long-lived bearer tokens (`dbb_…`) for programmatic access; cannot create or revoke other keys (security restriction)
 - **Slack OAuth (optional)**: Sign-in via Slack workspace, optional auto-provisioning
 - **Slack Grant Approvals (optional)**: Grant requests notify a Slack channel with Approve/Deny buttons (inbound endpoint or Socket Mode); auto-approved requests notify without buttons
-- **Server Configuration**: Store target server connections with AES-256-GCM encrypted credentials; `protocol` field per server (`postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `ssh`)
+- **Server Configuration**: Store target server connections with AES-256-GCM encrypted credentials; `protocol` field per server (`postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `mssql`, `ssh`)
 - **SSH Tunnels**: Route upstream connections for any protocol through an SSH bastion (`via_uid`), with host-key TOFU pinning and a shared pooled dialer
 - **Connection & Query Tracking**: Logs every connection, every query (SQL text, parameters, duration, rows affected, errors), and optionally captures result rows (`query_rows` table) up to configurable size limits
 - **Access Control**: Time-windowed grants (`starts_at` / `expires_at`), independent controls (`read_only`, `block_copy`, `block_ddl`), and optional quotas (`max_query_counts`, `max_bytes_transferred`)
@@ -57,10 +61,12 @@ Any of these upstreams can be reached directly or through an **SSH bastion** —
 - **Live Enforcement**: Limits are enforced mid-stream (not just between commands), and revoking a grant blocks further queries and disconnects sessions already in flight
 - **Upstream Identity**: The dbbat username is encoded into the upstream connection metadata (`application_name` / `program_name` / `AUTH_PROGRAM_NM`), so target-side monitoring attributes queries to the real person
 - **Read-only enforcement**: Defense in depth — SQL inspection, PostgreSQL `default_transaction_read_only`, MySQL/MariaDB blocks for `LOAD DATA`/`SELECT … INTO OUTFILE`/etc., and proxy-side opt-out from `LOCAL INFILE`
-- **Audit Trail**: Append-only audit log of user, grant, and database changes
+- **Audit Trail**: Every user, grant and database change is recorded in `audit_log` with its actor; dbbat only ever inserts, and the REST API exposes reads only (`GET /api/v1/audit`)
+- **Tamper-evident**: Every audit entry and every logged query carries an HMAC over its content plus the previous record's MAC, keyed by a subkey derived from `DBB_KEY` that is never stored in the database — so modifying, deleting or reordering a record is detectable even by someone with write access to dbbat's own PostgreSQL store. `dbbat audit verify` walks the chain and names the first break (see [docs/audit-chain.md](docs/audit-chain.md))
 - **Rate Limiting**: Per-user request limits and exponential backoff on failed login
 - **Authentication Cache**: Optional in-memory cache (TTL + max size) shared across REST and proxy auth paths
 - **Session Packet Captures**: Optional capture of post-auth session traffic as tcpdump-compatible `.pcapng` files, so Wireshark dissects them out of the box; same format across all protocols (see [docs/dump-format.md](docs/dump-format.md)) with `dbbat dump anonymise` for sharing
+- **MCP for AI agents**: Claude Code, Claude Desktop or any MCP client can query databases through the *same* pipeline — an agent's statement is executed by dialing dbbat's own proxy listener as the API key's owner, so grants, quotas, logging and mid-flight approval holds all apply with no second execution path (see [docs/mcp.md](docs/mcp.md))
 - **REST API**: OpenAPI 3.0 documented (`/api/docs`), versioned under `/api/v1/`
 - **Web UI**: Embedded React frontend served at `/app` — servers (`/servers`, listing SSH bastions alongside database servers), grants, connections and queries all have detail pages
 - **Demo / Test modes**: Self-provisioning sample data for safe trials and E2E testing
@@ -76,11 +82,12 @@ docker run -d \
   -p 1522:1522 \
   -p 3307:3307 \
   -p 27018:27018 \
+  -p 1434:1434 \
   -p 4200:4200 \
   ghcr.io/fclairamb/dbbat
 ```
 
-Ports: `5433` PostgreSQL proxy, `1522` Oracle proxy, `3307` MySQL/MariaDB proxy, `27018` MongoDB proxy, `4200` REST API + web UI.
+Ports: `5433` PostgreSQL proxy, `1522` Oracle proxy, `3307` MySQL/MariaDB proxy, `27018` MongoDB proxy, `1434` SQL Server proxy, `4200` REST API + web UI.
 
 ### Running with Docker Compose
 
@@ -132,7 +139,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
   }'
 ```
 
-For Oracle, set `"protocol": "oracle"` and add `"oracle_service_name": "ORCL"`. For MySQL/MariaDB, set `"protocol": "mysql"` (or `"mariadb"`) and use port `3306`. For MongoDB, set `"protocol": "mongodb"`, use port `27017`, and optionally add `"mongo_auth_source": "admin"`.
+For Oracle, set `"protocol": "oracle"` and add `"oracle_service_name": "ORCL"`. For MySQL/MariaDB, set `"protocol": "mysql"` (or `"mariadb"`) and use port `3306`. For MongoDB, set `"protocol": "mongodb"`, use port `27017`, and optionally add `"mongo_auth_source": "admin"`. For SQL Server, set `"protocol": "mssql"` and use port `1433`.
 
 Creating a server whose name is already taken returns `409 DUPLICATE_NAME` (same for grant definitions and users).
 
@@ -158,7 +165,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
   -d "{\"name\": \"prod-behind-bastion\", \"protocol\": \"postgresql\", \"host\": \"10.0.1.20\", \"port\": 5432, \"database_name\": \"myapp\", \"username\": \"readonly_user\", \"password\": \"dbpass\", \"via_uid\": \"$BASTION\"}"
 ```
 
-Tunnelling works for all four protocols. The bastion host key is pinned on first use (TOFU) and connections are pooled and shared across sessions. `ssh_private_key` and `ssh_passphrase` are write-only and never returned. Set `"clear_via_uid": true` on update to go back to a direct dial.
+Tunnelling works for all five protocols. The bastion host key is pinned on first use (TOFU) and connections are pooled and shared across sessions. `ssh_private_key` and `ssh_passphrase` are write-only and never returned. Set `"clear_via_uid": true` on update to go back to a direct dial.
 
 ### 4. Grant Access
 
@@ -194,6 +201,9 @@ mysql -h 127.0.0.1 -P 3307 -u developer -p production
 
 # MongoDB (authSource carries the DBBat database name)
 mongosh "mongodb://developer:temppass123@localhost:27018/?authSource=production&authMechanism=SCRAM-SHA-256"
+
+# SQL Server (the -d database names the DBBat entry; -C trusts the proxy's self-signed cert)
+sqlcmd -S localhost,1434 -U developer -P temppass123 -d production -C
 ```
 
 ## Configuration
@@ -205,6 +215,7 @@ mongosh "mongodb://developer:temppass123@localhost:27018/?authSource=production&
 | `DBB_LISTEN_ORA` | Oracle proxy listen address (empty disables) | `:1522` |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address (empty disables) | `:3307` |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address (empty disables) | `:27018` |
+| `DBB_LISTEN_MSSQL` | SQL Server (TDS) proxy listen address (empty disables) | `:1434` |
 | `DBB_LISTEN_API` | REST API listen address | `:4200` |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | Auto-generated at `~/.dbbat/key` |
 | `DBB_KEYFILE` | Path to file containing encryption key | - |
@@ -215,28 +226,67 @@ mongosh "mongodb://developer:temppass123@localhost:27018/?authSource=production&
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration) | `24h` |
 | `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history and captured result rows older than this (Go duration; `0` keeps them forever) | `0` (recommended: `720h`) |
+| `DBB_MCP_ENABLED` | Serve the MCP endpoint for AI agents at `/api/v1/mcp` (API-key authenticated; see [docs/mcp.md](docs/mcp.md)) | `true` |
 | `DBB_MYSQL_TLS_DISABLE` | Disable MySQL TLS termination at the proxy | `false` |
 | `DBB_MYSQL_TLS_CERT_FILE` | PEM cert for MySQL TLS (auto self-signed if empty) | - |
 | `DBB_MYSQL_TLS_KEY_FILE` | PEM RSA key for MySQL TLS (auto-generated if empty) | - |
+| `DBB_OIDC_ISSUER` | OIDC issuer URL for single sign-on; setting it enables the provider | - |
+| `DBB_OIDC_CLIENT_ID` | OIDC client ID (required once the issuer is set) | - |
+| `DBB_OIDC_CLIENT_SECRET` | OIDC client secret (required once the issuer is set) | - |
+| `DBB_OIDC_SCOPES` | Scopes requested from the issuer (`openid` always added) | `openid email profile` |
+| `DBB_OIDC_DISPLAY_NAME` | Login-button label | `SSO` |
+| `DBB_OIDC_EMAIL_DOMAINS` | Comma-separated allowlist checked against the *verified* email claim | - (any domain) |
+| `DBB_OIDC_GROUPS_CLAIM` | ID-token claim carrying directory group membership | `groups` |
+| `DBB_OIDC_ROLE_MAPPING` | Binds roles to directory groups (`admin=db-admins,viewer=analysts`); applied on every login | - (roles stay manual) |
+| `DBB_AUTH_AUTO_CREATE_USERS` | Let a verified SSO identity with no local account provision one on first login. Applies to **every** login provider | `true` |
+| `DBB_AUTH_DEFAULT_ROLE` | Role such an account starts with, and the floor a role mapping never digs below. Must be spelled exactly like a real role (`admin`, `viewer`, `connector`) or startup fails | `connector` |
+| `DBB_AUTH_AUTO_CREATE_USERS_<PROVIDER>` | Same, for one provider only (`..._SLACK`, `..._OIDC`) — for a deployment that trusts its corporate issuer to mint accounts but not its Slack workspace | - (the instance-wide value) |
+| `DBB_AUTH_DEFAULT_ROLE_<PROVIDER>` | Same, for one provider only. Validated exactly like the instance-wide role; an unknown provider name is a startup failure | - (the instance-wide value) |
+
+Each of the two settings resolves per-provider, then instance-wide, then the
+default. The overrides can equally be written as `auth.providers.<name>.*` in a
+config file.
+
+The two instance-wide `DBB_AUTH_*` settings were previously named
+`DBB_SLACK_AUTH_AUTO_CREATE_USERS` / `DBB_SLACK_AUTH_DEFAULT_ROLE`; those names
+still work as aliases — instance-wide, not Slack-specific — and the `DBB_AUTH_*`
+setting wins whenever both are present, whichever source each came from
+(environment or config file).
 
 See [Configuration](https://dbbat.com/docs/configuration) for the full set, including rate limiting, query storage, hash presets, auth cache, Slack OAuth, demo target, and dev redirects.
+
+### Single sign-on
+
+Any OpenID Connect provider works — Google Workspace, Okta, Microsoft Entra,
+Keycloak, Authentik. Point `DBB_OIDC_ISSUER` at your issuer, register
+`https://<your-host>/api/v1/auth/oidc/callback` as the redirect URI, and DBBat
+adds a button to the login page. Every sign-in is carried by an ID token DBBat
+verifies against the issuer's JWKS, and the code flow uses PKCE (S256).
+
+`DBB_OIDC_ROLE_MAPPING="admin=db-admins,viewer=analysts"` then lets the
+directory own role assignment: the mapping is re-applied on **every** login, so
+leaving the group demotes at the next sign-in without anyone remembering to
+click. It is authoritative only for the roles it names, never empties a user's
+roles below the default one, and never strips the last admin. See
+[Single sign-on (OIDC)](https://dbbat.com/docs/configuration/sso) for
+per-provider snippets and the configuration each IdP needs to emit groups.
 
 ## Security
 
 - User passwords are hashed with Argon2id
 - Database credentials are encrypted with AES-256-GCM (AAD-bound to the database UID)
-- API keys (`dbb_…`) are stored as encrypted blobs and cannot create or revoke other keys
+- API keys (`dbb_…`) are hashed with Argon2id, exactly like passwords — only the 8-character prefix is stored in clear, for lookup, so a leaked database yields no usable key. They cannot create or revoke other keys
 - Failed logins trigger per-username exponential backoff
 - Default admin user (`admin` / `admin`) is created on first startup — **change it immediately**
 
 ## Architecture
 
 ```
-psql / pg client     ─►  DBBat (auth + grant check + log) ─┐
-sqlplus / go-ora     ─►  DBBat (TNS service-name routing)  ─┤   direct dial   ┌─► PostgreSQL / Oracle
-mysql / mariadb cli  ─►  DBBat (caching_sha2_password)     ─┼───────────────► ┤
-mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─┘   or SSH tunnel └─► MySQL / MariaDB / MongoDB
-                                                                 (via_uid)
+psql / pg client     ─►  DBBat (auth + grant check + log)  ─┐
+sqlplus / go-ora     ─►  DBBat (TNS service-name routing)   ─┤   direct dial   ┌─► PostgreSQL / Oracle
+mysql / mariadb cli  ─►  DBBat (caching_sha2_password)      ─┼───────────────► ┤
+mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS)  ─┤   or SSH tunnel └─► MySQL / MariaDB /
+sqlcmd / TDS driver  ─►  DBBat (PRELOGIN + TLS + LOGIN7)    ─┘    (via_uid)         MongoDB / SQL Server
 ```
 
 DBBat is a single Go binary backed by a PostgreSQL store (users, servers, grants, connections, queries, audit, dumps).

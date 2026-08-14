@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,6 +35,50 @@ var (
 	// uploaded once complete (S3 objects cannot be appended to), so an upload
 	// URL with no DBB_DUMP_DIR would silently capture nothing.
 	ErrDumpUploadNeedsDir = errors.New("DBB_DUMP_UPLOAD_URL requires DBB_DUMP_DIR")
+
+	// ErrOIDCClientCredentialsRequired is returned when an OIDC issuer is
+	// configured without client credentials. Failing at startup beats
+	// offering a login button that can only ever end in an error page.
+	ErrOIDCClientCredentialsRequired = errors.New(
+		"DBB_OIDC_ISSUER requires DBB_OIDC_CLIENT_ID and DBB_OIDC_CLIENT_SECRET")
+
+	// ErrOIDCRoleMappingInvalid is returned when DBB_OIDC_ROLE_MAPPING cannot
+	// be parsed. A mapping is an authorization rule: a typo must stop the
+	// process, never silently resolve to "no rule" and hand everyone the
+	// default role.
+	ErrOIDCRoleMappingInvalid = errors.New("DBB_OIDC_ROLE_MAPPING is malformed")
+
+	// ErrAuthDefaultRoleInvalid is returned when DBB_AUTH_DEFAULT_ROLE (or its
+	// legacy alias DBB_SLACK_AUTH_DEFAULT_ROLE) names a role that does not
+	// exist. Same reasoning as the role mapping: a default role is an
+	// authorization decision, and one that fails closed at startup is far
+	// better than one that quietly provisions users into a role nothing knows.
+	ErrAuthDefaultRoleInvalid = errors.New("DBB_AUTH_DEFAULT_ROLE is not a known role")
+
+	// ErrAuthProviderUnknown is returned when a per-provider auto-provisioning
+	// override names a login provider that does not exist. Ignoring it would
+	// fail *open*: an operator writing DBB_AUTH_AUTO_CREATE_USERS_OKTA to gate
+	// their issuer would get no override, no error, and auto-provisioning still
+	// on for everyone.
+	ErrAuthProviderUnknown = errors.New("unknown OAuth provider in a per-provider auto-provisioning override")
+)
+
+// DefaultOAuthRole is the role an auto-provisioned OAuth user starts with when
+// DBB_AUTH_DEFAULT_ROLE is unset. It mirrors store.RoleConnector, which config
+// cannot import (store imports config); TestConfigKnownRolesMatchStore pins the
+// two together.
+const DefaultOAuthRole = "connector"
+
+// OIDC provider defaults.
+const (
+	// DefaultOIDCScopes is the scope set requested from the issuer.
+	DefaultOIDCScopes = "openid email profile"
+	// DefaultOIDCGroupsClaim is the ID-token claim read for directory group
+	// membership when DBB_OIDC_GROUPS_CLAIM is unset.
+	DefaultOIDCGroupsClaim = "groups"
+	// DefaultOIDCDisplayName is the login-button label when the operator
+	// does not set one.
+	DefaultOIDCDisplayName = "SSO"
 )
 
 // RunMode represents the application run mode.
@@ -155,17 +201,311 @@ type RedirectRule struct {
 }
 
 // SlackAuthConfig holds Slack OAuth configuration.
+//
+// Auto-provisioning used to live here (`auto_create_users`, `default_role`)
+// even though every OAuth provider read it; it now lives on OAuthUsersConfig.
+// The old env/file keys are still accepted as aliases — see
+// applyAuthProvisioningAliases.
 type SlackAuthConfig struct {
-	ClientID        string `koanf:"client_id"`
-	ClientSecret    string `koanf:"client_secret"`
-	TeamID          string `koanf:"team_id"`
-	AutoCreateUsers bool   `koanf:"auto_create_users"`
-	DefaultRole     string `koanf:"default_role"`
+	ClientID     string `koanf:"client_id"`
+	ClientSecret string `koanf:"client_secret"`
+	TeamID       string `koanf:"team_id"`
 }
 
 // Enabled returns true if Slack OAuth is configured with both client ID and secret.
 func (c SlackAuthConfig) Enabled() bool {
 	return c.ClientID != "" && c.ClientSecret != ""
+}
+
+// OIDCAuthConfig holds the generic OpenID Connect login provider — the one
+// that lets an organization sign in with Google Workspace, Okta, Microsoft
+// Entra, Keycloak or anything else speaking OIDC discovery. Distinct from
+// SlackAuthConfig: both can be enabled at once, and the login page shows a
+// button per enabled provider.
+type OIDCAuthConfig struct {
+	// Issuer is the OIDC issuer URL (e.g. "https://accounts.google.com").
+	// Setting it is what enables the provider.
+	Issuer string `koanf:"issuer"`
+	// ClientID and ClientSecret identify this dbbat instance to the issuer.
+	ClientID     string `koanf:"client_id"`
+	ClientSecret string `koanf:"client_secret"`
+	// Scopes is the space- or comma-separated scope list requested at
+	// authorization time. "openid" is always added.
+	Scopes string `koanf:"scopes"`
+	// DisplayName is the login-button label (e.g. "Acme SSO").
+	DisplayName string `koanf:"display_name"`
+	// EmailDomains is an optional comma-separated allowlist. When set, a
+	// login is rejected unless the *verified* email claim's domain is
+	// listed — the generic equivalent of Slack's workspace gating.
+	EmailDomains string `koanf:"email_domains"`
+	// GroupsClaim names the ID-token claim carrying the user's directory
+	// group membership. Empty means "groups", which is what Okta, Keycloak
+	// and Entra all use by default.
+	GroupsClaim string `koanf:"groups_claim"`
+	// RoleMapping binds dbbat roles to directory groups, e.g.
+	// "admin=db-admins,viewer=analysts". Empty disables the mapping
+	// entirely, leaving role assignment manual.
+	RoleMapping string `koanf:"role_mapping"`
+}
+
+// KnownRoles is the set of role names a role mapping may name. It duplicates
+// store.RoleAdmin/RoleViewer/RoleConnector on purpose: store imports config,
+// so config cannot import store. TestConfigKnownRolesMatchStore in
+// internal/api pins the two lists together.
+var KnownRoles = []string{"admin", "viewer", "connector"}
+
+// KnownOAuthProviders is the set of login-provider keys a per-provider
+// auto-provisioning override may name. Same duplication as KnownRoles and for
+// the same reason: internal/auth/slack and internal/auth/oidc both import
+// config, so config cannot name their provider constants.
+// TestConfigKnownOAuthProvidersMatchProviders in internal/api pins the lists
+// together — a provider added on one side without the other would make its
+// override a startup failure.
+var KnownOAuthProviders = []string{"slack", "oidc"}
+
+// OAuthUsersConfig holds the auto-provisioning settings that apply to **every**
+// OAuth/OIDC login provider — Slack, the generic OIDC issuer, and whatever
+// comes next.
+//
+// They used to live on SlackAuthConfig, which meant an operator who had never
+// touched Slack still had to set DBB_SLACK_AUTH_AUTO_CREATE_USERS=false to stop
+// their OIDC issuer from minting accounts. The canonical names are now
+// DBB_AUTH_AUTO_CREATE_USERS and DBB_AUTH_DEFAULT_ROLE; the DBB_SLACK_AUTH_*
+// ones keep working as aliases (applyAuthProvisioningAliases).
+// One knob for every provider is right for the common case and wrong for a
+// deployment running two providers at different trust levels — a tightly-gated
+// Entra tenant where auto-provisioning is exactly what you want, next to a
+// Slack workspace full of contractors that should only admit accounts an admin
+// created by hand. Providers holds that per-provider override; the two
+// accessors below are the only way either setting is read.
+type OAuthUsersConfig struct {
+	// AutoCreateUsers lets an unknown but verified identity provision itself a
+	// local account on first login. Defaults to true.
+	AutoCreateUsers bool `koanf:"auto_create_users"`
+	// DefaultRole is the role such an account starts with, and the floor a
+	// group role mapping can never dig below. Empty means DefaultOAuthRole.
+	DefaultRole string `koanf:"default_role"`
+	// Providers overrides both settings for one login provider, keyed by the
+	// provider's registered name ("slack", "oidc"). Written as
+	// DBB_AUTH_AUTO_CREATE_USERS_<PROVIDER> / DBB_AUTH_DEFAULT_ROLE_<PROVIDER>,
+	// or as auth.providers.<name>.* in a config file. A key nobody registered
+	// is a startup failure (see Validate).
+	Providers map[string]OAuthProviderUsersConfig `koanf:"providers"`
+}
+
+// OAuthProviderUsersConfig is one provider's override of the instance-wide
+// auto-provisioning settings. Every field is optional: what is not set here
+// falls back to the instance-wide value, which itself falls back to the
+// default.
+type OAuthProviderUsersConfig struct {
+	// AutoCreateUsers is a pointer because "unset" and "false" must be
+	// different answers. Auto-provisioning defaults to *on*, so a plain bool
+	// would make an unset override indistinguishable from an explicit
+	// "false" — and the whole point of the override is letting one provider
+	// say false while the instance says true.
+	AutoCreateUsers *bool `koanf:"auto_create_users"`
+	// DefaultRole overrides the role this provider's auto-provisioned accounts
+	// start with. Empty means "no override", so a provider cannot opt back
+	// into the built-in default against an instance-wide setting — spelling the
+	// instance-wide role out is the way to say that, and it is unambiguous.
+	DefaultRole string `koanf:"default_role"`
+}
+
+// AutoCreateUsersFor reports whether providerName may auto-provision accounts:
+// its own override if it set one, otherwise the instance-wide value.
+func (c OAuthUsersConfig) AutoCreateUsersFor(providerName string) bool {
+	if override, ok := c.Providers[providerName]; ok && override.AutoCreateUsers != nil {
+		return *override.AutoCreateUsers
+	}
+
+	return c.AutoCreateUsers
+}
+
+// RoleFor returns the default role providerName's auto-provisioned accounts
+// start with — its override, then the instance-wide value, then
+// DefaultOAuthRole.
+//
+// Same non-normalization as Role: Validate refuses anything a normalizer would
+// have had to fix, per-provider values included.
+func (c OAuthUsersConfig) RoleFor(providerName string) string {
+	if override, ok := c.Providers[providerName]; ok && override.DefaultRole != "" {
+		return override.DefaultRole
+	}
+
+	return c.Role()
+}
+
+// Role returns the configured default role verbatim, falling back to
+// DefaultOAuthRole when unset.
+//
+// Deliberately no normalization: Validate refuses anything that is not spelled
+// exactly like a known role, so in a process that booted this is either "" or
+// one of KnownRoles, and there is nothing left to normalize. See Validate for
+// why normalizing here would be actively unsafe.
+func (c OAuthUsersConfig) Role() string {
+	if c.DefaultRole != "" {
+		return c.DefaultRole
+	}
+
+	return DefaultOAuthRole
+}
+
+// Validate refuses a default role that is not a real role. A typo here would
+// otherwise provision every auto-created user into a role that grants nothing
+// and that no permission check has ever heard of — failing at startup is the
+// far cheaper outcome, and it is the same rule ParseRoleMapping applies to the
+// role names in a group mapping.
+//
+// The match is exact, and a near-miss like "Admin" or " admin " is an error
+// rather than something quietly folded to "admin". That looks pedantic and is
+// not: before these settings moved off SlackAuthConfig the default role was
+// read raw and never validated, so DBB_SLACK_AUTH_DEFAULT_ROLE=Admin matched no
+// role and granted precisely nothing. Normalizing it now would turn a dormant
+// typo into a genuine admin default for every auto-provisioned user of that
+// deployment — a privilege escalation delivered by an upgrade, with nothing in
+// the release notes to warn anyone. Refusing to start says it out loud instead,
+// and the fix is one character.
+// A per-provider override goes through exactly the same check — a typo is a
+// typo whichever name carried it, and an override that fails to apply is the
+// more dangerous half of the pair, since it silently leaves the looser
+// instance-wide policy in force.
+func (c OAuthUsersConfig) Validate() error {
+	if err := validateOAuthRole(c.DefaultRole); err != nil {
+		return err
+	}
+
+	// Sorted so a config with several bad providers always names the same one.
+	for _, name := range slices.Sorted(maps.Keys(c.Providers)) {
+		if !slices.Contains(KnownOAuthProviders, name) {
+			return fmt.Errorf("%w: %q (known: %s)",
+				ErrAuthProviderUnknown, name, strings.Join(KnownOAuthProviders, ", "))
+		}
+
+		if err := validateOAuthRole(c.Providers[name].DefaultRole); err != nil {
+			return fmt.Errorf("provider %q: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+// validateOAuthRole is the exact-match role check Validate applies to the
+// instance-wide default role and to every per-provider override.
+func validateOAuthRole(role string) error {
+	if role == "" || slices.Contains(KnownRoles, role) {
+		return nil
+	}
+
+	if canonical := strings.ToLower(strings.TrimSpace(role)); slices.Contains(KnownRoles, canonical) {
+		return fmt.Errorf("%w: %q is not spelled like a role name — write %q",
+			ErrAuthDefaultRoleInvalid, role, canonical)
+	}
+
+	return fmt.Errorf("%w: unknown role %q (known: %s)",
+		ErrAuthDefaultRoleInvalid, role, strings.Join(KnownRoles, ", "))
+}
+
+// Enabled returns true when an issuer is configured. Client id and secret are
+// validated at startup once Enabled is true, so a half-configured provider
+// fails loudly instead of silently offering a broken login button.
+func (c OIDCAuthConfig) Enabled() bool {
+	return c.Issuer != ""
+}
+
+// ScopeList splits Scopes on whitespace and commas.
+func (c OIDCAuthConfig) ScopeList() []string {
+	return splitList(c.Scopes)
+}
+
+// EmailDomainList splits EmailDomains on whitespace and commas.
+func (c OIDCAuthConfig) EmailDomainList() []string {
+	return splitList(c.EmailDomains)
+}
+
+// GroupsClaimName returns the configured groups claim, defaulting to "groups".
+func (c OIDCAuthConfig) GroupsClaimName() string {
+	if claim := strings.TrimSpace(c.GroupsClaim); claim != "" {
+		return claim
+	}
+
+	return DefaultOIDCGroupsClaim
+}
+
+// RoleMappingEnabled reports whether a group-to-role mapping is configured.
+// Without one, nothing in the login path ever touches a user's roles.
+func (c OIDCAuthConfig) RoleMappingEnabled() bool {
+	return strings.TrimSpace(c.RoleMapping) != ""
+}
+
+// ParseRoleMapping turns "admin=db-admins,viewer=analysts" into
+// {"admin": ["db-admins"], "viewer": ["analysts"]}.
+//
+// Pairs are separated by commas only — never by whitespace — because directory
+// groups are routinely named "Domain Admins". The role is the part before the
+// first "=", lower-cased and validated against KnownRoles; everything after it
+// is the group value, kept verbatim (Entra sends group **object ids**, not
+// display names, and matching is exact, case included). Repeating a role
+// unions its groups: "admin=db-admins,admin=sre" grants admin to either.
+//
+// An empty map means "no mapping configured"; an error means the operator
+// typed something that cannot be an authorization rule.
+func (c OIDCAuthConfig) ParseRoleMapping() (map[string][]string, error) {
+	mapping := make(map[string][]string)
+
+	if !c.RoleMappingEnabled() {
+		return mapping, nil
+	}
+
+	for _, pair := range strings.Split(c.RoleMapping, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		role, group, found := strings.Cut(pair, "=")
+		if !found {
+			return nil, fmt.Errorf("%w: %q is not a role=group pair", ErrOIDCRoleMappingInvalid, pair)
+		}
+
+		role = strings.ToLower(strings.TrimSpace(role))
+		group = strings.TrimSpace(group)
+
+		if !slices.Contains(KnownRoles, role) {
+			return nil, fmt.Errorf("%w: unknown role %q (known: %s)",
+				ErrOIDCRoleMappingInvalid, role, strings.Join(KnownRoles, ", "))
+		}
+
+		if group == "" {
+			return nil, fmt.Errorf("%w: role %q is mapped to an empty group", ErrOIDCRoleMappingInvalid, role)
+		}
+
+		if !slices.Contains(mapping[role], group) {
+			mapping[role] = append(mapping[role], group)
+		}
+	}
+
+	if len(mapping) == 0 {
+		return nil, fmt.Errorf("%w: no role=group pair found", ErrOIDCRoleMappingInvalid)
+	}
+
+	return mapping, nil
+}
+
+// splitList tokenizes a comma- or whitespace-separated env-var value,
+// dropping empties so a trailing comma is harmless.
+func splitList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+
+	return out
 }
 
 // SlackNotifyConfig configures outbound Slack notifications for grant
@@ -486,6 +826,13 @@ type Config struct {
 	// SlackAuth holds Slack OAuth configuration.
 	SlackAuth SlackAuthConfig `koanf:"slack_auth"`
 
+	// Auth holds the auto-provisioning settings shared by every OAuth/OIDC
+	// login provider.
+	Auth OAuthUsersConfig `koanf:"auth"`
+
+	// OIDCAuth holds the generic OpenID Connect login provider.
+	OIDCAuth OIDCAuthConfig `koanf:"oidc"`
+
 	// SlackNotify holds outbound Slack notification configuration for
 	// grant request events.
 	SlackNotify SlackNotifyConfig `koanf:"slack_notify"`
@@ -512,6 +859,24 @@ type Config struct {
 
 	// Approval holds pattern-triggered approval-hold configuration.
 	Approval ApprovalConfig `koanf:"approval"`
+
+	// MCP holds the Model Context Protocol endpoint configuration.
+	MCP MCPConfig `koanf:"mcp"`
+}
+
+// MCPConfig configures the Model Context Protocol endpoint that lets AI
+// agents query databases through dbbat.
+//
+// Enabled defaults to **true**, deliberately unlike ApprovalConfig. The
+// endpoint is API-key gated, and every statement it runs is executed by
+// dialing dbbat's own proxy listener as the key's owner — so it grants an
+// agent nothing the key holder could not already do with psql, and it adds no
+// enforcement path of its own. Turning it off is for deployments that want the
+// route surface gone entirely, not a safety default.
+type MCPConfig struct {
+	// Enabled registers POST/GET/DELETE /api/v1/mcp. When false the routes do
+	// not exist at all — a disabled feature should not answer, not even 403.
+	Enabled bool `koanf:"enabled"`
 }
 
 // Default query storage limits.
@@ -596,9 +961,15 @@ func defaultConfig() Config {
 			TTLSeconds: DefaultAuthCacheTTLSeconds,
 			MaxSize:    DefaultAuthCacheMaxSize,
 		},
-		SlackAuth: SlackAuthConfig{
+		Auth: OAuthUsersConfig{
 			AutoCreateUsers: true,
-			DefaultRole:     "connector",
+			DefaultRole:     DefaultOAuthRole,
+		},
+		MCP: MCPConfig{Enabled: true},
+		OIDCAuth: OIDCAuthConfig{
+			Scopes:      DefaultOIDCScopes,
+			DisplayName: DefaultOIDCDisplayName,
+			GroupsClaim: DefaultOIDCGroupsClaim,
 		},
 		SlackNotify: SlackNotifyConfig{
 			Channel: "#dbbat",
@@ -626,6 +997,36 @@ type LoadOptions struct {
 // koanfDelim is the delimiter used for nested config keys in koanf.
 const koanfDelim = "."
 
+// authProviderOverrideSettings maps the environment-variable stem of each
+// per-provider auto-provisioning override onto the key it carries under
+// auth.providers.<provider>. Only these two settings take a provider suffix,
+// which is what makes "whatever follows the stem is the provider name"
+// unambiguous — and why an unknown provider has to be a startup failure rather
+// than a key quietly parked in the map.
+var authProviderOverrideSettings = map[string]string{
+	"auth_auto_create_users_": "auto_create_users",
+	"auth_default_role_":      "default_role",
+}
+
+// authProviderOverrideKey turns an already-lowercased, DBB_-stripped variable
+// name into its auth.providers.* koanf key. The second result is false when the
+// name is not a per-provider override, which is the overwhelmingly common case.
+//
+// The stems are mutually exclusive prefixes, so the map's iteration order does
+// not matter.
+func authProviderOverrideKey(key string) (string, bool) {
+	for stem, setting := range authProviderOverrideSettings {
+		provider, found := strings.CutPrefix(key, stem)
+		if !found || provider == "" {
+			continue
+		}
+
+		return "auth.providers." + provider + "." + setting, true
+	}
+
+	return "", false
+}
+
 // envTransform transforms environment variable names to koanf keys.
 // DBB_LISTEN_PG -> listen_pg
 // DBB_QUERY_STORAGE_MAX_RESULT_ROWS -> query_storage.max_result_rows
@@ -651,9 +1052,29 @@ func envTransform(k, v string) (string, any) {
 	if strings.HasPrefix(key, "auth_cache_") {
 		return "auth_cache." + strings.TrimPrefix(key, "auth_cache_"), v
 	}
+	// auth_auto_create_users_<provider> -> auth.providers.<provider>.auto_create_users
+	// auth_default_role_<provider>      -> auth.providers.<provider>.default_role
+	//
+	// Must stay *before* the auth_ rule below, which would otherwise turn
+	// DBB_AUTH_AUTO_CREATE_USERS_OIDC into auth.auto_create_users_oidc — a key
+	// nothing unmarshals, so the operator would get no override, no error, and
+	// the instance-wide policy still in force.
+	if nested, ok := authProviderOverrideKey(key); ok {
+		return nested, v
+	}
+	// auth_* -> auth.* (DBB_AUTH_AUTO_CREATE_USERS, DBB_AUTH_DEFAULT_ROLE).
+	// Must stay *after* the auth_cache_ rule above, which it would otherwise
+	// swallow into auth.cache_*.
+	if strings.HasPrefix(key, "auth_") {
+		return "auth." + strings.TrimPrefix(key, "auth_"), v
+	}
 	// slack_auth_* -> slack_auth.*
 	if strings.HasPrefix(key, "slack_auth_") {
 		return "slack_auth." + strings.TrimPrefix(key, "slack_auth_"), v
+	}
+	// oidc_* -> oidc.*
+	if strings.HasPrefix(key, "oidc_") {
+		return "oidc." + strings.TrimPrefix(key, "oidc_"), v
 	}
 	// slack_signing_secret -> slack_notify.signing_secret
 	// DBB_SLACK_SIGNING_SECRET is the canonical, documented name; the
@@ -699,7 +1120,119 @@ func envTransform(k, v string) (string, any) {
 	if strings.HasPrefix(key, "approval_") {
 		return "approval." + strings.TrimPrefix(key, "approval_"), v
 	}
+	// mcp_* -> mcp.*
+	if strings.HasPrefix(key, "mcp_") {
+		return "mcp." + strings.TrimPrefix(key, "mcp_"), v
+	}
 	return key, v
+}
+
+// authProvisioningAliases maps the pre-rename keys the two auto-provisioning
+// settings used to live under onto their provider-agnostic home. Both the
+// legacy environment variables (DBB_SLACK_AUTH_*, through the slack_auth_
+// prefix rule in envTransform) and the legacy config-file keys land on the left
+// side, so one table covers both.
+var authProvisioningAliases = map[string]string{
+	"slack_auth.auto_create_users": "auth.auto_create_users",
+	"slack_auth.default_role":      "auth.default_role",
+}
+
+// operatorLayer returns everything the operator actually configured — the
+// config file and the environment — with the struct defaults left out.
+//
+// That distinction is the whole point: in the merged koanf every key exists,
+// because defaultConfig() populates it, so "is auth.default_role set?" cannot
+// be answered there. Here it can.
+func operatorLayer(configPath string) (*koanf.Koanf, error) {
+	explicit := koanf.New(koanfDelim)
+
+	if configPath != "" {
+		if err := loadConfigFile(explicit, configPath); err != nil {
+			return nil, fmt.Errorf("failed to load config file: %w", err)
+		}
+	}
+
+	if err := explicit.Load(env.Provider(koanfDelim, env.Opt{Prefix: "DBB_", TransformFunc: envTransform}), nil); err != nil {
+		return nil, fmt.Errorf("failed to load environment variables: %w", err)
+	}
+
+	return explicit, nil
+}
+
+// applyAuthProvisioningAliases resolves the canonical auth.* auto-provisioning
+// keys against the legacy slack_auth.* ones: an explicitly configured canonical
+// value wins, then the legacy alias, then the default.
+//
+// Silently ignoring the legacy names would flip auto-provisioning back on for
+// every deployment that turned it off, on nothing more than an upgrade — hence
+// the promotion. Silently letting a lingering legacy value beat a canonical one
+// would be the same failure in the other direction, hence the precedence check.
+//
+// This is deliberately *not* the shape DBB_SLACK_SIGNING_SECRET uses a few
+// lines above. That alias is a pure environment-variable-name ambiguity onto
+// one koanf key, where the only risk is env-provider map ordering, and
+// re-applying the canonical variable from os.Getenv closes it completely. This
+// one is a two-key alias: the canonical and the legacy value live under
+// different keys and can each arrive from either the config file or the
+// environment. An os.Getenv re-apply would only cover the deployments that set
+// the canonical name in the environment, and would let a legacy value beat a
+// canonical one written in the config file. Asking the operator layer instead
+// covers all four combinations, in both directions.
+func applyAuthProvisioningAliases(k, explicit *koanf.Koanf) error {
+	for legacy, canonical := range authProvisioningAliases {
+		// Canonical set from any source: it already sits in k, and it wins.
+		if explicit.Exists(canonical) {
+			continue
+		}
+
+		if !explicit.Exists(legacy) {
+			continue
+		}
+
+		if err := k.Set(canonical, explicit.Get(legacy)); err != nil {
+			return fmt.Errorf("failed to apply legacy %s: %w", legacy, err)
+		}
+	}
+
+	return nil
+}
+
+// validate refuses a configuration the process should not boot with. Every
+// check here is one where the alternative — starting anyway — means failing
+// later, at a worse moment, in a way that looks like a different bug.
+func validate(cfg *Config) error {
+	if cfg.DSN == "" {
+		return ErrDSNRequired
+	}
+
+	if cfg.Dump.UploadURL != "" && cfg.Dump.Dir == "" {
+		return ErrDumpUploadNeedsDir
+	}
+
+	// Fail here rather than in the proxy: a typo'd TLS ceiling must stop the
+	// process, not silently leave the listener on the default.
+	if _, err := cfg.MSSQL.ResolveTLSMaxVersion(); err != nil {
+		return err
+	}
+
+	if cfg.OIDCAuth.Enabled() && (cfg.OIDCAuth.ClientID == "" || cfg.OIDCAuth.ClientSecret == "") {
+		return ErrOIDCClientCredentialsRequired
+	}
+
+	// The mapping decides who is an admin, so it is parsed here — a typo stops
+	// the process instead of quietly degrading to "nobody matches", which at
+	// the next login would demote every mapped user.
+	if _, err := cfg.OIDCAuth.ParseRoleMapping(); err != nil {
+		return err
+	}
+
+	// Same reasoning one rung down: the default role is what an unmatched user
+	// ends up with, so a typo must not survive startup.
+	if err := cfg.Auth.Validate(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Load reads configuration from environment variables and optional config file.
@@ -744,6 +1277,15 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 		}
 	}
 
+	explicit, err := operatorLayer(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := applyAuthProvisioningAliases(k, explicit); err != nil {
+		return nil, err
+	}
+
 	// Unmarshal into Config struct
 	cfg := &Config{}
 	if err := k.Unmarshal("", cfg); err != nil {
@@ -755,18 +1297,7 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 		override(cfg)
 	}
 
-	// Validate required fields
-	if cfg.DSN == "" {
-		return nil, ErrDSNRequired
-	}
-
-	if cfg.Dump.UploadURL != "" && cfg.Dump.Dir == "" {
-		return nil, ErrDumpUploadNeedsDir
-	}
-
-	// Fail here rather than in the proxy: a typo'd TLS ceiling must stop the
-	// process, not silently leave the listener on the default.
-	if _, err := cfg.MSSQL.ResolveTLSMaxVersion(); err != nil {
+	if err := validate(cfg); err != nil {
 		return nil, err
 	}
 

@@ -32,6 +32,25 @@ type CreateDatabaseRequest struct {
 	// SSH bastion secrets (write-only, never returned).
 	SSHPrivateKey string `json:"ssh_private_key"`
 	SSHPassphrase string `json:"ssh_passphrase"`
+	// Kubernetes cluster material. The ServiceAccount bearer token is sent as
+	// Password — it is the row's secret, encrypted exactly like a database
+	// password — while the CA bundle and the namespace are public and stored
+	// in clear. There is deliberately no kubeconfig field: EKS/GKE kubeconfigs
+	// authenticate through exec credential plugins, which a server daemon
+	// cannot run.
+	//
+	// K8sCACert is optional: a row that supplies none gets a trust-on-first-use
+	// pin instead, learned on the first connect and stored separately. Pasting
+	// the bundle remains the stronger setup — see docs/kubernetes.md.
+	K8sCACert                string `json:"k8s_ca_cert"`
+	K8sNamespace             string `json:"k8s_namespace"`
+	K8sInsecureSkipTLSVerify bool   `json:"k8s_insecure_skip_tls_verify"`
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs name the user
+	// groups allowed to decide grant *requests* for this server and to release
+	// approval *holds* on statements against it. Omitted or empty falls back to
+	// the server groups this server belongs to, and then to admins.
+	AccessApproverUserGroupUIDs []uuid.UUID `json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
 	// TestConnection asks the API to validate the row by actually dialing it
 	// once created. Opt-in, and never fatal: the outcome comes back as a
 	// connection_test object alongside the created server.
@@ -58,6 +77,24 @@ type UpdateDatabaseRequest struct {
 	// SSH bastion secrets (write-only, never returned).
 	SSHPrivateKey *string `json:"ssh_private_key"`
 	SSHPassphrase *string `json:"ssh_passphrase"`
+	// Kubernetes cluster material; see CreateDatabaseRequest. The bearer token
+	// is rotated through Password like any other secret.
+	K8sCACert                *string `json:"k8s_ca_cert"`
+	K8sNamespace             *string `json:"k8s_namespace"`
+	K8sInsecureSkipTLSVerify *bool   `json:"k8s_insecure_skip_tls_verify"`
+	// K8sResetLearnedCACert forgets the TOFU-learned bundle so the next connect
+	// pins afresh. It is the exit from a stale pin when the cluster's CA
+	// rotated and you do not have the new bundle to paste; supplying a
+	// non-empty k8s_ca_cert clears it too, since a supplied bundle supersedes
+	// anything learned.
+	K8sResetLearnedCACert bool `json:"k8s_reset_learned_ca_cert"`
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs replace the
+	// server's approver lists wholesale. Omitted (null) leaves them alone; an
+	// explicit `[]` clears them, handing the decision back to the server groups
+	// and then to admins. Effective immediately, for grant requests already
+	// filed and statements already parked — see docs/approvals.md.
+	AccessApproverUserGroupUIDs *[]uuid.UUID `json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  *[]uuid.UUID `json:"query_approver_user_group_uids"`
 	// TestConnection asks the API to validate the row by actually dialing it
 	// once updated. Opt-in, and never fatal.
 	TestConnection bool `json:"test_connection"`
@@ -82,6 +119,21 @@ type DatabaseResponse struct {
 	// SSHKnownHostKey is the TOFU-pinned bastion host key (read-only). Secrets
 	// (private key, passphrase) are never returned.
 	SSHKnownHostKey string `json:"ssh_known_host_key,omitempty"`
+	// Kubernetes cluster material. Public: the CA bundle is challenge material
+	// and the namespace is scope, so both round-trip. The ServiceAccount token
+	// never does.
+	K8sCACert string `json:"k8s_ca_cert,omitempty"`
+	// K8sLearnedCACert is the bundle dbbat pinned itself on first connect, when
+	// the row supplied none (read-only). Kept apart from K8sCACert so a client
+	// can say which of the two is in force: a supplied bundle always wins.
+	K8sLearnedCACert         string `json:"k8s_learned_ca_cert,omitempty"`
+	K8sNamespace             string `json:"k8s_namespace,omitempty"`
+	K8sInsecureSkipTLSVerify bool   `json:"k8s_insecure_skip_tls_verify,omitempty"`
+	// The two approver lists. Always rendered, empty included: an empty list is
+	// a meaningful state (fall back to the server groups, then to admins), so
+	// omitting it would make "cleared" indistinguishable from "unknown".
+	AccessApproverUserGroupUIDs []uuid.UUID `json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
 	// ConnectionTest is present only when the request set test_connection.
 	ConnectionTest *ConnectionTestResponse `json:"connection_test,omitempty"`
 }
@@ -116,7 +168,13 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	if !isSupportedProtocol(req.Protocol) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh")
+			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes")
+		return
+	}
+
+	if msg := s.validateApproverUserGroups(c.Request.Context(),
+		req.AccessApproverUserGroupUIDs, req.QueryApproverUserGroupUIDs); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
 		return
 	}
 
@@ -153,31 +211,44 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		}
 		protocolData.SSH = &store.SSHServerData{PrivateKey: req.SSHPrivateKey, Passphrase: req.SSHPassphrase}
 	}
+	if req.Protocol == store.ProtocolKubernetes {
+		if protocolData == nil {
+			protocolData = &store.ServerProtocolData{}
+		}
+		protocolData.Kubernetes = &store.KubernetesServerData{
+			CACert:                req.K8sCACert,
+			Namespace:             req.K8sNamespace,
+			InsecureSkipTLSVerify: req.K8sInsecureSkipTLSVerify,
+		}
+	}
 
 	listable := true
 	if req.Listable != nil {
 		listable = *req.Listable
 	}
-	// SSH bastions are never grantable/connectable targets.
-	if req.Protocol == store.ProtocolSSH {
+	// Tunnel rows (ssh bastions, kubernetes clusters) are dial paths, never
+	// grantable/connectable targets.
+	if store.IsTunnelProtocol(req.Protocol) {
 		listable = false
 	}
 
 	db := &store.Server{
-		Name:              req.Name,
-		Description:       req.Description,
-		Host:              req.Host,
-		Port:              req.Port,
-		DatabaseName:      req.DatabaseName,
-		Username:          req.Username,
-		Password:          req.Password,
-		SSLMode:           req.SSLMode,
-		Protocol:          req.Protocol,
-		OracleServiceName: oracleServiceName,
-		ViaUID:            req.ViaUID,
-		ProtocolData:      protocolData,
-		Listable:          listable,
-		CreatedBy:         &currentUser.UID,
+		Name:                        req.Name,
+		Description:                 req.Description,
+		Host:                        req.Host,
+		Port:                        req.Port,
+		DatabaseName:                req.DatabaseName,
+		Username:                    req.Username,
+		Password:                    req.Password,
+		SSLMode:                     req.SSLMode,
+		Protocol:                    req.Protocol,
+		OracleServiceName:           oracleServiceName,
+		ViaUID:                      req.ViaUID,
+		ProtocolData:                protocolData,
+		Listable:                    listable,
+		AccessApproverUserGroupUIDs: normalizeUUIDs(req.AccessApproverUserGroupUIDs),
+		QueryApproverUserGroupUIDs:  normalizeUUIDs(req.QueryApproverUserGroupUIDs),
+		CreatedBy:                   &currentUser.UID,
 	}
 
 	result, err := s.store.CreateServer(c.Request.Context(), db, s.encryptionKey)
@@ -377,6 +448,27 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		}
 	}
 
+	// Per-protocol validation, which the update path used to skip entirely —
+	// leaving PUT able to reach states POST rejects (a kubernetes row with
+	// neither a CA bundle nor the explicit insecure flag, or any protocol
+	// string at all).
+	current, err := s.store.GetServerByUID(c.Request.Context(), uid)
+	if err != nil {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
+		return
+	}
+
+	if errMsg := validateUpdateProtocolFields(current, &req); errMsg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errMsg)
+		return
+	}
+
+	if msg := s.validateApproverUserGroups(c.Request.Context(),
+		derefUUIDs(req.AccessApproverUserGroupUIDs), derefUUIDs(req.QueryApproverUserGroupUIDs)); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+		return
+	}
+
 	updates := store.ServerUpdate{
 		Description:       req.Description,
 		Host:              req.Host,
@@ -393,6 +485,14 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		ClearViaUID:       req.ClearViaUID,
 		SSHPrivateKey:     req.SSHPrivateKey,
 		SSHPassphrase:     req.SSHPassphrase,
+
+		K8sCACert:                req.K8sCACert,
+		K8sNamespace:             req.K8sNamespace,
+		K8sInsecureSkipTLSVerify: req.K8sInsecureSkipTLSVerify,
+		K8sClearLearnedCACert:    req.K8sResetLearnedCACert,
+
+		AccessApproverUserGroupUIDs: req.AccessApproverUserGroupUIDs,
+		QueryApproverUserGroupUIDs:  req.QueryApproverUserGroupUIDs,
 	}
 
 	if err := s.store.UpdateServer(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
@@ -534,6 +634,15 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 		knownHostKey = sd.KnownHostKey
 	}
 
+	var k8sCACert, k8sLearnedCACert, k8sNamespace string
+	var k8sInsecure bool
+	if kd := db.KubernetesData(); kd != nil {
+		k8sCACert = kd.CACert
+		k8sLearnedCACert = kd.LearnedCACert
+		k8sNamespace = kd.Namespace
+		k8sInsecure = kd.InsecureSkipTLSVerify
+	}
+
 	return DatabaseResponse{
 		UID:               db.UID,
 		Name:              db.Name,
@@ -550,6 +659,14 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 		CreatedBy:         db.CreatedBy,
 		ViaUID:            db.ViaUID,
 		SSHKnownHostKey:   knownHostKey,
+
+		K8sCACert:                k8sCACert,
+		K8sLearnedCACert:         k8sLearnedCACert,
+		K8sNamespace:             k8sNamespace,
+		K8sInsecureSkipTLSVerify: k8sInsecure,
+
+		AccessApproverUserGroupUIDs: normalizeUUIDs(db.AccessApproverUserGroupUIDs),
+		QueryApproverUserGroupUIDs:  normalizeUUIDs(db.QueryApproverUserGroupUIDs),
 	}
 }
 
@@ -561,6 +678,25 @@ func (s *Server) handleListSSHServers(c *gin.Context) {
 	servers, err := s.store.ListSSHServers(c.Request.Context())
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list ssh servers")
+		return
+	}
+	response := make([]DatabaseResponse, len(servers))
+	for i := range servers {
+		response[i] = toDatabaseResponse(&servers[i])
+	}
+	successResponse(c, gin.H{"servers": response})
+}
+
+// handleListTunnelServers lists every dial-path row — SSH bastions and
+// Kubernetes clusters — for the "via" selector (admin only).
+//
+// It exists alongside /ssh-servers rather than replacing it because the two
+// answer different questions: /ssh-servers is the bastion management view,
+// while a target's via_uid may point at either kind.
+func (s *Server) handleListTunnelServers(c *gin.Context) {
+	servers, err := s.store.ListTunnelServers(c.Request.Context())
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list tunnel servers")
 		return
 	}
 	response := make([]DatabaseResponse, len(servers))
@@ -589,6 +725,20 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 		if req.SSHPrivateKey == "" && req.Password == "" {
 			return "ssh_private_key or password is required for ssh servers"
 		}
+	case store.ProtocolKubernetes:
+		// A cluster row authenticates with one thing only: a long-lived
+		// ServiceAccount bearer token, sent in the password field.
+		if req.Password == "" {
+			return "password (the service account bearer token) is required for kubernetes servers"
+		}
+		// k8s_ca_cert is deliberately *not* required. A row that supplies none
+		// gets a trust-on-first-use pin: the dialer learns the API server's CA
+		// on first connect and verifies against it from then on. It never falls
+		// back to the host's system trust store, so leaving it blank is a
+		// weaker but still closed configuration, not an open one.
+		if req.K8sNamespace == "" {
+			return "k8s_namespace is required for kubernetes servers"
+		}
 	case store.ProtocolOracle:
 		if req.OracleServiceName == "" && req.DatabaseName == "" {
 			return "oracle_service_name or database_name is required for Oracle databases"
@@ -604,6 +754,49 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 			req.SSLMode = "prefer"
 		}
 	}
+	return ""
+}
+
+// validateUpdateProtocolFields validates an update against the row it will
+// produce, returning an error message (empty when valid).
+//
+// It exists because the create path's validation used to be the only one: PUT
+// could set any protocol string, so the check is written against the
+// *resulting* values (request field, falling back to the stored one) rather
+// than against what the request happens to mention.
+//
+// It no longer refuses a kubernetes row that blanks its CA bundle without
+// setting the insecure flag: that row now gets a trust-on-first-use pin
+// instead. What has not changed is that "no CA" never means "the host's system
+// trust store" — the dialer refuses that, whatever this function allows.
+func validateUpdateProtocolFields(current *store.Server, req *UpdateDatabaseRequest) string {
+	protocol := current.Protocol
+	if req.Protocol != nil {
+		protocol = *req.Protocol
+	}
+
+	if !isSupportedProtocol(protocol) {
+		return "protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes"
+	}
+
+	if protocol != store.ProtocolKubernetes {
+		return ""
+	}
+
+	stored := current.KubernetesData()
+	if stored == nil {
+		stored = &store.KubernetesServerData{}
+	}
+
+	namespace := stored.Namespace
+	if req.K8sNamespace != nil {
+		namespace = *req.K8sNamespace
+	}
+
+	if namespace == "" {
+		return "k8s_namespace is required for kubernetes servers"
+	}
+
 	return ""
 }
 
@@ -632,6 +825,19 @@ func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
 	addPtr("mongo_auth_source", req.MongoAuthSource, req.MongoAuthSource != nil)
 	addPtr("listable", req.Listable, req.Listable != nil)
 	addPtr("via_uid", req.ViaUID, req.ViaUID != nil)
+	addPtr("k8s_ca_cert", req.K8sCACert, req.K8sCACert != nil)
+	addPtr("k8s_namespace", req.K8sNamespace, req.K8sNamespace != nil)
+	addPtr("k8s_insecure_skip_tls_verify", req.K8sInsecureSkipTLSVerify, req.K8sInsecureSkipTLSVerify != nil)
+	// Approver lists are recorded in full, not as a "changed" marker: who may
+	// decide is the audit-relevant fact, and the value is not a secret.
+	addPtr("access_approver_user_group_uids", req.AccessApproverUserGroupUIDs,
+		req.AccessApproverUserGroupUIDs != nil)
+	addPtr("query_approver_user_group_uids", req.QueryApproverUserGroupUIDs,
+		req.QueryApproverUserGroupUIDs != nil)
+
+	if req.K8sResetLearnedCACert {
+		out["k8s_reset_learned_ca_cert"] = true
+	}
 
 	if req.ClearViaUID {
 		out["clear_via_uid"] = true
@@ -658,7 +864,7 @@ func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
 func isSupportedProtocol(protocol string) bool {
 	switch protocol {
 	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB,
-		store.ProtocolMongoDB, store.ProtocolMSSQL, store.ProtocolSSH:
+		store.ProtocolMongoDB, store.ProtocolMSSQL, store.ProtocolSSH, store.ProtocolKubernetes:
 		return true
 	default:
 		return false
@@ -688,6 +894,11 @@ func defaultPortFor(protocol string) int {
 		return 1433
 	case store.ProtocolSSH:
 		return 22
+	case store.ProtocolKubernetes:
+		// The Kubernetes API server's port is the row's Port; 443 is what a
+		// managed control plane fronts, 6443 what a self-hosted one usually
+		// binds. 443 is the safer suggestion.
+		return 443
 	default:
 		return 0
 	}

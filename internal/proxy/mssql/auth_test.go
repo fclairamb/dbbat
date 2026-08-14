@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -18,6 +17,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -66,58 +66,6 @@ func newTestStore(t *testing.T) *store.Store {
 	require.NoError(t, dataStore.Migrate(ctx))
 
 	return dataStore
-}
-
-// grantFullAccess gives a user a live, unrestricted grant on a database.
-// Every grant is an instance of a definition, so the definition comes first;
-// the slug is unique per call because a definition slug is unique among live
-// rows.
-func grantFullAccess(t *testing.T, dataStore *store.Store, userUID, databaseUID uuid.UUID) {
-	t.Helper()
-
-	grantAccess(t, dataStore, userUID, databaseUID, nil, nil)
-}
-
-// grantAccess is grantFullAccess with the definition's controls and approval
-// patterns spelled out, which is what stage 3's enforcement tests need.
-func grantAccess(
-	t *testing.T,
-	dataStore *store.Store,
-	userUID, databaseUID uuid.UUID,
-	controls, approvalPatterns []string,
-) {
-	t.Helper()
-
-	ctx := context.Background()
-
-	if controls == nil {
-		controls = []string{}
-	}
-
-	if approvalPatterns == nil {
-		approvalPatterns = []string{}
-	}
-
-	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
-		Name:             "mssql-test-" + databaseUID.String(),
-		Slug:             "mssql-test-" + databaseUID.String(),
-		DurationSeconds:  int64((24 * time.Hour).Seconds()),
-		Controls:         controls,
-		ApprovalPatterns: approvalPatterns,
-		CreatedBy:        userUID,
-	})
-	require.NoError(t, err)
-
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:            userUID,
-		DatabaseID:        databaseUID,
-		GrantDefinitionID: def.UID,
-		Definition:        def,
-		GrantedBy:         userUID,
-		StartsAt:          time.Now().Add(-time.Hour),
-		ExpiresAt:         time.Now().Add(24 * time.Hour),
-	})
-	require.NoError(t, err)
 }
 
 // authFixture is a proxy wired to a real store and a fake SQL Server.
@@ -209,7 +157,9 @@ func newAuthFixtureWith(t *testing.T, opts fixtureOptions) *authFixture {
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	grantAccess(t, dataStore, user.UID, database.UID, opts.controls, opts.approvalPatterns)
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, database.UID,
+		opts.controls, testsupport.WithApprovalPatterns(opts.approvalPatterns...))
+	require.NoError(t, err)
 
 	dumpConfig := config.DumpConfig{}
 	if dumpDir != "" {
@@ -495,7 +445,9 @@ func TestSessionRejectsADatabaseOnAnotherProtocol(t *testing.T) {
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	grantFullAccess(t, fixture.store, fixture.user.UID, other.UID)
+	_, err = testsupport.CreateGrantWithControls(
+		context.Background(), t, fixture.store, fixture.user.UID, other.UID, nil)
+	require.NoError(t, err)
 
 	_, outcome := fixture.login(t, fixtureUser, fixturePassword, "a-postgres-entry")
 

@@ -107,6 +107,12 @@ func (r noResolver) SetKnownHostKey(context.Context, uuid.UUID, string) error {
 	return errResolverUnexpected
 }
 
+func (r noResolver) SetKubernetesCACert(context.Context, uuid.UUID, string) error {
+	r.t.Error(errResolverUnexpected)
+
+	return errResolverUnexpected
+}
+
 // witnessServer builds the server row both entry points are driven from.
 func witnessServer(t *testing.T, ln net.Listener, sslMode string, key []byte) *store.Server {
 	t.Helper()

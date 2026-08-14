@@ -15,6 +15,7 @@ import (
 	"github.com/slack-go/slack"
 
 	"github.com/fclairamb/dbbat/internal/notify"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -28,10 +29,22 @@ const slackInteractionMaxBody = 1 << 20 // 1 MB
 // its own context (mirrors notifyAsync).
 const slackInteractionTimeout = 10 * time.Second
 
+// What a panic in a detached decision goroutine is logged under. Both outlive
+// the ack that spawned them (Slack's 3s deadline is why they are detached at
+// all), so no recover upstream of them exists and an unguarded panic would take
+// the process down with every live proxy session on it.
+const (
+	goroutineNameSlackGrantDecision = "slack grant request decision"
+	goroutineNameSlackQueryDecision = "slack query approval decision"
+)
+
 // Ephemeral message copy shown only to the clicking user.
 const (
-	msgNotLinked       = "Your Slack account isn't linked to a dbbat user. Sign in to dbbat with Slack first: %s"
-	msgNotAdmin        = "Only dbbat admins can decide grant requests."
+	msgNotLinked = "Your Slack account isn't linked to a dbbat user. Sign in to dbbat with Slack first: %s"
+	// msgNotApprover covers both halves of the gate — not an approver, and
+	// being the requester — deliberately without saying which: a Slack
+	// ephemeral is a poor place to enumerate who guards what.
+	msgNotApprover     = "You can't decide this grant request. Only dbbat admins and this server's access approvers can — and never their own request."
 	msgNoLongerPending = "This request is no longer pending."
 	msgRequestNotFound = "That grant request no longer exists."
 	msgDefinitionGone  = "The grant definition is no longer active, so this request can't be approved."
@@ -47,6 +60,12 @@ type slackDecider interface {
 	// userBySlackID maps a Slack user ID to a dbbat user, or returns
 	// store.ErrUserNotFound / store.ErrIdentityNotFound if unlinked.
 	userBySlackID(ctx context.Context, slackID string) (*store.User, error)
+	// mayDecideRequest runs the same authorization the REST approve/deny
+	// handlers run — admin, or an access approver resolved off the target
+	// server and its groups, never the requester themselves. Arriving over
+	// Slack is not an authorization, and this is the one gate: both Slack
+	// transports (inbound HTTP and Socket Mode) funnel through here.
+	mayDecideRequest(ctx context.Context, user *store.User, requestUID uuid.UUID) bool
 	// approve / deny run the shared decide flow (store + audit + notify)
 	// with decisionSourceSlack, returning the raw store error unmapped.
 	approve(ctx context.Context, uid uuid.UUID, decider *store.User) (*decideOutcome, error)
@@ -148,12 +167,12 @@ func (s *Server) serveSlackInteraction(c *gin.Context, signingSecret string, dec
 	responseURL := callback.ResponseURL
 	slackUserID := callback.User.ID
 
-	go func() {
+	go safe.RunGuarded(context.Background(), s.logger, goroutineNameSlackGrantDecision, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackInteractionTimeout)
 		defer cancel()
 
 		s.processSlackDecision(ctx, decider, slackUserID, responseURL, action, requestUID)
-	}()
+	})
 }
 
 // readVerifiedSlackBody reads the request body (capped) and verifies the
@@ -274,8 +293,8 @@ func (s *Server) processSlackDecision(
 		return
 	}
 
-	if !user.IsAdmin() {
-		s.postEphemeral(ctx, responseURL, msgNotAdmin)
+	if !decider.mayDecideRequest(ctx, user, requestUID) {
+		s.postEphemeral(ctx, responseURL, msgNotApprover)
 
 		return
 	}
@@ -369,6 +388,23 @@ func (s *Server) publicURLForMessage(ctx context.Context) string {
 
 func (s *Server) userBySlackID(ctx context.Context, slackID string) (*store.User, error) {
 	return s.store.GetUserByIdentity(ctx, store.IdentityTypeSlack, slackID)
+}
+
+// mayDecideRequest re-reads the request and runs mayDecideGrantRequest — the
+// same function the REST handlers use, so the Slack buttons cannot end up more
+// permissive than the API.
+//
+// A request that no longer exists lets an admin through, so the decision that
+// follows reports "no longer exists" instead of the misleading "you can't
+// decide this". A non-admin is refused: there is nothing left to resolve them
+// against.
+func (s *Server) mayDecideRequest(ctx context.Context, user *store.User, requestUID uuid.UUID) bool {
+	req, err := s.store.GetGrantRequest(ctx, requestUID)
+	if err != nil {
+		return user != nil && user.IsAdmin()
+	}
+
+	return s.mayDecideGrantRequest(ctx, user, req)
 }
 
 func (s *Server) approve(ctx context.Context, uid uuid.UUID, decider *store.User) (*decideOutcome, error) {
@@ -549,12 +585,12 @@ func (s *Server) dispatchSlackQueryDecision(callback slack.InteractionCallback) 
 	slackUserID := callback.User.ID
 	responseURL := callback.ResponseURL
 
-	go func() {
+	go safe.RunGuarded(context.Background(), s.logger, goroutineNameSlackQueryDecision, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackInteractionTimeout)
 		defer cancel()
 
 		s.processSlackQueryDecision(ctx, slackUserID, responseURL, status, queryUID)
-	}()
+	})
 
 	return true
 }

@@ -210,7 +210,7 @@ func TestReplaceAuthKVValueWideBufferSized(t *testing.T) {
 	body = append(body, []byte("OLDVALUE")...)
 	body = binary.LittleEndian.AppendUint32(body, 1) // flag
 
-	out := replaceAuthKVValueWide(body, "AUTH_SESSKEY", "NEWLONGERVALUE")
+	out := replaceAuthKVValueWide(body, "AUTH_SESSKEY", "NEWLONGERVALUE", false)
 
 	valLenOff := 4 + 1 + 12
 	valLen := binary.LittleEndian.Uint32(out[valLenOff : valLenOff+4])
@@ -242,7 +242,7 @@ func TestReplaceAuthKVValueWidePlain(t *testing.T) {
 	body = append(body, []byte("OLDVALUE")...)
 	body = binary.LittleEndian.AppendUint32(body, 0)
 
-	out := replaceAuthKVValueWide(body, "AUTH_SESSKEY", "NEWVAL")
+	out := replaceAuthKVValueWide(body, "AUTH_SESSKEY", "NEWVAL", false)
 
 	valLenOff := 4 + 1 + 12
 	if valLen := binary.LittleEndian.Uint32(out[valLenOff : valLenOff+4]); valLen != 6 {

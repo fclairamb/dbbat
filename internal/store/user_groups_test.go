@@ -13,75 +13,75 @@ func TestGrantDefinitionAppliesTo(t *testing.T) {
 
 	groupA := uuid.New()
 	groupB := uuid.New()
-	dbA := uuid.New()
-	dbB := uuid.New()
+	sgA := uuid.New()
+	sgB := uuid.New()
 
 	tests := []struct {
-		name          string
-		def           GrantDefinition
-		userGroupUIDs []uuid.UUID
-		databaseUID   uuid.UUID
-		want          bool
+		name            string
+		def             GrantDefinition
+		userGroupUIDs   []uuid.UUID
+		serverGroupUIDs []uuid.UUID
+		want            bool
 	}{
 		{
 			// The backwards-compatibility case: every pre-scoping definition
 			// has empty arrays and must keep applying to everyone.
-			name:          "unscoped applies to everyone",
-			def:           GrantDefinition{},
-			userGroupUIDs: nil,
-			databaseUID:   dbA,
-			want:          true,
+			name:            "unscoped applies to everyone",
+			def:             GrantDefinition{},
+			userGroupUIDs:   nil,
+			serverGroupUIDs: []uuid.UUID{sgA},
+			want:            true,
 		},
 		{
-			name:          "groups only, member",
-			def:           GrantDefinition{GroupUIDs: []uuid.UUID{groupA}},
-			userGroupUIDs: []uuid.UUID{groupB, groupA},
-			databaseUID:   dbA,
-			want:          true,
+			name:            "groups only, member",
+			def:             GrantDefinition{UserGroupUIDs: []uuid.UUID{groupA}},
+			userGroupUIDs:   []uuid.UUID{groupB, groupA},
+			serverGroupUIDs: []uuid.UUID{sgA},
+			want:            true,
 		},
 		{
-			name:          "groups only, non-member",
-			def:           GrantDefinition{GroupUIDs: []uuid.UUID{groupA}},
-			userGroupUIDs: []uuid.UUID{groupB},
-			databaseUID:   dbA,
-			want:          false,
+			name:            "groups only, non-member",
+			def:             GrantDefinition{UserGroupUIDs: []uuid.UUID{groupA}},
+			userGroupUIDs:   []uuid.UUID{groupB},
+			serverGroupUIDs: []uuid.UUID{sgA},
+			want:            false,
 		},
 		{
-			name:          "groups only, user in no group",
-			def:           GrantDefinition{GroupUIDs: []uuid.UUID{groupA}},
-			userGroupUIDs: nil,
-			databaseUID:   dbA,
-			want:          false,
+			name:            "groups only, user in no group",
+			def:             GrantDefinition{UserGroupUIDs: []uuid.UUID{groupA}},
+			userGroupUIDs:   nil,
+			serverGroupUIDs: []uuid.UUID{sgA},
+			want:            false,
 		},
 		{
-			name:          "databases only, in scope",
-			def:           GrantDefinition{DatabaseUIDs: []uuid.UUID{dbA, dbB}},
-			userGroupUIDs: nil,
-			databaseUID:   dbB,
-			want:          true,
+			name:            "server groups only, in scope",
+			def:             GrantDefinition{ServerGroupUIDs: []uuid.UUID{sgA, sgB}},
+			userGroupUIDs:   nil,
+			serverGroupUIDs: []uuid.UUID{sgB},
+			want:            true,
 		},
 		{
-			name:          "databases only, out of scope",
-			def:           GrantDefinition{DatabaseUIDs: []uuid.UUID{dbA}},
-			userGroupUIDs: []uuid.UUID{groupA},
-			databaseUID:   dbB,
-			want:          false,
+			name:            "server groups only, out of scope",
+			def:             GrantDefinition{ServerGroupUIDs: []uuid.UUID{sgA}},
+			userGroupUIDs:   []uuid.UUID{groupA},
+			serverGroupUIDs: []uuid.UUID{sgB},
+			want:            false,
 		},
 		{
-			name:          "both axes must pass",
-			def:           GrantDefinition{GroupUIDs: []uuid.UUID{groupA}, DatabaseUIDs: []uuid.UUID{dbA}},
-			userGroupUIDs: []uuid.UUID{groupA},
-			databaseUID:   dbB,
-			want:          false,
+			name:            "both axes must pass",
+			def:             GrantDefinition{UserGroupUIDs: []uuid.UUID{groupA}, ServerGroupUIDs: []uuid.UUID{sgA}},
+			userGroupUIDs:   []uuid.UUID{groupA},
+			serverGroupUIDs: []uuid.UUID{sgB},
+			want:            false,
 		},
 		{
 			// Fail-closed: a group that was deleted leaves a dangling uid in
 			// the scope array, which must match nobody rather than everybody.
-			name:          "dangling group uid fails closed",
-			def:           GrantDefinition{GroupUIDs: []uuid.UUID{uuid.New()}},
-			userGroupUIDs: []uuid.UUID{groupA, groupB},
-			databaseUID:   dbA,
-			want:          false,
+			name:            "dangling group uid fails closed",
+			def:             GrantDefinition{UserGroupUIDs: []uuid.UUID{uuid.New()}},
+			userGroupUIDs:   []uuid.UUID{groupA, groupB},
+			serverGroupUIDs: []uuid.UUID{sgA},
+			want:            false,
 		},
 	}
 
@@ -89,7 +89,7 @@ func TestGrantDefinitionAppliesTo(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := tt.def.AppliesTo(tt.userGroupUIDs, tt.databaseUID); got != tt.want {
+			if got := tt.def.AppliesTo(tt.userGroupUIDs, tt.serverGroupUIDs); got != tt.want {
 				t.Errorf("AppliesTo() = %v, want %v", got, tt.want)
 			}
 		})
@@ -174,13 +174,13 @@ func TestUserGroupMembership(t *testing.T) {
 		t.Fatalf("CreateUserGroup() error = %v", err)
 	}
 
-	if err := store.AddUserToGroup(ctx, group.UID, user.UID); err != nil {
-		t.Fatalf("AddUserToGroup() error = %v", err)
+	if err := store.AddUserToUserGroup(ctx, group.UID, user.UID); err != nil {
+		t.Fatalf("AddUserToUserGroup() error = %v", err)
 	}
 
 	// Adding twice must be a no-op, not a unique violation.
-	if err := store.AddUserToGroup(ctx, group.UID, user.UID); err != nil {
-		t.Fatalf("AddUserToGroup() twice error = %v", err)
+	if err := store.AddUserToUserGroup(ctx, group.UID, user.UID); err != nil {
+		t.Fatalf("AddUserToUserGroup() twice error = %v", err)
 	}
 
 	uids, err := store.ListUserGroupUIDs(ctx, user.UID)
@@ -192,26 +192,26 @@ func TestUserGroupMembership(t *testing.T) {
 		t.Errorf("ListUserGroupUIDs() = %v, want [%v]", uids, group.UID)
 	}
 
-	members, err := store.ListGroupMembers(ctx, group.UID)
+	members, err := store.ListUserGroupMembers(ctx, group.UID)
 	if err != nil {
-		t.Fatalf("ListGroupMembers() error = %v", err)
+		t.Fatalf("ListUserGroupMembers() error = %v", err)
 	}
 
 	if len(members) != 1 || members[0].UID != user.UID {
-		t.Errorf("ListGroupMembers() = %+v, want the single member", members)
+		t.Errorf("ListUserGroupMembers() = %+v, want the single member", members)
 	}
 
-	groupsForUser, err := store.ListGroupsForUser(ctx, user.UID)
+	groupsForUser, err := store.ListUserGroupsForUser(ctx, user.UID)
 	if err != nil {
-		t.Fatalf("ListGroupsForUser() error = %v", err)
+		t.Fatalf("ListUserGroupsForUser() error = %v", err)
 	}
 
 	if len(groupsForUser) != 1 || groupsForUser[0].UID != group.UID {
-		t.Errorf("ListGroupsForUser() = %+v, want the single group", groupsForUser)
+		t.Errorf("ListUserGroupsForUser() = %+v, want the single group", groupsForUser)
 	}
 
-	if err := store.RemoveUserFromGroup(ctx, group.UID, user.UID); err != nil {
-		t.Fatalf("RemoveUserFromGroup() error = %v", err)
+	if err := store.RemoveUserFromUserGroup(ctx, group.UID, user.UID); err != nil {
+		t.Fatalf("RemoveUserFromUserGroup() error = %v", err)
 	}
 
 	uids, err = store.ListUserGroupUIDs(ctx, user.UID)
@@ -250,31 +250,31 @@ func TestSetGroupMembersAndSetUserGroups(t *testing.T) {
 		t.Fatalf("CreateUserGroup() error = %v", err)
 	}
 
-	if err := store.SetGroupMembers(ctx, groupA.UID, []uuid.UUID{userA.UID, userB.UID}); err != nil {
-		t.Fatalf("SetGroupMembers() error = %v", err)
+	if err := store.SetUserGroupMembers(ctx, groupA.UID, []uuid.UUID{userA.UID, userB.UID}); err != nil {
+		t.Fatalf("SetUserGroupMembers() error = %v", err)
 	}
 
-	members, err := store.ListGroupMemberUIDs(ctx, groupA.UID)
+	members, err := store.ListUserGroupMemberUIDs(ctx, groupA.UID)
 	if err != nil {
-		t.Fatalf("ListGroupMemberUIDs() error = %v", err)
+		t.Fatalf("ListUserGroupMemberUIDs() error = %v", err)
 	}
 
 	if len(members) != 2 {
-		t.Fatalf("ListGroupMemberUIDs() = %v, want 2 members", members)
+		t.Fatalf("ListUserGroupMemberUIDs() = %v, want 2 members", members)
 	}
 
 	// Replacing wholesale drops the members not in the new set.
-	if err := store.SetGroupMembers(ctx, groupA.UID, []uuid.UUID{userB.UID}); err != nil {
-		t.Fatalf("SetGroupMembers() replace error = %v", err)
+	if err := store.SetUserGroupMembers(ctx, groupA.UID, []uuid.UUID{userB.UID}); err != nil {
+		t.Fatalf("SetUserGroupMembers() replace error = %v", err)
 	}
 
-	members, err = store.ListGroupMemberUIDs(ctx, groupA.UID)
+	members, err = store.ListUserGroupMemberUIDs(ctx, groupA.UID)
 	if err != nil {
-		t.Fatalf("ListGroupMemberUIDs() error = %v", err)
+		t.Fatalf("ListUserGroupMemberUIDs() error = %v", err)
 	}
 
 	if len(members) != 1 || members[0] != userB.UID {
-		t.Errorf("ListGroupMemberUIDs() = %v, want only userB", members)
+		t.Errorf("ListUserGroupMemberUIDs() = %v, want only userB", members)
 	}
 
 	if err := store.SetUserGroups(ctx, userA.UID, []uuid.UUID{groupA.UID, groupB.UID}); err != nil {
@@ -322,8 +322,8 @@ func TestUserGroupDeletionCascadesMembershipButNotScope(t *testing.T) {
 		t.Fatalf("CreateUserGroup() error = %v", err)
 	}
 
-	if err := store.AddUserToGroup(ctx, group.UID, user.UID); err != nil {
-		t.Fatalf("AddUserToGroup() error = %v", err)
+	if err := store.AddUserToUserGroup(ctx, group.UID, user.UID); err != nil {
+		t.Fatalf("AddUserToUserGroup() error = %v", err)
 	}
 
 	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
@@ -331,7 +331,7 @@ func TestUserGroupDeletionCascadesMembershipButNotScope(t *testing.T) {
 		Slug:            "scoped-def",
 		DurationSeconds: 3600,
 		Controls:        []string{ControlReadOnly},
-		GroupUIDs:       []uuid.UUID{group.UID},
+		UserGroupUIDs:   []uuid.UUID{group.UID},
 		CreatedBy:       admin.UID,
 	})
 	if err != nil {
@@ -359,11 +359,11 @@ func TestUserGroupDeletionCascadesMembershipButNotScope(t *testing.T) {
 		t.Fatalf("GetGrantDefinition() error = %v", err)
 	}
 
-	if len(reloaded.GroupUIDs) != 1 || reloaded.GroupUIDs[0] != group.UID {
-		t.Fatalf("GroupUIDs = %v, want the dangling group uid preserved", reloaded.GroupUIDs)
+	if len(reloaded.UserGroupUIDs) != 1 || reloaded.UserGroupUIDs[0] != group.UID {
+		t.Fatalf("UserGroupUIDs = %v, want the dangling group uid preserved", reloaded.UserGroupUIDs)
 	}
 
-	if reloaded.AppliesToGroups(uids) {
+	if reloaded.AppliesToUserGroups(uids) {
 		t.Error("definition with a dangling group scope should fail closed")
 	}
 }
@@ -377,7 +377,7 @@ func TestGrantDefinitionScopePersistence(t *testing.T) {
 	admin := createTestAdmin(t, ctx, store, "scope_persist")
 
 	groupUID := uuid.New()
-	dbUID := uuid.New()
+	serverGroupUID := uuid.New()
 
 	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
 		Name:            "persist-def",
@@ -391,12 +391,12 @@ func TestGrantDefinitionScopePersistence(t *testing.T) {
 	}
 
 	// Unset scope round-trips as an empty (never nil) array.
-	if len(def.GroupUIDs) != 0 || len(def.DatabaseUIDs) != 0 {
-		t.Errorf("new definition scope = %v/%v, want empty", def.GroupUIDs, def.DatabaseUIDs)
+	if len(def.UserGroupUIDs) != 0 || len(def.ServerGroupUIDs) != 0 {
+		t.Errorf("new definition scope = %v/%v, want empty", def.UserGroupUIDs, def.ServerGroupUIDs)
 	}
 
-	def.GroupUIDs = []uuid.UUID{groupUID}
-	def.DatabaseUIDs = []uuid.UUID{dbUID}
+	def.UserGroupUIDs = []uuid.UUID{groupUID}
+	def.ServerGroupUIDs = []uuid.UUID{serverGroupUID}
 
 	updated, err := store.UpdateGrantDefinition(ctx, def)
 	if err != nil {
@@ -409,11 +409,11 @@ func TestGrantDefinitionScopePersistence(t *testing.T) {
 		t.Fatalf("GetGrantDefinition() error = %v", err)
 	}
 
-	if len(reloaded.GroupUIDs) != 1 || reloaded.GroupUIDs[0] != groupUID {
-		t.Errorf("GroupUIDs = %v, want [%v]", reloaded.GroupUIDs, groupUID)
+	if len(reloaded.UserGroupUIDs) != 1 || reloaded.UserGroupUIDs[0] != groupUID {
+		t.Errorf("UserGroupUIDs = %v, want [%v]", reloaded.UserGroupUIDs, groupUID)
 	}
 
-	if len(reloaded.DatabaseUIDs) != 1 || reloaded.DatabaseUIDs[0] != dbUID {
-		t.Errorf("DatabaseUIDs = %v, want [%v]", reloaded.DatabaseUIDs, dbUID)
+	if len(reloaded.ServerGroupUIDs) != 1 || reloaded.ServerGroupUIDs[0] != serverGroupUID {
+		t.Errorf("ServerGroupUIDs = %v, want [%v]", reloaded.ServerGroupUIDs, serverGroupUID)
 	}
 }

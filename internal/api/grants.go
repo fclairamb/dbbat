@@ -71,25 +71,44 @@ func (s *Server) handleAssignGrant(c *gin.Context) {
 		return
 	}
 
-	if target.IsSSH() {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot grant access to an ssh server")
+	if target.IsTunnel() {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot grant access to a "+target.Protocol+" tunnel server")
 
 		return
 	}
 
-	// The definition's database scope is enforced: a shape declared to apply
-	// only to certain databases must not authorize another one, whoever is
-	// issuing it. Its *group* scope is not — that scope governs who may
+	// The definition's server-group scope is enforced: a shape declared to
+	// apply only to certain servers must not authorize another one, whoever is
+	// issuing it. Its *user-group* scope is not — that scope governs who may
 	// self-request the definition, and an admin assigning access is the
 	// authority on who gets it.
-	if !def.AppliesToDatabase(req.DatabaseID) {
+	serverGroupUIDs, err := s.store.ListServerGroupUIDsForServer(ctx, req.DatabaseID)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list server groups")
+
+		return
+	}
+
+	if !def.AppliesToServerGroups(serverGroupUIDs) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
 			"this grant definition cannot be used for this database")
 
 		return
 	}
 
-	startsAt := time.Now()
+	// "Starts now" means the store's now, not this process's: the auth path
+	// admits a session with `starts_at <= NOW()` evaluated by PostgreSQL, so a
+	// window opened from an API server whose clock runs ahead of the store is
+	// refused by every proxy until the skew elapses. An explicitly requested
+	// start is taken as given — that one is the caller's wall clock by
+	// definition.
+	startsAt, err := s.store.Now(ctx)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to read the database clock")
+
+		return
+	}
+
 	if req.StartsAt != nil {
 		startsAt = *req.StartsAt
 	}

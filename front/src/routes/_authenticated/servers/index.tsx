@@ -6,7 +6,7 @@ import {
   useCreateDatabase,
   useUpdateDatabase,
   useDeleteDatabase,
-  useSSHServers,
+  useTunnelServers,
   useTestServerConnection,
   type ConnectionTestResult,
   type Database,
@@ -57,12 +57,14 @@ import {
   Plus,
   Trash2,
   Pencil,
+  ShieldCheck,
   AlertCircle,
   PlugZap,
   Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { CopyableField } from "@/components/shared/CopyableField";
+import { ApproverGroupPickers } from "@/components/shared/ApproverGroupPickers";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
 export const Route = createFileRoute("/_authenticated/servers/")({
@@ -82,7 +84,8 @@ type Protocol =
   | "mariadb"
   | "mongodb"
   | "mssql"
-  | "ssh";
+  | "ssh"
+  | "kubernetes";
 
 const PROTOCOL_LABEL: Record<Protocol, string> = {
   postgresql: "PostgreSQL",
@@ -92,6 +95,7 @@ const PROTOCOL_LABEL: Record<Protocol, string> = {
   mongodb: "MongoDB",
   mssql: "SQL Server",
   ssh: "SSH Bastion",
+  kubernetes: "Kubernetes cluster",
 };
 
 const PROTOCOL_DEFAULT_PORT: Record<Protocol, string> = {
@@ -102,6 +106,7 @@ const PROTOCOL_DEFAULT_PORT: Record<Protocol, string> = {
   mongodb: "27017",
   mssql: "1433",
   ssh: "22",
+  kubernetes: "6443",
 };
 
 const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
@@ -116,6 +121,8 @@ const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
   mssql:
     "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
   ssh: "bg-slate-100 text-slate-700 dark:bg-slate-800/50 dark:text-slate-300",
+  kubernetes:
+    "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400",
 };
 
 const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
@@ -126,6 +133,7 @@ const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
   mongodb: "admin",
   mssql: "sa",
   ssh: "www-data",
+  kubernetes: "dbbat",
 };
 
 function ServersPage() {
@@ -135,20 +143,38 @@ function ServersPage() {
   const [deleteDb, setDeleteDb] = useState<DatabaseItem | null>(null);
   const [detailDb, setDetailDb] = useState<DatabaseItem | null>(null);
   const [editSshServer, setEditSshServer] = useState<Database | null>(null);
+  const [approversDb, setApproversDb] = useState<Database | null>(null);
 
   const canCreate = canCreateDatabase(user?.roles);
   const canDelete = canDeleteDatabase(user?.roles);
   const canUpdate = canUpdateDatabase(user?.roles);
 
-  // SSH bastions are admin-only (GET /ssh-servers requires the admin role),
+  // Tunnel rows are admin-only (GET /tunnel-servers requires the admin role),
   // matching the create/delete-database gating already in place.
-  const { data: sshServers, isLoading: sshLoading } = useSSHServers(canCreate);
+  const { data: tunnelServers, isLoading: tunnelsLoading } =
+    useTunnelServers(canCreate);
 
   const sshColumns: Column<Database>[] = [
     {
       key: "name",
       header: "Name",
       cell: (srv) => <span className="font-medium">{srv.name}</span>,
+    },
+    {
+      key: "protocol",
+      header: "Type",
+      cell: (srv) => {
+        const proto = srv.protocol as Protocol | undefined;
+        return (
+          <span
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+              (proto && PROTOCOL_BADGE_CLASS[proto]) ?? ""
+            }`}
+          >
+            {(proto && PROTOCOL_LABEL[proto]) ?? srv.protocol}
+          </span>
+        );
+      },
     },
     {
       key: "description",
@@ -170,6 +196,41 @@ function ServersPage() {
       key: "username",
       header: "Username",
       cell: (srv) => <span className="font-mono text-sm">{srv.username}</span>,
+    },
+    {
+      key: "namespace",
+      header: "Namespace",
+      cell: (srv) => (
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-sm text-muted-foreground">
+            {srv.k8s_namespace || "-"}
+          </span>
+          {/* An escape hatch you cannot see is a trap: a row created with TLS
+              verification off has to say so wherever it is listed. */}
+          {srv.k8s_insecure_skip_tls_verify && (
+            <span
+              data-testid={`tunnel-insecure-badge-${srv.uid}`}
+              title="TLS verification is disabled for this cluster's API server: anything that can intercept that connection can read the service account token."
+              className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400"
+            >
+              Insecure TLS
+            </span>
+          )}
+          {/* Which CA is in force changes what a failure means, so it has to be
+              visible from the list, not only inside the edit dialog. */}
+          {!srv.k8s_insecure_skip_tls_verify &&
+            !srv.k8s_ca_cert &&
+            srv.k8s_learned_ca_cert && (
+              <span
+                data-testid={`tunnel-ca-pinned-badge-${srv.uid}`}
+                title="No CA bundle was supplied, so dbbat pinned the one the API server presented on first connect and refuses any other. Paste the cluster's own bundle for a CA you verified yourself."
+                className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+              >
+                CA pinned (TOFU)
+              </span>
+            )}
+        </div>
+      ),
     },
     {
       key: "actions",
@@ -299,6 +360,20 @@ function ServersPage() {
               disabledReason={getDisabledReason("update-database", user?.roles)}
             />
           )}
+          {canUpdate && isFullDatabase(db) && (
+            <Button
+              variant="ghost"
+              size="icon"
+              title="Approvers"
+              data-testid={`database-approvers-${db.uid}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setApproversDb(db);
+              }}
+            >
+              <ShieldCheck className="h-4 w-4" />
+            </Button>
+          )}
           <PermissionButton
             variant="ghost"
             size="icon"
@@ -353,18 +428,19 @@ function ServersPage() {
       {canCreate && (
         <div className="space-y-3" data-testid="ssh-servers-section">
           <div>
-            <h2 className="text-lg font-semibold">SSH Servers</h2>
+            <h2 className="text-lg font-semibold">Tunnel Servers</h2>
             <p className="text-sm text-muted-foreground">
-              Bastions used as tunnels to reach databases. Created via the "SSH
-              Bastion" protocol above.
+              Dial paths used to reach databases: SSH bastions and Kubernetes
+              clusters. Created via the "SSH Bastion" or "Kubernetes cluster"
+              protocol above; neither is ever a grantable target.
             </p>
           </div>
           <DataTable
             columns={sshColumns}
-            data={sshServers ?? []}
-            isLoading={sshLoading}
+            data={tunnelServers ?? []}
+            isLoading={tunnelsLoading}
             rowKey={(srv) => srv.uid}
-            emptyMessage="No SSH servers configured"
+            emptyMessage="No tunnel servers configured"
           />
         </div>
       )}
@@ -375,7 +451,115 @@ function ServersPage() {
         server={editSshServer}
         onClose={() => setEditSshServer(null)}
       />
+      <EditServerApproversDialog
+        server={approversDb}
+        onClose={() => setApproversDb(null)}
+      />
     </div>
+  );
+}
+
+/**
+ * Editing the two approver lists on one server.
+ *
+ * Kept out of the create dialog's edit counterpart because there isn't one:
+ * databases are otherwise edited nowhere in this UI, and who may approve for a
+ * server is exactly the field an operator revisits after the row was created —
+ * on a rotation change, a team split, a departure.
+ */
+function EditServerApproversDialog({
+  server,
+  onClose,
+}: {
+  server: Database | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={!!server} onOpenChange={() => onClose()}>
+      {/* Keyed on the UID so the pickers re-seed from the row being opened. */}
+      {server && (
+        <EditServerApproversForm
+          key={server.uid}
+          server={server}
+          onClose={onClose}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+function EditServerApproversForm({
+  server,
+  onClose,
+}: {
+  server: Database;
+  onClose: () => void;
+}) {
+  const [accessApproverUids, setAccessApproverUids] = useState<string[]>(
+    server.access_approver_user_group_uids ?? [],
+  );
+  const [queryApproverUids, setQueryApproverUids] = useState<string[]>(
+    server.query_approver_user_group_uids ?? [],
+  );
+
+  const updateServer = useUpdateDatabase(server.uid, {
+    onSuccess: () => {
+      toast.success("Approvers updated");
+      onClose();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    // Both sent unconditionally, empty included: clearing a list is a real
+    // policy change (the decision falls back to the server groups, then to
+    // admins), so it has to be expressible from this form.
+    updateServer.mutate({
+      access_approver_user_group_uids: accessApproverUids,
+      query_approver_user_group_uids: queryApproverUids,
+    });
+  };
+
+  return (
+    <DialogContent
+      data-testid="server-approvers-dialog"
+      className="max-w-md"
+    >
+      <form onSubmit={handleSubmit}>
+        <DialogHeader>
+          <DialogTitle>Approvers for {server.name}</DialogTitle>
+          <DialogDescription>
+            Who, besides admins, may decide access requests and release approval
+            holds on this server.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
+          <ApproverGroupPickers
+            scope="server"
+            accessSelected={accessApproverUids}
+            onAccessChange={setAccessApproverUids}
+            querySelected={queryApproverUids}
+            onQueryChange={setQueryApproverUids}
+            testIdPrefix="server-approvers"
+          />
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            disabled={updateServer.isPending}
+            data-testid="server-approvers-submit"
+          >
+            Save
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
   );
 }
 
@@ -387,6 +571,10 @@ const STAGE_LABEL: Record<string, string> = {
   bastion_auth: "SSH authentication",
   target_dial: "Reaching the database",
   target_auth: "Database authentication",
+  cluster_api: "Reaching the Kubernetes API server",
+  cluster_auth: "Kubernetes service account token",
+  cluster_rbac: "Kubernetes RBAC (pods/portforward)",
+  cluster_target: "Resolving the target pod",
 };
 
 function describeTestResult(result: ConnectionTestResult): string {
@@ -460,13 +648,33 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
   const [viaUid, setViaUid] = useState<string>("");
   const [sshPrivateKey, setSshPrivateKey] = useState("");
   const [sshPassphrase, setSshPassphrase] = useState("");
+  const [k8sCaCert, setK8sCaCert] = useState("");
+  const [k8sNamespace, setK8sNamespace] = useState("");
+  const [k8sInsecure, setK8sInsecure] = useState(false);
+  const [accessApproverUids, setAccessApproverUids] = useState<string[]>([]);
+  const [queryApproverUids, setQueryApproverUids] = useState<string[]>([]);
 
   const isSSH = protocol === "ssh";
-  const { data: sshServers } = useSSHServers();
+  const isKubernetes = protocol === "kubernetes";
+  // Both are dial paths rather than database targets, so they share every
+  // "this row has no database behind it" branch below.
+  const isTunnel = isSSH || isKubernetes;
+  const { data: tunnelServers } = useTunnelServers();
+  // A cluster row may itself sit behind an SSH bastion; the reverse nesting is
+  // unsupported, so a cluster is never offered as a cluster's own via.
+  const viaOptions = (tunnelServers ?? []).filter((srv) =>
+    isKubernetes ? srv.protocol === "ssh" : true,
+  );
 
   const createDb = useCreateDatabase({
     onSuccess: () => {
-      toast.success(isSSH ? "SSH server created" : "Database created successfully");
+      toast.success(
+        isKubernetes
+          ? "Kubernetes cluster created"
+          : isSSH
+            ? "SSH server created"
+            : "Database created successfully",
+      );
       onClose();
     },
     onError: (error) => {
@@ -476,6 +684,26 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isKubernetes) {
+      createDb.mutate({
+        name,
+        description: description || undefined,
+        host,
+        port: parseInt(port, 10),
+        username,
+        // The service account bearer token rides in the password field: it is
+        // this row's one secret, encrypted exactly like a database password.
+        password,
+        protocol,
+        ssl_mode: "",
+        listable: false,
+        k8s_ca_cert: k8sCaCert || undefined,
+        k8s_namespace: k8sNamespace,
+        k8s_insecure_skip_tls_verify: k8sInsecure || undefined,
+        via_uid: viaUid || undefined,
+      });
+      return;
+    }
     if (isSSH) {
       createDb.mutate({
         name,
@@ -511,6 +739,8 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
           : undefined,
       listable,
       via_uid: viaUid || undefined,
+      access_approver_user_group_uids: accessApproverUids,
+      query_approver_user_group_uids: queryApproverUids,
     });
   };
 
@@ -549,6 +779,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 <SelectItem value="mongodb">MongoDB</SelectItem>
                 <SelectItem value="mssql">SQL Server</SelectItem>
                 <SelectItem value="ssh" data-testid="protocol-option-ssh">SSH Bastion</SelectItem>
+                <SelectItem value="kubernetes" data-testid="protocol-option-kubernetes">Kubernetes cluster</SelectItem>
               </SelectContent>
             </Select>
             {isSSH && (
@@ -556,6 +787,15 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 An SSH bastion is a dial path, not a database. Other databases
                 can be reached "via" it. It never appears in access-request
                 lists.
+              </p>
+            )}
+            {isKubernetes && (
+              <p className="text-xs text-muted-foreground">
+                A Kubernetes cluster is a dial path, not a database. Databases
+                reached "via" it must <strong>run as pods</strong> in the
+                namespace below: a port-forward reaches a pod's own port, so a
+                database merely routable from the cluster network (an RDS in the
+                same VPC) is out of scope.
               </p>
             )}
           </div>
@@ -579,7 +819,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               placeholder="Production database"
             />
           </div>
-          {!isSSH && (
+          {!isTunnel && (
             <div className="flex items-center justify-between rounded-lg border p-3">
               <div className="space-y-0.5">
                 <Label htmlFor="listable">Listable</Label>
@@ -594,14 +834,30 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               />
             </div>
           )}
+          {/* Tunnel rows are dial paths — nothing is ever granted or held on
+              them, so neither approver kind applies. */}
+          {!isTunnel && (
+            <ApproverGroupPickers
+              scope="server"
+              accessSelected={accessApproverUids}
+              onAccessChange={setAccessApproverUids}
+              querySelected={queryApproverUids}
+              onQueryChange={setQueryApproverUids}
+              testIdPrefix="database"
+            />
+          )}
           <div className="grid grid-cols-3 gap-2">
             <div className="col-span-2 space-y-2">
-              <Label htmlFor="host">Host</Label>
+              <Label htmlFor="host">
+                {isKubernetes ? "API server" : "Host"}
+              </Label>
               <Input
                 id="host"
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
-                placeholder="localhost"
+                placeholder={
+                  isKubernetes ? "https://api.cluster.example.com" : "localhost"
+                }
                 required
               />
             </div>
@@ -616,7 +872,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               />
             </div>
           </div>
-          {!isSSH && protocol !== "oracle" && (
+          {!isTunnel && protocol !== "oracle" && (
             <div className="space-y-2">
               <Label htmlFor="databaseName">Database Name</Label>
               <Input
@@ -656,7 +912,9 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
             </div>
           )}
           <div className="space-y-2">
-            <Label htmlFor="username">Username</Label>
+            <Label htmlFor="username">
+              {isKubernetes ? "Service account name" : "Username"}
+            </Label>
             <Input
               id="username"
               value={username}
@@ -664,10 +922,18 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               placeholder={PROTOCOL_USERNAME_PLACEHOLDER[protocol]}
               required
             />
+            {isKubernetes && (
+              <p className="text-xs text-muted-foreground">
+                Informational: it names the account in the UI and the logs. The
+                credential is the token below.
+              </p>
+            )}
           </div>
           <div className="space-y-2">
             <Label htmlFor="password">
-              Password{isSSH ? " (optional if using a key)" : ""}
+              {isKubernetes
+                ? "Service account token"
+                : `Password${isSSH ? " (optional if using a key)" : ""}`}
             </Label>
             <Input
               id="password"
@@ -676,6 +942,13 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               onChange={(e) => setPassword(e.target.value)}
               required={!isSSH}
             />
+            {isKubernetes && (
+              <p className="text-xs text-muted-foreground">
+                A long-lived ServiceAccount bearer token. Kubeconfig files are
+                not accepted: managed clusters authenticate through exec
+                credential plugins, which a server daemon cannot run.
+              </p>
+            )}
           </div>
           {isSSH && (
             <>
@@ -703,7 +976,66 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               </div>
             </>
           )}
-          {!isSSH && protocol !== "oracle" && (
+          {isKubernetes && (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="k8sNamespace">Namespace</Label>
+                <Input
+                  id="k8sNamespace"
+                  data-testid="k8s-namespace-input"
+                  value={k8sNamespace}
+                  onChange={(e) => setK8sNamespace(e.target.value)}
+                  placeholder="data"
+                  required
+                />
+                <p className="text-xs text-muted-foreground">
+                  Every pod lookup and every port-forward is scoped to it: it is
+                  the namespace the Role and RoleBinding cover.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="k8sCaCert">
+                  CA certificate (PEM){" "}
+                  <span className="font-normal text-muted-foreground">
+                    — optional
+                  </span>
+                </Label>
+                <textarea
+                  id="k8sCaCert"
+                  data-testid="k8s-ca-cert-input"
+                  className="flex min-h-[96px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={k8sCaCert}
+                  onChange={(e) => setK8sCaCert(e.target.value)}
+                  placeholder="-----BEGIN CERTIFICATE-----"
+                />
+                {/* Optional, but the recommendation: a pasted bundle is a CA
+                    you verified, where a pin is only a CA we happened to meet
+                    first. Say so at the point of choosing. */}
+                <p className="text-xs text-muted-foreground">
+                  From the token Secret&apos;s{" "}
+                  <code className="font-mono">ca.crt</code> key. Leave it blank
+                  and dbbat pins whatever the API server presents on the first
+                  connect, then refuses anything else — safer than skipping
+                  verification, weaker than a bundle you checked yourself.
+                </p>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border p-3">
+                <div className="space-y-0.5">
+                  <Label htmlFor="k8sInsecure">Skip TLS verification</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Throwaway clusters only: anything that can intercept the API
+                    server connection can then read the token.
+                  </p>
+                </div>
+                <Switch
+                  id="k8sInsecure"
+                  checked={k8sInsecure}
+                  onCheckedChange={setK8sInsecure}
+                />
+              </div>
+            </>
+          )}
+          {!isTunnel && protocol !== "oracle" && (
             <div className="space-y-2">
               <Label htmlFor="sslMode">SSL Mode</Label>
               <Select value={sslMode} onValueChange={setSslMode}>
@@ -722,26 +1054,31 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
           )}
           {!isSSH && (
             <div className="space-y-2">
-              <Label htmlFor="viaUid">Via SSH server</Label>
+              <Label htmlFor="viaUid">
+                {isKubernetes ? "Via SSH bastion" : "Via tunnel server"}
+              </Label>
               <Select
                 value={viaUid || "none"}
                 onValueChange={(v) => setViaUid(v === "none" ? "" : v)}
               >
-                <SelectTrigger>
+                <SelectTrigger data-testid="via-select">
                   <SelectValue placeholder="Direct (no tunnel)" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">Direct (no tunnel)</SelectItem>
-                  {(sshServers ?? []).map((srv) => (
+                  {viaOptions.map((srv) => (
                     <SelectItem key={srv.uid} value={srv.uid}>
-                      {srv.name} ({srv.host})
+                      {srv.name} (
+                      {PROTOCOL_LABEL[srv.protocol as Protocol] ?? srv.protocol}
+                      )
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Tunnel this database's connection through an SSH bastion. Create
-                one by adding a server with protocol "SSH Bastion".
+                {isKubernetes
+                  ? "Only needed when the API server itself is reachable only through a jump host."
+                  : 'Dial this database through an SSH bastion or a Kubernetes cluster. Through a cluster, Host is a pod name or "svc/<name>" in that cluster\'s namespace and Port is the container port.'}
               </p>
             </div>
           )}
@@ -861,11 +1198,18 @@ function DeleteDatabaseDialog({
   db: DatabaseItem | null;
   onClose: () => void;
 }) {
-  const isSSH = !!db && isFullDatabase(db) && db.protocol === "ssh";
+  const protocol = !!db && isFullDatabase(db) ? db.protocol : undefined;
+  const isSSH = protocol === "ssh" || protocol === "kubernetes";
+  const kind =
+    protocol === "kubernetes"
+      ? "Kubernetes cluster"
+      : protocol === "ssh"
+        ? "SSH server"
+        : "database";
 
   const deleteDb = useDeleteDatabase({
     onSuccess: () => {
-      toast.success(isSSH ? "SSH server deleted successfully" : "Database deleted successfully");
+      toast.success(isSSH ? `${kind} deleted successfully` : "Database deleted successfully");
       onClose();
     },
     onError: (error) => {
@@ -877,9 +1221,9 @@ function DeleteDatabaseDialog({
     <AlertDialog open={!!db} onOpenChange={() => onClose()}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>{isSSH ? "Delete SSH Server" : "Delete Database"}</AlertDialogTitle>
+          <AlertDialogTitle>{isSSH ? `Delete ${kind}` : "Delete Database"}</AlertDialogTitle>
           <AlertDialogDescription>
-            Are you sure you want to delete {isSSH ? "SSH server" : "database"} "{db?.name}"? This action
+            Are you sure you want to delete {kind} "{db?.name}"? This action
             cannot be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -907,7 +1251,7 @@ function EditSSHServerDialog({
   return (
     <Dialog open={!!server} onOpenChange={() => onClose()}>
       {/* Keyed on the server UID so the form state re-initializes fresh
-          (from `server`'s current values) every time a different bastion is
+          (from `server`'s current values) every time a different tunnel row is
           opened for editing, without needing an effect to re-seed state. */}
       {server && (
         <EditSSHServerForm key={server.uid} server={server} onClose={onClose} />
@@ -930,10 +1274,23 @@ function EditSSHServerForm({
   const [password, setPassword] = useState("");
   const [sshPrivateKey, setSshPrivateKey] = useState("");
   const [sshPassphrase, setSshPassphrase] = useState("");
+  const [k8sCaCert, setK8sCaCert] = useState(server.k8s_ca_cert || "");
+  const [k8sNamespace, setK8sNamespace] = useState(server.k8s_namespace || "");
+  const [k8sInsecure, setK8sInsecure] = useState(
+    server.k8s_insecure_skip_tls_verify ?? false,
+  );
+  // Read-only: the learned pin is the dialer's to write, never a form field.
+  const learnedCaCert = server.k8s_learned_ca_cert || "";
+  const [resetLearnedCa, setResetLearnedCa] = useState(false);
+
+  // One form for both dial-path kinds: they share host/port/credential and
+  // differ only in the extra material they carry.
+  const isKubernetes = server.protocol === "kubernetes";
+  const kindLabel = isKubernetes ? "Kubernetes cluster" : "SSH server";
 
   const updateServer = useUpdateDatabase(server.uid, {
     onSuccess: () => {
-      toast.success("SSH server updated successfully");
+      toast.success(`${kindLabel} updated successfully`);
       onClose();
     },
     onError: (error) => {
@@ -943,6 +1300,25 @@ function EditSSHServerForm({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isKubernetes) {
+      updateServer.mutate({
+        description: description || undefined,
+        host,
+        port: parseInt(port, 10),
+        username,
+        // Blank means "keep the stored token", exactly like the SSH secrets.
+        password: password || undefined,
+        // Sent unconditionally, unlike the CA: the whole point is that the
+        // flag can be turned back off from here.
+        k8s_ca_cert: k8sCaCert,
+        k8s_namespace: k8sNamespace || undefined,
+        k8s_insecure_skip_tls_verify: k8sInsecure,
+        // Only ever sent when explicitly asked for: forgetting a pin is a
+        // decision, not a side effect of opening the dialog.
+        k8s_reset_learned_ca_cert: resetLearnedCa || undefined,
+      });
+      return;
+    }
     updateServer.mutate({
       description: description || undefined,
       host,
@@ -958,9 +1334,9 @@ function EditSSHServerForm({
     <DialogContent data-testid="ssh-server-edit-dialog" className="max-w-md">
       <form onSubmit={handleSubmit}>
         <DialogHeader>
-          <DialogTitle>Edit SSH Server</DialogTitle>
+          <DialogTitle>Edit {kindLabel}</DialogTitle>
           <DialogDescription>
-            Update the bastion "{server.name}"'s connection details.
+            Update "{server.name}"'s connection details.
           </DialogDescription>
         </DialogHeader>
           <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
@@ -995,7 +1371,9 @@ function EditSSHServerForm({
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="edit-ssh-username">Username</Label>
+              <Label htmlFor="edit-ssh-username">
+                {isKubernetes ? "Service account name" : "Username"}
+              </Label>
               <Input
                 id="edit-ssh-username"
                 value={username}
@@ -1005,7 +1383,8 @@ function EditSSHServerForm({
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-ssh-password">
-                Password (leave blank to keep unchanged)
+                {isKubernetes ? "Service account token" : "Password"} (leave
+                blank to keep unchanged)
               </Label>
               <Input
                 id="edit-ssh-password"
@@ -1014,6 +1393,94 @@ function EditSSHServerForm({
                 onChange={(e) => setPassword(e.target.value)}
               />
             </div>
+            {isKubernetes && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-k8s-namespace">Namespace</Label>
+                  <Input
+                    id="edit-k8s-namespace"
+                    data-testid="k8s-server-edit-namespace-input"
+                    value={k8sNamespace}
+                    onChange={(e) => setK8sNamespace(e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-k8s-ca-cert">
+                    CA certificate (PEM){" "}
+                    <span className="font-normal text-muted-foreground">
+                      — optional
+                    </span>
+                  </Label>
+                  <textarea
+                    id="edit-k8s-ca-cert"
+                    data-testid="k8s-server-edit-ca-cert-input"
+                    className="flex min-h-[96px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    value={k8sCaCert}
+                    onChange={(e) => setK8sCaCert(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Public challenge material, so unlike the token it is shown
+                    back to you. Blank means the CA pinned on first connect is
+                    what verifies the API server.
+                  </p>
+                </div>
+                {/* Which CA is actually in force is the question an operator
+                    asks when a connection starts failing, so answer it here
+                    rather than leaving them to infer it from two fields. */}
+                {learnedCaCert && !k8sCaCert && (
+                  <div
+                    data-testid="k8s-server-edit-learned-ca"
+                    className="space-y-2 rounded-lg border p-3"
+                  >
+                    <p className="text-sm font-medium">
+                      Pinned on first connect
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      dbbat learned this CA itself and refuses anything else. If
+                      the cluster&apos;s CA has rotated, paste the new bundle
+                      above — or forget the pin and let the next connect pin
+                      afresh, which only makes sense once you know why it
+                      changed.
+                    </p>
+                    <pre className="max-h-24 overflow-auto rounded bg-muted p-2 font-mono text-[10px] leading-tight">
+                      {learnedCaCert}
+                    </pre>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      data-testid="k8s-server-edit-reset-learned-ca"
+                      onClick={() => setResetLearnedCa(true)}
+                      disabled={resetLearnedCa}
+                    >
+                      {resetLearnedCa
+                        ? "Will be forgotten on save"
+                        : "Forget the learned CA"}
+                    </Button>
+                  </div>
+                )}
+                <div className="flex items-center justify-between rounded-lg border p-3">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="edit-k8s-insecure">
+                      Skip TLS verification
+                    </Label>
+                    <p className="text-sm text-muted-foreground">
+                      Anything that can intercept the API server connection can
+                      read the service account token. Throwaway clusters only.
+                    </p>
+                  </div>
+                  <Switch
+                    id="edit-k8s-insecure"
+                    data-testid="k8s-server-edit-insecure-switch"
+                    checked={k8sInsecure}
+                    onCheckedChange={setK8sInsecure}
+                  />
+                </div>
+              </>
+            )}
+            {!isKubernetes && (
+              <>
             <div className="space-y-2">
               <Label htmlFor="edit-ssh-private-key">
                 SSH Private Key (PEM, leave blank to keep unchanged)
@@ -1038,6 +1505,8 @@ function EditSSHServerForm({
                 onChange={(e) => setSshPassphrase(e.target.value)}
               />
             </div>
+              </>
+            )}
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>

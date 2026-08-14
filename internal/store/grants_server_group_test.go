@@ -1,0 +1,530 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// TestGroupBoundGrantCoversServersAddedLater is the point of the whole
+// feature: a grant bound to a server group authorizes a database that joined
+// that group *after* the grant was issued, with no re-issuance and no edit.
+//
+// It runs against GetActiveGrant, which is the single function all five
+// protocol proxies resolve their session's grant through — so proving it here
+// proves it for PostgreSQL, Oracle, MySQL, MongoDB and SQL Server at once.
+func TestGroupBoundGrantCoversServersAddedLater(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sgbound")
+
+	user, anchor := createTestUserAndDatabase(t, ctx, store, "sgbound")
+	joinsLater := newTestTargetServer(t, ctx, store, "sgbound_later")
+	neverJoins := newTestTargetServer(t, ctx, store, "sgbound_never")
+
+	group, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "bound-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup() error = %v", err)
+	}
+
+	if err := store.AddServerToGroup(ctx, group.UID, anchor.UID); err != nil {
+		t.Fatalf("AddServerToGroup() error = %v", err)
+	}
+
+	def := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{
+		Controls:        []string{ControlReadOnly},
+		ServerGroupUIDs: []uuid.UUID{group.UID},
+	})
+
+	now := time.Now()
+	grant := newTestGrant(t, ctx, store, def, user.UID, anchor.UID, admin.UID, now.Add(-time.Minute), now.Add(time.Hour))
+
+	if grant.ServerGroupUID == nil || *grant.ServerGroupUID != group.UID {
+		t.Fatalf("grant.ServerGroupUID = %v, want %v", grant.ServerGroupUID, group.UID)
+	}
+
+	// The anchor works, as it always did.
+	if _, err := store.GetActiveGrant(ctx, user.UID, anchor.UID); err != nil {
+		t.Fatalf("GetActiveGrant(anchor) error = %v", err)
+	}
+
+	// A database not in the group is not covered.
+	if _, err := store.GetActiveGrant(ctx, user.UID, joinsLater.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Fatalf("GetActiveGrant(before joining) error = %v, want ErrNoActiveGrant", err)
+	}
+
+	// Membership is live: adding the server extends the grant that is already
+	// running, with no new grant row.
+	if err := store.AddServerToGroup(ctx, group.UID, joinsLater.UID); err != nil {
+		t.Fatalf("AddServerToGroup(later) error = %v", err)
+	}
+
+	got, err := store.GetActiveGrant(ctx, user.UID, joinsLater.UID)
+	if err != nil {
+		t.Fatalf("GetActiveGrant(after joining) error = %v, want the same grant", err)
+	}
+
+	if got.UID != grant.UID {
+		t.Errorf("GetActiveGrant(after joining) = %v, want the already-live grant %v", got.UID, grant.UID)
+	}
+
+	// And a database that never joined is still refused.
+	if _, err := store.GetActiveGrant(ctx, user.UID, neverJoins.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Fatalf("GetActiveGrant(never joined) error = %v, want ErrNoActiveGrant", err)
+	}
+
+	// Removing it again narrows the grant back, in the same live fashion.
+	if err := store.RemoveServerFromGroup(ctx, group.UID, joinsLater.UID); err != nil {
+		t.Fatalf("RemoveServerFromGroup() error = %v", err)
+	}
+
+	if _, err := store.GetActiveGrant(ctx, user.UID, joinsLater.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Fatalf("GetActiveGrant(after removal) error = %v, want ErrNoActiveGrant", err)
+	}
+}
+
+// TestAnchorOnlyGrantIsUnaffectedByGroups pins the compatibility half: a grant
+// issued from an unscoped definition binds to no group and keeps covering
+// exactly one database, whatever the fleet's group membership looks like.
+func TestAnchorOnlyGrantIsUnaffectedByGroups(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sganchor")
+	user, anchor := createTestUserAndDatabase(t, ctx, store, "sganchor")
+	sibling := newTestTargetServer(t, ctx, store, "sganchor_sibling")
+
+	group, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "anchor-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup() error = %v", err)
+	}
+
+	// Both databases are in a group; the definition simply does not scope on
+	// it, so the grant must not pick the group up.
+	for _, uid := range []uuid.UUID{anchor.UID, sibling.UID} {
+		if err := store.AddServerToGroup(ctx, group.UID, uid); err != nil {
+			t.Fatalf("AddServerToGroup() error = %v", err)
+		}
+	}
+
+	def := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{Controls: []string{ControlReadOnly}})
+
+	now := time.Now()
+	grant := newTestGrant(t, ctx, store, def, user.UID, anchor.UID, admin.UID, now.Add(-time.Minute), now.Add(time.Hour))
+
+	if grant.ServerGroupUID != nil {
+		t.Errorf("grant from an unscoped definition bound to %v, want no binding", *grant.ServerGroupUID)
+	}
+
+	if _, err := store.GetActiveGrant(ctx, user.UID, sibling.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Errorf("GetActiveGrant(sibling) error = %v, want ErrNoActiveGrant", err)
+	}
+}
+
+// TestPriorityRanksOverlappingServerGroups pins the ranking rule for the case
+// group-bound grants introduce: two grants whose groups overlap on one
+// database. On that database the higher priority wins; on a database only one
+// group holds, that group's grant wins whatever its priority.
+func TestPriorityRanksOverlappingServerGroups(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sgprio")
+	user, shared := createTestUserAndDatabase(t, ctx, store, "sgprio")
+	readOnlyOnly := newTestTargetServer(t, ctx, store, "sgprio_ro")
+
+	// groupWrite holds only the shared database; groupRead holds both.
+	groupWrite, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "write-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup(write) error = %v", err)
+	}
+
+	groupRead, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "read-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup(read) error = %v", err)
+	}
+
+	if err := store.SetServerGroupMembers(ctx, groupWrite.UID, []uuid.UUID{shared.UID}); err != nil {
+		t.Fatalf("SetServerGroupMembers(write) error = %v", err)
+	}
+
+	if err := store.SetServerGroupMembers(ctx, groupRead.UID, []uuid.UUID{shared.UID, readOnlyOnly.UID}); err != nil {
+		t.Fatalf("SetServerGroupMembers(read) error = %v", err)
+	}
+
+	writeDef := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{
+		ServerGroupUIDs: []uuid.UUID{groupWrite.UID},
+	})
+
+	readDef := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{
+		Controls:        []string{ControlReadOnly},
+		ServerGroupUIDs: []uuid.UUID{groupRead.UID},
+	})
+
+	now := time.Now()
+
+	writeGrant := newTestGrant(t, ctx, store, writeDef,
+		user.UID, shared.UID, admin.UID, now.Add(-time.Minute), now.Add(time.Hour))
+
+	readGrant := newTestGrant(t, ctx, store, readDef,
+		user.UID, readOnlyOnly.UID, admin.UID, now.Add(-time.Minute), now.Add(2*time.Hour))
+
+	if writeGrant.Priority <= readGrant.Priority {
+		t.Fatalf("fixture is wrong: write priority %d must beat read priority %d",
+			writeGrant.Priority, readGrant.Priority)
+	}
+
+	// On the overlap, the writable grant wins on priority — even though the
+	// read-only grant lasts longer, which is the next tie-break down.
+	got, err := store.GetActiveGrant(ctx, user.UID, shared.UID)
+	if err != nil {
+		t.Fatalf("GetActiveGrant(shared) error = %v", err)
+	}
+
+	if got.UID != writeGrant.UID {
+		t.Errorf("GetActiveGrant(shared) = %v, want the higher-priority write grant %v", got.UID, writeGrant.UID)
+	}
+
+	// Outside the overlap, only the read-only group covers the database, so
+	// its grant is the answer regardless of the other's higher rank.
+	got, err = store.GetActiveGrant(ctx, user.UID, readOnlyOnly.UID)
+	if err != nil {
+		t.Fatalf("GetActiveGrant(read-only) error = %v", err)
+	}
+
+	if got.UID != readGrant.UID {
+		t.Errorf("GetActiveGrant(read-only) = %v, want the read grant %v", got.UID, readGrant.UID)
+	}
+
+	if !got.IsReadOnly() {
+		t.Error("the grant selected outside the overlap must carry the read-only shape")
+	}
+}
+
+// TestGroupBoundGrantQuotaSpansTheGroup pins the quota decision: one budget
+// for the grant, consumed across every database in its group, rather than one
+// budget per database.
+func TestGroupBoundGrantQuotaSpansTheGroup(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sgquota")
+	user, dbA := createTestUserAndDatabase(t, ctx, store, "sgquota")
+	dbB := newTestTargetServer(t, ctx, store, "sgquota_b")
+
+	group, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "quota-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup() error = %v", err)
+	}
+
+	if err := store.SetServerGroupMembers(ctx, group.UID, []uuid.UUID{dbA.UID, dbB.UID}); err != nil {
+		t.Fatalf("SetServerGroupMembers() error = %v", err)
+	}
+
+	maxQueries := int64(10)
+
+	def := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{
+		Controls:        []string{ControlReadOnly},
+		MaxQueryCounts:  &maxQueries,
+		ServerGroupUIDs: []uuid.UUID{group.UID},
+	})
+
+	now := time.Now()
+	grant := newTestGrant(t, ctx, store, def, user.UID, dbA.UID, admin.UID, now.Add(-time.Hour), now.Add(time.Hour))
+
+	// One query on each database, both on *unstamped* connections — the
+	// fallback attribution path, which is the half that used to be pinned to
+	// the anchor database.
+	for _, dbUID := range []uuid.UUID{dbA.UID, dbB.UID} {
+		conn, err := store.CreateConnection(ctx, user.UID, dbUID, "10.0.0.9")
+		if err != nil {
+			t.Fatalf("CreateConnection() error = %v", err)
+		}
+
+		// Clear the auth-time stamp so this exercises the (user, database)
+		// fallback rather than the grant_uid shortcut.
+		if _, err := store.db.NewUpdate().
+			Model((*Connection)(nil)).
+			Set("grant_uid = NULL").
+			Where("uid = ?", conn.UID).
+			Exec(ctx); err != nil {
+			t.Fatalf("clear grant stamp: %v", err)
+		}
+
+		if _, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: conn.UID,
+			SQLText:      "SELECT 1",
+			ExecutedAt:   now,
+		}); err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+	}
+
+	reloaded, err := store.GetGrantByUID(ctx, grant.UID)
+	if err != nil {
+		t.Fatalf("GetGrantByUID() error = %v", err)
+	}
+
+	if reloaded.QueryCount != 2 {
+		t.Errorf("QueryCount = %d, want 2 — the budget spans every database in the group", reloaded.QueryCount)
+	}
+}
+
+// TestApprovedRequestBindsTheGrantToTheServerGroup pins the other
+// materialization path: a grant issued by approving a request is bound to the
+// definition's server group inside the same transaction that issues it, so it
+// widens with the group exactly like an admin-assigned one.
+func TestApprovedRequestBindsTheGrantToTheServerGroup(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sgreq")
+	user, anchor := createTestUserAndDatabase(t, ctx, store, "sgreq")
+	joinsLater := newTestTargetServer(t, ctx, store, "sgreq_later")
+
+	group, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "req-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup() error = %v", err)
+	}
+
+	if err := store.AddServerToGroup(ctx, group.UID, anchor.UID); err != nil {
+		t.Fatalf("AddServerToGroup() error = %v", err)
+	}
+
+	def := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{
+		Controls:        []string{ControlReadOnly},
+		ServerGroupUIDs: []uuid.UUID{group.UID},
+	})
+
+	req, err := store.CreateGrantRequest(ctx, &GrantRequest{
+		UserID:            user.UID,
+		GrantDefinitionID: def.UID,
+		DatabaseID:        anchor.UID,
+	})
+	if err != nil {
+		t.Fatalf("CreateGrantRequest() error = %v", err)
+	}
+
+	grant, _, err := store.ApproveGrantRequest(ctx, req.UID, admin.UID)
+	if err != nil {
+		t.Fatalf("ApproveGrantRequest() error = %v", err)
+	}
+
+	if grant.ServerGroupUID == nil || *grant.ServerGroupUID != group.UID {
+		t.Fatalf("approved grant ServerGroupUID = %v, want %v", grant.ServerGroupUID, group.UID)
+	}
+
+	if err := store.AddServerToGroup(ctx, group.UID, joinsLater.UID); err != nil {
+		t.Fatalf("AddServerToGroup(later) error = %v", err)
+	}
+
+	got, err := store.GetActiveGrant(ctx, user.UID, joinsLater.UID)
+	if err != nil {
+		t.Fatalf("GetActiveGrant(after joining) error = %v", err)
+	}
+
+	if got.UID != grant.UID {
+		t.Errorf("GetActiveGrant(after joining) = %v, want the approved grant %v", got.UID, grant.UID)
+	}
+}
+
+// TestRemovingTheAnchorFromTheGroupNarrowsTheGrant pins the half of "membership
+// is live" that is easy to get wrong: a group-bound grant covers what the group
+// holds *now*, full stop. The database it was originally issued for is not
+// carved out, so "removing a server narrows every grant bound to the group" has
+// no exception an operator has to remember.
+//
+// Deleting the group outright is the different case, and the only case where
+// the anchor comes back: the binding is ON DELETE SET NULL, so the grant falls
+// back to where it started. Access narrows, never widens.
+func TestRemovingTheAnchorFromTheGroupNarrowsTheGrant(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sgnarrow")
+	user, anchor := createTestUserAndDatabase(t, ctx, store, "sgnarrow")
+	sibling := newTestTargetServer(t, ctx, store, "sgnarrow_sibling")
+
+	group, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "narrow-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup() error = %v", err)
+	}
+
+	if err := store.SetServerGroupMembers(ctx, group.UID, []uuid.UUID{anchor.UID, sibling.UID}); err != nil {
+		t.Fatalf("SetServerGroupMembers() error = %v", err)
+	}
+
+	def := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{
+		Controls:        []string{ControlReadOnly},
+		ServerGroupUIDs: []uuid.UUID{group.UID},
+	})
+
+	now := time.Now()
+	grant := newTestGrant(t, ctx, store, def, user.UID, anchor.UID, admin.UID, now.Add(-time.Minute), now.Add(time.Hour))
+
+	if _, err := store.GetActiveGrant(ctx, user.UID, anchor.UID); err != nil {
+		t.Fatalf("GetActiveGrant(anchor) error = %v", err)
+	}
+
+	// Take the anchor out of the group. The grant is bound to the group, so it
+	// stops covering the anchor too.
+	if err := store.RemoveServerFromGroup(ctx, group.UID, anchor.UID); err != nil {
+		t.Fatalf("RemoveServerFromGroup(anchor) error = %v", err)
+	}
+
+	if _, err := store.GetActiveGrant(ctx, user.UID, anchor.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Errorf("GetActiveGrant(anchor after removal) error = %v, want ErrNoActiveGrant", err)
+	}
+
+	// The rest of the group is unaffected.
+	if _, err := store.GetActiveGrant(ctx, user.UID, sibling.UID); err != nil {
+		t.Errorf("GetActiveGrant(sibling) error = %v, want the grant to still cover it", err)
+	}
+
+	// Deleting the group unbinds the grant, which falls back to its anchor.
+	if err := store.DeleteServerGroup(ctx, group.UID); err != nil {
+		t.Fatalf("DeleteServerGroup() error = %v", err)
+	}
+
+	got, err := store.GetActiveGrant(ctx, user.UID, anchor.UID)
+	if err != nil {
+		t.Fatalf("GetActiveGrant(anchor after group delete) error = %v, want the anchor fallback", err)
+	}
+
+	if got.UID != grant.UID || got.ServerGroupUID != nil {
+		t.Errorf("after deleting the group, grant = %v (group %v), want %v unbound",
+			got.UID, got.ServerGroupUID, grant.UID)
+	}
+
+	if _, err := store.GetActiveGrant(ctx, user.UID, sibling.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Errorf("GetActiveGrant(sibling after group delete) error = %v, want ErrNoActiveGrant", err)
+	}
+}
+
+// TestGroupBoundGrantStillFailsClosedOnItsWindow pins that widening the
+// coverage predicate did not weaken any of the conditions ANDed next to it.
+// The group-membership arm replaced "database_id = ?", nothing else, so a
+// revoked, expired or not-yet-started grant must still authorize nothing —
+// however live its group's membership is.
+func TestGroupBoundGrantStillFailsClosedOnItsWindow(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sgclosed")
+	anchor := newTestTargetServer(t, ctx, store, "sgclosed_anchor")
+	sibling := newTestTargetServer(t, ctx, store, "sgclosed_sibling")
+
+	group, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "closed-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup() error = %v", err)
+	}
+
+	if err := store.SetServerGroupMembers(ctx, group.UID, []uuid.UUID{anchor.UID, sibling.UID}); err != nil {
+		t.Fatalf("SetServerGroupMembers() error = %v", err)
+	}
+
+	def := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{
+		Controls:        []string{ControlReadOnly},
+		ServerGroupUIDs: []uuid.UUID{group.UID},
+	})
+
+	now := time.Now()
+
+	tests := []struct {
+		name      string
+		startsAt  time.Time
+		expiresAt time.Time
+		revoke    bool
+		want      bool // whether the grant should authorize
+	}{
+		{
+			name:      "expired",
+			startsAt:  now.Add(-2 * time.Hour),
+			expiresAt: now.Add(-time.Hour),
+		},
+		{
+			name:      "not yet started",
+			startsAt:  now.Add(time.Hour),
+			expiresAt: now.Add(2 * time.Hour),
+		},
+		{
+			name:      "revoked",
+			startsAt:  now.Add(-time.Hour),
+			expiresAt: now.Add(time.Hour),
+			revoke:    true,
+		},
+		{
+			// The control: the same fixture, in-window and unrevoked, does
+			// authorize — so the cases above fail for their stated reason and
+			// not because the fixture never worked.
+			name:      "in window",
+			startsAt:  now.Add(-time.Minute),
+			expiresAt: now.Add(time.Hour),
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Its own user, so the cases are genuinely independent: a user
+			// holding two of these grants at once would have them compete in
+			// the selection order rather than each answering on its own.
+			user, err := store.CreateUser(ctx, "sgclosed_"+uuid.NewString()[:8], "hash", []string{RoleConnector})
+			if err != nil {
+				t.Fatalf("CreateUser() error = %v", err)
+			}
+
+			grant := newTestGrant(t, ctx, store, def,
+				user.UID, anchor.UID, admin.UID, tt.startsAt, tt.expiresAt)
+
+			if tt.revoke {
+				if err := store.RevokeGrant(ctx, grant.UID, admin.UID); err != nil {
+					t.Fatalf("RevokeGrant() error = %v", err)
+				}
+			}
+
+			// Neither the anchor nor another member of a fully-populated group
+			// is reachable: the window and revocation gates are ANDed with
+			// coverage, not replaced by it.
+			for _, target := range []uuid.UUID{anchor.UID, sibling.UID} {
+				got, err := store.GetActiveGrant(ctx, user.UID, target)
+
+				if !tt.want {
+					if !errors.Is(err, ErrNoActiveGrant) {
+						t.Errorf("GetActiveGrant(%v) error = %v, want ErrNoActiveGrant", target, err)
+					}
+
+					continue
+				}
+
+				if err != nil {
+					t.Fatalf("GetActiveGrant(%v) error = %v", target, err)
+				}
+
+				if got.UID != grant.UID {
+					t.Errorf("GetActiveGrant(%v) = %v, want %v", target, got.UID, grant.UID)
+				}
+			}
+		})
+	}
+}

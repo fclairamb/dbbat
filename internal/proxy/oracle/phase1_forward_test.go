@@ -42,6 +42,92 @@ func TestRewriteAuthPhase1Username_CLREncoding(t *testing.T) {
 	}
 }
 
+// TestTTCAuthFuncHeaderLen pins the width rule against the headers actually
+// captured in testdata: the trailing 0x00 go-ora's PutTTCFunc adds once the
+// negotiated TTC field version reaches 18 is present for some clients and
+// absent for others, and everything after it is read at that offset.
+func TestTTCAuthFuncHeaderLen(t *testing.T) {
+	t.Parallel()
+
+	// The wide (OCI/sqlplus) preamble captured in sqlplus_cursor_reexec.pcapng:
+	// pointer runs and 4-byte little-endian fields, no username-present marker,
+	// so byte 3 carries no width information at all. Its first AUTH_ key is
+	// framed the wide way so payloadUsesWideKVEncoding recognizes it.
+	wideBody := []byte{
+		0x03, 0x76, 0x02, 0x00, 0x03,
+		0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0x12, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x06, 's', 'y', 's', 't', 'e', 'm',
+		0x0d, 0x00, 0x00, 0x00, 0x0d,
+		'A', 'U', 'T', 'H', '_', 'T', 'E', 'R', 'M', 'I', 'N', 'A', 'L',
+	}
+
+	cases := []struct {
+		name   string
+		body   []byte
+		want   int
+		wantOK bool
+	}{
+		{"go-ora v3 Phase 1 (go_ora_cursor_reexec.pcapng)", []byte{0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x06}, 4, true},
+		{"JDBC thin Phase 1 (jdbc_thin_cursor_reexec.pcapng)", []byte{0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x06}, 4, true},
+		{"python thin Phase 1 (python_thin.pcapng)", []byte{0x03, 0x76, 0x01, 0x01, 0x01, 0x04}, 3, true},
+		{"go-ora v2 Phase 1 (go_ora.pcapng)", []byte{0x03, 0x76, 0x00, 0x01, 0x01, 0x04}, 3, true},
+		{"go-ora v3 Phase 2 (go_ora_cursor_reexec.pcapng)", []byte{0x03, 0x73, 0x02, 0x00, 0x01, 0x01, 0x06}, 4, true},
+		{"python thin Phase 2 (python_thin.pcapng)", []byte{0x03, 0x73, 0x02, 0x01, 0x01, 0x04}, 3, true},
+		// A Phase 2 with no username writes [00 00] where one with a username
+		// writes [01], so a narrow header is followed by two zeros and an
+		// extended one by three.
+		{"Phase 2 without a username, narrow header", []byte{0x03, 0x73, 0x02, 0x00, 0x00, 0x02, 0x01, 0x01}, 3, true},
+		{"Phase 2 without a username, extended header", []byte{0x03, 0x73, 0x02, 0x00, 0x00, 0x00, 0x02, 0x01}, 4, true},
+		// Unreadable: narrow default, and ok=false so a writer doesn't act on it.
+		{"wide OCI preamble (sqlplus_cursor_reexec.pcapng)", wideBody, 3, false},
+		{"too short to tell", []byte{0x03, 0x76}, 3, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := ttcAuthFuncHeaderLen(tc.body)
+			if got != tc.want || ok != tc.wantOK {
+				t.Fatalf("ttcAuthFuncHeaderLen(%x) = (%d, %v), want (%d, %v)", tc.body, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestRewriteAuthPhase1Username_NarrowFuncHeader is the width-agnosticism half
+// of the round-trip tests above: those now run over the 4-byte (go-ora v3)
+// header, so this one runs the same rewrite over the 3-byte header
+// python-oracledb thin sends. Neither width may confuse the fixed-offset
+// parser — the anchored locator is deliberately bypassed here by a fixture
+// whose tail carries no AUTH_* key.
+func TestRewriteAuthPhase1Username_NarrowFuncHeader(t *testing.T) {
+	t.Parallel()
+
+	narrow := func(username string) []byte {
+		buf := make([]byte, 0, 64)
+		buf = append(buf, byte(TTCFuncPiggyback), PiggybackSubAuth1, 0x01, 0x01)
+		buf = append(buf, ttcCompressedUint(uint64(len(username)))...)
+		buf = append(buf, ttcCompressedUint(1)...)
+		buf = append(buf, 0x01, 0x01, 0x05, 0x01, 0x01)
+		buf = append(buf, byte(len(username)))
+		buf = append(buf, []byte(username)...)
+		buf = append(buf, []byte("__KV_TAIL__")...)
+
+		return buf
+	}
+
+	out, err := rewriteAuthPhase1Username(narrow("connector"), "LABEOMNGR_DEV")
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if expected := narrow("LABEOMNGR_DEV"); !bytes.Equal(out, expected) {
+		t.Fatalf("narrow-header rewrite mismatch:\n got %x\nwant %x", out, expected)
+	}
+}
+
 // TestRewriteAuthPhase1Username_Errors covers the obvious malformed-input
 // cases — too-short body, wrong piggyback marker, and an absurd user_id_len.
 func TestRewriteAuthPhase1Username_Errors(t *testing.T) {
@@ -77,6 +163,11 @@ func TestRewriteAuthPhase1Username_Errors(t *testing.T) {
 // python-oracledb thin on 2026-07-12:
 //
 //	00000376010101140101010105010114 || "florent.clairambault" || KV pairs
+//
+// Note the 3-byte function header (03 76 <seq>, no trailing 0x00): that is the
+// narrow framing a session below TTCVersion 18 negotiates, and it is as real as
+// the 4-byte one buildPhase1Body carries — see testdata/python_thin.pcapng
+// against testdata/go_ora_cursor_reexec.pcapng. Both must survive the rewrite.
 func thinPhase1Payload(username string, withCLRPrefix bool) []byte {
 	payload := []byte{0x00, 0x00} // TNS data flags
 	payload = append(payload, byte(TTCFuncPiggyback), PiggybackSubAuth1, 0x01, 0x01)
@@ -187,13 +278,21 @@ func TestRewriteAuthPhase1Username_ThinDottedUsername(t *testing.T) {
 }
 
 // buildPhase1Body returns a TTC AUTH Phase 1 body matching the wire layout
-// `[03 76 00 01] [userLen] [mode] [magic] [(CLR-prefix?) username] [trailing
-// KV-pair bytes]`. The trailing bytes are a fixed sentinel so tests can
-// confirm they are passed through unchanged.
+// `[03 76 01 00] [01] [userLen] [mode] [magic] [(CLR-prefix?) username]
+// [trailing KV-pair bytes]`. The trailing bytes are a fixed sentinel so tests
+// can confirm they are passed through unchanged.
+//
+// The header is go-ora v3's: PutTTCFunc writes the function sequence number
+// and, on a TTCVersion >= 18 session, a trailing 0x00 — see
+// testdata/go_ora_cursor_reexec.pcapng and jdbc_thin_cursor_reexec.pcapng.
+// This fixture used to carry `03 76 00 01`, a preamble one byte narrower than
+// anything a client sends; the rewrite assertions below hold either way (the
+// rewriter must not care about the header's width), but the fixture should not
+// document a layout that does not exist.
 func buildPhase1Body(t *testing.T, username string, withCLRPrefix bool) []byte {
 	t.Helper()
 
-	buf := []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, 0x00, 0x01}
+	buf := []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, 0x01, 0x00, 0x01}
 	buf = append(buf, ttcCompressedUint(uint64(len(username)))...)
 	buf = append(buf, ttcCompressedUint(1)...)
 	buf = append(buf, 0x01, 0x01, 0x05, 0x01, 0x01)
@@ -206,4 +305,87 @@ func buildPhase1Body(t *testing.T, username string, withCLRPrefix bool) []byte {
 	buf = append(buf, []byte("__KV_TAIL__")...)
 
 	return buf
+}
+
+// TestRewriteAuthPhase1Username_PairCountCollision is the regression for
+// ORA-03120 on the thin path.
+//
+// A thin client writes [01 01 <numPairs> 01 01] immediately before the login
+// username, and go-ora's numPairs is 5. The rewriter used to scan backward from
+// the username for the first byte equal to the old length, so a 5-character
+// login name matched that pair count — nearer than the real user_id_len — and
+// the splice bumped the number of KV pairs while leaving the length stale. The
+// upstream then read a 5-byte name out of a 6-byte field and answered
+// "ORA-03120: two-task conversion routine: integer overflow".
+//
+// Five characters is not an exotic case: it is "admin", dbbat's own default
+// user, and "agent".
+func TestRewriteAuthPhase1Username_PairCountCollision(t *testing.T) {
+	t.Parallel()
+
+	for _, clr := range []bool{true, false} {
+		body := buildPhase1Body(t, "agent", clr)
+
+		// Pin the premise: the pair count and the username length are the same
+		// byte value here, which is exactly what made them confusable.
+		if body[6] != 0x05 || body[11] != 0x05 {
+			t.Fatalf("fixture no longer sets up the collision: %x", body)
+		}
+
+		out, err := rewriteAuthPhase1Username(body, "SYSTEM")
+		if err != nil {
+			t.Fatalf("rewrite (clr=%v): %v", clr, err)
+		}
+
+		expected := buildPhase1Body(t, "SYSTEM", clr)
+		if !bytes.Equal(out, expected) {
+			t.Fatalf("five-char rewrite mismatch (clr=%v):\n got %x\nwant %x", clr, out, expected)
+		}
+
+		if out[11] != 0x05 {
+			t.Errorf("KV pair count was rewritten to %#x (clr=%v); only user_id_len may change", out[11], clr)
+		}
+
+		if out[6] != 0x06 {
+			t.Errorf("user_id_len = %#x, want 0x06 (clr=%v)", out[6], clr)
+		}
+	}
+}
+
+// TestRewriteAuthPhase1Username_ObservedGoOraCapture runs the rewriter over the
+// real preamble go-ora v3 put on the wire through the proxy against Oracle 23ai
+// Free (username "agent"), rather than over the synthetic fixture, so the
+// regression is anchored to bytes an actual client sent.
+func TestRewriteAuthPhase1Username_ObservedGoOraCapture(t *testing.T) {
+	t.Parallel()
+
+	// 03 76 | 01 00 01 | 01 05 (user_id_len) | 01 01 (logon mode)
+	//       | 01 01 05 01 01 (pair-count block) | 05 "agent" | KV pairs...
+	body := []byte{
+		0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x05, 0x01, 0x01,
+		0x01, 0x01, 0x05, 0x01, 0x01,
+		0x05, 'a', 'g', 'e', 'n', 't',
+		0x01, 0x0d, 0x0d, 'A', 'U', 'T', 'H', '_', 'T', 'E', 'R', 'M', 'I', 'N', 'A', 'L',
+	}
+
+	out, err := rewriteAuthPhase1Username(body, "SYSTEM")
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if out[6] != 0x06 {
+		t.Errorf("user_id_len = %#x, want 0x06", out[6])
+	}
+
+	if out[11] != 0x05 {
+		t.Errorf("KV pair count = %#x, want it untouched at 0x05", out[11])
+	}
+
+	if out[14] != 0x06 {
+		t.Errorf("CLR length prefix = %#x, want 0x06", out[14])
+	}
+
+	if !bytes.Contains(out, []byte("SYSTEM")) || bytes.Contains(out, []byte("agent")) {
+		t.Errorf("username not swapped cleanly: %x", out)
+	}
 }

@@ -1,7 +1,6 @@
 package postgresql
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -154,7 +153,7 @@ func (s *Session) authenticateWithAPIKey(apiKey string) error {
 	}
 
 	// Increment usage asynchronously
-	go func() { _ = s.store.IncrementAPIKeyUsage(context.Background(), verified.ID) }()
+	shared.BumpAPIKeyUsage(s.ctx, s.logger, s.store, verified.ID)
 
 	return nil
 }

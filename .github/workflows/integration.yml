@@ -27,11 +27,28 @@ jobs:
       # One protocol failing should not hide the state of the others.
       fail-fast: false
       matrix:
-        package:
-          - ./internal/proxy/postgresql/
-          - ./internal/proxy/mysql/
-          - ./internal/proxy/mongodb/
-          - ./internal/proxy/mssql/
+        # `race` is per leg on purpose, and mirrors the Makefile targets. These
+        # suites are the only ones that run two proxy goroutines over one
+        # session, so the detector is what makes them worth more than a smoke
+        # test — it found a live race in the PostgreSQL proxy the moment it was
+        # switched on. It costs little: measured on the Oracle target at 6m38s
+        # without / 6m16s with, because these suites spend their time booting
+        # containers, not burning CPU.
+        #
+        # mssql was the last leg without it, on the grounds that its image is
+        # published for linux/amd64 only. That turned out not to stop anyone:
+        # the suite was run green under the detector on an arm64 host through
+        # Rosetta (3m39s wall, 175 cases, nothing reported) before this leg was
+        # switched on, so the setting is measured rather than assumed.
+        include:
+          - package: ./internal/proxy/postgresql/
+            race: "-race"
+          - package: ./internal/proxy/mysql/
+            race: "-race"
+          - package: ./internal/proxy/mongodb/
+            race: "-race"
+          - package: ./internal/proxy/mssql/
+            race: "-race"
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -39,12 +56,92 @@ jobs:
         with:
           go-version: "1.26.6"
 
+      # A manual dispatch naming its own package keeps the leg's race setting;
+      # the four legs all still run, so `-race` is exercised whichever package
+      # is asked for.
       - name: Run integration suite
-        run: go test -tags integration -timeout 40m -count=1 -v ${{ github.event.inputs.package || matrix.package }}
+        run: go test ${{ matrix.race }} -tags integration -timeout 40m -count=1 -v ${{ github.event.inputs.package || matrix.package }}
 
-  # The Oracle suite is kept out of the matrix above: its default image is
-  # amd64-only and slow to boot, so it gets its own job with a longer budget.
+  # The Oracle suite is kept out of the matrix above: its images are slow to
+  # boot, so it gets its own job with a longer budget.
+  #
+  # Three legs, over ORACLE_TEST_IMAGE / DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH. The
+  # first entry takes the suite default — gvenzl/oracle-free:23-slim, see
+  # `defaultOracleImage` in internal/proxy/oracle/integration_test.go — so CI
+  # exercises exactly what a developer gets from a bare `make test-e2e-oracle`.
+  # The second pins gvenzl/oracle-xe:18.4.0-slim: 18c XE coverage is kept, but
+  # as a deliberate choice rather than an inherited default. Both run on
+  # amd64, because the XE image is published for linux/amd64 only.
+  #
+  # The third leg re-runs the suite default image with
+  # DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1, which disables the client-packet
+  # rewrite so every AUTH exchange goes through the synthetic builders
+  # instead. That fallback is otherwise unreachable — nothing else ever calls
+  # it — and it rotted unnoticed for months (see docs/oracle.md, "Exercising
+  # the synthetic AUTH fallback"). This job only runs nightly and on manual
+  # dispatch, never per-push or per-PR, and matrix legs run in parallel, so a
+  # third leg adds no wall-clock cost to anyone's inner loop; it was not worth
+  # gating separately.
   oracle:
+    name: oracle (${{ matrix.label }})
+    runs-on: ubuntu-24.04
+    strategy:
+      # One leg failing should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        include:
+          - label: 23ai Free (suite default)
+            image: ""
+          - label: 18c XE (pinned)
+            image: gvenzl/oracle-xe:18.4.0-slim
+          - label: 23ai Free (synthetic AUTH fallback)
+            image: ""
+            synthetic_auth: "1"
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: "1.26.5"
+
+      # -race, matching `make test-e2e-oracle`. This suite is the only one that
+      # runs two proxy goroutines over one session, and it hid two live races
+      # on the in-flight query for as long as it ran without the detector.
+      # Measured locally at 6m38s without / 6m16s with — the tax is real in CPU
+      # (~2x) but invisible in wall clock next to Oracle container startup, so
+      # the 60m budget is unchanged.
+      # ORACLE_TEST_REQUIRE_OCI_CLIENT makes "no OCI client here" a failure
+      # instead of a skip. The two sqlplus-driven tests are the only end-to-end
+      # proof that an OCI client can authenticate through dbbat, and the only
+      # automated cover for the unlearned fallback in nextOERFrame; they used to
+      # skip on every runner, so both were green by proving nothing. Nothing is
+      # installed on the runner for them: sqlplus comes from the Oracle
+      # container the suite already starts (gvenzl images bundle one — 23.26 in
+      # oracle-free, 18.4 in oracle-xe), reached back over host.docker.internal.
+      #
+      # It is set on all three legs on purpose, so the OCI login is proved in
+      # both AUTH modes — the first two legs run it through the wide AUTH
+      # *rewrite*, the third through the wide *synthetic* builders — and on both
+      # Oracle versions.
+      - name: Run Oracle integration suite
+        env:
+          ORACLE_TEST_IMAGE: ${{ matrix.image }}
+          DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH: ${{ matrix.synthetic_auth || '' }}
+          ORACLE_TEST_REQUIRE_OCI_CLIENT: "1"
+        run: go test -race -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/
+
+  # The Kubernetes tunnel suite gets its own job for the same reason Oracle
+  # does: it boots a whole k3s control plane in a privileged container before
+  # any assertion runs, which does not belong in the per-protocol matrix's
+  # budget. It is also the one suite whose *cluster* version matters — the
+  # websocket port-forward transport is only on by default from 1.31 — so the
+  # image is pinned in the suite and overridable here.
+  #
+  # -race, like every leg above. The k3s boot makes this look like the one suite
+  # where the detector would cost more than it returns; measured, it does not —
+  # 1m09s wall for the whole suite with a warm image, nothing reported. The 40m
+  # budget is unchanged.
+  kubernetes:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
@@ -53,5 +150,5 @@ jobs:
         with:
           go-version: "1.26.6"
 
-      - name: Run Oracle integration suite
-        run: go test -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/
+      - name: Run Kubernetes tunnel integration suite
+        run: go test -race -tags integration -timeout 40m -count=1 -v ./internal/proxy/kubernetes/

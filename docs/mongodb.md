@@ -194,11 +194,120 @@ other database. `listDatabases` is **allowed but filtered**: the reply's
 `databases` array is rewritten to just the grant's target database (with
 `totalSize`/`totalSizeMb` recomputed), so no cluster-wide database list leaks.
 
+#### A pipeline stage's own `db`
+
+`$db` is not the only database an aggregate names. Five stages carry a namespace
+of their own, each in the same two shapes — a bare collection name (the
+command's own `$db`) or a `{db, coll}` document:
+
+| Stage | Field | Effect |
+|-------|-------|--------|
+| `$out` | the stage value | writes |
+| `$merge` | `into` | writes |
+| `$lookup`, `$graphLookup` | `from` | reads |
+| `$unionWith` | `coll` | reads |
+
+So `{$merge: {into: {db: "other", coll: "x"}}}` writes into a database the grant
+does not cover while `$db` on the message is the granted one and passes the
+check honestly — and the two read stages are worse in one respect: being reads,
+`read_only` never looks at them either.
+
+Every one of those target databases is therefore held to **the same policy as
+`$db`** (`validateMongoPipelineTargets`, `internal/proxy/shared/validation.go`):
+a stage naming anything but the session's server row is refused with the same
+`Unauthorized` (13) a foreign `$db` gets, the write stages checked as writes and
+the read stages as reads (so neither gets the diagnostics-only `admin`
+carve-out). Names are compared **exactly** — MongoDB database names are
+case-sensitive. This is an *additional* refusal, not a replacement: a pipeline
+containing `$out`/`$merge` is still reclassified as a write for `read_only`, and
+a `$out` to the session's own database (named or implied) is normal traffic and
+keeps working.
+
+Nested pipelines (`$lookup`, `$unionWith`, `$facet`) are walked too, and so is
+the command an `explain` wraps — `{explain: {aggregate: …, pipeline: […]}}`
+otherwise hides the whole pipeline from both the target check and the
+write classification. (Measured against mongod 7.0.40 and 8.2.12: an `explain`
+of an aggregate whose `$out` names another database is **accepted**, `ok: 1`, so
+the server is no backstop; it does not execute the `$out`, so this was a
+classification gap rather than a live write escape. dbbat closes it anyway
+rather than depending on that.)
+
+Some of this is belt-and-braces against the *current* server: MongoDB forbids
+`$out`/`$merge` inside a sub-pipeline, rejects `$lookup`'s `{db, coll}` form for
+ordinary namespaces (`FailedToParse`, verified on 7.0 and 8.2) and insists
+`$unionWith.coll` be a string. That is the upstream's validation, not dbbat's
+access control, and it is version-specific.
+
+#### An unreadable pipeline is refused
+
+The walk **fails closed**. If dbbat cannot see the whole pipeline — nesting past
+`mongoPipelineMaxDepth`, a `pipeline` that is not an array, a stage that will not
+parse, a `db` that is not a string — the command is refused with
+`dbbat: aggregation pipeline is too deeply nested or malformed to be checked`,
+before any grant control is consulted.
+
+The direction matters more than it looks: the same walk that finds a stage's
+target database is what reclassifies the command as a write, so a scan that
+quietly gave up would leave a deeply nested `$merge` classified as a *read* —
+and a `read_only` grant would run it. "dbbat could not read it, so the upstream
+will presumably reject it" is precisely the posture the rest of this section
+exists to avoid.
+
+#### `renameCollection` and `bulkWrite`: already closed by the `admin` rule
+
+Two other commands name a namespace outside `$db` — `renameCollection`'s
+`to: "<db>.<coll>"`, and the MongoDB 8.0 cluster-level `bulkWrite`'s
+`nsInfo: [{ns: "<db>.<coll>"}]`. Neither needs a target check, because the
+server refuses to run them anywhere but `admin`, and dbbat refuses `admin` for
+everything except diagnostics.
+
+Established empirically rather than reasoned about, on real servers
+(mongod 7.0.40 and 8.2.12), by sending each command with `$db` set to an
+ordinary database:
+
+```
+renameCollection $db=probedb → (Unauthorized) renameCollection may only be run against the admin database.
+bulkWrite        $db=probedb → (Unauthorized) bulkWrite may only be run against the admin database.
+```
+
+Both succeed against `admin` on a direct connection (`bulkWrite` on 8.x only;
+7.0 answers `CommandNotSupported`), which is exactly the `$db` dbbat denies —
+`renameCollection` classifies as DDL and `bulkWrite` as a write, and `admin` is
+allowed only for the diagnostics set. The consequence for `bulkWrite` is worth
+stating plainly: dbbat blocks the 8.0 cluster-level `bulkWrite` outright, so a
+driver's `client.BulkWrite()` does not work through the proxy. Per-collection
+bulk writes (`collection.BulkWrite()`, which is `insert`/`update`/`delete`
+against `$db`) are unaffected.
+
 `block_copy` has no MongoDB equivalent (PostgreSQL COPY-specific).
 
 Blocked commands surface an `Unauthorized` (13) error document carrying the
 dbbat reason. Fire-and-forget (`w:0`, `moreToCome`) writes that are blocked are
 dropped silently and logged — the client is not listening for a reply.
+
+### Legacy opcodes are refused after authentication
+
+dbbat decodes **only `OP_MSG`** (2013). Every pre-`OP_MSG` opcode — `OP_QUERY`
+(2004), `OP_GET_MORE` (2005), `OP_INSERT`/`OP_UPDATE`/`OP_DELETE`,
+`OP_KILL_CURSORS` — is refused post-auth (`refuseLegacyOpCode`,
+`internal/proxy/mongodb/intercept.go`), including one wrapped in
+`OP_COMPRESSED`. `OP_QUERY` and `OP_GET_MORE` get an `Unauthorized` (13)
+`OP_REPLY`; the fire-and-forget writes are dropped. Either way the attempt is
+logged and recorded as a statement.
+
+This is a **deliberate refusal, not a limitation**. Those frames used to be
+forwarded verbatim, which meant they never reached `ValidateMongoCommand` at
+all: no `$db` check, no `read_only` check, no statement in the query log. The
+refusal is independent of grant controls, exactly like the `$db` check — a
+full-write grant is not permission to bypass the statement pipeline. dbbat does
+not write decoders for them: parsing a path MongoDB removed in 5.1 is a lot of
+wire code and new decoder attack surface for clients that should not exist.
+
+Consequence, accepted: a **hand-crafted legacy client against MongoDB < 5.1**
+(the only server that still serves these opcodes) breaks. Modern drivers against
+a supported server never send them — dbbat advertises `maxWireVersion` 21. The
+**pre-auth** handshake is untouched: the first `hello` may still arrive as
+`OP_QUERY` and is answered with `OP_REPLY` as before.
 
 ## Query Logging & Result Capture
 
@@ -239,7 +348,12 @@ traffic is captured per session using `dump.ProtocolMongo`. Dumps are pruned per
 
 `internal/proxy/mongodb/wire_test.go` covers the framing round-trips (including
 `OP_COMPRESSED` compress/decompress); `filter_test.go` and `lineage_test.go`
-cover listDatabases filtering and cursor lineage as unit tests.
+cover listDatabases filtering and cursor lineage as unit tests; `opcode_test.go`
+drives the real client→upstream pump against a session with **no upstream**, so
+a legacy opcode that was forwarded rather than refused fails the test by
+panicking. The pipeline target-database checks — write stages, read stages, the
+`explain`-wrapped form, the depth cap and the malformed shapes — are pinned in
+`internal/proxy/shared/validation_test.go`.
 
 `internal/proxy/mongodb/integration_test.go` (build tag `integration`) dials a
 `mongo:7` testcontainer **through** the proxy with the official Go driver,

@@ -22,13 +22,19 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Loader2, CheckCircle2, Gamepad2, LogOut } from "lucide-react";
+import { Loader2, CheckCircle2, Gamepad2, KeyRound, LogOut } from "lucide-react";
 
 export const Route = createFileRoute("/login")({
   component: LoginPage,
 });
 
 type ViewState = "login" | "password-change";
+
+// AuthProvider is one entry of GET /auth/providers, derived from the generated
+// schema through the query hook so it cannot drift from the API.
+type AuthProvider = NonNullable<
+  ReturnType<typeof useAuthProviders>["data"]
+>[number];
 
 // getSafeRedirectTarget reads the `redirect` param the _authenticated guard
 // attaches when it bounces an unauthenticated visitor here, so a successful
@@ -43,26 +49,41 @@ function getSafeRedirectTarget(): string {
   return "/";
 }
 
+// oauthErrorMessage turns the `?error=` code the OAuth callback bounces back
+// with into a message. The wording is provider-neutral: any of these can now
+// come from Slack or from an organization's own OIDC issuer.
 function oauthErrorMessage(code: string): string {
   switch (code) {
-    case "slack_denied":
-      return "Slack authorization was cancelled.";
-    case "invalid_state":
+    // Codes emitted by the server (internal/api/errors.go).
+    case "OAUTH_PROVIDER_ERROR":
+      return "Sign-in was cancelled or refused by your identity provider.";
+    case "OAUTH_STATE_MISMATCH":
       return "Login session expired. Please try again.";
-    case "wrong_workspace":
-      return "Your Slack workspace is not authorized for this instance.";
-    case "token_exchange_failed":
-    case "user_info_failed":
-      return "Failed to complete Slack login. Please try again.";
-    case "user_creation_failed":
-      return "Failed to create your account. Contact an administrator.";
-    case "slack_not_linked":
-      return "No account is linked to your Slack identity. Contact an administrator.";
+    case "OAUTH_WRONG_WORKSPACE":
+      return "Your workspace or email domain is not authorized for this instance.";
+    case "OAUTH_FAILED":
+      return "Failed to complete single sign-on. Please try again.";
+    case "OAUTH_USER_NOT_LINKED":
+      return "No account is linked to your identity. Contact an administrator.";
+    case "OAUTH_EXCHANGE_INVALID":
     case "exchange_failed":
       return "Your login link has expired or was already used. Please sign in again.";
     default:
       return "An error occurred during login. Please try again.";
   }
+}
+
+// oauthProviderLabel is the login-button text. The generic OIDC provider is
+// labelled by the server (DBB_OIDC_DISPLAY_NAME) because only the operator
+// knows what their IdP is called; branded providers we label ourselves.
+function oauthProviderLabel(provider: AuthProvider): string {
+  if (provider.display_name) {
+    return `Sign in with ${provider.display_name}`;
+  }
+  if (provider.type === "slack") {
+    return "Sign in with Slack";
+  }
+  return "Sign in with SSO";
 }
 
 function LoginPage() {
@@ -77,7 +98,13 @@ function LoginPage() {
   const { login, isLoading, isAuthenticated, refreshUser } = useAuth();
   const { data: versionInfo } = useVersion();
   const { data: providers } = useAuthProviders();
-  const slackProvider = providers?.find((p) => p.type === "slack" && p.enabled);
+  // Every enabled provider except the password form gets a button, so an
+  // instance configured with a generic OIDC issuer (and/or Slack) shows one
+  // per identity provider without the page knowing any of them by name.
+  const oauthProviders = (providers ?? []).filter(
+    (p): p is AuthProvider & { authorize_url: string } =>
+      p.enabled === true && p.type !== "password" && !!p.authorize_url,
+  );
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   // Any `?error=` the OAuth callback bounced us back with is turned into a
@@ -446,8 +473,8 @@ function LoginPage() {
             </form>
           )}
 
-          {/* Slack OAuth button */}
-          {slackProvider && (
+          {/* One button per enabled OAuth/OIDC provider */}
+          {oauthProviders.length > 0 && (
             <>
               <div className="relative my-4">
                 <div className="absolute inset-0 flex items-center">
@@ -460,26 +487,39 @@ function LoginPage() {
                 </div>
               </div>
 
-              <Button
-                variant="outline"
-                className="w-full"
-                onClick={() => {
-                  // Forward the post-login target through the OAuth
-                  // round-trip: the backend stores it with the CSRF state and
-                  // the callback brings it back as ?redirect=, so a user sent
-                  // here from e.g. the device consent page still lands there
-                  // after signing in with Slack.
-                  const authorizeUrl = slackProvider.authorize_url!;
-                  window.location.href =
-                    redirectTarget !== "/"
-                      ? `${authorizeUrl}?redirect=${encodeURIComponent(redirectTarget)}`
-                      : authorizeUrl;
-                }}
-                data-testid="slack-login-button"
-              >
-                <SlackIcon className="mr-2 h-4 w-4" />
-                Sign in with Slack
-              </Button>
+              <div className="space-y-2">
+                {oauthProviders.map((provider) => (
+                  <Button
+                    key={provider.type}
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => {
+                      // Forward the post-login target through the OAuth
+                      // round-trip: the backend stores it with the CSRF state
+                      // and the callback brings it back as ?redirect=, so a
+                      // user sent here from e.g. the device consent page still
+                      // lands there after signing in with their IdP.
+                      const authorizeUrl = provider.authorize_url;
+                      window.location.href =
+                        redirectTarget !== "/"
+                          ? `${authorizeUrl}?redirect=${encodeURIComponent(redirectTarget)}`
+                          : authorizeUrl;
+                    }}
+                    data-testid={
+                      provider.type === "slack"
+                        ? "slack-login-button"
+                        : `oauth-login-button-${provider.type}`
+                    }
+                  >
+                    {provider.type === "slack" ? (
+                      <SlackIcon className="mr-2 h-4 w-4" />
+                    ) : (
+                      <KeyRound className="mr-2 h-4 w-4" />
+                    )}
+                    {oauthProviderLabel(provider)}
+                  </Button>
+                ))}
+              </div>
             </>
           )}
         </CardContent>

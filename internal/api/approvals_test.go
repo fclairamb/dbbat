@@ -270,7 +270,7 @@ func TestNonApproverIsRefused(t *testing.T) {
 // must stay resolvable by grant A's approver group even after a newer,
 // higher-priority grant B is created for the same user/database — the exact
 // situation where the pre-stamp code (re-resolving GetActiveGrant at approval
-// time) picked B's approver_group_uids instead of A's.
+// time) picked B's approver_user_group_uids instead of A's.
 func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 	t.Parallel()
 
@@ -300,7 +300,7 @@ func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create member A: %v", err)
 	}
-	if err := dataStore.AddUserToGroup(ctx, groupA.UID, memberA.UID); err != nil {
+	if err := dataStore.AddUserToUserGroup(ctx, groupA.UID, memberA.UID); err != nil {
 		t.Fatalf("add member A: %v", err)
 	}
 
@@ -308,7 +308,7 @@ func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create member B: %v", err)
 	}
-	if err := dataStore.AddUserToGroup(ctx, groupB.UID, memberB.UID); err != nil {
+	if err := dataStore.AddUserToUserGroup(ctx, groupB.UID, memberB.UID); err != nil {
 		t.Fatalf("add member B: %v", err)
 	}
 
@@ -330,17 +330,17 @@ func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 
 	// Grant A: what the connection is actually stamped with, approver group A.
 	grantA := persistGrantWithShape(t, dataStore, store.GrantDefinition{
-		Controls:          []string{},
-		ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
-		ApproverGroupUIDs: []uuid.UUID{groupA.UID},
+		Controls:              []string{},
+		ApprovalPatterns:      []string{`(?i)^DELETE\s+FROM`},
+		ApproverUserGroupUIDs: []uuid.UUID{groupA.UID},
 	}, requester.UID, target.UID, admin.UID, now.Add(-time.Hour), now.Add(time.Hour), 0)
 
 	// Grant B: created afterwards, higher priority, overlapping window,
 	// approver group B — exactly the grant GetActiveGrant now picks.
 	persistGrantWithShape(t, dataStore, store.GrantDefinition{
-		Controls:          []string{},
-		ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
-		ApproverGroupUIDs: []uuid.UUID{groupB.UID},
+		Controls:              []string{},
+		ApprovalPatterns:      []string{`(?i)^DELETE\s+FROM`},
+		ApproverUserGroupUIDs: []uuid.UUID{groupB.UID},
 	}, requester.UID, target.UID, admin.UID, now.Add(-time.Hour), now.Add(2*time.Hour), store.PriorityFullWrite+10)
 
 	active, err := dataStore.GetActiveGrant(ctx, requester.UID, target.UID)

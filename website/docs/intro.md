@@ -6,9 +6,9 @@ sidebar_position: 1
 
 DBBat is a transparent database proxy designed for query observability, access control, and safety.
 
-It gives temporary, audited access to production databases for support, debugging, and data analysis — without handing out raw credentials.
+It gives developers and AI agents temporary, audited access to production databases for support, debugging, and data analysis — without handing out raw credentials.
 
-It speaks the **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, and **MongoDB** wire protocols, so any standard database client (psql, sqlplus, mysql, mongosh, DBeaver, IntelliJ, pgAdmin, your application's ORM or driver, …) can connect through DBBat without modification.
+It speaks the **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, **MongoDB**, and **Microsoft SQL Server** wire protocols, so any standard database client (psql, sqlplus, mysql, mongosh, sqlcmd, DBeaver, IntelliJ, pgAdmin, your application's ORM or driver, an AI agent's database tooling, …) can connect through DBBat without modification.
 
 ## Why DBBat?
 
@@ -16,10 +16,13 @@ Giving access to production databases can be dangerous. DBBat provides:
 - **Query visibility**: every query is logged with its SQL text, parameters, duration, and rows affected
 - **Result capture (optional)**: actual result rows can be stored alongside the query for replay/audit
 - **Access control**: time-windowed grants with fine-grained controls for read-only, blocking COPY, blocking DDL
-- **Audit trails**: append-only record of who did what — both inside the proxy and against the configuration API
+- **Audit trails**: a record of who did what — both inside the proxy and against the configuration API — [HMAC-chained](/docs/features/audit-chain) so that editing, deleting or reordering an entry is detectable, even by whoever runs DBBat's own storage database
 - **Safety**: defense in depth against accidental writes, file-system-touching SQL, and protocol-level data exfiltration
+- **Agent-ready**: AI agents connect with the same unmodified drivers and get the same guardrails — time-boxed grants, read-only enforcement, quotas, and approval holds on risky statements
 
 DBBat addresses all these needs without requiring changes to your application code.
+
+If your compliance team needs to know what evidence all of this produces, [Compliance](/docs/compliance) maps each capability to the SOC 2, ISO/IEC 27001:2022 and PCI DSS v4.x controls auditors ask about — and is equally explicit about what DBBat does not do.
 
 ## Supported Databases
 
@@ -121,7 +124,8 @@ Everything described here can be done via the REST API or the web UI.
 
 - **User passwords**: Argon2id (configurable preset and parameters)
 - **Database credentials**: AES-256-GCM, AAD-bound to the database UID
-- **API keys**: encrypted blobs, scoped restrictions (no key-management via key)
+- **API keys**: Argon2id-hashed like passwords — only the 8-character prefix is stored in clear, for lookup — with scoped restrictions (no key-management via key)
+- **Audit log and query history**: [HMAC-chained](/docs/features/audit-chain) with a key derived from `DBB_KEY` and never stored in the database; `dbbat audit verify` walks the chain
 - **Encryption key**: from `DBB_KEY` (base64) or `DBB_KEYFILE`; auto-generated at `~/.dbbat/key` on first start if neither is set
 - **Default admin**: created on first startup (username: `admin`, password: `admin`) — must be changed before login
 
@@ -140,3 +144,4 @@ Experience DBBat without any setup. Our demo instance is available at:
 - [Install DBBat](/docs/installation/docker) using Docker
 - [Configure](/docs/configuration) your environment
 - Learn about [Access Control](/docs/features/access-control)
+- Hand your auditors the [Compliance](/docs/compliance) mapping

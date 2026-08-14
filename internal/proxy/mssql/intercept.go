@@ -331,16 +331,110 @@ func (s *session) validate(st statement) error {
 			continue
 		}
 
-		if err := shared.ValidateQuery(sql, s.grant); err != nil {
+		if err := s.validateStatement(sql); err != nil {
 			return err
-		}
-
-		if s.grant.ShouldBlockCopy() && bulkCopyPattern.MatchString(sql) {
-			return ErrBulkCopyBlocked
 		}
 	}
 
 	return nil
+}
+
+// validateStatement checks one statement — and the statement text of any
+// dynamic SQL it carries as a literal, which T-SQL executes as a batch of its
+// own.
+//
+// Without the second half, every control here was one `EXEC('…')` away from
+// irrelevant: `EXEC('DELETE FROM t')` starts with EXEC, so the prefix-shaped
+// classifiers saw no write, and the USE scan steps over string literals on the
+// (otherwise sound) assumption that no statement begins inside one.
+//
+// Only the decidable form is covered. `EXEC(@sql)` is assembled at runtime and
+// yields nothing to check — see the limitation note in docs/mssql.md rather
+// than any pretense of coverage here.
+func (s *session) validateStatement(sql string) error {
+	if err := s.checkStatement(sql); err != nil {
+		return err
+	}
+
+	inner, readable := shared.MSSQLDynamicSQL(sql)
+	if !readable {
+		return ErrDynamicSQLNotCheckable
+	}
+
+	for _, text := range inner {
+		if err := s.checkStatement(text); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// checkStatement is the static controls over one statement's own text, with no
+// unwrapping. It is applied to the batch and, unchanged, to whatever the batch
+// would execute dynamically — running a second, laxer set of rules on the inner
+// statement is exactly the drift that turns a control into a suggestion.
+func (s *session) checkStatement(sql string) error {
+	if err := shared.ValidateQuery(sql, s.grant); err != nil {
+		return err
+	}
+
+	// Ahead of the control below rather than among them: a database switch is a
+	// scope question, not a permission one, so it is refused under a full-write
+	// grant too.
+	if err := s.checkDatabaseSwitch(sql); err != nil {
+		return err
+	}
+
+	// Normalized like the ValidateQuery above it: the pattern spans two
+	// keywords, so `BULK/**/INSERT` would otherwise walk through a block_copy
+	// grant while SQL Server read the statement unchanged.
+	if s.grant.ShouldBlockCopy() && shared.MatchesNormalizedSQL(sql, bulkCopyPattern) {
+		return ErrBulkCopyBlocked
+	}
+
+	return nil
+}
+
+// checkDatabaseSwitch refuses a batch that would move the session to a database
+// other than the one its grant was issued on.
+//
+// It runs on every statement the message would execute, which is what puts
+// `sp_executesql N'USE otherdb'` and a resolved prepared handle on the same
+// footing as a plain SQLBatch — they all arrive here through validate's enforce
+// list.
+//
+// A batch dbbat could not read a `USE` out of with confidence is refused rather
+// than forwarded, and `USE <this session's database>` is allowed: a driver that
+// re-states its own database must keep working. The comparison folds case
+// because SQL Server's own database names are case-insensitive under the
+// default collation, so an exact match would refuse a session naming its own
+// database in another casing.
+func (s *session) checkDatabaseSwitch(sql string) error {
+	targets, readable := shared.MSSQLUseTargets(sql)
+	if !readable {
+		return ErrDatabaseSwitchBlocked
+	}
+
+	for _, target := range targets {
+		if !s.namesSessionDatabase(target) {
+			return ErrDatabaseSwitchBlocked
+		}
+	}
+
+	return nil
+}
+
+// namesSessionDatabase reports whether name is this session's database, under
+// either of the two names it answers to: the dbbat entry's name, which is what
+// the client put in its connection string, and the real database on the target.
+func (s *session) namesSessionDatabase(name string) bool {
+	if s.database == nil {
+		return false
+	}
+
+	return strings.EqualFold(name, s.database.Name) ||
+		strings.EqualFold(name, s.database.DatabaseName)
 }
 
 // grantRestricts reports whether the grant limits what a statement may do. It

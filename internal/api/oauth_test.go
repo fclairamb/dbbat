@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/auth"
+	"github.com/fclairamb/dbbat/internal/auth/oidc"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -54,6 +56,242 @@ func (p *recordingProvider) ExchangeCode(_ context.Context, _, _ string) (*auth.
 	return p.user, nil
 }
 
+// pkceRecordingProvider is a second registered provider that exercises the
+// auth.PKCEProvider path: it mints a verifier at authorize time and records
+// whatever verifier the callback hands back, so a test can prove the value
+// survived the round trip through the oauth_states row. It also implements
+// auth.DisplayNamer, like the real generic OIDC provider.
+type pkceRecordingProvider struct {
+	name        string
+	displayName string
+	user        *auth.OAuthUser
+
+	mu               sync.Mutex
+	lastState        string
+	mintedVerifier   string
+	receivedVerifier string
+}
+
+func (p *pkceRecordingProvider) Name() string        { return p.name }
+func (p *pkceRecordingProvider) DisplayName() string { return p.displayName }
+
+func (p *pkceRecordingProvider) AuthorizeURL(state, _ string) string {
+	return "https://provider.example/authorize?state=" + state
+}
+
+func (p *pkceRecordingProvider) ExchangeCode(_ context.Context, _, _ string) (*auth.OAuthUser, error) {
+	return p.user, nil
+}
+
+func (p *pkceRecordingProvider) AuthorizeURLWithPKCE(
+	_ context.Context,
+	state, _ string,
+) (string, string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.lastState = state
+	p.mintedVerifier = "verifier-for-" + state
+
+	return "https://provider.example/authorize?state=" + state + "&code_challenge_method=S256", p.mintedVerifier, nil
+}
+
+func (p *pkceRecordingProvider) ExchangeCodeWithVerifier(
+	_ context.Context,
+	_, _, verifier string,
+) (*auth.OAuthUser, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.receivedVerifier = verifier
+
+	return p.user, nil
+}
+
+// TestOAuthPKCEVerifierSurvivesTheRoundTrip pins the storage half of PKCE: the
+// verifier is minted before the redirect, parked on the oauth_states row, and
+// handed back at the callback. It must never travel through the browser, and
+// it must survive a callback that lands on a different process — which is why
+// it lives in the database and not in memory.
+func TestOAuthPKCEVerifierSurvivesTheRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	server.encryptionKey = dbTestEncryptionKey
+	suffix := uuid.NewString()[:8]
+
+	server.config = &config.Config{
+		Auth: config.OAuthUsersConfig{
+			AutoCreateUsers: true,
+			DefaultRole:     store.RoleConnector,
+		},
+	}
+
+	providerName := "oidc-" + suffix
+	provider := &pkceRecordingProvider{
+		name:        providerName,
+		displayName: "Acme SSO",
+		user: &auth.OAuthUser{
+			ProviderID:  "OIDC-" + suffix,
+			Email:       "oidc-" + suffix + "@example.com",
+			DisplayName: "OIDC User " + suffix,
+		},
+	}
+	server.oauthProviders[providerName] = provider
+
+	router := gin.New()
+	router.GET("/api/v1/auth/"+providerName, server.handleOAuthAuthorize(providerName))
+	router.GET("/api/v1/auth/"+providerName+"/callback", server.handleOAuthCallback(providerName))
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/auth/"+providerName, nil))
+	require.Equal(t, http.StatusFound, w.Code)
+
+	provider.mu.Lock()
+	state, minted := provider.lastState, provider.mintedVerifier
+	provider.mu.Unlock()
+
+	require.NotEmpty(t, state)
+	require.NotEmpty(t, minted)
+	assert.NotContains(t, w.Header().Get("Location"), minted,
+		"the code verifier must never leave the server")
+
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		"/api/v1/auth/"+providerName+"/callback?code=x&state="+state, nil))
+	require.Equal(t, http.StatusFound, w.Code)
+
+	provider.mu.Lock()
+	received := provider.receivedVerifier
+	provider.mu.Unlock()
+
+	assert.Equal(t, minted, received,
+		"the callback must present the verifier stored with the state row")
+
+	loc, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err)
+	assert.Equal(t, "/app/login", loc.Path)
+	assert.NotEmpty(t, loc.Query().Get("code"), "a PKCE login must still end in an exchange code")
+	assert.Empty(t, loc.Query().Get("error"))
+}
+
+// TestAuthProvidersExposesDisplayName covers the login page's discovery
+// endpoint with two OAuth providers registered: the generic one carries the
+// operator-configured button label, the branded one does not.
+func TestAuthProvidersExposesDisplayName(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	suffix := uuid.NewString()[:8]
+
+	genericName := "oidc-list-" + suffix
+	brandedName := "slack-list-" + suffix
+
+	server.oauthProviders[genericName] = &pkceRecordingProvider{name: genericName, displayName: "Acme SSO"}
+	server.oauthProviders[brandedName] = &mockProvider{name: brandedName}
+
+	router := gin.New()
+	router.GET("/api/v1/auth/providers", server.handleAuthProviders)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Providers []authProviderInfo `json:"providers"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+
+	byType := make(map[string]authProviderInfo, len(body.Providers))
+	for _, p := range body.Providers {
+		byType[p.Type] = p
+	}
+
+	require.Contains(t, byType, "password")
+	require.Contains(t, byType, genericName)
+	require.Contains(t, byType, brandedName)
+
+	assert.Equal(t, "Acme SSO", byType[genericName].DisplayName)
+	assert.Equal(t, "/api/v1/auth/"+genericName, byType[genericName].AuthorizeURL)
+	assert.Empty(t, byType[brandedName].DisplayName,
+		"a provider the frontend labels itself must not carry a display name")
+}
+
+// authProvidersRoleMapping drives GET /auth/providers and returns the
+// role_mapping block plus the raw body, so a test can also assert on what is
+// *not* in it.
+func authProvidersRoleMapping(t *testing.T, server *Server) (roleMappingInfo, string) {
+	t.Helper()
+
+	router := gin.New()
+	router.GET("/api/v1/auth/providers", server.handleAuthProviders)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		RoleMapping roleMappingInfo `json:"role_mapping"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+
+	return body.RoleMapping, w.Body.String()
+}
+
+// TestAuthProvidersExposesManagedRoles is what lets the users page badge a
+// role as directory-owned: the endpoint names the roles the mapping governs,
+// and nothing else about it.
+func TestAuthProvidersExposesManagedRoles(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	serverWithRoleMapping(t, server, "viewer=analysts,admin=db-admins")
+	server.oauthProviders[oidc.ProviderName] = &mockProvider{name: oidc.ProviderName}
+
+	mapping, raw := authProvidersRoleMapping(t, server)
+
+	assert.True(t, mapping.Enabled)
+	assert.Equal(t, []string{store.RoleAdmin, store.RoleViewer}, mapping.Roles,
+		"the managed roles must come back sorted, whatever order they were configured in")
+	assert.Equal(t, oidc.ProviderName, mapping.Provider)
+
+	// The endpoint is unauthenticated: directory group names are topology and
+	// must never travel through it.
+	assert.NotContains(t, raw, "db-admins")
+	assert.NotContains(t, raw, "analysts")
+}
+
+// TestAuthProvidersRoleMappingNeedsTheProvider covers a mapping configured
+// while the OIDC provider is not registered. Nothing applies it, so the UI
+// must not warn that anything is managed.
+func TestAuthProvidersRoleMappingNeedsTheProvider(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	serverWithRoleMapping(t, server, "admin=db-admins")
+
+	mapping, _ := authProvidersRoleMapping(t, server)
+
+	assert.False(t, mapping.Enabled)
+	assert.Empty(t, mapping.Roles)
+	assert.Empty(t, mapping.Provider)
+}
+
+// TestAuthProvidersRoleMappingUnset is the default deployment: SSO may well be
+// on, but nobody mapped a group to a role, so every role stays manual.
+func TestAuthProvidersRoleMappingUnset(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	serverWithRoleMapping(t, server, "")
+	server.oauthProviders[oidc.ProviderName] = &mockProvider{name: oidc.ProviderName}
+
+	mapping, _ := authProvidersRoleMapping(t, server)
+
+	assert.False(t, mapping.Enabled)
+	assert.Empty(t, mapping.Roles)
+}
+
 func TestFindOrCreateOAuthUser_OrphanIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -62,7 +300,7 @@ func TestFindOrCreateOAuthUser_OrphanIdentity(t *testing.T) {
 	suffix := uuid.NewString()[:8]
 
 	server.config = &config.Config{
-		SlackAuth: config.SlackAuthConfig{
+		Auth: config.OAuthUsersConfig{
 			AutoCreateUsers: true,
 			DefaultRole:     store.RoleConnector,
 		},
@@ -98,6 +336,63 @@ func TestFindOrCreateOAuthUser_OrphanIdentity(t *testing.T) {
 	assert.NotEqual(t, user.UID, newUser.UID, "a new user must be created")
 }
 
+// TestFindOrCreateOAuthUserPerProviderAutoCreate is the feature seen from the
+// login path: two providers, one allowed to mint accounts and one not, in the
+// same process. Before the per-provider override the stricter policy applied to
+// both, which made the looser provider unusable.
+func TestFindOrCreateOAuthUserPerProviderAutoCreate(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+
+	gated := false
+	server.config = &config.Config{
+		Auth: config.OAuthUsersConfig{
+			AutoCreateUsers: true,
+			DefaultRole:     store.RoleConnector,
+			Providers: map[string]config.OAuthProviderUsersConfig{
+				// Slack: a workspace full of contractors — accounts by hand only.
+				store.IdentityTypeSlack: {AutoCreateUsers: &gated},
+				// The corporate issuer keeps the instance-wide "yes", on its own role.
+				oidc.ProviderName: {DefaultRole: store.RoleViewer},
+			},
+		},
+	}
+	require.NoError(t, server.config.Auth.Validate())
+
+	slackUser := &auth.OAuthUser{
+		ProviderID:  "USLACKGATED-" + suffix,
+		Email:       "slack-" + suffix + "@example.com",
+		DisplayName: "Slack User " + suffix,
+	}
+
+	_, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: store.IdentityTypeSlack}, slackUser)
+	require.ErrorIs(t, err, errOAuthUserNotLinked,
+		"the gated provider must not provision an account despite the instance-wide true")
+
+	// The same identity through the other provider still gets an account, on
+	// that provider's own default role.
+	created, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: oidc.ProviderName}, &auth.OAuthUser{
+		ProviderID:  "OIDCALLOWED-" + suffix,
+		Email:       "oidc-" + suffix + "@example.com",
+		DisplayName: "OIDC User " + suffix,
+	})
+	require.NoError(t, err, "a provider with no auto-create override keeps the instance-wide yes")
+	assert.Equal(t, []string{store.RoleViewer}, []string(created.Roles),
+		"the per-provider default role must apply to the account it creates")
+
+	// Gating creation must not gate *login*: an account an admin created by
+	// hand is exactly what the deployment wants the Slack provider used for.
+	manual, err := dataStore.CreateUser(ctx, slackUser.Email, "hash", []string{store.RoleConnector})
+	require.NoError(t, err)
+
+	linked, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: store.IdentityTypeSlack}, slackUser)
+	require.NoError(t, err, "an existing account must still sign in through the gated provider")
+	assert.Equal(t, manual.UID, linked.UID)
+}
+
 // errTestExchangeFailed stands in for a provider token endpoint refusing the
 // authorization code.
 var errTestExchangeFailed = errors.New("token endpoint said no")
@@ -129,7 +424,7 @@ func TestOAuthLoginRedirectRoundTrip(t *testing.T) {
 	server.encryptionKey = dbTestEncryptionKey
 
 	server.config = &config.Config{
-		SlackAuth: config.SlackAuthConfig{
+		Auth: config.OAuthUsersConfig{
 			AutoCreateUsers: true,
 			DefaultRole:     store.RoleConnector,
 		},
@@ -280,7 +575,7 @@ func TestOAuthCallbackErrorRedirects(t *testing.T) {
 
 	// Auto-create off and no matching local user: findOrCreateOAuthUser bails
 	// out with errOAuthUserNotLinked.
-	server.config = &config.Config{SlackAuth: config.SlackAuthConfig{AutoCreateUsers: false}}
+	server.config = &config.Config{Auth: config.OAuthUsersConfig{AutoCreateUsers: false}}
 
 	providerName := "slack-nolink-" + suffix
 	provider := &recordingProvider{
@@ -348,7 +643,7 @@ func TestOAuthLoginExchange(t *testing.T) {
 	suffix := uuid.NewString()[:8]
 
 	server.config = &config.Config{
-		SlackAuth: config.SlackAuthConfig{
+		Auth: config.OAuthUsersConfig{
 			AutoCreateUsers: true,
 			DefaultRole:     store.RoleConnector,
 		},

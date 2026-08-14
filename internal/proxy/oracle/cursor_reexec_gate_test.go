@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,13 +16,15 @@ import (
 )
 
 // buildOALL8Reexec builds the frame this whole file is about: a well-formed
-// OALL8 naming a cursor, with a zero-length SQL field. That is what an Oracle
-// client sends when it re-runs a statement it already parsed — the statement
-// text is never resent, only the cursor id.
+// OALL8 naming a cursor, with a zero-length SQL field — a re-execution in the
+// legacy (pre-v315) framing, where the statement text is never resent, only the
+// cursor id.
 //
-// Hand-built rather than replayed from a capture: see the note in
-// docs/approvals.md — the real-world frequency of this shape is unmeasured,
-// and capturing one is filed as its own follow-up.
+// Hand-built on purpose, and it stays that way: captures from go-ora,
+// python-oracledb thin, JDBC thin and sqlplus show that no modern client emits
+// this shape — they all use the piggyback re-execution instead, which
+// cursor_reexec_replay_test.go covers from real recordings. This file keeps the
+// legacy shape honest for the older clients that would still send it.
 func buildOALL8Reexec(cursorID uint16) []byte {
 	return buildOALL8("", nil, cursorID)
 }
@@ -180,10 +183,59 @@ func TestCursorReexec_DeniedIsRefused(t *testing.T) {
 	assert.Nil(t, s.tracker.pendingQuery, "a denied re-execution must not be tracked as in flight")
 }
 
+// buildPiggybackReexec assembles the frame a modern thin client sends to re-run
+// a statement it already parsed: func 0x03, sub-op 0x4e, the v315+ zero pad,
+// then the cursor id and the three execution fields decodeCursorReexec walks.
+func buildPiggybackReexec(cursorID uint16) []byte {
+	out := make([]byte, 0, 12)
+	out = append(out, byte(TTCFuncPiggyback), PiggybackSubReexecSel, 0x01, 0x00)
+	out = append(out, ttcCompressedUint(uint64(cursorID))...)
+
+	// rowsToFetch, execOptions, execFlags.
+	for _, v := range []uint64{1, 0x20, 0} {
+		out = append(out, ttcCompressedUint(v)...)
+	}
+
+	return out
+}
+
+// TestBuildPiggybackReexecIsDecodedAsARexecution guards that fixture the same
+// way TestBuildOALL8ReexecIsDecodedAsARexecution guards the legacy one: a
+// builder that stopped decoding would make every assertion below pass without
+// the handler ever seeing a re-execution.
+func TestBuildPiggybackReexecIsDecodedAsARexecution(t *testing.T) {
+	t.Parallel()
+
+	frame := buildPiggybackReexec(7)
+
+	require.True(t, IsPiggybackCursorReexec(frame), "the fixture must be recognized as a re-execution")
+
+	cursorID, err := decodeCursorReexec(frame)
+	require.NoError(t, err)
+	assert.Equal(t, uint16(7), cursorID)
+}
+
+// reexecOps are the two frames that name a cursor and carry nothing else: the
+// legacy SQL-less OALL8, and the piggyback re-execution every modern thin
+// client sends. They must answer an untracked cursor identically — otherwise
+// the wire op a client picks is a cheaper way past the same grant.
+var reexecOps = []struct {
+	name string
+	run  func(s *session, cursorID uint16) error
+}{
+	{name: "a SQL-less OALL8", run: func(s *session, cursorID uint16) error {
+		return s.handleOALL8(buildOALL8Reexec(cursorID))
+	}},
+	{name: "a piggyback re-execution", run: func(s *session, cursorID uint16) error {
+		return s.handlePiggybackReexec(buildPiggybackReexec(cursorID))
+	}},
+}
+
 // TestCursorReexec_UnknownCursorFailsClosedOnlyUnderAStatementControl pins the
 // deliberate asymmetry: an execution dbbat cannot identify is refused where
 // there is a statement-shaped control to bypass, and forwarded where there is
-// none. See docs/approvals.md.
+// none — and both re-execution frames answer identically. See
+// docs/approvals.md.
 func TestCursorReexec_UnknownCursorFailsClosedOnlyUnderAStatementControl(t *testing.T) {
 	t.Parallel()
 
@@ -219,24 +271,26 @@ func TestCursorReexec_UnknownCursorFailsClosedOnlyUnderAStatementControl(t *test
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+		for _, op := range reexecOps {
+			t.Run(tc.name+"/"+op.name, func(t *testing.T) {
+				t.Parallel()
 
-			s := newTestSession(tc.grant)
+				s := newTestSession(tc.grant)
 
-			// Cursor 42 was never parsed on this session.
-			err := s.handleOALL8(buildOALL8Reexec(42))
+				// Cursor 42 was never parsed on this session.
+				err := op.run(s, 42)
 
-			if tc.refused {
-				require.ErrorIs(t, err, ErrUnknownCursor)
-				assert.Nil(t, s.tracker.pendingQuery)
+				if tc.refused {
+					require.ErrorIs(t, err, ErrUnknownCursor)
+					assert.Nil(t, s.tracker.pendingQuery)
 
-				return
-			}
+					return
+				}
 
-			require.NoError(t, err, "a permissive grant keeps forwarding an unidentifiable re-execution")
-			assert.Nil(t, s.tracker.pendingQuery, "a forwarded but unidentified execution is not tracked")
-		})
+				require.NoError(t, err, "a permissive grant keeps forwarding an unidentifiable re-execution")
+				assert.Nil(t, s.tracker.pendingQuery, "a forwarded but unidentified execution is not tracked")
+			})
+		}
 	}
 }
 
@@ -266,55 +320,33 @@ func TestInterceptClientMessageBlocksARefusedCursorReexec(t *testing.T) {
 	assert.False(t, s.interceptClientMessage(allowed))
 }
 
-// TestOFETCH_ReexecutionIsGated covers the second path: an OFETCH arriving with
-// no query in flight starts a fresh pending query — persisted as its own row in
-// /queries — and so must be gated as its own query.
-func TestOFETCH_ReexecutionIsGated(t *testing.T) {
+// TestCursorReexec_SQLlessOALL8CountsAgainstTheQueryQuota pins that a
+// re-execution is charged to max_query_counts, which is true by construction:
+// the SQL-less OALL8 reaches its handler through gateStatement, so checkQuotas
+// has always run on it. Cheap to assert, and it is what keeps the two
+// re-execution frames answering alike.
+func TestCursorReexec_SQLlessOALL8CountsAgainstTheQueryQuota(t *testing.T) {
 	t.Parallel()
 
-	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}})
-	s.tracker.cursors[5] = &trackedCursor{cursorID: 5, sql: "DELETE FROM emp", parsedAt: time.Now()}
+	maxQueries := int64(3)
+	s := newTestSession(&store.Grant{
+		QueryCount: 3,
+		Definition: &store.GrantDefinition{MaxQueryCounts: &maxQueries},
+	})
+	s.clientConn = drainedPipe(t)
+	s.tracker.cursors[6] = &trackedCursor{cursorID: 6, sql: "SELECT 1 FROM DUAL", parsedAt: time.Now()}
 
-	require.ErrorIs(t, s.handleOFETCH(buildOFETCH(5, 100)), shared.ErrReadOnlyViolation)
-	assert.Nil(t, s.tracker.pendingQuery, "a refused re-execution must not be tracked as in flight")
-}
+	overQuota := &TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: append([]byte{0x00, 0x00}, buildOALL8Reexec(6)...),
+	}
+	assert.True(t, s.interceptClientMessage(overQuota),
+		"a cursor re-execution over max_query_counts must be blocked, not forwarded upstream")
+	assert.Nil(t, s.tracker.pendingQuery)
 
-// TestOFETCH_ReexecutionIsHeld: the approval gate, not just the static
-// controls, applies to a fetch that re-executes a cursor.
-func TestOFETCH_ReexecutionIsHeld(t *testing.T) {
-	t.Parallel()
-
-	s, fake, registry := gatedTestSession([]string{`(?i)^DELETE`})
-	s.tracker.cursors[5] = &trackedCursor{cursorID: 5, sql: "DELETE FROM emp", parsedAt: time.Now()}
-
-	done := make(chan error, 1)
-
-	go func() { done <- s.handleOFETCH(buildOFETCH(5, 100)) }()
-
-	pending := awaitHeld(t, fake, 1)
-	assert.Equal(t, "DELETE FROM emp", pending.SQLText)
-
-	releaseHold(t, registry, pending.UID, store.ApprovalApproved, "")
-	requireReleased(t, done)
-}
-
-// TestOFETCH_ContinuationIsNotReGated is the other half of the OFETCH decision,
-// and the one that keeps the fix safe: more rows of a statement already in
-// flight must never be re-validated, or a long result set could park on a human
-// halfway through. The grant here would refuse the statement outright.
-func TestOFETCH_ContinuationIsNotReGated(t *testing.T) {
-	t.Parallel()
-
-	s, fake, _ := gatedTestSession([]string{`(?i)^DELETE`})
-
-	cursor := &trackedCursor{cursorID: 5, sql: "DELETE FROM emp", parsedAt: time.Now()}
-	s.tracker.cursors[5] = cursor
-	// A query is already in flight — it went through the gate when it started.
-	s.tracker.pendingQuery = &pendingOracleQuery{cursor: cursor, startTime: time.Now()}
-
-	require.NoError(t, s.handleOFETCH(buildOFETCH(5, 100)))
-	assert.Empty(t, fake.held(), "a fetch continuing a query in flight must not be held")
-	assert.Equal(t, cursor, s.tracker.pendingQuery.cursor, "the in-flight query is untouched")
+	s.grant.QueryCount = 2
+	assert.False(t, s.interceptClientMessage(overQuota), "under the cap the same frame travels")
+	require.NotNil(t, s.tracker.pendingQuery)
 }
 
 // awaitHeld waits until want statements have been parked and returns the last.
@@ -388,4 +420,58 @@ func drainedPipe(t *testing.T) net.Conn {
 	}()
 
 	return proxySide
+}
+
+// recordingPipe is drainedPipe that keeps what it drained, so a test can assert
+// dbbat wrote *nothing* back. "Nothing" is the whole point of the fail-open
+// path: a client parked on a call dbbat cannot name must be left to its
+// upstream's answer, not handed an OER that ends some other call.
+//
+// The read deadline is what makes the empty case fast rather than a hang — the
+// pipe never closes on its own, so a reader waiting for bytes that will never
+// come would wait forever.
+func recordingPipe(t *testing.T) (net.Conn, func() []byte) {
+	t.Helper()
+
+	client, proxySide := net.Pipe()
+
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = proxySide.Close()
+	})
+
+	var (
+		mu      sync.Mutex
+		written []byte
+		done    = make(chan struct{})
+	)
+
+	go func() {
+		defer close(done)
+
+		buf := make([]byte, 4096)
+
+		for {
+			_ = client.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+
+			n, err := client.Read(buf)
+
+			mu.Lock()
+			written = append(written, buf[:n]...)
+			mu.Unlock()
+
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	return proxySide, func() []byte {
+		<-done
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		return written
+	}
 }

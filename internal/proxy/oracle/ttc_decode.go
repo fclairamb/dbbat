@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -335,7 +336,6 @@ func decodeRow(data []byte, columns []columnDef) ([]interface{}, int, error) {
 var (
 	ErrEmptySQL         = errors.New("OALL8 message contains empty SQL")
 	ErrOALL8TooShort    = errors.New("OALL8 payload too short")
-	ErrOFETCHTooShort   = errors.New("OFETCH payload too short")
 	ErrSQLLengthInvalid = errors.New("OALL8 SQL length exceeds payload")
 	// ErrNotLegacyResponse reports that a payload does not follow the legacy
 	// fixed-offset Response layout — its "error" fields decode to something
@@ -369,6 +369,406 @@ func (e *OALL8NoSQLError) Error() string {
 // Unwrap makes errors.Is(err, ErrOALL8NoSQL) true.
 func (e *OALL8NoSQLError) Unwrap() error { return ErrOALL8NoSQL }
 
+// ErrNotCursorReexec reports that a payload is not a decodable piggyback
+// cursor re-execution (wrong sub-op, truncated, or a cursor id of zero — which
+// would mean "allocate a new cursor", not "re-run that one").
+var ErrNotCursorReexec = errors.New("payload is not a piggyback cursor re-execution")
+
+// cursorReexecMaxID bounds a plausible cursor id. Oracle allots them from a
+// small per-session pool (open_cursors); anything past 16 bits is a sign the
+// compressed-int walk landed on the wrong bytes.
+const cursorReexecMaxID = 0xFFFF
+
+// cursorReexecTrailingFields is how many compressed ints follow the cursor id
+// in a re-execution: rows to fetch, execute options, execute flags.
+const cursorReexecTrailingFields = 3
+
+// decodeCursorReexec extracts the cursor id from a piggyback re-execution —
+// func 0x03, sub-op 0x4e (SELECT) or 0x04 (everything else). This is what a
+// modern thin client puts on the wire to re-run a statement it already parsed;
+// the statement text is never resent.
+//
+// Layout, verified byte-for-byte against testdata/go_ora_cursor_reexec.pcapng,
+// testdata/go_ora_dml_cursor_reexec.pcapng and
+// testdata/python_thin_cursor_reexec.pcapng:
+//
+//	[0]    0x03 (piggyback)
+//	[1]    0x4e or 0x04 (sub-op)
+//	[2]    TTC sequence number
+//	[3]    0x00 — present only from TTC version 18 (v315+) on
+//	[4..]  cursorID, rowsToFetch, execOptions, execFlags — TTC compressed ints
+//
+// The trailing zero of the function header is what distinguishes the two
+// framings: pre-v315 clients emit a 3-byte header, so the fields start one byte
+// earlier. Only the cursor id is read — the rest of the frame says how to run
+// the statement, not which statement it is.
+func decodeCursorReexec(ttcPayload []byte) (uint16, error) {
+	if len(ttcPayload) < 5 || ttcPayload[0] != byte(TTCFuncPiggyback) || !IsPiggybackCursorReexec(ttcPayload) {
+		return 0, ErrNotCursorReexec
+	}
+
+	// TTC >= 18 pads the function header with a zero byte; older ones do not.
+	pos := 3
+	if ttcPayload[3] == 0 {
+		pos = 4
+	}
+
+	cursorID, n := readCompressedInt(ttcPayload[pos:])
+	if n == 0 || cursorID <= 0 || cursorID > cursorReexecMaxID {
+		return 0, fmt.Errorf("%w: cursor id decoded as %d", ErrNotCursorReexec, cursorID)
+	}
+
+	// The other three fields are not read, only walked: a re-execution is
+	// exactly these four integers and nothing else, and requiring them to
+	// consume the frame to the byte is what keeps some *other* piggyback
+	// sub-op from being mistaken for one and gated against a cursor it has
+	// nothing to do with.
+	pos += n
+
+	for range cursorReexecTrailingFields {
+		_, n := readCompressedInt(ttcPayload[pos:])
+		if n == 0 {
+			return 0, fmt.Errorf("%w: truncated execution fields", ErrNotCursorReexec)
+		}
+
+		pos += n
+	}
+
+	if pos != len(ttcPayload) {
+		return 0, fmt.Errorf("%w: %d trailing bytes", ErrNotCursorReexec, len(ttcPayload)-pos)
+	}
+
+	return uint16(cursorID), nil
+}
+
+// ErrNotCloseCursors reports that a payload is not a decodable close-cursors
+// piggyback — wrong message type or function, missing pointer flag, an
+// implausible count, or truncated before the list ends. Callers delete nothing
+// when they see it: a half-read list would evict tracker entries the client
+// never closed, and an evicted entry turns a correctly-gated re-execution into
+// a refusal.
+var ErrNotCloseCursors = errors.New("payload is not a close-cursors piggyback")
+
+const (
+	// closeCursorsPointer is the one-byte pointer flag Oracle writes between
+	// the function header and the list. Requiring it is what keeps a
+	// wide-encoded (OCI) frame — whose next field is an 8-byte sentinel — from
+	// being walked as compressed ints.
+	closeCursorsPointer byte = 0x01
+
+	// closeCursorsMaxCount bounds a plausible batch. Cursors come from a
+	// per-session pool (open_cursors, a few hundred by default); a count past
+	// this means the walk landed on the wrong bytes.
+	closeCursorsMaxCount = 4096
+)
+
+// closeCursorsWideSentinel is the 8-byte pointer placeholder the OCI thick
+// client (sqlplus, SQL*Developer via OCI, Instant Client) writes instead of
+// the compressed-int pointer flag — the same sentinel the AUTH path already
+// knows (see payloadUsesWideKVEncoding, findUserIDLenPos).
+var closeCursorsWideSentinel = []byte{0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+
+// closeCursorsWideHeaderLen is the size, in bytes, of the two-byte pad OCI
+// writes between the TTC sequence number and the pointer sentinel — see
+// isCloseCursorsWideHeader.
+const closeCursorsWideHeaderLen = 2
+
+// isCloseCursorsWideHeader reports whether ttcPayload's close-cursors header
+// is OCI's wide encoding: [seq] [0x01] [seq+1] [8-byte pointer sentinel].
+//
+// The two bytes between the sequence number and the sentinel were not
+// guessed at: pinned byte-for-byte against every close-cursors frame in
+// testdata/sqlplus_cursor_reexec.pcapng (client frames 9, 12, 14, 16) plus
+// the piggyback execute-with-SQL header stapled behind three of them (func
+// 0x03 sub 0x5e), which carries the identical two-byte pad ahead of its own
+// sentinel. In every one of those seven headers the first byte is a constant
+// 0x01 and the second equals that header's OWN sequence number plus one —
+// i.e. the sequence number the NEXT TTC message on the wire will carry. That
+// makes it the wide framing's own header padding, not something specific to
+// the close-cursors op, so decodeCloseCursors validates rather than skips it:
+// a payload whose two bytes don't fit this shape is read as the thin
+// (compressed-int) encoding instead, never guessed at as wide.
+func isCloseCursorsWideHeader(ttcPayload []byte) bool {
+	const sentinelStart = 3 + closeCursorsWideHeaderLen
+
+	if len(ttcPayload) < sentinelStart+len(closeCursorsWideSentinel) {
+		return false
+	}
+
+	if ttcPayload[3] != closeCursorsPointer {
+		return false
+	}
+
+	if ttcPayload[4] != ttcPayload[2]+1 {
+		return false
+	}
+
+	return bytes.Equal(ttcPayload[sentinelStart:sentinelStart+len(closeCursorsWideSentinel)], closeCursorsWideSentinel)
+}
+
+// closeCursorsWide8HeaderLen is the size of the op header the *other* OCI
+// flavor writes — see isCloseCursorsWide8Header. It replaces the 5-byte header
+// above and everything after it shifts by the difference, which is the whole
+// reason this needs its own walk rather than an offset tweak.
+const closeCursorsWide8HeaderLen = 17
+
+// closeCursorsWide8SeqOffset is where that header carries its "next sequence"
+// field, as a little-endian uint64.
+const closeCursorsWide8SeqOffset = 9
+
+// isCloseCursorsWide8Header reports whether ttcPayload uses the 64-bit variant
+// of the OCI header: `[msg][func][seq][0x00][0x00][ub4 …][sb8 seq+1]` followed
+// by the same 8-byte pointer sentinel.
+//
+// It exists because "the OCI encoding" turned out to be two encodings, and the
+// difference hung a client. The Instant Client 23.3 the wide support was
+// captured from writes the 5-byte header above, with 4-byte integers after it;
+// the client bundled in gvenzl/oracle-free:23-slim (23.26) writes this one,
+// with 8-byte integers. Same protocol version, same upstream, different widths
+// — so a decoder pinned to one of them reads the other's close list as garbage
+// and, far worse, never finds the call stapled behind it:
+//
+//	11 69 0d 00 00 7b 05 00 00 0e 00 00 00 00 00 00 00  ← header, seq 13
+//	fe(x8)                                              ← pointer sentinel
+//	01 00 00 00 00 00 00 00  02 00 00 00                ← one cursor: id 2
+//	03 5e 0e …                                          ← the call, sequence 14
+//
+// Refusing that INSERT with the sequence dbbat could see (13, or whatever the
+// previous call was) rather than 14 is what left sqlplus waiting forever.
+//
+// The guard is the same one the 4-byte variant uses, and for the same reason:
+// the second field must be this header's own sequence number plus one — the
+// sequence the next TTC message will carry — so a payload that does not fit
+// the shape is read as one of the other encodings instead of guessed at.
+func isCloseCursorsWide8Header(ttcPayload []byte) bool {
+	return usesWide64OpHeader(ttcPayload)
+}
+
+// usesWide64OpHeader reports whether a TTC message opens with the 64-bit OCI op
+// header, whatever op it is: `[msg][func][seq][0x00][0x00][ub4 …][sb8 seq+1]`
+// followed by the 8-byte pointer sentinel.
+//
+// It is deliberately not specific to close-cursors. The same header opens this
+// client's AUTH Phase 1 (`03 76 02 00 00 00000000 0300000000000000 fe…`), which
+// is what lets a session know it is talking to a 64-bit OCI client *before* the
+// upstream has sent an OER to learn the shape from — see nextOERFrame. The
+// Instant Client's 32-bit header (`[seq][0x01][seq+1]`) never satisfies it: its
+// byte 3 is the 0x01 pointer flag, not zero.
+//
+// The "next sequence" check is what makes it a shape test rather than a guess.
+// The second field is always this header's own sequence number plus one — the
+// sequence the next TTC message on the wire will carry — measured across every
+// recorded frame from this client, AUTH and proxy mode alike.
+func usesWide64OpHeader(ttcPayload []byte) bool {
+	const sentinelStart = closeCursorsWide8HeaderLen
+
+	if len(ttcPayload) < sentinelStart+len(closeCursorsWideSentinel) {
+		return false
+	}
+
+	if ttcPayload[3] != 0x00 || ttcPayload[4] != 0x00 {
+		return false
+	}
+
+	next := binary.LittleEndian.Uint64(ttcPayload[closeCursorsWide8SeqOffset : closeCursorsWide8SeqOffset+8])
+	if next != uint64(ttcPayload[2])+1 {
+		return false
+	}
+
+	return bytes.Equal(ttcPayload[sentinelStart:sentinelStart+len(closeCursorsWideSentinel)], closeCursorsWideSentinel)
+}
+
+// decodeCloseCursorsWide8 walks the 64-bit OCI close list: an 8-byte count,
+// then one 4-byte id per cursor. The id width is *not* symmetric with the
+// count, and that is measured rather than assumed — the stapled op that follows
+// lands exactly at count*4 bytes past the count in every recorded frame, which
+// is the only reading under which dbbat can find the call behind the list.
+//
+// Same guards as the other two walks: a bounded count, every id inside 16 bits,
+// enough bytes for the whole list. A payload that does not fit is rejected and
+// nothing is deleted.
+func decodeCloseCursorsWide8(ttcPayload []byte) ([]uint16, int, error) {
+	pos := closeCursorsWide8HeaderLen + len(closeCursorsWideSentinel)
+
+	if pos+8 > len(ttcPayload) {
+		return nil, 0, fmt.Errorf("%w: truncated wide count", ErrNotCloseCursors)
+	}
+
+	count := binary.LittleEndian.Uint64(ttcPayload[pos : pos+8])
+	if count == 0 || count > closeCursorsMaxCount {
+		return nil, 0, fmt.Errorf("%w: wide cursor count decoded as %d", ErrNotCloseCursors, count)
+	}
+
+	pos += 8
+
+	if pos+4*int(count) > len(ttcPayload) {
+		return nil, 0, fmt.Errorf("%w: truncated after wide count of %d", ErrNotCloseCursors, count)
+	}
+
+	cursorIDs := make([]uint16, 0, count)
+
+	for range count {
+		id := binary.LittleEndian.Uint32(ttcPayload[pos : pos+4])
+		if id == 0 || id > cursorReexecMaxID {
+			return nil, 0, fmt.Errorf("%w: wide cursor id decoded as %d", ErrNotCloseCursors, id)
+		}
+
+		cursorIDs = append(cursorIDs, uint16(id))
+		pos += 4
+	}
+
+	return cursorIDs, pos, nil
+}
+
+// decodeCloseCursorsWide extracts the cursor ids out of an OCI wide-encoded
+// close-cursors piggyback, once isCloseCursorsWideHeader has confirmed the
+// header shape. The count and every id are little-endian uint32 fields
+// (unlike the thin encoding's compressed ints), but the guards mirror
+// decodeCloseCursors exactly: a bounded count, every id inside 16 bits, and
+// enough bytes for the whole list — so a payload that doesn't fit is
+// rejected with ErrNotCloseCursors and deletes nothing, same as the thin
+// path.
+func decodeCloseCursorsWide(ttcPayload []byte) ([]uint16, int, error) {
+	pos := 3 + closeCursorsWideHeaderLen + len(closeCursorsWideSentinel)
+
+	if pos+4 > len(ttcPayload) {
+		return nil, 0, fmt.Errorf("%w: truncated wide count", ErrNotCloseCursors)
+	}
+
+	count := binary.LittleEndian.Uint32(ttcPayload[pos : pos+4])
+	if count > closeCursorsMaxCount {
+		return nil, 0, fmt.Errorf("%w: wide cursor count decoded as %d", ErrNotCloseCursors, count)
+	}
+
+	pos += 4
+
+	if pos+4*int(count) > len(ttcPayload) {
+		return nil, 0, fmt.Errorf("%w: truncated after wide count of %d", ErrNotCloseCursors, count)
+	}
+
+	cursorIDs := make([]uint16, 0, count)
+
+	for range count {
+		id := binary.LittleEndian.Uint32(ttcPayload[pos : pos+4])
+		if id == 0 || id > cursorReexecMaxID {
+			return nil, 0, fmt.Errorf("%w: wide cursor id decoded as %d", ErrNotCloseCursors, id)
+		}
+
+		cursorIDs = append(cursorIDs, uint16(id))
+		pos += 4
+	}
+
+	return cursorIDs, pos, nil
+}
+
+// decodeCloseCursors extracts every cursor id from Oracle's close-cursors
+// piggyback — message type 0x11 (TNS_MSG_TYPE_PIGGYBACK), function 0x69
+// (TNS_FUNC_CLOSE_CURSORS).
+//
+// This is how a client tells the server it is done with cursors, and it is a
+// *list*: dbbat used to read a single id out of the func-0x03 logoff frame
+// instead, so batched closes left the tracker holding entries for cursors that
+// no longer exist — and Oracle recycles ids, so a later re-execution naming a
+// recycled id resolved to whatever statement used to hold it.
+//
+// Layout, verified byte-for-byte against the recordings in testdata/:
+//
+//	[0]    0x11            message type: piggyback
+//	[1]    0x69            function: close cursors
+//	[2]    seq             TTC sequence number
+//	[3]    0x00            token byte — 23ai-era clients only
+//	[..]   0x01            pointer flag
+//	[..]   count           TTC compressed int
+//	[..]   count x id      TTC compressed ints
+//	[..]   (optional)      the next TTC message in the same packet
+//
+// The trailing zero of the function header is what distinguishes the two
+// framings, exactly as in decodeCursorReexec; the pointer flag is always 0x01,
+// so a zero at [3] can only be the token.
+//
+// Unlike decodeCursorReexec this does **not** require the fields to consume the
+// frame: clients staple the statement they are about to run behind the close
+// list in the same packet (`… 03 5e <execute>`), which is the frame dbbat also
+// knows as the JDBC/DBeaver execute. What it does require is that the list
+// itself be complete and plausible — see ErrNotCloseCursors.
+//
+// The OCI thick client (sqlplus, SQL*Developer via OCI, Instant Client) sends
+// the same op in the wide encoding — an 8-byte pointer sentinel and
+// little-endian 32-bit fields — which decodeCloseCursorsWide reads once
+// isCloseCursorsWideHeader confirms the header shape. It never re-executes by
+// cursor id (it resends the statement text every time, see docs/oracle.md),
+// so this is defense in depth rather than something load-bearing: a tracker
+// entry it leaves behind cannot mis-resolve anything on its own.
+func decodeCloseCursors(ttcPayload []byte) ([]uint16, error) {
+	ids, _, err := decodeCloseCursorsAt(ttcPayload)
+
+	return ids, err
+}
+
+// closeCursorsEnd returns the offset just past a close-cursors list — where a
+// stapled TTC op begins, if the client put one there. It is how
+// clientCallNumber reaches the execute JDBC staples behind its closes; false
+// when the payload is not a close-cursors piggyback or its list does not
+// decode.
+func closeCursorsEnd(ttcPayload []byte) (int, bool) {
+	_, end, err := decodeCloseCursorsAt(ttcPayload)
+
+	return end, err == nil
+}
+
+// decodeCloseCursorsAt is decodeCloseCursors plus the offset the close list
+// ends at.
+func decodeCloseCursorsAt(ttcPayload []byte) ([]uint16, int, error) {
+	if !IsCloseCursorsPiggyback(ttcPayload) {
+		return nil, 0, ErrNotCloseCursors
+	}
+
+	if isCloseCursorsWideHeader(ttcPayload) {
+		return decodeCloseCursorsWide(ttcPayload)
+	}
+
+	if isCloseCursorsWide8Header(ttcPayload) {
+		return decodeCloseCursorsWide8(ttcPayload)
+	}
+
+	// TTC >= 18 pads the function header with a zero byte; older ones do not.
+	pos := 3
+	if len(ttcPayload) > 3 && ttcPayload[3] == 0 {
+		pos = 4
+	}
+
+	if pos >= len(ttcPayload) || ttcPayload[pos] != closeCursorsPointer {
+		return nil, 0, fmt.Errorf("%w: no pointer flag at offset %d", ErrNotCloseCursors, pos)
+	}
+
+	pos++
+
+	count, n := readCompressedInt(ttcPayload[pos:])
+	if n == 0 || count < 0 || count > closeCursorsMaxCount {
+		return nil, 0, fmt.Errorf("%w: cursor count decoded as %d", ErrNotCloseCursors, count)
+	}
+
+	pos += n
+
+	cursorIDs := make([]uint16, 0, count)
+
+	for range count {
+		cursorID, n := readCompressedInt(ttcPayload[pos:])
+		if n == 0 {
+			return nil, 0, fmt.Errorf("%w: truncated after %d of %d ids", ErrNotCloseCursors, len(cursorIDs), count)
+		}
+
+		if cursorID <= 0 || cursorID > cursorReexecMaxID {
+			return nil, 0, fmt.Errorf("%w: cursor id decoded as %d", ErrNotCloseCursors, cursorID)
+		}
+
+		cursorIDs = append(cursorIDs, uint16(cursorID))
+		pos += n
+	}
+
+	return cursorIDs, pos, nil
+}
+
 // OALL8Result contains the decoded fields from an OALL8 (parse+execute) message.
 type OALL8Result struct {
 	SQL        string
@@ -380,12 +780,6 @@ type OALL8Result struct {
 func (r *OALL8Result) IsPLSQL() bool {
 	normalized := strings.ToUpper(strings.TrimSpace(r.SQL))
 	return strings.HasPrefix(normalized, "BEGIN") || strings.HasPrefix(normalized, "DECLARE")
-}
-
-// OFETCHResult contains the decoded fields from an OFETCH message.
-type OFETCHResult struct {
-	CursorID  uint16
-	FetchSize uint32
 }
 
 // OALL8 binary layout (simplified):
@@ -487,46 +881,63 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 		return nil, fmt.Errorf("%w: piggyback exec needs at least 52 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
 	}
 
+	// The header carries the statement's length, so read that first and take
+	// the run it names. Everything below is the pre-2026-08 heuristic, kept for
+	// a header shape no recording produces — see decodeExecStatement.
+	stmt, _ := decodeExecStatementText(ttcPayload)
+
 	// Strategy: scan the payload for SQL text. Different Oracle client drivers
 	// (oracledb thin, JDBC thin) place the SQL at slightly different offsets
 	// (50-54 typically). We scan a range and validate the extracted text.
-	sql := ""
-
-	for offset := 40; offset < 70 && offset < len(ttcPayload)-1; offset++ {
-		if found, scanErr := extractSQLAtOffset(ttcPayload, offset); scanErr == nil && found != "" {
-			sql = found
-			break
+	for offset := 40; stmt.Text == "" && offset < 70 && offset < len(ttcPayload)-1; offset++ {
+		if found, scanErr := extractSQLAtOffsetText(ttcPayload, offset); scanErr == nil && found.Text != "" {
+			stmt = found
 		}
 	}
 
-	// Last resort: find SQL keywords directly in the payload.
-	if sql == "" {
-		sql = findSQLInPayload(ttcPayload)
+	// Last resort: find SQL keywords directly in the payload. It returns a
+	// verbatim slice of the payload, so the text is its own anchor.
+	if stmt.Text == "" {
+		if found := findSQLInPayload(ttcPayload); found != "" {
+			stmt = execStatement{Text: found, Raw: found}
+		}
 	}
 
-	if sql == "" {
+	if stmt.Text == "" {
 		return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
 	}
 
-	return &OALL8Result{SQL: sql, BindValues: extractPiggybackBinds(ttcPayload, sql)}, nil
+	return &OALL8Result{
+		SQL:        stmt.Text,
+		BindValues: extractPiggybackBinds(ttcPayload, stmt),
+	}, nil
 }
 
 // extractPiggybackBinds recovers the bind values from a piggyback exec payload.
 // The values are length-prefixed at the tail of the message and their count
-// equals the number of distinct bind placeholders in sql, so they are located as
-// the suffix that parses as exactly that many length-prefixed values consuming
-// the rest of the payload. Returns nil when they can't be located — binds are
-// then simply not captured rather than guessed wrong.
-func extractPiggybackBinds(payload []byte, sql string) []string {
-	count := countBindPlaceholders(sql)
+// equals the number of distinct bind placeholders in the statement, so they are
+// located as the suffix that parses as exactly that many length-prefixed values
+// consuming the rest of the payload. Returns nil when they can't be located —
+// binds are then simply not captured rather than guessed wrong.
+//
+// The floor is anchored on stmt.Raw and not on stmt.Text, and the distinction is
+// load-bearing rather than tidiness. Text may have had undecodable bytes
+// repaired to U+FFFD for storage (sanitizeSQLRun), and a U+FFFD is three bytes
+// where the wire had one — so searching for it would fail to match, the floor
+// would collapse to 0, and the tail scan would be free to walk back into the
+// statement and read "bind values" out of its own text. That is not the "no
+// binds captured" this function promises; it is the guessed-wrong outcome the
+// promise exists to rule out.
+func extractPiggybackBinds(payload []byte, stmt execStatement) []string {
+	count := countBindPlaceholders(stmt.Text)
 	if count == 0 {
 		return nil
 	}
 
 	// Don't scan into the SQL text itself.
 	lo := 0
-	if idx := findBytes(payload, []byte(sql)); idx >= 0 {
-		lo = idx + len(sql)
+	if idx := findBytes(payload, []byte(stmt.Raw)); idx >= 0 {
+		lo = idx + len(stmt.Raw)
 	}
 
 	// Scan from the tail so the tightest (real) value run is found before any
@@ -625,6 +1036,21 @@ func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 		return nil, fmt.Errorf("%w: exec needs at least 30 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
 	}
 
+	// The `11 69` "JDBC exec" is a close-cursors piggyback with the real
+	// execute stapled behind it (docs/oracle.md, "Closing cursors"), so walk
+	// the close list to that op and decode it properly. The old 50-75 window
+	// scanned *past* the list into the stapled SQL and routinely landed inside
+	// the statement text — see decodeExecStatement.
+	if sql, ok := decodeExecStatement(ttcPayload); ok {
+		return &OALL8Result{SQL: sql}, nil
+	}
+
+	if end, ok := closeCursorsEnd(ttcPayload); ok {
+		if sql, ok := decodeExecStatement(ttcPayload[end:]); ok {
+			return &OALL8Result{SQL: sql}, nil
+		}
+	}
+
 	// Scan for SQL text at known offsets across client drivers.
 	for offset := 50; offset <= 75 && offset < len(ttcPayload)-1; offset++ {
 		sql, err := extractSQLAtOffset(ttcPayload, offset)
@@ -642,19 +1068,33 @@ func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	return nil, fmt.Errorf("%w: could not find SQL text in JDBC exec payload", ErrEmptySQL)
 }
 
-// findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.
-// Used as a fallback when length-prefix decoding fails — notably for SQLcl/JDBC
-// thin's func=0x11 exec, where the SQL follows a run of zero bytes (so no length
-// prefix sits immediately before it). The keyword match is case-insensitive
-// because clients send the statement verbatim and SQLcl lowercases its SQL.
-func findSQLInPayload(payload []byte) string {
-	keywords := [][]byte{
-		[]byte("SELECT"), []byte("INSERT"), []byte("UPDATE"), []byte("DELETE"),
-		[]byte("CREATE"), []byte("DROP"), []byte("ALTER"), []byte("BEGIN"),
-		[]byte("DECLARE"), []byte("WITH"), []byte("MERGE"), []byte("CALL"),
-	}
+// findSQLKeywords is the keyword set the last-resort scan looks for. It is the
+// set of verbs the controls in internal/proxy/shared/validation.go refuse
+// (writeKeywords, ddlKeywords) plus the read and block verbs — because a verb
+// the gate would refuse but the scan cannot see is a statement that reaches the
+// upstream unexamined. TRUNCATE, GRANT and REVOKE were the three missing ones.
+//
+// Widening a keyword scan is normally how a binary frame comes to be read as a
+// statement, which on the unnameable path costs a session. It does not here,
+// because it lands together with the word-boundary requirement below: matching
+// `GRANT` inside `GRANTED_ROLE` was measured happening on a real DBeaver frame,
+// and the boundary rule removes strictly more false positives than these three
+// verbs add.
+var findSQLKeywords = [][]byte{
+	[]byte("SELECT"), []byte("INSERT"), []byte("UPDATE"), []byte("DELETE"),
+	[]byte("CREATE"), []byte("DROP"), []byte("ALTER"), []byte("BEGIN"),
+	[]byte("DECLARE"), []byte("WITH"), []byte("MERGE"), []byte("CALL"),
+	[]byte("TRUNCATE"), []byte("GRANT"), []byte("REVOKE"),
+}
 
-	idx := indexOfAnyKeywordCI(payload, keywords)
+// findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.
+// Used as a last resort when the header-anchored decode (decodeExecStatement)
+// and the length-prefix window both fail. The keyword match is case-insensitive
+// because clients send the statement verbatim and SQLcl lowercases its SQL, and
+// it must land on a word boundary so an identifier that merely starts with a
+// verb is not read as one.
+func findSQLInPayload(payload []byte) string {
+	idx := indexOfAnyKeywordCI(payload, findSQLKeywords)
 	if idx < 0 {
 		return ""
 	}
@@ -674,8 +1114,13 @@ func findSQLInPayload(payload []byte) string {
 }
 
 // indexOfAnyKeywordCI returns the offset of the earliest case-insensitive match
-// of any keyword in payload, or -1. Used to locate the SQL statement inside an
-// exec message whose framing varies by client.
+// of any keyword in payload that ends at a word boundary, or -1. Used to locate
+// the SQL statement inside an exec message whose framing varies by client.
+//
+// The boundary requirement is not cosmetic. Without it `GRANT` matched the
+// `GRANTED_ROLE` column in DBeaver's own privilege probe and `DELETE` matched
+// `DELETE_RULE`, so the gate enforced against — and /queries recorded — a
+// fragment starting in the middle of a column name.
 func indexOfAnyKeywordCI(payload []byte, keywords [][]byte) int {
 	for i := range payload {
 		for _, kw := range keywords {
@@ -683,13 +1128,26 @@ func indexOfAnyKeywordCI(payload []byte, keywords [][]byte) int {
 				continue
 			}
 
-			if equalFoldASCIIBytes(payload[i:i+len(kw)], kw) {
-				return i
+			if !equalFoldASCIIBytes(payload[i:i+len(kw)], kw) {
+				continue
 			}
+
+			if i+len(kw) < len(payload) && isSQLWordByte(payload[i+len(kw)]) {
+				continue
+			}
+
+			return i
 		}
 	}
 
 	return -1
+}
+
+// isSQLWordByte reports whether c can appear inside an Oracle identifier, which
+// is what makes a keyword match a word rather than a prefix of one.
+func isSQLWordByte(c byte) bool {
+	return c == '_' || c == '$' || c == '#' ||
+		(c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
 // equalFoldASCIIBytes reports whether a and b are equal ignoring ASCII letter case.
@@ -716,33 +1174,52 @@ func equalFoldASCIIBytes(a, b []byte) bool {
 	return true
 }
 
-// extractSQLAtOffset tries to read a length-prefixed SQL string at the given offset.
-// Returns the SQL text, bytes consumed, and error.
+// extractSQLAtOffset tries to read a length-prefixed SQL string at the given
+// offset, returning the text to store.
 func extractSQLAtOffset(data []byte, offset int) (string, error) {
+	stmt, err := extractSQLAtOffsetText(data, offset)
+
+	return stmt.Text, err
+}
+
+// extractSQLAtOffsetText is extractSQLAtOffset keeping the verbatim run too, so
+// bind capture can still find the statement back in the payload by byte
+// comparison after repair — see extractPiggybackBinds.
+func extractSQLAtOffsetText(data []byte, offset int) (execStatement, error) {
 	if offset >= len(data) {
-		return "", ErrOALL8TooShort
+		return execStatement{}, ErrOALL8TooShort
 	}
 
 	sqlLen, bytesRead, err := decodeVarLen(data[offset:])
 	if err != nil || sqlLen == 0 || sqlLen > 32768 {
-		return "", ErrEmptySQL
+		return execStatement{}, ErrEmptySQL
 	}
 
 	sqlStart := offset + bytesRead
 	sqlEnd := sqlStart + int(sqlLen)
 
 	if sqlEnd > len(data) {
-		return "", ErrSQLLengthInvalid
+		return execStatement{}, ErrSQLLengthInvalid
 	}
 
-	sqlText := string(data[sqlStart:sqlEnd])
+	raw := string(data[sqlStart:sqlEnd])
 
-	// Validate that it looks like SQL (starts with a keyword or is mostly printable)
+	// Statement text is text. Without this a declared run that opens with a
+	// verb and then turns into TTC framing bytes — `SET CURRENT_SCHEMA=TESTADM`
+	// followed by four 0x01s was the measured case — passed as a statement.
+	// sanitizeSQLRun is charitable about the session charset and strict about
+	// binary; it also returns the text repaired for storage.
+	sqlText, ok := sanitizeSQLRun(raw)
+	if !ok {
+		return execStatement{}, ErrEmptySQL
+	}
+
+	// Validate that it looks like SQL (opens with a statement verb)
 	if !looksLikeSQL(sqlText) {
-		return "", ErrEmptySQL
+		return execStatement{}, ErrEmptySQL
 	}
 
-	return sqlText, nil
+	return execStatement{Text: sqlText, Raw: raw}, nil
 }
 
 // QueryResultV2 contains parsed data from a v315+ TTC QueryResult (func=0x10).
@@ -1568,26 +2045,19 @@ func findBytes(data, pattern []byte) int {
 	return -1
 }
 
-// looksLikeSQL returns true if the string appears to be SQL text.
+// looksLikeSQL returns true if the string appears to be SQL text: it opens with
+// a statement verb that ends at a word boundary.
+//
+// The boundary is the fix, not a detail. A bare prefix match read the
+// `GRANTED_ROLE='DBA'` in DBeaver's privilege probe as a GRANT statement and
+// `DELETE_RULE, …` as a DELETE, which is how the loose scan came to hand the
+// gate a fragment starting inside a column name (see ttc_exec_statement.go).
 func looksLikeSQL(s string) bool {
 	if len(s) < 2 {
 		return false
 	}
 
-	upper := strings.ToUpper(strings.TrimSpace(s))
-	sqlKeywords := []string{
-		"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
-		"ALTER", "TRUNCATE", "MERGE", "CALL", "BEGIN", "DECLARE", "WITH", "GRANT", "REVOKE",
-		"EXPLAIN", "SET", "COMMIT", "ROLLBACK", "SAVEPOINT", "LOCK", "COMMENT",
-	}
-
-	for _, kw := range sqlKeywords {
-		if strings.HasPrefix(upper, kw) {
-			return true
-		}
-	}
-
-	return false
+	return startsWithSQLVerb(s)
 }
 
 // decodeVarLen decodes a variable-length integer used in TTC.
@@ -1690,29 +2160,4 @@ func isBinaryData(data []byte) bool {
 	}
 
 	return false
-}
-
-// OFETCH binary layout:
-//
-//	Offset  Size  Field
-//	0       1     Function code (0x11)
-//	1       2     Cursor ID (uint16 BE)
-//	3       4     Fetch size / row count (uint32 BE)
-
-const ofetchMinPayloadSize = 7 // func(1) + cursor(2) + fetchsize(4)
-
-// decodeOFETCH decodes an OFETCH TTC payload (starting from the function code byte).
-func decodeOFETCH(ttcPayload []byte) (*OFETCHResult, error) {
-	if len(ttcPayload) < ofetchMinPayloadSize {
-		return nil, fmt.Errorf("%w: got %d bytes, need at least %d", ErrOFETCHTooShort, len(ttcPayload), ofetchMinPayloadSize)
-	}
-
-	// Skip function code (1 byte)
-	cursorID := binary.BigEndian.Uint16(ttcPayload[1:3])
-	fetchSize := binary.BigEndian.Uint32(ttcPayload[3:7])
-
-	return &OFETCHResult{
-		CursorID:  cursorID,
-		FetchSize: fetchSize,
-	}, nil
 }

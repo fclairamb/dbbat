@@ -79,9 +79,15 @@ type GrantRequestEvent struct {
 	// RequesterSlackID is the requester's linked Slack user ID, or "" if
 	// the requester has no linked Slack identity. Used to @-mention them.
 	RequesterSlackID string
-	// AdminSlackIDs are the Slack user IDs of admins with a linked Slack
-	// identity, used to @-mention them on the pending message.
-	AdminSlackIDs []string
+	// ApproverSlackIDs are the Slack user IDs of everyone who may decide this
+	// request and has a linked Slack identity — every admin, plus the access
+	// approvers resolved off the target server and its server groups. Used to
+	// @-mention them on the pending message.
+	//
+	// It was admins only until servers grew their own approver lists; the fan-out
+	// has to follow the authorization, or the people who can act never learn
+	// there is anything to act on.
+	ApproverSlackIDs []string
 	// DeciderSlackID is the decider's linked Slack user ID (set on decision
 	// events), used to @-mention them in the thread reply.
 	DeciderSlackID string
@@ -359,9 +365,9 @@ func mentionLine(ev GrantRequestEvent) string {
 
 	line := fmt.Sprintf("%s requested access on *%s* with *%s*.", requester, dbName, defName)
 
-	if len(ev.AdminSlackIDs) > 0 {
-		mentions := make([]string, 0, len(ev.AdminSlackIDs))
-		for _, id := range ev.AdminSlackIDs {
+	if len(ev.ApproverSlackIDs) > 0 {
+		mentions := make([]string, 0, len(ev.ApproverSlackIDs))
+		for _, id := range ev.ApproverSlackIDs {
 			mentions = append(mentions, slackMention(id, ""))
 		}
 

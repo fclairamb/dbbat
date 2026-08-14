@@ -12,7 +12,141 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
+)
+
+// The log messages the cursor-tracking path emits, named because the
+// cursor-id learning measurement counts them
+// (cursor_learning_integration_test.go) and a measurement that silently counts
+// a string nothing emits any more reports a perfect score forever. Naming them
+// makes the compiler the guard: rewording one here moves the counter with it.
+//
+// logMsgQueryIntercepted is deliberately shared by every statement-carrying op
+// — each one is a chance to learn a cursor id, which is what the measurement
+// counts it for.
+const (
+	logMsgQueryIntercepted         = "query intercepted"
+	logMsgLearnedCursorID          = "learned server-assigned cursor id"
+	logMsgReexecGated              = "intercepted cursor re-execution"
+	logMsgUntrackedCursorForwarded = "forwarding a re-execution of an untracked cursor: " +
+		"the grant carries no statement-shaped control"
+	logMsgUntrackedCursorRefused = "refused a re-execution of an untracked cursor under a restrictive grant"
+	logMsgCursorsClosed          = "client closed cursors"
+	logMsgRecycledCursorID       = "cursor id recycled onto a different statement"
+
+	// logMsgUnnamedCallForwarded is the fail-open record: a client message
+	// whose call dbbat could not name is forwarded with no reading taken off
+	// it. It is DEBUG rather than WARN because an OCI session emits one on
+	// every login — see clientCallNumber.
+	logMsgUnnamedCallForwarded = "forwarding a message whose call dbbat cannot name"
+
+	// logMsgUnnameableStatementRecorded is the allow branch of that same
+	// fail-open: the message carried a statement the gate permits, so it is
+	// recorded in /queries and forwarded.
+	//
+	// It is deliberately NOT logMsgQueryIntercepted. That message is the
+	// cursor-id learning measurement's own counter (see
+	// TestIntegration_CursorIDLearningMissRate), which pairs every parse it
+	// counts with a learned cursor id — and a statement recovered from a frame
+	// dbbat cannot even name never learns one, so reusing the message would
+	// report a learning miss that is nothing of the kind.
+	logMsgUnnameableStatementRecorded = "recorded a statement carried by a message dbbat cannot name"
+
+	// logMsgUnnameableStatementRefused is the other end of that fail-open: the
+	// message carried a statement a statement-shaped control refuses, so the
+	// session is ended rather than answered. WARN, and it names the statement —
+	// this is a refusal the client only sees as a dropped socket, so the log is
+	// where it is legible.
+	logMsgUnnameableStatementRefused = "ended the session: a message dbbat cannot name carried a refused statement"
+
+	// logMsgLearnedOERTail is the one record that says which summary-object
+	// shape a session will answer a refusal with. The per-client refusal tests
+	// read extra_tail_fields back off it (see blocked_integration_test.go), so
+	// the shape a client actually got is reported rather than assumed.
+	logMsgLearnedOERTail = "learned OER tail shape from upstream"
+
+	// logMsgWatchdogTeardown is the limit watchdog's own record
+	// (session.onLimitViolation). It is the only teardown that writes no error
+	// frame, so a measurement of the idle-revocation path reads it back to show
+	// the session died there and not on the mid-stream check that does write
+	// one — see async_refusal_integration_test.go.
+	logMsgWatchdogTeardown = "terminating Oracle session: grant no longer valid mid-stream"
+
+	// The records of a mid-stream limit refusal held for the client's next call
+	// (session.enforceMidStreamLimits). They are separate messages because they
+	// are different outcomes and the measurement reads them apart:
+	// held is the decision, delivered is the ORA-00028 the client can actually
+	// parse, and the other two are the fail-safes — a call dbbat cannot name, and
+	// a reply that never reached a boundary. logMsgWatchdogTeardown covers the
+	// fourth (a client that stopped talking), which is the watchdog's own.
+	logMsgRefusalHeld = "holding a mid-stream limit refusal until the client's next call: " +
+		"a frame written into a reply in progress is not readable"
+	logMsgRefusalDelivered  = "refused the client's next call with the limit violation held mid-reply"
+	logMsgRefusalUnnameable = "ended the session: a held limit refusal met a call dbbat cannot name, " +
+		"so there is no frame to answer with"
+	logMsgRefusalHandoffAbandoned = "ended the session: a held limit refusal never reached a call boundary"
+
+	// logMsgRefusalGraceOutranBytes names the one case where the two fail-safe
+	// bounds constrain each other rather than each covering its own failure: a
+	// handoff cut by refusalHandoffGrace while the client was *still draining*
+	// the reply, which means the link was slow enough that refusalHoldMaxBytes
+	// could never have been reached inside the grace.
+	//
+	// It accompanies logMsgWatchdogTeardown rather than replacing it — the
+	// teardown is what happened, this is why it is not the "client went quiet"
+	// case that path is the fail-safe for. Nothing branches on it: it exists so
+	// a slow-link deployment meeting the crossover is visible instead of looking
+	// like every other ORA-03113. See session.reportRefusalBoundCrossover and
+	// docs/oracle.md, "What a legitimate handoff costs, measured".
+	logMsgRefusalGraceOutranBytes = "a held limit refusal was cut by its grace while the client was " +
+		"still draining the reply: on this link the overshoot bound was unreachable"
+
+	// logMsgRefusalCrossoverDeclined is the same measurement when the record
+	// above is *not* emitted, at DEBUG because the ordinary abandonment — a
+	// client that genuinely stopped talking — takes this path every time.
+	//
+	// It exists because the crossover is decided from four numbers that were
+	// otherwise nowhere: without it an abandoned hold that is not reported as a
+	// crossover says nothing about why, and "the record never fires" and "the
+	// link was fast enough" are indistinguishable in a log or in a test failure.
+	// See session.reportRefusalBoundCrossover.
+	logMsgRefusalCrossoverDeclined = "a held limit refusal was abandoned at its grace, but not as a " +
+		"bound crossover"
+
+	// logMsgRefusalTeardownPanic is the one that should never appear. It means
+	// the teardown of a held refusal panicked while itself running from a
+	// recovered decode panic. The relay goroutine above it does have a recover
+	// now (safe.RunRelay), so the nested one no longer stands between this and
+	// process death — it stands between this and losing a session that was
+	// supposed to survive a malformed frame.
+	logMsgRefusalTeardownPanic = "recovered from panic tearing down a held limit refusal"
+)
+
+// The attributes every exit of a held refusal carries: how many bytes were
+// relayed to the client past the violation, and how long the hold lasted. They
+// are named constants for the same reason the messages above are — they are the
+// measurement refusalHoldMaxBytes and refusalHandoffGrace are sized against
+// (docs/oracle.md, "What a legitimate handoff costs, measured"), and a silent
+// rename would leave the integration suites reading an attribute nothing emits.
+const (
+	logAttrRelayedBytesSince = "relayed_bytes_since"
+	logAttrHeldForMillis     = "held_for_ms"
+
+	// The three the crossover record adds (logMsgRefusalGraceOutranBytes): the
+	// rate the hold was actually drained at, the rate at which the two bounds
+	// meet, and the byte bound itself — so the line carries the whole comparison
+	// rather than leaving the reader to divide two of the numbers by hand.
+	logAttrEffectiveBytesPerSec = "effective_bytes_per_second"
+	logAttrCrossoverBytesPerSec = "crossover_bytes_per_second"
+	logAttrRefusalBytesBound    = "refusal_bytes_bound"
+
+	// The two the declined record adds (logMsgRefusalCrossoverDeclined): how
+	// long before the grace expired the relay last fed the client (-1 when it
+	// never did), and whether the byte bound was out of reach at the observed
+	// rate. Between them they say which of the two predicates answered no.
+	logAttrSinceLastRelayMillis = "since_last_relay_ms"
+	logAttrBoundOutOfReach      = "bound_out_of_reach"
 )
 
 // trackedCursor tracks a parsed cursor and its SQL.
@@ -54,6 +188,48 @@ func newOracleQueryTracker() *oracleQueryTracker {
 	}
 }
 
+// book runs one bookkeeping step under trackerMu.
+//
+// This is the client leg's way of taking the lock: unlike the upstream leg —
+// which holds it for the whole of interceptUpstreamMessage — the client leg
+// must *not* hold it across the approval hold, which parks the statement on a
+// human with no timeout and would park the upstream reader with it. So each
+// statement-carrying handler is split into two locked steps with holdIfNeeded
+// between them, and this keeps that split to an indentation change rather than
+// a scattering of Lock/Unlock pairs around every early return (each of which
+// bumps the grant's query counter and so needs the lock itself).
+//
+// Everything called from inside fn assumes the lock is held and must never
+// take it again.
+func (s *session) book(fn func() error) error {
+	s.trackerMu.Lock()
+	defer s.trackerMu.Unlock()
+
+	return fn()
+}
+
+// hasPendingQuery reports whether a query is in flight. Takes trackerMu, so it
+// is for callers that do *not* already hold it — the mid-stream limit check in
+// upstreamToClient.
+func (s *session) hasPendingQuery() bool {
+	s.trackerMu.Lock()
+	defer s.trackerMu.Unlock()
+
+	return s.tracker.pendingQuery != nil
+}
+
+// lookupCursor resolves a cursor id to the statement it stands for. Takes
+// trackerMu; the returned *trackedCursor is then handed to regateCursor, which
+// re-takes it for the steps that mutate anything.
+func (s *session) lookupCursor(cursorID uint16) (*trackedCursor, bool) {
+	s.trackerMu.Lock()
+	defer s.trackerMu.Unlock()
+
+	cursor, ok := s.tracker.cursors[cursorID]
+
+	return cursor, ok
+}
+
 // handleOALL8 intercepts an OALL8 message: decodes SQL, checks access controls,
 // and begins tracking the query. Returns an error if the query should be blocked.
 func (s *session) handleOALL8(ttcPayload []byte) error {
@@ -78,23 +254,39 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		slog.Int("bind_count", len(result.BindValues)),
 	)
 
-	// Access control check
-	if s.grant != nil {
-		if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
-			s.logger.WarnContext(s.ctx, "query blocked by access control",
-				slog.String("sql", truncateSQL(result.SQL, 200)),
-				slog.Any("error", err),
-			)
-
-			return err
+	if err := s.book(func() error {
+		// Quota, expiry and revocation — ahead of the static controls and therefore
+		// ahead of the hold, so an exhausted grant is refused outright and never
+		// parks a statement on a human. Recorded like any other refusal now that the
+		// decode has produced the SQL to record it against.
+		if err := s.checkQuotas(); err != nil {
+			return s.refuseStatement(result.SQL, result.BindValues, err)
 		}
+
+		// Access control check
+		if s.grant != nil {
+			if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
+				s.logger.WarnContext(s.ctx, "query blocked by access control",
+					slog.String("sql", truncateSQL(result.SQL, 200)),
+					slog.Any("error", err),
+				)
+
+				return s.refuseStatement(result.SQL, result.BindValues, err)
+			}
+		}
+
+		// Complete previous query if still pending (sets duration)
+		s.flushPendingQuery()
+
+		return nil
+	}); err != nil {
+		return err
 	}
 
-	// Complete previous query if still pending (sets duration)
-	s.flushPendingQuery()
-
 	// Approval hold — after the static validators, before anything reaches
-	// upstream.
+	// upstream. Outside trackerMu on purpose: it parks on a human with no
+	// timeout, and the upstream reader needs the lock for every packet it
+	// relays.
 	approvalUID, herr := s.holdIfNeeded(result.SQL)
 	if herr != nil {
 		return herr
@@ -107,35 +299,37 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		bindValues: result.BindValues,
 		parsedAt:   time.Now(),
 	}
-	s.tracker.cursors[result.CursorID] = cursor
 
-	// Start pending query and persist immediately
-	s.tracker.pendingQuery = &pendingOracleQuery{
-		cursor:    cursor,
-		startTime: time.Now(),
-	}
+	return s.book(func() error {
+		s.rememberCursor(result.CursorID, cursor)
 
-	// An approval hold already inserted the row; reuse it rather than writing
-	// a second one for the same statement.
-	if approvalUID != uuid.Nil {
-		s.tracker.pendingQuery.queryUID = approvalUID
-		s.tracker.pendingQuery.queryPersisted = true
-	} else {
-		s.persistQueryRecord()
-	}
+		// Start pending query and persist immediately
+		s.tracker.pendingQuery = &pendingOracleQuery{
+			cursor:    cursor,
+			startTime: time.Now(),
+		}
 
-	return nil
+		// An approval hold already inserted the row; reuse it rather than writing
+		// a second one for the same statement.
+		if approvalUID != uuid.Nil {
+			s.tracker.pendingQuery.queryUID = approvalUID
+			s.tracker.pendingQuery.queryPersisted = true
+		} else {
+			s.persistQueryRecord()
+		}
+
+		return nil
+	})
 }
 
 // handleCursorReexec gates an execution that carries no statement of its own —
-// a SQL-less OALL8, or an OFETCH that starts a fresh pending query — against
-// the SQL the named cursor was parsed with.
+// a SQL-less OALL8 — against the SQL the named cursor was parsed with.
 //
 // Without this, an approval decision and every statement-shaped control applied
 // to the *parse* only: a client that parsed once and re-executed the same
 // cursor got one hold and then a free run for the rest of the session.
 func (s *session) handleCursorReexec(cursorID uint16) error {
-	cursor, ok := s.tracker.cursors[cursorID]
+	cursor, ok := s.lookupCursor(cursorID)
 	if !ok {
 		return s.refuseUnknownCursor(cursorID)
 	}
@@ -144,7 +338,10 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 }
 
 // refuseUnknownCursor decides what to do with a re-execution naming a cursor
-// dbbat never saw parsed. The statement it would run is unknown, so:
+// dbbat never saw parsed. Both frames that can only be identified by cursor id
+// route through here — the SQL-less OALL8 and the piggyback re-execution every
+// modern thin client sends — so the wire op a client picks cannot change the
+// answer. The statement it would run is unknown, so:
 //
 //   - under a grant carrying statement-shaped controls, it fails closed — a
 //     restrictive grant must not be bypassable by an execution the proxy cannot
@@ -155,19 +352,35 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 //     mid-session, or the entry may be gone — and refusing there would break
 //     permissive sessions for no security gain.
 //
-// This asymmetry is deliberate and documented in docs/approvals.md.
+// This conditional refusal is documented in docs/approvals.md.
+//
+// It runs *before* the quota check, which lives one call further down in
+// regateCursor: an unknown cursor keeps answering here even when the grant is
+// also exhausted, because "dbbat cannot identify this statement" is the more
+// specific and more security-relevant answer, and burying it under a quota
+// error would make it harder to diagnose. The quota is only consulted on the
+// branch that decides *not* to refuse — an execution dbbat cannot identify is
+// still an execution, and the quota is the one gate that needs no SQL, so a
+// permissive grant that has run out must not start forwarding again just
+// because the cursor is untracked. That refusal carries no queries row, for
+// want of any statement text to put in it.
 func (s *session) refuseUnknownCursor(cursorID uint16) error {
 	if !s.hasStatementControls() {
-		s.logger.WarnContext(s.ctx,
-			"forwarding a re-execution of an untracked cursor: the grant carries no statement-shaped control",
+		// checkQuotas reads the in-session grant counters the upstream leg
+		// bumps as queries complete, so it runs under trackerMu like every
+		// other reader of them.
+		if err := s.book(s.checkQuotas); err != nil {
+			return err
+		}
+
+		s.logger.WarnContext(s.ctx, logMsgUntrackedCursorForwarded,
 			slog.Uint64("cursor_id", uint64(cursorID)),
 		)
 
 		return nil
 	}
 
-	s.logger.WarnContext(s.ctx,
-		"refused a re-execution of an untracked cursor under a restrictive grant",
+	s.logger.WarnContext(s.ctx, logMsgUntrackedCursorRefused,
 		slog.Uint64("cursor_id", uint64(cursorID)),
 	)
 
@@ -193,59 +406,158 @@ func (s *session) hasStatementControls() bool {
 	return len(s.grant.ApprovalPatterns()) > 0 || s.grant.IsReadOnly() || s.grant.ShouldBlockDDL()
 }
 
-// regateCursor re-runs the statement gate — static controls, then the approval
-// hold — against the SQL a tracked cursor holds, and starts a fresh pending
-// query for this execution. Same order as the SQL-carrying path, so a
+// regateCursor re-runs the statement gate — quota, static controls, then the
+// approval hold — against the SQL a tracked cursor holds, and starts a fresh
+// pending query for this execution. Same order as the SQL-carrying path, so a
 // re-execution is enforced exactly like the parse that created the cursor.
+//
+// This is the single quota-check insertion point for both re-execution frames:
+// the SQL-less OALL8 (handleCursorReexec) and the piggyback re-execution
+// (handlePiggybackReexec). Each resolves its cursor before delegating here,
+// which is deliberate — a cursor dbbat never saw parsed keeps answering
+// refuseUnknownCursor even when the grant is also exhausted. That refusal is
+// the more specific and the more security-relevant one, and burying it under a
+// quota error would make it harder to diagnose.
 func (s *session) regateCursor(cursor *trackedCursor) error {
+	// sql and bindValues are fixed when the cursor is built and never rewritten,
+	// so they are safe to read here; cursorID is not — learnCursorID fills it in
+	// from the upstream leg — hence the log line inside the locked step below.
 	sql := cursor.sql
 
-	s.logger.DebugContext(s.ctx, "intercepted cursor re-execution",
-		slog.String("sql", truncateSQL(sql, 200)),
-		slog.Uint64("cursor_id", uint64(cursor.cursorID)),
-	)
+	if err := s.book(func() error {
+		s.logger.DebugContext(s.ctx, logMsgReexecGated,
+			slog.String("sql", truncateSQL(sql, 200)),
+			slog.Uint64("cursor_id", uint64(cursor.cursorID)),
+		)
 
-	// Access control check
-	if s.grant != nil {
-		if err := shared.ValidateOracleQuery(sql, s.grant); err != nil {
-			s.logger.WarnContext(s.ctx, "cursor re-execution blocked by access control",
-				slog.String("sql", truncateSQL(sql, 200)),
-				slog.Any("error", err),
-			)
-
-			return err
+		// Quota, expiry and revocation — recorded against the SQL the cursor holds,
+		// which is the only place this execution's statement text exists.
+		if err := s.checkQuotas(); err != nil {
+			return s.refuseStatement(sql, cursor.bindValues, err)
 		}
+
+		// Access control check
+		if s.grant != nil {
+			if err := shared.ValidateOracleQuery(sql, s.grant); err != nil {
+				s.logger.WarnContext(s.ctx, "cursor re-execution blocked by access control",
+					slog.String("sql", truncateSQL(sql, 200)),
+					slog.Any("error", err),
+				)
+
+				return s.refuseStatement(sql, cursor.bindValues, err)
+			}
+		}
+
+		// Complete previous query if still pending (sets duration)
+		s.flushPendingQuery()
+
+		return nil
+	}); err != nil {
+		return err
 	}
 
-	// Complete previous query if still pending (sets duration)
-	s.flushPendingQuery()
-
 	// Approval hold — after the static validators, before anything reaches
-	// upstream.
+	// upstream. Outside trackerMu, like every other hold; see handleOALL8.
 	approvalUID, herr := s.holdIfNeeded(sql)
 	if herr != nil {
 		return herr
 	}
 
-	s.tracker.pendingQuery = &pendingOracleQuery{
-		cursor:    cursor,
-		startTime: time.Now(),
+	return s.book(func() error {
+		s.tracker.pendingQuery = &pendingOracleQuery{
+			cursor:    cursor,
+			startTime: time.Now(),
+		}
+
+		// An approval hold already inserted the row; reuse it rather than writing
+		// a second one for the same statement.
+		if approvalUID != uuid.Nil {
+			s.tracker.pendingQuery.queryUID = approvalUID
+			s.tracker.pendingQuery.queryPersisted = true
+		} else {
+			s.persistQueryRecord()
+		}
+
+		return nil
+	})
+}
+
+// handlePiggybackReexec gates a piggyback cursor re-execution — func 0x03,
+// sub-op 0x4e (SELECT) or 0x04 (everything else). This is the frame every
+// modern thin client actually sends to re-run a statement it already parsed;
+// the SQL-less OALL8 handleCursorReexec was written for is its legacy
+// equivalent, and no tested client emits that one (see docs/oracle.md).
+//
+// A cursor dbbat knows is re-gated exactly like the parse that created it. One
+// it does not know goes through refuseUnknownCursor, exactly like the other two
+// re-execution frames: refused under a grant carrying statement-shaped
+// controls, forwarded with a WARN otherwise. The wire op a client picks cannot
+// change the answer.
+//
+// That symmetry was not always safe, and the difference is measured rather than
+// assumed. dbbat learns these cursor ids by reading them off the server's
+// response (learnCursorID), and while that scan bounded the OER sequence number
+// at 255 it stopped learning a few dozen statements into every session — under
+// which failing closed here would have refused the second execution of ordinary
+// read-only work. With that bound corrected, two real thin clients (go-ora v3
+// and python-oracledb thin) drove 124 re-executions through this path across
+// prepared loops, bind-heavy statements, interleaved cursors, DML, PL/SQL, a
+// REF cursor and a churned statement cache, and every single one resolved. See
+// docs/oracle.md, "Cursor-id learning", and
+// TestIntegration_CursorIDLearningMissRate.
+func (s *session) handlePiggybackReexec(ttcPayload []byte) error {
+	cursorID, err := decodeCursorReexec(ttcPayload)
+	if err != nil {
+		s.logger.DebugContext(s.ctx, "failed to decode piggyback cursor re-execution", slog.Any("error", err))
+
+		return nil
 	}
 
-	// An approval hold already inserted the row; reuse it rather than writing
-	// a second one for the same statement.
-	if approvalUID != uuid.Nil {
-		s.tracker.pendingQuery.queryUID = approvalUID
-		s.tracker.pendingQuery.queryPersisted = true
-	} else {
-		s.persistQueryRecord()
+	cursor, ok := s.lookupCursor(cursorID)
+	if !ok {
+		return s.refuseUnknownCursor(cursorID)
 	}
 
-	return nil
+	return s.regateCursor(cursor)
+}
+
+// learnCursorID records the cursor id the server assigned to the statement
+// currently in flight, so a later re-execution naming that id resolves to its
+// SQL.
+//
+// Only the legacy OALL8 carries the cursor id on the request; the piggyback and
+// JDBC exec paths leave dbbat to read it off the response. Learning is a
+// one-shot per statement — a cursor that already has an id is never re-read —
+// which is what keeps the anchored scan in findCursorIDInResponse from being
+// re-run against row-stream bytes for the rest of a fetch.
+//
+// Runs on the upstream leg, so the caller holds trackerMu (see
+// interceptUpstreamMessage) — it writes into the in-flight query's cursor and
+// into the tracker's map, both of which the client leg also owns.
+func (s *session) learnCursorID(ttcPayload []byte) {
+	pending := s.tracker.pendingQuery
+	if pending == nil || pending.cursor == nil || pending.cursor.cursorID != 0 {
+		return
+	}
+
+	cursorID, ok := findCursorIDInResponse(s.oerShapeSnapshot(), ttcPayload)
+	if !ok {
+		return
+	}
+
+	pending.cursor.cursorID = cursorID
+	s.rememberCursor(cursorID, pending.cursor)
+
+	s.logger.DebugContext(s.ctx, logMsgLearnedCursorID,
+		slog.Uint64("cursor_id", uint64(cursorID)),
+		slog.String("sql", truncateSQL(pending.cursor.sql, 200)),
+	)
 }
 
 // flushPendingQuery completes any outstanding query that hasn't been finalized.
 // Called before starting a new query to ensure the previous one is persisted.
+//
+// Callers hold trackerMu.
 func (s *session) flushPendingQuery() {
 	if s.tracker.pendingQuery != nil {
 		s.completeQuery(nil, nil)
@@ -260,24 +572,37 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		return nil // Don't block on decode failure
 	}
 
-	s.logger.InfoContext(s.ctx, "query intercepted",
+	s.logger.InfoContext(s.ctx, logMsgQueryIntercepted,
 		slog.String("sql", truncateSQL(result.SQL, 200)),
 	)
 
-	// Access control check
-	if s.grant != nil {
-		if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
-			s.logger.WarnContext(s.ctx, "query blocked by access control",
-				slog.String("sql", truncateSQL(result.SQL, 200)),
-				slog.Any("error", err),
-			)
-			return err
+	if err := s.book(func() error {
+		// Quota, expiry and revocation first — see handleOALL8.
+		if err := s.checkQuotas(); err != nil {
+			return s.refuseStatement(result.SQL, result.BindValues, err)
 		}
+
+		// Access control check
+		if s.grant != nil {
+			if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
+				s.logger.WarnContext(s.ctx, "query blocked by access control",
+					slog.String("sql", truncateSQL(result.SQL, 200)),
+					slog.Any("error", err),
+				)
+
+				return s.refuseStatement(result.SQL, result.BindValues, err)
+			}
+		}
+
+		// Complete previous query if still pending (sets duration)
+		s.flushPendingQuery()
+
+		return nil
+	}); err != nil {
+		return err
 	}
 
-	// Complete previous query if still pending (sets duration)
-	s.flushPendingQuery()
-
+	// Outside trackerMu, like every other hold; see handleOALL8.
 	approvalUID, herr := s.holdIfNeeded(result.SQL)
 	if herr != nil {
 		return herr
@@ -289,19 +614,22 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		bindValues: result.BindValues,
 		parsedAt:   time.Now(),
 	}
-	s.tracker.pendingQuery = &pendingOracleQuery{
-		cursor:    cursor,
-		startTime: time.Now(),
-	}
 
-	if approvalUID != uuid.Nil {
-		s.tracker.pendingQuery.queryUID = approvalUID
-		s.tracker.pendingQuery.queryPersisted = true
-	} else {
-		s.persistQueryRecord()
-	}
+	return s.book(func() error {
+		s.tracker.pendingQuery = &pendingOracleQuery{
+			cursor:    cursor,
+			startTime: time.Now(),
+		}
 
-	return nil
+		if approvalUID != uuid.Nil {
+			s.tracker.pendingQuery.queryUID = approvalUID
+			s.tracker.pendingQuery.queryPersisted = true
+		} else {
+			s.persistQueryRecord()
+		}
+
+		return nil
+	})
 }
 
 // handleJDBCExec intercepts a JDBC execute-with-SQL message (func=0x11, sub=0x69).
@@ -327,28 +655,40 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 	// /queries is the same one the patterns ran against.
 	sql := shared.NormalizeSQL(result.SQL)
 
-	s.logger.InfoContext(s.ctx, "query intercepted",
+	s.logger.InfoContext(s.ctx, logMsgQueryIntercepted,
 		slog.String("sql", truncateSQL(sql, 200)),
 		slog.String("source", "jdbc"),
 	)
 
-	// Access control check
-	if s.grant != nil {
-		if err := shared.ValidateOracleQuery(sql, s.grant); err != nil {
-			s.logger.WarnContext(s.ctx, "query blocked by access control",
-				slog.String("sql", truncateSQL(sql, 200)),
-				slog.Any("error", err),
-			)
-
-			return err
+	if err := s.book(func() error {
+		// Quota, expiry and revocation first — see handleOALL8. Recorded against the
+		// normalized text, like the control refusal below it.
+		if err := s.checkQuotas(); err != nil {
+			return s.refuseStatement(sql, result.BindValues, err)
 		}
+
+		// Access control check
+		if s.grant != nil {
+			if err := shared.ValidateOracleQuery(sql, s.grant); err != nil {
+				s.logger.WarnContext(s.ctx, "query blocked by access control",
+					slog.String("sql", truncateSQL(sql, 200)),
+					slog.Any("error", err),
+				)
+
+				return s.refuseStatement(sql, result.BindValues, err)
+			}
+		}
+
+		// Complete previous query if still pending (sets duration)
+		s.flushPendingQuery()
+
+		return nil
+	}); err != nil {
+		return err
 	}
 
-	// Complete previous query if still pending (sets duration)
-	s.flushPendingQuery()
-
 	// Approval hold — after the static validators, before anything reaches
-	// upstream.
+	// upstream. Outside trackerMu, like every other hold; see handleOALL8.
 	approvalUID, herr := s.holdIfNeeded(sql)
 	if herr != nil {
 		return herr
@@ -359,27 +699,32 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 		sql:      sql,
 		parsedAt: time.Now(),
 	}
-	s.tracker.pendingQuery = &pendingOracleQuery{
-		cursor:    cursor,
-		startTime: time.Now(),
-	}
 
-	// An approval hold already inserted the row; reuse it rather than writing
-	// a second one for the same statement.
-	if approvalUID != uuid.Nil {
-		s.tracker.pendingQuery.queryUID = approvalUID
-		s.tracker.pendingQuery.queryPersisted = true
-	} else {
-		s.persistQueryRecord()
-	}
+	return s.book(func() error {
+		s.tracker.pendingQuery = &pendingOracleQuery{
+			cursor:    cursor,
+			startTime: time.Now(),
+		}
 
-	return nil
+		// An approval hold already inserted the row; reuse it rather than writing
+		// a second one for the same statement.
+		if approvalUID != uuid.Nil {
+			s.tracker.pendingQuery.queryUID = approvalUID
+			s.tracker.pendingQuery.queryPersisted = true
+		} else {
+			s.persistQueryRecord()
+		}
+
+		return nil
+	})
 }
 
 // handleQueryResultV2 processes a v315+ QueryResult (func=0x10) response.
 // Extracts column names and row values, stores them as query results.
 // For large result sets, rows arrive across multiple response packets.
 // We accumulate rows until we see ORA-01403 (no data found) which signals end of data.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleQueryResultV2(ttcPayload []byte) {
 	result := decodeQueryResultV2(ttcPayload)
 	if result == nil {
@@ -425,43 +770,70 @@ func (s *session) handleQueryResultV2(ttcPayload []byte) {
 	}
 }
 
-// handleOFETCH intercepts an OFETCH message: links the fetch to its cursor.
-//
-// Returns a non-nil error when the fetch must not be forwarded; the caller
-// answers the client with a TTC error instead.
-func (s *session) handleOFETCH(ttcPayload []byte) error {
-	result, err := decodeOFETCH(ttcPayload)
-	if err != nil {
-		s.logger.WarnContext(s.ctx, "failed to decode OFETCH", slog.Any("error", err))
+// handleOCLOSE cleans up cursor tracking when a cursor is closed. Takes
+// trackerMu; forgetCursor is the variant for callers already holding it.
+func (s *session) handleOCLOSE(cursorID uint16) {
+	s.trackerMu.Lock()
+	defer s.trackerMu.Unlock()
 
-		return nil
-	}
-
-	// A fetch that CONTINUES a query already in flight is simply more rows of a
-	// statement that has already been through the gate. It is deliberately left
-	// alone: re-validating here would risk parking a client mid-result-set,
-	// which the hold must never do.
-	if s.tracker.pendingQuery != nil {
-		return nil
-	}
-
-	cursor, ok := s.tracker.cursors[result.CursorID]
-	if !ok {
-		s.logger.DebugContext(s.ctx, "OFETCH for unknown cursor", slog.Uint64("cursor_id", uint64(result.CursorID)))
-
-		return nil
-	}
-
-	// No query in flight: this fetch re-executes the cursor and starts its own
-	// pending query, which is persisted as a distinct row in /queries. Anything
-	// recorded as its own query is gated as its own query, or the audit trail
-	// and the enforcement disagree.
-	return s.regateCursor(cursor)
+	s.forgetCursor(cursorID)
 }
 
-// handleOCLOSE cleans up cursor tracking when a cursor is closed.
-func (s *session) handleOCLOSE(cursorID uint16) {
+// forgetCursor drops one tracker entry. Callers hold trackerMu.
+func (s *session) forgetCursor(cursorID uint16) {
 	delete(s.tracker.cursors, cursorID)
+}
+
+// handleCloseCursors drops every cursor a close-cursors piggyback named.
+//
+// This is the whole reason s.tracker.cursors stays bounded on a long session,
+// and the reason a recycled id resolves to the statement that owns it now
+// rather than the one that used to: clients batch their closes, so removing one
+// per frame left the rest behind as stale entries. The `tracked` attribute is
+// the tracker's size afterwards — TestIntegration_CursorIDLearningMissRate
+// asserts on it, which is what makes "no cap needed" a measured claim rather
+// than an assumption.
+func (s *session) handleCloseCursors(cursorIDs []uint16) {
+	tracked := 0
+
+	_ = s.book(func() error {
+		for _, cursorID := range cursorIDs {
+			s.forgetCursor(cursorID)
+		}
+
+		tracked = len(s.tracker.cursors)
+
+		return nil
+	})
+
+	s.logger.DebugContext(s.ctx, logMsgCursorsClosed,
+		slog.Int("closed", len(cursorIDs)),
+		slog.Int("tracked", tracked),
+	)
+}
+
+// rememberCursor records the statement a cursor id now stands for.
+//
+// Overwriting an existing entry is correct — Oracle really does recycle ids
+// from a small per-session pool — but it is also the exact moment at which a
+// re-execution could start resolving to the wrong statement, so an overwrite
+// that changes the SQL is logged at WARN. It stays a signal and never a
+// refusal: the original bug went unnoticed for so long precisely because this
+// window was silent, and a WARN naming the id and both statements is what makes
+// a future one visible.
+//
+// Callers hold trackerMu — both legs write here (handleOALL8 on the client
+// side, learnCursorID on the upstream side).
+func (s *session) rememberCursor(cursorID uint16, cursor *trackedCursor) {
+	if prev, ok := s.tracker.cursors[cursorID]; ok && prev != cursor && prev.sql != cursor.sql {
+		s.logger.WarnContext(s.ctx, logMsgRecycledCursorID,
+			slog.Uint64("cursor_id", uint64(cursorID)),
+			slog.String("previous_sql", truncateSQL(prev.sql, 200)),
+			slog.String("sql", truncateSQL(cursor.sql, 200)),
+		)
+	}
+
+	s.tracker.cursors[cursorID] = cursor
 }
 
 // captureRow hands a single captured row to the shared batching writer.
@@ -471,6 +843,10 @@ func (s *session) handleOCLOSE(cursorID uint16) {
 // rows to the client and a slow moment in dbbat's own storage must never
 // become a stall on the customer's query. Rows are never accumulated in
 // memory here — the writer's bounded queue is the only buffer.
+//
+// Callers hold trackerMu: every counter it advances (rowNumber, capturedBytes,
+// truncated) lives on the in-flight query, which the client leg reads when it
+// completes that same query.
 func (s *session) captureRow(columns []columnDef, values []interface{}) {
 	pending := s.tracker.pendingQuery
 	if pending == nil || pending.truncated {
@@ -535,6 +911,10 @@ func (s *session) captureRow(columns []columnDef, values []interface{}) {
 }
 
 // persistQueryRecord creates the query record in the database before streaming rows.
+//
+// Callers hold trackerMu. The INSERT does run under the lock, which is the one
+// place bookkeeping blocks on dbbat's own storage — bounded, and cheaper than
+// publishing a half-built pending query to the other goroutine.
 func (s *session) persistQueryRecord() {
 	pending := s.tracker.pendingQuery
 	if pending == nil || pending.queryPersisted || pending.cursor == nil || s.store == nil {
@@ -560,6 +940,80 @@ func (s *session) persistQueryRecord() {
 	pending.rowSink = s.rowWriter.NewSinkFor(created.UID)
 
 	s.stream.Query(created.UID, query)
+}
+
+// refuseStatement records a statement that access control declined and returns
+// the refusal unchanged, so a caller reads as `return s.refuseStatement(...)`.
+//
+// Callers hold trackerMu (it bumps the in-session query counter).
+func (s *session) refuseStatement(sql string, binds []string, refusal error) error {
+	s.recordBlockedQuery(sql, binds, refusal)
+
+	return refusal
+}
+
+// recordBlockedQuery persists a queries row for a statement refused by
+// read_only, block_copy or block_ddl before a single byte of it reached
+// upstream.
+//
+// Until this existed the refusal lived only in the process log (the WARN just
+// above every call site) and in the pcapng capture when capture happened to be
+// on — an evidence gap against PCI DSS 10.2.1.4, and an inconsistency with
+// MySQL/MariaDB, MongoDB and SQL Server, which have always recorded one. The
+// row carries the same error-string shape as those three so the UI badge and
+// any log-based alerting treat all five protocols identically.
+//
+// duration_ms and rows_affected are 0 — the statement never ran — and the row
+// is attributed to the session's connection like any other, so it joins to the
+// user and the database. It deliberately does not touch pendingQuery: a
+// refused statement is not in flight, and the previous query (if any) is still
+// owed its own completion.
+//
+// Callers hold trackerMu (it bumps the in-session query counter).
+func (s *session) recordBlockedQuery(sql string, binds []string, refusal error) {
+	if refusal == nil || s.completionStore == nil || s.connectionUID == uuid.Nil {
+		return
+	}
+
+	errText := refusal.Error()
+	duration := float64(0)
+	rowsAffected := int64(0)
+
+	query := &store.Query{
+		ConnectionID: s.connectionUID,
+		SQLText:      sql,
+		ExecutedAt:   time.Now(),
+		DurationMs:   &duration,
+		RowsAffected: &rowsAffected,
+		Parameters:   formatOracleBinds(binds),
+		// Last gate before the store: never persist an "error" that is not
+		// readable text. See shared.SanitizeQueryError.
+		Error: shared.SanitizeQueryError(s.ctx, s.logger, &errText),
+	}
+
+	go safe.RunGuarded(s.ctx, s.logger, goroutineNameBlockedQuery, func() {
+		created, err := s.completionStore.CreateQuery(s.ctx, query)
+		if err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to log blocked query", slog.Any("error", err))
+
+			return
+		}
+
+		s.stream.Query(created.UID, query)
+
+		// Bytes are left to the TTC error frame's own accounting; this only
+		// bumps the connection's query counter so a refused attempt shows up
+		// there too.
+		if err := s.completionStore.IncrementConnectionStats(s.ctx, s.connectionUID, 0); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
+		}
+	})
+
+	// The attempt counts against the in-session query quota, exactly as it
+	// does on the three protocols that already recorded refusals.
+	if s.grant != nil {
+		s.grant.QueryCount++
+	}
 }
 
 // queryCompletionStore is the slice of the store that query completion writes
@@ -588,6 +1042,12 @@ type queryCompletionStore interface {
 // client socket — this captures TNS framing, AUTH/OALL8/OFETCH payloads and
 // error packets, fixing the previous undercount that summed only response
 // payload lengths.
+//
+// Callers hold trackerMu. Both relay goroutines reach here — the client leg
+// through flushPendingQuery when a new statement starts, the upstream leg
+// through completeQueryFromOER when the server ends the call — and it is a
+// read-modify-write of lastBytesSnapshot and of the grant's byte counter, so
+// racing it double-counts (or loses) bytes charged against a quota.
 func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 	pending := s.tracker.pendingQuery
 	if pending == nil || pending.cursor == nil {
@@ -618,7 +1078,10 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 		// Update with duration, error, rows affected. results_truncated is only
 		// known now: the row was inserted before any row was streamed.
 		if s.completionStore != nil {
-			go s.finalizeQuery(pending.queryUID, pending.rowSink, &duration, rowsAffected, queryError, pending.truncated, bytesTransferred)
+			go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryCompletion, func() {
+				s.finalizeQuery(pending.queryUID, pending.rowSink, &duration,
+					rowsAffected, queryError, pending.truncated, bytesTransferred)
+			})
 		}
 	} else if s.completionStore != nil {
 		// Create the query record (no rows to stream)
@@ -633,7 +1096,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 			ResultsTruncated: pending.truncated,
 		}
 
-		go func() {
+		go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
 			if _, err := s.completionStore.CreateQuery(s.ctx, query); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
 			}
@@ -641,7 +1104,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 			if err := s.completionStore.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 			}
-		}()
+		})
 	}
 
 	// Update local grant state for in-session quota checks
@@ -680,54 +1143,73 @@ func (s *session) finalizeQuery(
 	}
 }
 
-// writeTTCError sends a TTC error response to the client.
-// This creates a response that Oracle clients (sqlplus, JDBC) can parse.
-// Format: TNS Data packet with TTC Response function code + error info.
+// writeTTCError ends the client's call with an ORA error.
+//
+// This is the frame every Oracle refusal rides on — `read_only`, `block_ddl`,
+// `block_copy`, a quota, an expired or revoked grant — so what it emits has to
+// be something a real client accepts as the end of a call, not merely something
+// that looks like an error. It used to emit a TTC Response (0x08) with
+// fixed-width big-endian fields, which no client parses: measured against
+// Oracle 23ai Free, go-ora's ExecContext never returned from a refused
+// statement at all.
+//
+// A server ends a call with an OER (message type 0x04) whose body is the TTC
+// summary object, and that is what this builds — see encodeOER for the layout
+// and for how the two negotiated variations in it are resolved. Nothing else in
+// the message matters to a client: go-ora leaves its read loop on the message
+// type alone (`msg == 4`), and python-oracledb treats a processed error info as
+// the end of the response, so both come back with the ORA code and text and the
+// connection stays usable for the next statement.
+//
+// The truncation is deliberate: a message long enough to need the chunked CLR
+// form would have to match the session's negotiated UseBigClrChunks, and no
+// refusal reason needs the room.
 func (s *session) writeTTCError(oraErrorCode int, message string) error {
-	// Build TTC error response payload:
-	// [data flags: 2 bytes] [func code: 1 byte = 0x08 Response]
-	// [sequence number: 1 byte] [error code: 4 bytes BE]
-	// [cursor ID: 2 bytes] [row count: 4 bytes]
-	// [error flag: 2 bytes] [error message length: 2 bytes] [error message]
 	errMsg := fmt.Sprintf("ORA-%05d: %s", oraErrorCode, message)
-	buf := make([]byte, 0, 18+len(errMsg))
-
-	// Data flags
-	buf = append(buf, 0x00, 0x00)
-
-	// TTC function code: Response
-	buf = append(buf, byte(TTCFuncResponse))
-
-	// Sequence number
-	buf = append(buf, 0x01)
-
-	// Error code (4 bytes, big-endian)
-	errCode := make([]byte, 4)
-	binary.BigEndian.PutUint32(errCode, uint32(oraErrorCode))
-	buf = append(buf, errCode...)
-
-	// Cursor ID (2 bytes) — 0 for error
-	buf = append(buf, 0x00, 0x00)
-
-	// Row count (4 bytes) — 0 for error
-	buf = append(buf, 0x00, 0x00, 0x00, 0x00)
-
-	// Error flag (2 bytes) — non-zero indicates error
-	buf = append(buf, 0x00, 0x01)
-
-	// Error message: ORA-NNNNN: message
-	msgLen := make([]byte, 2)
-	binary.BigEndian.PutUint16(msgLen, uint16(len(errMsg)))
-	buf = append(buf, msgLen...)
-	buf = append(buf, []byte(errMsg)...)
-
-	pkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: buf,
+	if len(errMsg) > oerMaxMessageLen {
+		errMsg = errMsg[:oerMaxMessageLen]
 	}
 
-	return writeTNSPacket(s.clientConn, pkt)
+	shape, seq, callNumber := s.nextOERFrame()
+
+	body := encodeOER(shape, oerSummary{
+		CallStatus:   1,
+		SeqNumber:    seq,
+		ErrorCode:    oraErrorCode,
+		ErrorMessage: errMsg,
+		CallNumber:   callNumber,
+	})
+
+	payload := make([]byte, 0, ttcDataFlagsSize+len(body)+1)
+	payload = append(payload, 0x00, 0x00) // data flags
+	payload = append(payload, body...)
+
+	// A session whose upstream terminates messages with the end-of-response
+	// marker needs one here too. OCI/sqlplus negotiates it and waits for it:
+	// with a byte-perfect OER and no marker it hung exactly as it did on the
+	// old frame.
+	if shape.endOfResponse {
+		payload = append(payload, ttcEndOfResponse)
+	}
+
+	// v315+ framing, for the same reason sendAuthFailed spells out: after the
+	// Accept a modern client reads the packet length as a 4-byte field, and the
+	// legacy 2-byte framing writeTNSPacket emits leaves the length bytes reading
+	// as a multi-megabyte packet. That was the *other* half of this frame's
+	// hang, and the half a correct OER body alone does not fix — measured
+	// against Oracle 23ai Free, go-ora parked on a byte-perfect OER until it was
+	// framed this way.
+	if _, err := s.clientConn.Write(encodeV315DataPacket(payload)); err != nil {
+		return fmt.Errorf("write TTC error frame: %w", err)
+	}
+
+	return nil
 }
+
+// oerMaxMessageLen keeps a synthesized error text inside the short (single
+// length byte) CLR form, whose encoding is the same whatever the session
+// negotiated.
+const oerMaxMessageLen = 240
 
 // sendOracleError sends an ORA-01031 (insufficient privileges) error to the client.
 func (s *session) sendOracleError(queryErr error) error {
@@ -783,6 +1265,9 @@ func decodeCursorIDFromOCLOSE(ttcPayload []byte) (uint16, error) {
 // the grant's expiry between commands: expiry is otherwise only validated at
 // connect time, so without this a session opened just before expiry could keep
 // issuing queries indefinitely.
+//
+// Callers hold trackerMu: it reads the in-session grant counters that
+// completeQuery advances from whichever goroutine finished the last query.
 func (s *session) checkQuotas() error {
 	// A grant revoked mid-session invalidates every subsequent command, even
 	// before the watchdog force-closes the connection.
@@ -812,6 +1297,12 @@ func (s *session) checkQuotas() error {
 // holdIfNeeded runs the approval gate for one statement, after the static
 // validators and before anything is forwarded upstream. Returns the uid of the
 // pending row the gate created (uuid.Nil when no hold happened).
+//
+// Deliberately called with trackerMu NOT held: a hold has no timeout, and the
+// upstream reader takes that lock for every packet it relays. Holding it here
+// would freeze the response leg of the session for as long as a human takes to
+// answer. That is why each statement handler is two book() steps with this
+// call in between rather than one.
 func (s *session) holdIfNeeded(sql string) (uuid.UUID, error) {
 	if !s.approvalGate.Active() {
 		return uuid.Nil, nil

@@ -420,3 +420,52 @@ test.describe("Grant definition priority", () => {
     await expect(hint).toHaveText("auto: 50");
   });
 });
+
+test.describe("Grant definition deactivated visibility toggle", () => {
+  test("a deactivated definition disappears from the default list and reappears via the toggle", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto(DEFS_URL);
+    await page.waitForLoadState("networkidle");
+
+    const name = `E2E Deactivate ${Date.now()}`;
+
+    await openCreateDialog(page);
+    await fillDefinition(page, {
+      name,
+      description: "will be deactivated",
+      durationValue: "1",
+      durationUnitLabel: "Hours",
+      controls: ["read_only"],
+    });
+    await submitDialog(page);
+
+    const row = rowByName(page, name);
+    await expect(row).toBeVisible();
+
+    // The toggle defaults to off: only active definitions load.
+    const toggle = page.getByTestId("show-deactivated-toggle");
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute("data-state", "unchecked");
+
+    // Deactivate it.
+    await row.locator('[data-testid^="deactivate-grant-definition-"]').click();
+    await page.waitForSelector('[role="alertdialog"]');
+    await page.getByRole("button", { name: "Deactivate" }).click();
+    await expect(page.locator('[role="alertdialog"]')).toBeHidden();
+
+    // Gone from the default (active-only) view.
+    await expect(row).toHaveCount(0);
+
+    // Flip the toggle: the deactivated definition reappears, badged as such.
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("data-state", "checked");
+    await expect(row).toBeVisible();
+    await expect(row).toContainText("deactivated");
+
+    // Flip it back off: it disappears again.
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("data-state", "unchecked");
+    await expect(row).toHaveCount(0);
+  });
+});

@@ -73,6 +73,11 @@ func ResolvePriority(explicit int16, controls []string) int16 {
 // AccessGrant. The only value derived from the shape is Priority, which is a
 // selection rank rather than policy and has to be stored so the ordering can
 // happen in SQL.
+//
+// ServerGroupUID is deliberately *not* set here: binding needs a database
+// round-trip, so it is resolved by the creation paths that own a handle —
+// CreateGrant and the grant-request approval transaction — through
+// resolveServerGroupBinding. This function stays pure.
 func BuildGrantFromDefinition(def *GrantDefinition, userID, databaseID, grantedBy uuid.UUID, now time.Time) *Grant {
 	// A definition's priority is optional: nil means "whatever the controls
 	// earn", which is what every definition predating the column wants.
@@ -110,6 +115,25 @@ func copyUUIDs(in []uuid.UUID) []uuid.UUID {
 	return out
 }
 
+// coversDatabaseSQL is the auth path's coverage predicate, in one place
+// because two queries must agree on it exactly.
+//
+// A grant bound to a server group covers exactly what that group holds *right
+// now* — the binding replaces the single-database scope rather than adding to
+// it. So a server removed from the group stops being covered even if it is the
+// database the grant was originally issued for: "removing narrows" has no
+// exceptions, which is the only version of that rule an operator can hold in
+// their head.
+//
+// The anchor (database_id) is what an unbound grant covers, and it is also the
+// fallback a grant falls back to when its group is deleted outright
+// (server_group_uid is ON DELETE SET NULL) — access narrows to where it
+// started, never widens.
+//
+// Both placeholders take the target database uid.
+const coversDatabaseSQL = "((server_group_uid IS NULL AND database_id = ?) " +
+	"OR server_group_uid IN (SELECT group_uid FROM server_group_members WHERE server_uid = ?))"
+
 // CreateGrant creates a new access grant. The grant must name the definition
 // it is an instance of: a grant with no definition would carry no shape at
 // all, and there is deliberately no code path that produces one.
@@ -128,9 +152,18 @@ func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 		def = loaded
 	}
 
+	// Bind the grant to whichever of the definition's server groups currently
+	// contains the target database. This is what makes the grant follow the
+	// group: a server added to it later is covered without re-issuing.
+	serverGroupUID, err := resolveServerGroupBinding(ctx, s.db, def, grant.DatabaseID)
+	if err != nil {
+		return nil, err
+	}
+
 	result := &AccessGrant{
 		UserID:            grant.UserID,
 		DatabaseID:        grant.DatabaseID,
+		ServerGroupUID:    serverGroupUID,
 		GrantDefinitionID: def.UID,
 		GrantedBy:         grant.GrantedBy,
 		StartsAt:          grant.StartsAt,
@@ -139,11 +172,10 @@ func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 		CreatedAt:         time.Now(),
 	}
 
-	_, err := s.db.NewInsert().
+	if _, err := s.db.NewInsert().
 		Model(result).
 		Returning("*").
-		Exec(ctx)
-	if err != nil {
+		Exec(ctx); err != nil {
 		return nil, fmt.Errorf("failed to create grant: %w", err)
 	}
 
@@ -155,24 +187,39 @@ func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 
 // GetActiveGrant retrieves an active grant for a user and database.
 //
-// "Active" now includes the definition's own state: a grant whose definition
+// This is the auth path. All five protocol proxies resolve their session's
+// grant through here, so it is the one place group-bound coverage has to be
+// understood: a grant matches the target database when it is that grant's
+// anchor **or** when the grant's server group currently contains it. Adding a
+// server to a group therefore extends every live grant bound to that group,
+// with no re-issuance — membership is read live and never snapshotted.
+//
+// "Active" also includes the definition's own state: a grant whose definition
 // was **deactivated** is not returned, so deactivation fails closed for every
 // grant issued from that definition — including grants pinned to an older
 // version, since deactivation applies to the whole lineage. Being
 // **archived** (superseded by an edit) is explicitly not deactivation and is
 // never consulted here: a grant keeps authorizing under the exact version it
 // was issued from.
+//
+// The window is compared against the *database's* clock (NOW() below), which
+// is why every issuance path stamps starts_at from that same clock rather than
+// from time.Now() — see Store.Now. A grant stamped from a process running
+// ahead of its store would be approved and refused here until the skew
+// elapsed.
 func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID) (*Grant, error) {
 	grant := new(AccessGrant)
 	err := s.db.NewSelect().
 		Model(grant).
 		Where("user_id = ?", userID).
-		Where("database_id = ?", databaseID).
+		Where(coversDatabaseSQL, databaseID, databaseID).
 		Where("revoked_at IS NULL").
 		Where("starts_at <= NOW()").
 		Where("expires_at > NOW()").
 		Where("grant_definition_id IN (SELECT uid FROM grant_definitions WHERE is_active)").
-		// Highest priority wins. Ties go to the grant that lasts longest (a
+		// Highest priority wins — including between two group-bound grants
+		// whose groups overlap on this database, which is exactly how
+		// priority ranks them. Ties go to the grant that lasts longest (a
 		// session is pinned to the grant it was admitted under for its whole
 		// life, so the longer window is the more useful pick), then to the
 		// newest — which is the pre-priority behavior, preserved as the last
@@ -284,6 +331,56 @@ func (s *Store) GetGrantByUID(ctx context.Context, uid uuid.UUID) (*Grant, error
 	return grant, nil
 }
 
+// GetGrantsByUIDs is the batched form of GetGrantByUID: two queries whatever
+// the number of uids — one for the grant rows, one for the definitions they
+// point at (attachDefinitions) — returning the grants keyed by uid.
+//
+// Unfiltered on purpose, exactly like GetGrantByUID: a lookup by uid must still
+// resolve a grant whose definition has since been deactivated or superseded.
+//
+// **It does not populate the live usage counters** (QueryCount and
+// BytesTransferred stay zero), which is the one way it differs from
+// GetGrantByUID. Those are two aggregate queries *per grant* — the very
+// per-row cost batching exists to remove — and they say nothing about who may
+// approve anything. The caller this exists for is the approval chain, which
+// reads only the definition's approver list. Anything that needs the counters
+// must keep using GetGrantByUID.
+//
+// A uid naming no row is absent from the map, which the caller reads as the
+// fail-closed equivalent of GetGrantByUID's ErrGrantNotFound.
+func (s *Store) GetGrantsByUIDs(ctx context.Context, uids []uuid.UUID) (map[uuid.UUID]*Grant, error) {
+	result := make(map[uuid.UUID]*Grant, len(uids))
+
+	if len(uids) == 0 {
+		return result, nil
+	}
+
+	var grants []AccessGrant
+
+	err := s.db.NewSelect().
+		Model(&grants).
+		Where("uid IN (?)", bun.List(uids)).
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get grants by uids: %w", err)
+	}
+
+	loaded := make([]*AccessGrant, 0, len(grants))
+	for i := range grants {
+		loaded = append(loaded, &grants[i])
+	}
+
+	if err := s.attachDefinitions(ctx, loaded); err != nil {
+		return nil, err
+	}
+
+	for _, g := range loaded {
+		result[g.UID] = g
+	}
+
+	return result, nil
+}
+
 // UserHasGrantForDefinition reports whether userID holds any grant (active,
 // expired, or revoked) issued from definitionID. Used to let a non-admin read
 // a grant definition by uid even when it is archived or otherwise out of
@@ -314,7 +411,10 @@ func (s *Store) ListGrants(ctx context.Context, filter GrantFilter) ([]Grant, er
 	}
 
 	if filter.DatabaseID != nil {
-		q = q.Where("database_id = ?", *filter.DatabaseID)
+		// Same coverage rule as GetActiveGrant, so "the grants on this
+		// database" means what the proxy means by it: anchored here, or bound
+		// to a server group that currently contains it.
+		q = q.Where(coversDatabaseSQL, *filter.DatabaseID, *filter.DatabaseID)
 	}
 
 	if filter.ActiveOnly {
@@ -381,13 +481,24 @@ func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error
 		upper = *g.RevokedAt
 	}
 
+	// The unstamped fallback has to span the grant's whole coverage, not just
+	// its anchor: quotas are properties of the grant, and a group-bound grant
+	// covers every database in its group, so one budget is consumed across all
+	// of them. Stamped connections already span it for free — they key on
+	// grant_uid, which says nothing about which database they used.
+	//
+	// Same coverage rule as coversDatabaseSQL, from the connection's side: the
+	// anchor for an unbound grant, the group's current membership for a bound
+	// one.
 	var queryCount int64
 	err := s.db.NewSelect().
 		ColumnExpr("COUNT(*)").
 		TableExpr("queries AS q").
 		Join("JOIN connections AS c ON q.connection_id = c.uid").
-		Where("(c.grant_uid = ? OR (c.grant_uid IS NULL AND c.user_id = ? AND c.database_id = ?))",
-			g.UID, g.UserID, g.DatabaseID).
+		Where("(c.grant_uid = ? OR (c.grant_uid IS NULL AND c.user_id = ? AND "+
+			"((?::uuid IS NULL AND c.database_id = ?) OR c.database_id IN "+
+			"(SELECT server_uid FROM server_group_members WHERE group_uid = ?))))",
+			g.UID, g.UserID, g.ServerGroupUID, g.DatabaseID, g.ServerGroupUID).
 		Where("q.executed_at >= ?", g.StartsAt).
 		Where("q.executed_at < ?", upper).
 		Scan(ctx, &queryCount)
@@ -399,8 +510,10 @@ func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error
 	err = s.db.NewSelect().
 		ColumnExpr("COALESCE(SUM(bytes_transferred), 0)").
 		Model((*Connection)(nil)).
-		Where("(grant_uid = ? OR (grant_uid IS NULL AND user_id = ? AND database_id = ?))",
-			g.UID, g.UserID, g.DatabaseID).
+		Where("(grant_uid = ? OR (grant_uid IS NULL AND user_id = ? AND "+
+			"((?::uuid IS NULL AND database_id = ?) OR database_id IN "+
+			"(SELECT server_uid FROM server_group_members WHERE group_uid = ?))))",
+			g.UID, g.UserID, g.ServerGroupUID, g.DatabaseID, g.ServerGroupUID).
 		Where("connected_at >= ?", g.StartsAt).
 		Where("connected_at < ?", upper).
 		Scan(ctx, &bytesTransferred)

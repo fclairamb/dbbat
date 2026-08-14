@@ -24,9 +24,28 @@ var errFakeInsert = errors.New("fake insert failure")
 type fakeRowStore struct {
 	mu       sync.Mutex
 	batches  [][]store.PendingQueryRow
+	sealed   []uuid.UUID // captures sealed at their flush barrier, in order
 	err      error
 	blockOn  chan struct{} // when non-nil, every insert waits for it
 	inserted chan struct{} // when non-nil, signaled after each insert
+}
+
+// SealQueryRowChain stands in for the row-chain stamp the real store writes
+// when a capture reaches its flush barrier.
+func (f *fakeRowStore) SealQueryRowChain(_ context.Context, queryUID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.sealed = append(f.sealed, queryUID)
+
+	return nil
+}
+
+func (f *fakeRowStore) sealedQueries() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]uuid.UUID(nil), f.sealed...)
 }
 
 func (f *fakeRowStore) StoreQueryRows(_ context.Context, rows []store.PendingQueryRow) error {
@@ -505,4 +524,49 @@ func TestRowWriter_ResolvedSinkAwaitIsAllocationFree(t *testing.T) {
 	})
 
 	assert.Zero(t, allocs, "awaiting a resolved sink must not allocate a timer per row")
+}
+
+// TestRowWriter_FlushSealsTheRowChain pins where the tamper-evident stamp is
+// written: at the barrier, once every row of the capture is durable. Sealing
+// any earlier would record a head the capture then grows past.
+func TestRowWriter_FlushSealsTheRowChain(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeRowStore{}
+	w := NewRowWriter(fake, slog.Default())
+
+	defer w.Close(context.Background())
+
+	queryUID := uuid.New()
+	sink := w.NewSinkFor(queryUID)
+
+	for i := 1; i <= 5; i++ {
+		require.True(t, sink.Add(testRow(i, 8)))
+	}
+
+	assert.Empty(t, fake.sealedQueries(), "a capture must not be sealed before its barrier")
+
+	sink.Flush(context.Background())
+
+	assert.Equal(t, []uuid.UUID{queryUID}, fake.sealedQueries())
+	assert.Equal(t, 5, fake.rowCount(), "the seal must come after the rows land")
+}
+
+// TestRowWriter_UnresolvedSinkIsNotSealed covers the sink whose parent query
+// record never materialized: it owns no query, so there is nothing to stamp.
+func TestRowWriter_UnresolvedSinkIsNotSealed(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeRowStore{}
+	w := NewRowWriter(fake, slog.Default())
+
+	defer w.Close(context.Background())
+
+	sink := w.NewSink()
+	require.True(t, sink.Add(testRow(1, 8)))
+
+	sink.Fail()
+	sink.Flush(context.Background())
+
+	assert.Empty(t, fake.sealedQueries())
 }

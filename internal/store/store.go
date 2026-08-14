@@ -15,6 +15,7 @@ import (
 	"github.com/uptrace/bun/migrate"
 
 	"github.com/fclairamb/dbbat/internal/cache"
+	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/migrations"
 )
 
@@ -26,6 +27,24 @@ type Store struct {
 	revocations *cache.RevocationRegistry // In-process fan-out of grant revocations to live proxy sessions
 	instanceID  string                    // Identifies this process among the replicas sharing this store
 	runID       string                    // Identifies this *run*: minted here, never configurable
+
+	// chainKey is the HMAC key sealing the audit and query chains — an HKDF
+	// subkey of the master encryption key, never the master key itself and
+	// never written anywhere. Empty disables chaining. See chain.go.
+	chainKey []byte
+
+	// queryRetention is the configured DBB_QUERY_STORAGE_RETENTION. The sweep
+	// itself takes its window as an argument (CleanupOldQueryRows), so this is
+	// not what drives deletion; it is what lets *verification* tell a session
+	// retention emptied from one somebody emptied. See checkEmptiedChain.
+	queryRetention time.Duration
+
+	// auditChain caches the head of the store-wide audit chain; queryChains
+	// caches one head per live connection; rowChains caches one head per query
+	// whose result rows are being captured.
+	auditChain  chainState
+	queryChains *queryChains
+	rowChains   *queryChains
 }
 
 // Options configures Store creation.
@@ -39,6 +58,21 @@ type Options struct {
 	// touching another replica's live sessions. Empty disables that reconcile
 	// rather than widening it.
 	InstanceID string
+
+	// EncryptionKey is the master AES-256 key (DBB_KEY / DBB_KEYFILE). The
+	// store keeps only an HKDF subkey of it, used to seal the tamper-evident
+	// audit and query chains. Empty leaves those rows unchained — which is
+	// what every test store that does not care about the chain gets, and what
+	// a serving process never gets, because config always resolves a key.
+	EncryptionKey []byte
+
+	// QueryRetention is the configured query-history retention window
+	// (DBB_QUERY_STORAGE_RETENTION), zero when retention is disabled — the
+	// default. Chain verification needs it to judge a session whose statements
+	// are *all* gone: retention can only account for that when the session ran
+	// entirely before the retention cutoff. Zero therefore means "nothing
+	// legitimately deletes statements here", which is the strictest reading.
+	QueryRetention time.Duration
 }
 
 // New creates a new Store instance and runs migrations
@@ -74,7 +108,21 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		// one live process, and anything an operator can set — including
 		// DBB_INSTANCE_ID — can end up shared by several replicas. UUIDv7 so
 		// it also sorts by start time, which makes a registry dump readable.
-		runID: newUIDv7().String(),
+		runID:          newUIDv7().String(),
+		queryChains:    newQueryChains(),
+		rowChains:      newQueryChains(),
+		queryRetention: options.QueryRetention,
+	}
+
+	if len(options.EncryptionKey) > 0 {
+		chainKey, err := crypto.DeriveAuditChainKey(options.EncryptionKey)
+		if err != nil {
+			_ = db.Close()
+
+			return nil, fmt.Errorf("failed to derive the audit chain key: %w", err)
+		}
+
+		s.chainKey = chainKey
 	}
 
 	// Drop-then-migrate is one schema change, so it happens under a single hold
@@ -118,6 +166,61 @@ func (s *Store) Health(ctx context.Context) error {
 // DB returns the underlying bun.DB for advanced operations
 func (s *Store) DB() *bun.DB {
 	return s.db
+}
+
+// Now returns the *database server's* clock.
+//
+// Anything whose window is later evaluated in SQL against NOW() has to be
+// stamped from here rather than from time.Now(): dbbat and its store are two
+// machines, their clocks are only ever approximately equal, and a grant
+// stamped a few milliseconds in the store's future is refused by the auth path
+// (`starts_at <= NOW()` in GetActiveGrant) for exactly as long as the skew
+// lasts. See dbNow.
+//
+// Which writers must use it, decided site by site when the short TTLs were
+// moved over:
+//
+//   - Production code writing a bound that SQL later judges — grant windows
+//     (IssueGrant, ApproveGrantRequest) and the oauth_states TTLs (device
+//     authorizations, login exchanges, OAuth CSRF states) — must. The last
+//     three do it SQL-side, inside the insert, so there is no extra round
+//     trip: see CreateOAuthState.
+//   - Integration fixtures that insert a window into a real store and then
+//     drive the auth path over it must too, because the container's clock is
+//     nobody's guarantee — internal/proxy/testsupport does.
+//   - Unit tests holding a store.Grant in memory (internal/mcp,
+//     internal/proxy/*) need not: no database ever judges those bounds, so
+//     there is only one clock. Same for a Go value compared against
+//     time.Now() on both sides, like an APIKey's expiry.
+//   - This package's own tests keep time.Now() for the same reason, margins
+//     notwithstanding: several of them stamp `starts_at: now` with no margin
+//     at all, and it is harmless because nothing filters those rows on it.
+//     They assert on the value CreateGrant returns, or fetch it back with
+//     GetGrantByUID — a primary-key lookup with no window predicate. The
+//     moment a test reads a row through GetActiveGrant instead, the SQL
+//     window filter is in play and it has to stamp from here, whatever the
+//     margin: a zero-margin window issued and immediately read back through
+//     that filter is precisely the parent flake.
+//
+// So the criterion is "is this window ever judged by SQL?", not "is the
+// margin wide enough". Margin width only buys comfort where the answer is
+// already yes.
+func (s *Store) Now(ctx context.Context) (time.Time, error) {
+	return dbNow(ctx, s.db)
+}
+
+// dbNow reads the database clock through the given handle — a *bun.DB or an
+// open transaction. Inside a transaction NOW() is the transaction's start
+// timestamp, which is what callers issuing a row in that transaction want: it
+// is at or before every subsequent statement's NOW(), so a window opened at
+// that instant is already open by the time anyone can read the row.
+func dbNow(ctx context.Context, db bun.IDB) (time.Time, error) {
+	var now time.Time
+	if err := db.NewSelect().ColumnExpr("NOW()").Scan(ctx, &now); err != nil {
+		return time.Time{}, fmt.Errorf("failed to read the database clock: %w", err)
+	}
+
+	return now, nil
 }
 
 // SetAuthCache sets the authentication cache for API key verification.
@@ -382,6 +485,8 @@ func (s *Store) DropAllTables(ctx context.Context) error {
 		"user_identities",
 		"user_group_members",
 		"user_groups",
+		"server_group_members",
+		"server_groups",
 		"global_parameters",
 		"servers",
 		"databases", // pre-20260716120000 table name; drop in case of a stale dev DB

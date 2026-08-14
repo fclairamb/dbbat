@@ -24,6 +24,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -221,7 +222,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, mysqlImage, dbProtocol,
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{UserID: user.UID, DatabaseID: db.UID, GrantedBy: user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{}}})
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{
@@ -488,7 +489,8 @@ func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, databases)
 
-	_, err = f.store.CreateGrant(ctx, &store.Grant{UserID: user.UID, DatabaseID: databases[0].UID, GrantedBy: user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{"read_only"}}})
+	_, err = testsupport.CreateGrantWithControls(ctx, t, f.store, user.UID, databases[0].UID,
+		[]string{store.ControlReadOnly})
 	require.NoError(t, err)
 
 	db := f.dialTLS()

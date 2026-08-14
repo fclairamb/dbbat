@@ -21,6 +21,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -70,6 +71,17 @@ type session struct {
 	// the compressed form (thin clients). Detected from AUTH Phase 1 and used to
 	// shape the challenge dbbat issues so OCI can parse it.
 	clientWideEncoding bool
+
+	// clientWide64Encoding records the *other* OCI dialect: the one whose TTC
+	// op headers and summary objects are marshaled at 64-bit widths (the client
+	// bundled in gvenzl/oracle-free:23-slim, 23.26), as opposed to the 32-bit
+	// ones the Instant Client 23.3 writes. Detected from the same AUTH Phase 1,
+	// and read by nextOERFrame: a session that has to refuse *before* any
+	// upstream OER taught it a shape would otherwise answer a 64-bit client
+	// with a 32-bit frame, which that client cannot parse — it waits for the
+	// rest of a response that has already arrived. See docs/oracle.md,
+	// "Two OCI encodings, not one".
+	clientWide64Encoding bool
 
 	// clientBigClrChunks records whether the upstream advertised
 	// ServerCompileTimeCaps[37]&0x20 (UseBigClrChunks) during the pre-auth relay.
@@ -126,7 +138,33 @@ type session struct {
 	// and JDBC trips ORA-17401 in T4CTTIfun.receive.
 	clientAuthPhase2Pkt *TNSPacket
 
-	// Query tracking
+	// Query tracking.
+	//
+	// trackerMu guards every piece of per-session query bookkeeping: the
+	// cursor map, the in-flight query pointer *and the fields of the
+	// pendingOracleQuery (and trackedCursor) it points at*, lastBytesSnapshot,
+	// and the in-session grant counters (QueryCount / BytesTransferred).
+	//
+	// All of it is touched by both relay goroutines. The client reader starts,
+	// gates and completes statements (handleOALL8, handlePiggybackExec,
+	// completeQuery); the upstream reader learns cursor ids, captures rows and
+	// completes the *same* statement off the server's own answer
+	// (learnCursorID, handleQueryResultV2, completeQueryFromOER) while reading
+	// pendingQuery once per forwarded packet for the mid-stream limit check.
+	// Two of those pairs were live data races until this mutex existed; they
+	// were invisible because make test-e2e-oracle ran without -race, unlike
+	// make test. See
+	// specs/todos/2026-08-11-10-race-detector-on-the-integration-suites.md.
+	//
+	// The convention, in the same spirit as heldMu / oerMu above: it is a
+	// per-concern lock, never a session-wide one. It is taken around
+	// bookkeeping only — never across a socket read, a forwarded write, or an
+	// approval hold — so the two directions keep relaying concurrently. The
+	// upstream leg takes it once for the whole of interceptUpstreamMessage
+	// (which does no I/O); the client leg takes it in explicit regions, with
+	// holdIfNeeded deliberately outside them. Functions below are annotated
+	// with which side of that boundary they sit on.
+	trackerMu    sync.Mutex
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
 
@@ -154,6 +192,10 @@ type session struct {
 	// the previous query. completeQuery diffs against it to attribute
 	// bytes to the just-finished query (the first query absorbs the
 	// auth/handshake traffic, which is the right place for it).
+	//
+	// Guarded by trackerMu: completeQuery runs on either relay goroutine, and
+	// a read-modify-write of this from both is how bytes get double-counted
+	// against a byte quota.
 	lastBytesSnapshot int64
 
 	// watched sits below the counting conn so an approval hold can keep
@@ -176,9 +218,51 @@ type session struct {
 	// guard enforces the grant's time-window and bandwidth limits mid-stream.
 	guard *shared.LimitGuard
 
+	// held is the mid-stream limit violation waiting for a call boundary, nil
+	// when none is armed. It is written by the upstream reader (which arms it),
+	// read by the client reader (which answers the client's next call with it)
+	// and by the limit watchdog (which must not pre-empt that handoff), hence
+	// the mutex. See holdRefusal.
+	refusalMu sync.Mutex
+	held      *heldRefusal
+
+	// refusalHoldBytes / refusalHoldGrace override the two fail-safe bounds
+	// below, and exist so a test can actually *reach* them. Both are sized so a
+	// live client never hits them — that is the whole point of their values —
+	// which used to leave the relay and the watchdog that enforce them coverable
+	// only by hand-mutating a held refusal's own marks. Zero means "use the
+	// constant", so a bare &session{} (which is how a dozen unit tests build
+	// one) keeps the production bounds; read them through refusalBytesBound and
+	// refusalGrace rather than directly.
+	refusalHoldBytes int64
+	refusalHoldGrace time.Duration
+
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
+
+	// oer holds the negotiated layout of the TTC summary object, so a refusal
+	// dbbat synthesizes is framed the way this client parses one. Its
+	// capability half is filled in from the relayed Set Protocol / Set Data
+	// Types exchange; its tail half is learned from the upstream's own OERs.
+	// See ttc_oer_encode.go.
+	//
+	// oerSeq is the highest end-to-end sequence number seen from the upstream,
+	// so a synthesized OER continues the session's count.
+	//
+	// oerCallNumber is the TTC sequence number of the call the client is
+	// waiting on, taken off its own request (clientCallNumber). A server echoes
+	// it in the summary object's callNumber, and ojdbc 26.1 refuses to read the
+	// error out of an OER whose callNumber is not the one it sent.
+	//
+	// All three are written by the upstream reader or the client reader and read
+	// by whichever goroutine refuses a statement — the client reader, the
+	// upstream reader on a mid-stream limit violation, or the limit watchdog —
+	// hence the mutex.
+	oerMu         sync.Mutex
+	oer           oerShape
+	oerSeq        int
+	oerCallNumber byte
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -230,6 +314,7 @@ func newSession(
 		rowWriter:       rowWriter,
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
+		oer:             defaultOERShape(),
 	}
 
 	// Assigned separately so a nil store stays a nil interface rather than a
@@ -303,7 +388,8 @@ func (s *session) run() error {
 	// the AUTH call with a break/reset marker exchange — the "sqlplus stalls
 	// before AUTH Phase 2" failure. Thin clients keep the proven hand-built
 	// summaries and the original ordering.
-	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Pkt.Payload)
+	s.observeClientAuthEncoding(phase1Pkt.Payload)
+
 	if s.clientWideEncoding {
 		if err := s.beginUpstreamAuth(); err != nil {
 			return fmt.Errorf("upstream auth failed: %w", err)
@@ -776,12 +862,12 @@ func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifiers []*o5Logo
 		// do this (it has no plaintext).
 		if od := apiKey.OracleData(); od != nil && !od.UserSalt {
 			keyID, plain, encKey := apiKey.ID, plainPassword, s.encryptionKey
-			go func() {
+			go safe.RunGuarded(context.Background(), s.logger, goroutineNameVerifierUpgrade, func() {
 				if err := s.store.UpgradeAPIKeyO5LogonVerifiers(context.Background(), keyID, plain, encKey); err != nil {
 					s.logger.WarnContext(context.Background(), "failed to upgrade legacy O5LOGON verifiers to user salts",
 						slog.String("key_id", keyID.String()), slog.Any("error", err))
 				}
-			}()
+			})
 		}
 
 		return apiKey, nil
@@ -868,7 +954,7 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	// compressed length-prefixed form. Detect the client's encoding from its
 	// AUTH Phase 1 and mirror it in the challenge — OCI breaks/aborts on a
 	// compressed challenge it cannot parse.
-	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Pkt.Payload)
+	s.observeClientAuthEncoding(phase1Pkt.Payload)
 
 	// Send AUTH challenge to client
 	s.logger.DebugContext(s.ctx, "sending AUTH challenge",
@@ -876,8 +962,10 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.Int("vfrdata_len", len(vfrData)),
 		slog.Bool("custom_hash", o5.CustomHashEnabled()),
 		slog.Int("verifier_type", o5.VerifierType()),
-		slog.Bool("wide_encoding", s.clientWideEncoding))
-	challengePayload := buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount(), o5.VerifierType(), s.clientWideEncoding)
+		slog.Bool("wide_encoding", s.clientWideEncoding),
+		slog.Bool("wide_encoding_64", s.clientWide64Encoding),
+		slog.Bool("big_clr_chunks", s.clientBigClrChunks))
+	challengePayload := buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount(), o5.VerifierType(), s.clientWideEncoding, s.clientBigClrChunks)
 	challengePayload = append(challengePayload, s.clientChallengeTrailer(o5.VerifierType())...)
 	s.logger.DebugContext(s.ctx, "AUTH challenge payload",
 		slog.Int("len", len(challengePayload)),
@@ -904,7 +992,7 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	s.logger.DebugContext(s.ctx, "AUTH Phase 2 payload",
 		slog.Int("len", len(phase2Pkt.Payload)),
 		slog.String("hex_head", fmt.Sprintf("%x", phase2Pkt.Payload[:min(len(phase2Pkt.Payload), 60)])))
-	clientSessKey, encPassword, err := parseAuthPhase2(phase2Pkt.Payload)
+	clientSessKey, encPassword, err := parseAuthPhase2(phase2Pkt.Payload, s.clientBigClrChunks)
 	if err != nil {
 		return fmt.Errorf("failed to parse AUTH Phase 2: %w", err)
 	}
@@ -927,7 +1015,7 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	s.clientCombinedKey = o5.CombinedKey
 
 	// Increment usage asynchronously
-	go func() { _ = s.store.IncrementAPIKeyUsage(context.Background(), apiKey.ID) }()
+	shared.BumpAPIKeyUsage(s.ctx, s.logger, s.store, apiKey.ID)
 
 	// NOTE: AUTH OK is NOT sent here. It's sent in run() AFTER upstream auth completes,
 	// so the relay can immediately forward go-ora's post-auth messages to upstream.
@@ -1126,6 +1214,26 @@ func strPtr(s string) *string {
 
 // maxResendAttempts limits the number of Resend retries to prevent infinite loops.
 
+// Names the per-session goroutines report themselves under when one of them
+// panics. They are log labels, not identifiers — the point is that the record
+// says which leg died.
+const (
+	relayNameClientToUpstream = "oracle client→upstream"
+	relayNameUpstreamToClient = "oracle upstream→client"
+	relayNameWatchdog         = "oracle limit watchdog"
+	relayNamePreAuthPump      = "oracle pre-auth upstream→client"
+
+	// The detached store writes. Each is named after what it writes, because
+	// that is the only thing the log line can usefully say: these goroutines
+	// outlive the call that spawned them, so the recover on handleConnection
+	// never sees them and nothing else records which write died.
+	goroutineNameBlockedQuery    = "oracle blocked query record"
+	goroutineNameQueryRecord     = "oracle query record"
+	goroutineNameQueryCompletion = "oracle query completion"
+	goroutineNameVerifierUpgrade = "oracle api key verifier upgrade"
+	goroutineNameDumpRetention   = "oracle dump retention sweep"
+)
+
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
 func (s *session) proxyMessages() error {
 	// Register this live session against its grant so an admin revoke can
@@ -1160,32 +1268,436 @@ func (s *session) proxyMessages() error {
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
 
-	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
+	// RunWatchdog, not RunGuarded: a watchdog that merely survives its own panic
+	// leaves the session running with nothing enforcing its expiry, quota or
+	// revocation. onLimitViolation is where a panic is most plausible (it walks a
+	// held refusal's handoff), so the teardown here is the blunt half of what it
+	// does — closing both conns, which ends whichever relay is parked on them.
+	go safe.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
+		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
+	}, s.closeConns)
 
 	errChan := make(chan error, 2)
 
-	// Client → Upstream (with query interception)
+	// Both directions run under safe.RunRelay, which turns a panic into an
+	// error on errChan instead of a dead process: these are goroutines of their
+	// own, and the only other recover in the Oracle proxy is on
+	// handleConnection, which runs on a *different* goroutine and catches
+	// nothing raised here. Everything they touch outside the two intercept paths
+	// — packet framing, the dump writer, the mid-stream limit check,
+	// holdIfNeeded, a held refusal's teardown — was otherwise a process-wide
+	// fault on one malformed session. The error genuinely reaching errChan is
+	// the load-bearing half: without it the wait below never returns and the
+	// session leaks its conns. errChan is buffered at 2, so neither send blocks
+	// even though only the first is read.
 	go func() {
-		errChan <- s.clientToUpstream()
+		errChan <- safe.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.clientToUpstream)
 	}()
 
-	// Upstream → Client (with response interception)
 	go func() {
-		errChan <- s.upstreamToClient()
+		errChan <- safe.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.upstreamToClient)
 	}()
 
 	// Wait for either direction to close
 	return <-errChan
 }
 
+// heldRefusal is a mid-stream limit violation that has been *decided* but not
+// yet delivered: the client is parked in the middle of a reply, so there is no
+// point in the stream where a frame can be written that it will read.
+//
+// It carries what the two escalation bounds need — when it was armed, and the
+// session's cumulative byte count at that moment — plus a channel the client leg
+// closes once it has answered, which is how the watchdog knows the handoff
+// landed and it must not drop the sockets on top of it.
+type heldRefusal struct {
+	err     error
+	armedAt time.Time
+	atBytes int64
+	done    chan struct{}
+
+	// lastRelayAt is when the client leg was last still being fed past this
+	// hold, and lastRelayBytes the session's cumulative byte mark then. They are
+	// observation only — nothing waits on them, no bound moves with them — and
+	// exist so an *abandoned* hold can say which of the two shapes it had: a
+	// client that stopped talking, or one that was still draining the reply and
+	// merely slow. See noteRefusalRelayProgress and
+	// heldRefusalWasStillReceiving.
+	//
+	// lastRelayAt stays zero until something is actually relayed, which is what
+	// makes "nothing ever moved" distinguishable from "something moved at the
+	// instant the hold was armed".
+	lastRelayAt    time.Time
+	lastRelayBytes int64
+}
+
+// refusalHandoffGrace bounds how long a held refusal may wait for the client to
+// speak again, and refusalHoldMaxBytes bounds how much of the in-flight reply
+// may still be relayed while it waits.
+//
+// Neither is a tuning knob; both are the fail-safes that keep "hold the refusal
+// for the next call" from becoming an enforcement hole. Crossing either falls
+// back to the socket close, which is the pre-fix behavior: an ORA-03113 that is
+// meant.
+//
+// The values are measured rather than reasoned — docs/oracle.md, "What a
+// legitimate handoff costs, measured", and TestIntegration_HeldRefusalHandoffCost
+// — and the measurement is not the comfortable one the reasoning expected:
+//
+//   - the cost is the tail of one fetch batch, and a fetch batch is whatever the
+//     client's array size makes it. Five clients at a 500-row fetch on 400-byte
+//     rows cost 19 B to 128 KB and 0 to 119 ms — three orders of magnitude
+//     inside both bounds, as expected. One client at a 3000-row fetch on
+//     4000-byte rows needed ~11.7 MiB and **crossed the 8 MiB bound**, so its
+//     session ended on the socket close. 8 MiB is therefore not slack; and no
+//     finite value would be, because the array size is the client's to pick.
+//   - the two bounds meet at a link speed. Measured over a throttled tap, a
+//     537 KB tail took 6.5s (an effective 80 KiB/s); a tail at the full byte
+//     bound would take ~105s there, so below roughly 280 KiB/s the grace runs
+//     out first and the byte bound is unreachable.
+//
+// They are kept where they are because both are enforcement limits before they
+// are ergonomics. 8 MiB is already a large overrun to allow past an exhausted
+// quota, and what a client loses beyond either bound is the *message*, not the
+// enforcement: the session still ends and the statement is still recorded with
+// the real reason. Raising them to cover the widest imaginable fetch would trade
+// that away for an error code.
+const (
+	refusalHandoffGrace = 30 * time.Second
+	refusalHoldMaxBytes = 8 << 20
+)
+
+// refusalBytesBound and refusalGrace are how the two bounds are read: the
+// session's own override when it has one, the constant otherwise. See the
+// fields on session for why the override exists.
+func (s *session) refusalBytesBound() int64 {
+	if s.refusalHoldBytes > 0 {
+		return s.refusalHoldBytes
+	}
+
+	return refusalHoldMaxBytes
+}
+
+func (s *session) refusalGrace() time.Duration {
+	if s.refusalHoldGrace > 0 {
+		return s.refusalHoldGrace
+	}
+
+	return refusalHandoffGrace
+}
+
+// refusalStillReceivingIdleFraction divides the grace to give the window a byte
+// must have reached the client inside for an abandoned hold to be read as
+// *slow* rather than *silent*.
+//
+// Derived from the grace rather than written as a duration of its own, so it
+// scales with the grace a test shortens the same way the wait does. Short enough
+// that a client whose last byte landed early in the hold gets no credit for
+// progress it had stopped making by the time the grace ran out; long enough that
+// a stalled window on a poor link is not mistaken for a client that stopped
+// talking — which is what moved it from a tenth to a third.
+//
+// A tenth was sized against the *packet* rate, and that is not what paces the
+// relay's writes. A write completes when the client socket frees space, and TCP
+// frees it in receive-window updates, which arrive at roughly half the receive
+// buffer at a time rather than per packet. So on a slow link the gap between two
+// completed writes is (buffer/2)/rate whatever the packet size is: measured
+// through a 32 KiB/s tap in TestIntegration_HeldRefusalHandoffCost, a relay that
+// was writing continuously right up to the teardown still had 4.5s between its
+// last two writes — comfortably outside a 3s window, and the reason the crossover
+// record never fired end to end. A third of the grace clears that with margin
+// while still meaning "the final stretch of the hold".
+const refusalStillReceivingIdleFraction = 3
+
+func (s *session) refusalStillReceivingIdle() time.Duration {
+	return s.refusalGrace() / refusalStillReceivingIdleFraction
+}
+
+// noteRefusalRelayProgress records that the client leg was still being fed past
+// a held refusal, `relayed` being the session's cumulative byte mark now.
+//
+// It is observation and nothing else. The grace stays the flat deadline
+// refusalHandoffGrace documents — this deliberately does *not* extend it, and
+// turning it into an idle timeout was the design considered and declined in
+// specs/todos/2026-08-13-15-held-refusal-grace-and-byte-bound-cross-at-a-link-speed.md.
+// The only thing it buys is that an abandonment can name the shape it had.
+func (s *session) noteRefusalRelayProgress(held *heldRefusal, relayed int64) {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	if relayed <= held.lastRelayBytes {
+		return
+	}
+
+	held.lastRelayBytes = relayed
+	held.lastRelayAt = time.Now()
+}
+
+// heldRefusalWasStillReceiving reports whether a hold abandoned at `at` was cut
+// off a client that was merely *slow*, rather than one that had stopped talking
+// — the distinction the grace itself cannot make, since it is a deadline and not
+// an idle timeout.
+//
+// The predicate is deliberately explicit rather than a threshold buried in a
+// branch: bytes must have moved past the violation at all, and the last of them
+// must have reached the client within refusalStillReceivingIdle of the moment
+// the grace expired. A silent client fails the first test (nothing was ever
+// relayed) or the second (whatever tail it took arrived at the start of the hold
+// and nothing followed).
+//
+// One case it under-reports, and it is the honest limit of measuring this from
+// the relay: a tail small enough to fit entirely in the client socket's send
+// buffer is handed to TCP in one go, so the proxy sees no progress while the
+// client is still draining it. The crossover this exists to name only arises for
+// overshoots larger than that buffer, which cannot be hidden that way — but
+// "that buffer" is bigger than the few hundred kilobytes first assumed here. It
+// is TCP's, sized to the bandwidth-delay product on a real link and to whatever
+// autotuning likes on loopback: measured in
+// TestIntegration_HeldRefusalHandoffCost, a 683 100-byte tail went into a
+// loopback socket in 1.5s and was still being drained by the client 100s later,
+// with nothing for the relay to see in between. That is why the subtest that
+// exercises this drives megabytes rather than the few hundred kilobytes a poor
+// link needs in the field.
+func (s *session) heldRefusalWasStillReceiving(held *heldRefusal, at time.Time) bool {
+	silence, fed := s.refusalRelaySilence(held, at)
+
+	return fed && silence <= s.refusalStillReceivingIdle()
+}
+
+// refusalRelaySilence is the raw measurement behind that predicate: how long
+// before `at` the relay last fed the client past this hold, and whether it ever
+// did. Split out because the number is what makes an abandonment legible — the
+// predicate alone cannot say whether it answered no because nothing was ever
+// relayed or because the last byte was too long ago.
+func (s *session) refusalRelaySilence(held *heldRefusal, at time.Time) (time.Duration, bool) {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	if held.lastRelayAt.IsZero() || held.lastRelayBytes <= held.atBytes {
+		return 0, false
+	}
+
+	return at.Sub(held.lastRelayAt), true
+}
+
+// refusalBoundOutOfReach reports whether the byte bound could not have been
+// reached inside the grace at the rate this hold was actually draining — i.e.
+// whether the two fail-safes crossed, so that the clock was always going to fire
+// first and refusalHoldMaxBytes was never a bound this session could meet.
+//
+// For a hold that survived to the grace it is implied (a hold that crossed the
+// byte bound would have been ended by enforceMidStreamLimits instead, so
+// whatever reached the grace was under it), but it is checked rather than
+// assumed because it is exactly what the log line claims.
+func (s *session) refusalBoundOutOfReach(cost handoffCost) bool {
+	if cost.bytes <= 0 || cost.millis <= 0 {
+		return false
+	}
+
+	// bound/(bytes/millis) > grace, without the division.
+	return s.refusalBytesBound()*cost.millis > cost.bytes*s.refusalGrace().Milliseconds()
+}
+
+// refusalCrossoverBytesPerSecond is the link speed at which the two bounds meet:
+// the rate at which relaying refusalHoldMaxBytes takes exactly
+// refusalHandoffGrace. Below it the grace is the binding bound and the byte one
+// is unreachable; above it the reverse. With the shipped values it is ~280 KiB/s
+// — see docs/oracle.md, "What a legitimate handoff costs, measured".
+func (s *session) refusalCrossoverBytesPerSecond() int64 {
+	millis := s.refusalGrace().Milliseconds()
+	if millis <= 0 {
+		return 0
+	}
+
+	return s.refusalBytesBound() * 1000 / millis
+}
+
+// reportRefusalBoundCrossover emits the one record that names the two fail-safes
+// constraining each other, and only for the case where they actually did: a
+// handoff cut by the clock while the client was still draining the reply.
+//
+// It is a separate line from the watchdog's own teardown because it is a
+// different claim. The teardown says the session was ended; this says the
+// *reason* it was ended is a link slow enough that the byte bound could never
+// have applied, which is the deployment shape (dbbat far from the database) the
+// bounds were not sized for. Nothing branches on it — see refusalHandoffGrace
+// for why the values are left where they are.
+func (s *session) reportRefusalBoundCrossover(held *heldRefusal, cost handoffCost, at time.Time) {
+	stillReceiving := s.heldRefusalWasStillReceiving(held, at)
+	outOfReach := s.refusalBoundOutOfReach(cost)
+
+	if !stillReceiving || !outOfReach {
+		// Say so rather than falling silent. The four numbers the decision is
+		// made from are otherwise nowhere, which is what made "the record never
+		// fires" indistinguishable from "the link was fast enough" — see
+		// logMsgRefusalCrossoverDeclined.
+		silence, fed := s.refusalRelaySilence(held, at)
+		sinceLastRelay := int64(-1)
+
+		if fed {
+			sinceLastRelay = silence.Milliseconds()
+		}
+
+		s.logger.DebugContext(s.ctx, logMsgRefusalCrossoverDeclined,
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis),
+			slog.Int64(logAttrEffectiveBytesPerSec, cost.bytesPerSecond()),
+			slog.Int64(logAttrCrossoverBytesPerSec, s.refusalCrossoverBytesPerSecond()),
+			slog.Int64(logAttrSinceLastRelayMillis, sinceLastRelay),
+			slog.Bool(logAttrBoundOutOfReach, outOfReach))
+
+		return
+	}
+
+	s.logger.WarnContext(s.ctx, logMsgRefusalGraceOutranBytes,
+		slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+		slog.Int64(logAttrHeldForMillis, cost.millis),
+		slog.Int64(logAttrEffectiveBytesPerSec, cost.bytesPerSecond()),
+		slog.Int64(logAttrCrossoverBytesPerSec, s.refusalCrossoverBytesPerSecond()),
+		slog.Int64(logAttrRefusalBytesBound, s.refusalBytesBound()),
+		slog.Any("error", held.err))
+}
+
+// holdRefusal arms a mid-stream refusal, reporting false when one is already
+// armed (the relay keeps checking after every packet, and the violation stays
+// true the whole time it is held).
+func (s *session) holdRefusal(verr error) bool {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	if s.held != nil {
+		return false
+	}
+
+	atBytes := s.cumulativeClientBytes()
+
+	s.held = &heldRefusal{
+		err:            verr,
+		armedAt:        time.Now(),
+		atBytes:        atBytes,
+		done:           make(chan struct{}),
+		lastRelayBytes: atBytes,
+	}
+
+	return true
+}
+
+// heldRefusalNow returns the armed refusal, or nil.
+func (s *session) heldRefusalNow() *heldRefusal {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	return s.held
+}
+
+// finishRefusalHandoff marks a held refusal as delivered (or as abandoned by an
+// escalation), releasing whatever is waiting on it. Idempotent.
+func (s *session) finishRefusalHandoff(held *heldRefusal) {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	select {
+	case <-held.done:
+	default:
+		close(held.done)
+	}
+}
+
+// awaitRefusalHandoff blocks while a mid-stream refusal is held and undelivered,
+// and reports whether the client leg answered it. False means the caller owns
+// the teardown.
+//
+// This exists because LimitGuard.Watch calls its violation hook exactly once and
+// then returns, while the violation itself stays true for as long as the refusal
+// is held: without the wait, the watchdog would drop both sockets ~250ms after
+// the quota was crossed and the client would meet the same ORA-03113 this whole
+// change exists to replace. Waiting rather than skipping is what keeps the
+// watchdog as the fail-safe — a client that never speaks again still loses the
+// session, just at the grace rather than at the poll.
+func (s *session) awaitRefusalHandoff(held *heldRefusal) bool {
+	timer := time.NewTimer(time.Until(held.armedAt.Add(s.refusalGrace())))
+	defer timer.Stop()
+
+	select {
+	case <-held.done:
+		return true
+	case <-s.ctx.Done():
+		// The session is going away on its own; nothing left to tear down.
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 // onLimitViolation is invoked by the limit watchdog when a time/bandwidth limit
 // is crossed. It force-closes both conns, unblocking whichever relay goroutine
 // is parked in a Read/Write so the session tears down. This is the only way to
 // terminate a query that is blocked producing no traffic (idle expiry).
+//
+// It deliberately sends no ORA-00028 frame, and that is the decision rather than
+// an omission: this is the one refusal path that can fire while the client is
+// idle between calls, so there is no call to end. TTC has no unsolicited server
+// message — an OER written to an idle socket is not read when it is sent, it
+// waits in the buffer for the client's next request and is consumed as *that*
+// request's answer, carrying by construction the previous call's number. On
+// ojdbc 26.1 that mismatch is exactly what handleOutOfSequenceError turns into
+// an ORA-18745 wrapping the real code, so a "graceful" frame here would be
+// strictly worse than the close, which surfaces as a plain I/O error. A real
+// Oracle does the same: ALTER SYSTEM KILL SESSION pushes nothing and the client
+// learns at its next call; DISCONNECT SESSION drops the socket, which is what
+// this imitates. See docs/oracle.md, "An asynchronous refusal: which call
+// number, and whether to send one at all", and TestIdleLimitViolationSendsNoOER.
+//
+// The one case it stands down for is a refusal already held for the client's
+// next call (holdRefusal): there the client leg has a call to answer and will
+// answer it, so closing the socket here would race the ORA-00028 and win. It
+// stands down for a bounded wait only — a handoff that never happens is exactly
+// what this path is the fail-safe for.
 func (s *session) onLimitViolation(err error) {
-	s.logger.WarnContext(s.ctx, "terminating Oracle session: grant no longer valid mid-stream",
-		slog.Any("error", err))
+	attrs := []any{slog.Any("error", err)}
 
+	if held := s.heldRefusalNow(); held != nil {
+		if s.awaitRefusalHandoff(held) {
+			return
+		}
+
+		// When the grace ran out, read before anything else moves: it is what
+		// the crossover report is measured against.
+		expiredAt := time.Now()
+
+		// The handoff never landed: the client stopped talking with a refusal
+		// undelivered. Fall back to the close, and record the statement the way
+		// the delivered path would have — the reason must survive either way.
+		s.abortHeldQuery(held.err)
+		s.finishRefusalHandoff(held)
+
+		// What the abandoned hold cost, on the same two axes every other exit
+		// reports. The time is the grace by construction; the bytes are not, and
+		// they say how much of a reply a client that went quiet was still fed.
+		cost := s.refusalHandoffCost(held)
+		attrs = append(attrs,
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis))
+
+		// "Went quiet" is the case above, and the one this path is the fail-safe
+		// for. A client that was still draining right up to the grace is a
+		// different animal wearing the same symptom, so it gets said out loud.
+		s.reportRefusalBoundCrossover(held, cost, expiredAt)
+	}
+
+	s.logger.WarnContext(s.ctx, logMsgWatchdogTeardown, attrs...)
+
+	s.closeConns()
+}
+
+// closeConns drops both sockets, which is how a session is ended from outside
+// its relays: whichever leg is parked in a Read or Write returns, and
+// proxyMessages runs its cleanup. It is the enforcement half of
+// onLimitViolation, split out so the watchdog's panic guard can perform it
+// without re-entering the held-refusal walk that may be what panicked.
+//
+// Safe to call twice, and safe concurrently with a blocked Read/Write.
+func (s *session) closeConns() {
 	if s.upstreamConn != nil {
 		_ = s.upstreamConn.Close()
 	}
@@ -1233,26 +1745,51 @@ func (s *session) clientToUpstream() error {
 // Query interception is best-effort observability: a malformed or unexpected
 // TTC layout must never crash the proxy or break the connection. Any panic in
 // the decode path is recovered here and the packet is forwarded unchanged.
-func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
+//
+// That fail-open has exactly one exception, and it is why the return is named:
+// once a mid-reply limit refusal is held (enforceMidStreamLimits), the grant no
+// longer permits anything, so "forward what I could not read" would make an
+// unreadable frame — or a panicking decode — the one way a client message
+// travels under an exhausted grant. Every unreadable exit therefore routes
+// through heldRefusalBlocks, which forwards as before when no refusal is held
+// and ends the session when one is.
+//
+//nolint:nonamedreturns // the recover below has to *change* the answer, which only a named return allows
+func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			// A recovered panic leaves the function returning the zero value
-			// (false) — i.e. don't block the message.
 			s.logger.WarnContext(s.ctx, "recovered from panic intercepting client message",
 				slog.Any("panic", r))
+
+			blocked = s.heldRefusalBlocks()
 		}
 	}()
 
 	funcCode, err := parseTTCFunctionCode(pkt.Payload)
 	if err != nil {
-		return false
+		return s.heldRefusalBlocks()
 	}
-
-	s.logger.DebugContext(s.ctx, "TTC message", slog.String("func", funcCode.String()))
 
 	ttcPayload := extractTTCPayload(pkt.Payload)
 	if ttcPayload == nil {
-		return false
+		return s.heldRefusalBlocks()
+	}
+
+	s.logger.DebugContext(s.ctx, "TTC message",
+		slog.String("func", funcCode.String()),
+		slog.String("op", ttcOpFunction(ttcPayload)))
+
+	// Whatever this message turns out to be, it names the call the client is
+	// now waiting on, and a refusal has to end *that* call by number — see
+	// oerSummary.CallNumber.
+	named := s.observeClientCallNumber(ttcPayload)
+
+	// A limit crossed while dbbat was relaying a reply is answered here rather
+	// than written into that reply: this message is the proof the client has
+	// finished consuming it and is parked on a fresh call that can be ended.
+	// See enforceMidStreamLimits.
+	if held := s.heldRefusalNow(); held != nil {
+		return s.answerHeldRefusal(held, named)
 	}
 
 	switch funcCode { //nolint:exhaustive // only intercepting specific TTC functions, rest pass through
@@ -1260,11 +1797,20 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		// v315+ piggyback: check sub-operation to determine action
 		if IsPiggybackExecSQL(ttcPayload) {
 			return s.gateStatement(s.handlePiggybackExec, ttcPayload)
-		} else if IsPiggybackClose(ttcPayload) {
-			// Sub-op 0x09 = close cursor
-			if len(ttcPayload) > 2 {
-				s.handleOCLOSE(uint16(ttcPayload[2]))
-			}
+		} else if IsPiggybackCursorReexec(ttcPayload) {
+			// A re-execution is a fresh execution of a statement: it goes
+			// through the same pre-flight as one carrying its own SQL, quota
+			// check included. This frame is never a continuation of a result
+			// set already streaming, so checking quotas here cannot strand a
+			// client mid-fetch.
+			return s.gateStatement(s.handlePiggybackReexec, ttcPayload)
+		} else if IsPiggybackLogoff(ttcPayload) {
+			// Sub-op 0x09 is the session logoff, not a cursor close. It used
+			// to delete s.tracker.cursors[ttcPayload[2]] in the belief that
+			// byte 2 was a cursor id; it is the TTC sequence number, and the
+			// frame carries no cursor id at all. The real close list is the
+			// 0x11/0x69 piggyback handled below.
+			s.logger.DebugContext(s.ctx, "client logoff")
 		}
 
 	case TTCFuncOALL8:
@@ -1272,33 +1818,55 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		return s.gateStatement(s.handleOALL8, ttcPayload)
 
 	case TTCFuncOFETCH:
+		// Func 0x11 sub-op 0x69 is Oracle's close-cursors piggyback, and a
+		// client with a statement to run staples that execute behind the close
+		// list in the same packet — which is the frame dbbat also knows as the
+		// JDBC/DBeaver execute. Wire order is closes first, so the tracker
+		// drops them before the execute below can be assigned a recycled id.
+		if cursorIDs, err := decodeCloseCursors(ttcPayload); err == nil {
+			s.handleCloseCursors(cursorIDs)
+		}
+
+		// A frame whose call dbbat could not name is handled apart from
+		// everything below, and *before* the readings below, because both of
+		// them end in an OER: the refusal would be stamped with whatever call
+		// number dbbat last saw, which ends a call the client is not waiting
+		// for and parks it forever (the ORA-18745 / hang mode of
+		// specs/done/2026/08/2026-08-12-02-oracle-async-refusal-call-number.md).
+		// That includes the exec reading — a `11 69` execute whose close list
+		// does not walk is exactly as unnameable as any other piggyback, and
+		// gating it here while stamping a stale number was the one place this
+		// invariant leaked.
+		//
+		// It is emphatically not a bypass: gateUnnameableFrame still gates the
+		// statement, it just refuses by ending the session rather than by
+		// answering a call it cannot name.
+		if !named {
+			return s.gateUnnameableFrame(ttcPayload)
+		}
+
 		// JDBC thin driver reuses func=0x11 with sub-op 0x69 for execute-with-SQL.
-		// Distinguish from plain OFETCH by checking the sub-operation byte.
+		// Distinguish it by checking the sub-operation byte.
 		if IsExecSQL(ttcPayload) {
 			return s.gateStatement(s.handleJDBCExec, ttcPayload)
 		}
 
-		// A fetch that starts a fresh pending query is a cursor re-execution
-		// and is gated like a statement; one that continues a query already in
-		// flight is not.
+		// Nothing else in a 0x11 frame is intercepted. There used to be a
+		// third re-execution reading here — "a fetch arriving with no query in
+		// flight is a re-execution" — but it was written against a layout no
+		// Oracle client sends (see the note on TTCFuncOFETCH in ttc.go), so it
+		// only ever fired on misparsed piggybacks. It is gone; the two real
+		// re-execution frames (the SQL-less OALL8 and the 03/0x4e|0x04
+		// piggyback) are unaffected.
 		//
-		// It deliberately does NOT go through gateStatement, which would also
-		// run checkQuotas on every fetch — including the continuation ones,
-		// where refusing mid-result-set is exactly what this path must avoid.
-		// The cost is precise and known: the response leg's LimitGuard covers
-		// revocation, the byte quota and expiry, but *not* MaxQueryCounts,
-		// which is incremented in completeQuery and only ever checked in
-		// checkQuotas. So a client that parses once and then loops OFETCH
-		// re-executions records a distinct /queries row per execution while
-		// its query-count cap goes unenforced. Statement-shaped controls and
-		// the approval gate still apply to each of those executions — it is
-		// the count quota alone that leaks. Tracked in
-		// specs/todos/2026-08-08-oracle-ofetch-unknown-cursor-and-query-quota.md.
-		if err := s.handleOFETCH(ttcPayload); err != nil {
-			_ = s.sendOracleError(err)
-
-			return true
-		}
+		// Its companion guarantee outlives it and needs no guard: "a fetch that
+		// merely continues a result set already streaming is never re-gated,
+		// and no client is ever cut off mid-result-set" is now true by
+		// construction rather than by an early return that could regress. A
+		// real fetch is message type 0x03 function 0x05, which never enters
+		// this switch at all. That is why the two tests that used to pin the
+		// continuation path were deleted with the gate rather than rewired:
+		// there is no longer a code path for them to guard.
 
 	case TTCFuncOCLOSE, TTCFuncOClosev2:
 		cursorID, err := decodeCursorIDFromOCLOSE(ttcPayload)
@@ -1313,23 +1881,27 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 	return false
 }
 
-// gateStatement runs the full pre-flight every statement-carrying TTC op shares:
-// quotas, expiry and revocation first, then the op's own handler — which runs
-// the static controls, the approval hold, and the query recording, in that
-// order. Reports true when the packet must NOT be forwarded; the client has
-// already been answered with a TTC error by then.
+// gateStatement runs a statement-carrying TTC op's handler and answers the
+// client itself when the handler refuses. Reports true when the packet must NOT
+// be forwarded; the client has already been answered with a TTC error by then.
 //
-// All three ops go through here (OALL8, the v315+ piggyback exec, and the JDBC
-// thin driver's func=0x11 exec) so that adding a fourth cannot quietly acquire
-// only half of it — which is exactly how the JDBC exec ended up recording
-// queries while enforcing nothing.
+// The pre-flight itself — quotas, expiry and revocation, then the static
+// controls, the approval hold and the query recording — lives inside the
+// handler, in that order. The quota check used to sit here instead, ahead of
+// the handler, and that is precisely why an over-quota statement left no
+// `queries` row: at this point the TTC payload is still undecoded, so there is
+// no SQL to record the refusal against. Each handler decodes differently
+// (decodeOALL8, decodePiggybackExecSQL, decodeExecSQL, decodeCursorReexec), so
+// the check belongs where the SQL is known — after the decode and before the
+// static controls. See regateCursor for the two re-execution frames, which
+// share one insertion point.
+//
+// All three SQL-carrying ops still go through here (OALL8, the v315+ piggyback
+// exec, and the JDBC thin driver's func=0x11 exec) so that adding a fourth
+// cannot quietly acquire only half of the answer-the-client behavior — which
+// is exactly how the JDBC exec ended up recording queries while enforcing
+// nothing.
 func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bool {
-	if err := s.checkQuotas(); err != nil {
-		_ = s.sendOracleError(err)
-
-		return true
-	}
-
 	if err := handle(ttcPayload); err != nil {
 		_ = s.sendOracleError(err)
 
@@ -1337,6 +1909,284 @@ func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bo
 	}
 
 	return false
+}
+
+// gateUnnameableFrame decides what happens to a client message whose call dbbat
+// could not name — a piggyback (message type 0x11) whose body it cannot walk,
+// so the call the client is parked on is stapled behind bytes of unknown
+// length. Reports true when the packet must NOT be forwarded.
+//
+// The default is to forward it, and that is the point: dbbat could not identify
+// this frame, so refusing it protects nothing, while answering it ends the
+// wrong call and strands the client. That is how the DB-bundled OCI client's
+// first message (`11 6b …`) stopped being refused as "a re-execution of cursor
+// 27396" and stopped hanging sqlplus.
+//
+// But "forward it" cannot be unconditional, and this is the bound. A piggyback
+// is by construction a frame with something stapled behind it — dbbat's own
+// recordings show `11 69 … 03 5e <exec>` — so a frame dbbat cannot walk can
+// carry a statement past the gate. Under a restrictive grant that would be a
+// smuggling channel for the exact adversary the controls exist for: an
+// authenticated user who has a grant and wants to exceed it. So the frame is
+// scanned for a stapled statement (stapledStatement) and put through the same
+// validators the JDBC exec path runs, in the same order.
+//
+// "The same validators" is literal, and includes the ones that fire with no
+// grant controls at all: the Oracle blocked patterns (ALTER SYSTEM, UTL_HTTP,
+// DBMS_SCHEDULER…) and the password-change guard. Gating this path on
+// hasStatementControls would have made an unwalkable piggyback the one place
+// `ALTER SYSTEM KILL SESSION` travels while the identical statement in a
+// nameable frame is refused — a statement hiding in a way it cannot hide from
+// the ordinary gate, which is exactly what this bound exists to prevent.
+//
+// The rest of handleJDBCExec's pre-flight is here too, and for the same reason:
+// the quota check ahead of the validators, and — on the allow branch — the
+// pending query and the store write. A statement that runs while leaving no
+// `queries` row would make this path the one place a session's SQL escapes the
+// audit trail, and an unrecorded statement is also an uncounted one, since
+// MaxQueryCounts is charged when a pending query completes on the response leg.
+//
+// It is refused by **ending the session**, not by an OER, and that is the whole
+// reason this is a separate path: dbbat cannot name the call, so it has no
+// legitimate frame to answer with. Dropping the socket is the same answer
+// onLimitViolation gives for the same reason (there is no call to end), it is
+// what a real Oracle does on DISCONNECT SESSION, and it surfaces to the client
+// as a plain I/O error rather than a wait that never returns. The statement is
+// recorded as blocked first, so the refusal is in the audit trail exactly like
+// every other one.
+func (s *session) gateUnnameableFrame(ttcPayload []byte) bool {
+	statements := stapledStatements(ttcPayload)
+
+	if len(statements) == 0 {
+		s.logger.DebugContext(s.ctx, logMsgUnnamedCallForwarded,
+			slog.String("op", ttcOpFunction(ttcPayload)),
+			slog.Bool("carries_statement", false))
+
+		return false
+	}
+
+	// Every statement, not the first: a frame that staples two executes runs
+	// both, so enforcing against one of them would leave the other exactly the
+	// smuggling channel this path exists to close.
+	for _, sql := range statements {
+		if s.gateUnnameableStatement(ttcPayload, sql) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// gateUnnameableStatement runs one stapled statement through the gate. Reports
+// true when the session was torn down and the packet must not be forwarded.
+func (s *session) gateUnnameableStatement(ttcPayload []byte, sql string) bool {
+	// Normalized, like handleJDBCExec: the text the patterns run against is the
+	// text recorded in /queries.
+	sql = shared.NormalizeSQL(sql)
+
+	// The pre-flight, in handleJDBCExec's order: quotas, expiry and revocation
+	// first, then the static validators. refuseStatement records the refusal
+	// against the statement, so a teardown is not a refusal that vanished.
+	err := s.book(func() error {
+		if err := s.checkQuotas(); err != nil {
+			return s.refuseStatement(sql, nil, err)
+		}
+
+		if s.grant != nil {
+			if err := shared.ValidateOracleQuery(sql, s.grant); err != nil {
+				return s.refuseStatement(sql, nil, err)
+			}
+		}
+
+		s.flushPendingQuery()
+
+		return nil
+	})
+
+	// The approval hold, outside trackerMu like every other one. It works here
+	// even though a refusal does not: it parks the *forwarding* and lets the
+	// packet through once a human approves, with no call to answer either way.
+	var approvalUID uuid.UUID
+
+	if err == nil {
+		approvalUID, err = s.holdIfNeeded(sql)
+	}
+
+	if err != nil {
+		return s.endSessionOnRefusal(ttcPayload, sql, err)
+	}
+
+	// Allowed — and therefore recorded, exactly as the JDBC exec path records
+	// it. A statement that runs and leaves no `queries` row would make this
+	// path the one place a session's SQL escapes the audit trail, which is a
+	// worse hole than the one the fail-open was introduced to fix. It is also
+	// what makes MaxQueryCounts apply: the quota is charged when a pending
+	// query completes on the response leg, so a statement nobody tracks is a
+	// statement nobody counts.
+	cursor := &trackedCursor{sql: sql, parsedAt: time.Now()}
+
+	_ = s.book(func() error {
+		s.tracker.pendingQuery = &pendingOracleQuery{cursor: cursor, startTime: time.Now()}
+
+		// An approval hold already inserted the row; reuse it rather than
+		// writing a second one for the same statement.
+		if approvalUID != uuid.Nil {
+			s.tracker.pendingQuery.queryUID = approvalUID
+			s.tracker.pendingQuery.queryPersisted = true
+		} else {
+			s.persistQueryRecord()
+		}
+
+		return nil
+	})
+
+	s.logger.InfoContext(s.ctx, logMsgUnnameableStatementRecorded,
+		slog.String("op", ttcOpFunction(ttcPayload)),
+		slog.String("sql", truncateSQL(sql, 200)))
+
+	return false
+}
+
+// endSessionOnRefusal is the refusal half of gateUnnameableFrame: there is no
+// call to answer, so the session ends instead. The statement was recorded by
+// refuseStatement (or by the hold) before this is reached.
+func (s *session) endSessionOnRefusal(ttcPayload []byte, sql string, refusal error) bool {
+	s.logger.WarnContext(s.ctx, logMsgUnnameableStatementRefused,
+		slog.String("op", ttcOpFunction(ttcPayload)),
+		slog.String("sql", truncateSQL(sql, 200)),
+		slog.Any("error", refusal))
+
+	if s.upstreamConn != nil {
+		_ = s.upstreamConn.Close()
+	}
+
+	if s.clientConn != nil {
+		_ = s.clientConn.Close()
+	}
+
+	return true
+}
+
+// stapledStatements returns every distinct statement a frame carries, in wire
+// order, or nil when it carries none.
+//
+// The extractor is the one the JDBC exec path gates on (decodeExecSQL: the
+// execute's own declared length first, then the legacy offset window and
+// keyword search). Using the same one is deliberate — a statement dbbat would
+// enforce against if it could name the call is a statement it has to enforce
+// against when it cannot.
+//
+// What is *not* the same is where it is allowed to look. On this path a
+// false positive is not a refused call the client can retry; it ends the
+// session. And the frames that reach here are the ones dbbat cannot parse,
+// which includes piggybacks that carry caller-supplied text by design —
+// `11 87` set-end-to-end-attrs carries the module, action and client-identifier
+// strings an application chooses. A bare keyword scan would kill a session
+// whose client set its module to "DELETE ORDERS".
+//
+// So the scan is anchored: the SQL is only read from the start of a TTC op that
+// can carry one. That is a bound and not a loophole, and the argument is what
+// makes it safe — bytes the *server* will execute have to be a statement-carrying
+// op too, so a payload with no such header is one the upstream will not run
+// either. Hiding an executable statement from dbbat while keeping it executable
+// by Oracle is precisely what this refuses to allow.
+//
+// Every anchor is read rather than the first that answers: `11 69 <closes>
+// 03 5e <exec>` is the recorded shape, and a frame that staples two executes
+// runs both. Duplicates are dropped because the two anchors of that shape name
+// the same execute.
+func stapledStatements(ttcPayload []byte) []string {
+	var (
+		out  []string
+		seen = map[string]struct{}{}
+	)
+
+	for _, at := range statementOpOffsets(ttcPayload) {
+		result, err := decodeExecSQL(ttcPayload[at:])
+		if err != nil || result == nil || result.SQL == "" {
+			continue
+		}
+
+		if _, dup := seen[result.SQL]; dup {
+			continue
+		}
+
+		seen[result.SQL] = struct{}{}
+
+		out = append(out, result.SQL)
+	}
+
+	return out
+}
+
+// ttcStatementOpHeaders are the op headers that carry SQL text: the v315+
+// piggyback execute, and the two func-0x11 execute sub-ops dbbat's own JDBC
+// path recognizes.
+//
+// A legacy OALL8 (message type 0x0e, a single byte) is deliberately not in the
+// list: one common byte is not a header, and matching it would trade the false
+// positive this anchoring removes straight back. That exclusion is now measured
+// rather than argued — TestSurveyStapledOALL8 walks every `0x11` piggyback in
+// testdata/ and finds six `0x0e` bytes at a non-zero offset, **none** of which
+// decodes as an OALL8 carrying plausible SQL. Adding the op would buy nothing
+// and cost the false positives anchoring removed. Whether Oracle would *execute*
+// a `0e` stapled behind a `0x11` piggyback is still not measured — no recorded
+// client sends OALL8 at all — and this list does not depend on the answer.
+//
+// The python sub-op (`11 98`) is likewise in no recording: python-oracledb thin
+// sends the piggyback execute like every other thin client. It stays because
+// keeping an anchor that never fires costs nothing, while removing one that
+// turns out to fire costs a statement.
+var ttcStatementOpHeaders = [][2]byte{
+	{byte(TTCFuncPiggyback), PiggybackSubExecSQL},
+	{byte(TTCFuncOFETCH), execSubOpJDBC},
+	{byte(TTCFuncOFETCH), execSubOpPython},
+}
+
+// statementOpOffsets returns every offset in ttcPayload where a
+// statement-carrying op header begins, earliest first.
+//
+// Offset 0 counts, and that is a carve-out worth naming rather than a detail:
+// when the frame's own header is a statement op (`11 69`, `11 98` — an exec
+// that only reached this path because its close list did not walk) the anchor
+// matches immediately and the scan covers the whole payload, i.e. it degenerates
+// to the unanchored scan the anchoring exists to avoid. Deliberate: such a
+// frame really is an execute and its SQL really is in there, so declining to
+// look would forward a live statement ungated. The cost is that a `11 69` frame
+// whose stapled set-end-to-end-attrs strings read as a refused statement ends
+// the session — fail-closed on a shape no tested client produces (every
+// recorded `11 69` walks) against fail-open on a live exec. See
+// TestUnnameableExecFrameIsGatedOnItsOwnPayload.
+//
+// The carve-out survived the measurement that was meant to settle it (the
+// 2026-08-13-05 spec), and it is worth being precise about what did and did not
+// change. decodeExecSQL reads the execute's *declared* length now, so the
+// ordinary case — a `11 69` close list that walks, with `03 5e <exec>` behind
+// it — is decoded from the stapled op's own header and never scans loose bytes.
+//
+// The exposure this carve-out names is **unchanged**, though. When the close
+// list does not walk, the offset-0 anchor calls decodeExecSQL on the whole
+// payload; the precise decode declines (a `11 69` header is not an exec header
+// and closeCursorsEnd already failed), and the window scan and findSQLInPayload
+// run over the whole frame exactly as before. A `03 5e` elsewhere in the
+// payload adds a *second* anchor that decodes precisely — it does not suppress
+// the offset-0 loose scan. So a caller-supplied module string that reads as a
+// refused statement still ends the session, and that is the trade this
+// carve-out was always making.
+func statementOpOffsets(ttcPayload []byte) []int {
+	var out []int
+
+	for i := 0; i+1 < len(ttcPayload); i++ {
+		for _, header := range ttcStatementOpHeaders {
+			if ttcPayload[i] == header[0] && ttcPayload[i+1] == header[1] {
+				out = append(out, i)
+
+				break
+			}
+		}
+	}
+
+	return out
 }
 
 // upstreamToClient reads TNS packets from upstream, intercepts Data packets
@@ -1369,28 +2219,264 @@ func (s *session) upstreamToClient() error {
 			return fmt.Errorf("client write error: %w", err)
 		}
 
-		// Enforce time/bandwidth limits mid-stream. While a query is in flight,
-		// re-check after every forwarded packet: the moment the grant's byte
-		// quota is crossed or the grant expires, send a TTC error frame and end
-		// the session rather than streaming the rest of a huge result.
-		if s.tracker.pendingQuery != nil {
-			if verr := s.guard.Check(); verr != nil {
-				_ = s.writeTTCError(int(ORA00028), "session terminated: "+verr.Error())
-
-				// Finalize the in-flight query so its streamed-so-far bytes are
-				// flushed to the store before we return. Otherwise those bytes
-				// live only in the CountingConn atomics and a reconnect recomputes
-				// BytesTransferred without them, letting the cumulative cap be
-				// bypassed across short-lived connections. completeQuery diffs the
-				// bytes since the last query boundary, persists, bumps the
-				// in-session grant, and clears pendingQuery (no double-count).
-				errMsg := "aborted: " + verr.Error()
-				s.completeQuery(nil, &errMsg)
-
-				return verr
-			}
+		if verr := s.enforceMidStreamLimits(); verr != nil {
+			return verr
 		}
 	}
+}
+
+// enforceMidStreamLimits runs after every forwarded packet: the moment the
+// grant's byte quota is crossed, the grant expires or it is revoked, the rest of
+// a huge result must not keep streaming. A non-nil return ends the relay, and
+// with it the session.
+//
+// What it does *not* do is write the refusal here, and that is the whole point
+// of this function. dbbat cuts into the reply at a **TNS packet** boundary,
+// while a fetch reply is a **TTC message** stream whose messages straddle
+// packets — which is why handleContinuation carries lastRow state across them.
+// An OER written at this point therefore lands inside a half-delivered row
+// batch: measured against Oracle 23ai Free, dbbat wrote exactly one well-formed
+// ORA-00028 with the right call number and *neither* ojdbc 23.7 nor go-ora
+// reported it — both consumed it as row bytes and then met EOF (ORA-03113 /
+// "driver: bad connection"). Two drivers reading it the same way is what makes
+// the injection point, and not either driver's parser, the thing that was wrong.
+//
+// So the violation is *held* instead, and the client announces the boundary
+// itself: a client that sends its next TTC op has by construction finished
+// consuming the previous reply, so interceptClientMessage answers that op with
+// the refusal through the ordinary path — the same one measured working on all
+// four clients. It is also what a real Oracle does, measured in
+// TestIntegration_RealOracleSessionTermination: ALTER SYSTEM KILL SESSION pushes
+// nothing at the parked client and answers its *next* call with an ORA-00028
+// stamped with that call's own number.
+//
+// The cost is the tail of the fetch batch already in flight, bounded by the
+// client's fetch size — and, when the reply has no end at all, by
+// refusalHoldMaxBytes below. See docs/oracle.md, "An asynchronous refusal: which
+// call number, and whether to send one at all".
+func (s *session) enforceMidStreamLimits() error {
+	if held := s.heldRefusalNow(); held != nil {
+		// A refusal is already decided and waiting for the client's next call.
+		// Keep relaying so the client can finish the reply it is parked in and
+		// get there — but not without end: a reply whose boundary never arrives
+		// would otherwise stream past the quota indefinitely.
+		relayed := s.cumulativeClientBytes()
+		if relayed-held.atBytes <= s.refusalBytesBound() {
+			// Still inside the bound, and the client is still being fed: note it,
+			// which is the only thing that tells a slow client from a silent one
+			// if the *grace* ends up being the bound that fires. Observation
+			// only — see noteRefusalRelayProgress.
+			s.noteRefusalRelayProgress(held, relayed)
+
+			return nil
+		}
+
+		cost := s.refusalHandoffCost(held)
+
+		s.logger.WarnContext(s.ctx, logMsgRefusalHandoffAbandoned,
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis),
+			slog.Any("error", held.err))
+
+		s.abortHeldQuery(held.err)
+		s.finishRefusalHandoff(held)
+
+		return held.err
+	}
+
+	if !s.hasPendingQuery() {
+		return nil
+	}
+
+	verr := s.guard.Check()
+	if verr == nil {
+		return nil
+	}
+
+	if s.holdRefusal(verr) {
+		s.logger.WarnContext(s.ctx, logMsgRefusalHeld, slog.Any("error", verr))
+	}
+
+	return nil
+}
+
+// abortHeldQuery finalizes the in-flight query a held refusal cut short, so its
+// streamed-so-far bytes are flushed to the store and the statement carries the
+// real reason it ended.
+//
+// Both halves matter. Without the flush those bytes live only in the
+// CountingConn atomics, and a reconnect recomputes BytesTransferred without
+// them — which lets a cumulative cap be bypassed across short-lived
+// connections. completeQuery diffs the bytes since the last query boundary,
+// persists, bumps the in-session grant and clears pendingQuery (no
+// double-count). Every path that ends a held refusal calls this: the delivered
+// one, and both escalations.
+func (s *session) abortHeldQuery(verr error) {
+	errMsg := "aborted: " + verr.Error()
+
+	// completeQuery expects trackerMu; this is one of the few callers that
+	// reaches it from outside an intercept.
+	s.trackerMu.Lock()
+	s.completeQuery(nil, &errMsg)
+	s.trackerMu.Unlock()
+}
+
+// answerHeldRefusal ends the call the client has just made with the limit
+// violation dbbat decided mid-reply but could not deliver then. Reports true so
+// the caller does not forward the packet.
+//
+// It runs before anything else interceptClientMessage would do with the message,
+// and immediately after observeClientCallNumber, which is what makes the frame
+// readable where the mid-reply one was not: the number stamped on it is the
+// number of the call the client is parked on *right now*, and the client is
+// between TTC messages by construction — it would not have sent this op
+// otherwise.
+//
+// A message dbbat could not name gets the gateUnnameableFrame answer instead:
+// no frame, both sockets dropped. Stamping such a frame with the last number
+// dbbat saw ends a call the client is not waiting for, which is the ORA-18745 /
+// hang mode of
+// specs/done/2026/08/2026-08-12-02-oracle-async-refusal-call-number.md.
+func (s *session) answerHeldRefusal(held *heldRefusal, named bool) bool {
+	// Answered once, and once only. The client leg keeps reading until its
+	// socket actually closes, so a pipelined second message — or a panic
+	// recovered after the frame went out — must not produce a second
+	// end-of-call OER for a call nobody is waiting on. That would be the
+	// unsolicited frame onLimitViolation exists to avoid, and it would break
+	// the one-frame invariant the measurement rests on.
+	select {
+	case <-held.done:
+		return true
+	default:
+	}
+
+	// The teardown is deferred, not sequential, and that is deliberate: writing
+	// the frame is the one step here that can fail in an unbounded way (a
+	// panicking encode, a socket error surfacing as a panic in a wrapper), and
+	// an exit that skipped the recording and left both sockets open would be a
+	// fifth, panic-shaped path — one that the "every exit ends the session and
+	// records the reason" claim in docs/oracle.md does not cover. Deferring it
+	// keeps the exits at four.
+	//
+	// The session is over either way: the message says "session terminated" and
+	// the grant no longer permits anything. Closing the upstream first stops any
+	// tail of the reply from being relayed on top of the frame just written.
+	defer func() {
+		s.finishRefusalHandoff(held)
+		s.abortHeldQuery(held.err)
+
+		if s.upstreamConn != nil {
+			_ = s.upstreamConn.Close()
+		}
+
+		if s.clientConn != nil {
+			_ = s.clientConn.Close()
+		}
+	}()
+
+	// What the handoff actually cost, recorded on the way out. Both bounds are
+	// sized against these two numbers and nothing else, so they are logged on
+	// every delivery rather than inferred from a client's row count: the byte
+	// side is the tail of the in-flight fetch batch, the time side is how long
+	// the client took to announce its boundary. See refusalHandoffCost and
+	// docs/oracle.md, "What a legitimate handoff costs, measured".
+	cost := s.refusalHandoffCost(held)
+
+	if named {
+		_ = s.writeTTCError(int(ORA00028), "session terminated: "+held.err.Error())
+
+		s.logger.WarnContext(s.ctx, logMsgRefusalDelivered,
+			slog.Any("error", held.err),
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis))
+	} else {
+		s.logger.WarnContext(s.ctx, logMsgRefusalUnnameable,
+			slog.Any("error", held.err),
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis))
+	}
+
+	return true
+}
+
+// handoffCost is what one held refusal cost before it was answered: the bytes
+// relayed to the client past the violation, and how long the hold lasted.
+//
+// These are exactly the two quantities refusalHoldMaxBytes and
+// refusalHandoffGrace bound, which is the point — the constants are sized
+// against observations of this struct, taken from live clients through the
+// integration suites, rather than against a reasoned expectation.
+type handoffCost struct {
+	bytes  int64
+	millis int64
+}
+
+// bytesPerSecond is the effective link speed the hold was drained at, which is
+// the axis the two bounds are compared on: see refusalCrossoverBytesPerSecond.
+// Zero for a hold too short to divide by.
+func (c handoffCost) bytesPerSecond() int64 {
+	if c.millis <= 0 {
+		return 0
+	}
+
+	return c.bytes * 1000 / c.millis
+}
+
+// refusalHandoffCost measures a held refusal at the moment it is resolved.
+func (s *session) refusalHandoffCost(held *heldRefusal) handoffCost {
+	return handoffCost{
+		bytes:  s.cumulativeClientBytes() - held.atBytes,
+		millis: time.Since(held.armedAt).Milliseconds(),
+	}
+}
+
+// heldRefusalBlocks is the exit interceptClientMessage takes when it could not
+// read a client message at all — an unwalkable payload, or a decode that
+// panicked. Reports true when the packet must NOT be forwarded.
+//
+// With no refusal held it reports false, which is the fail-open the whole
+// intercept path is built on: dbbat could not read this frame, so refusing it
+// protects nothing, while blocking it would strand the client (see
+// gateUnnameableFrame for the same argument at length).
+//
+// With one held, the answer flips, and the asymmetry is the point: the grant is
+// exhausted, the session is already over, and forwarding is the one thing that
+// must not happen. A frame dbbat cannot parse is by construction a frame it
+// cannot *name*, so it gets exactly what a named-but-unwalkable call gets —
+// both sockets dropped and no frame written, because an OER stamped with a
+// stale call number ends a call the client is not parked on.
+//
+// Of its three callers, only the recovered panic is live traffic. The two
+// length-based early returns above it cannot fire from clientToUpstream, which
+// pre-gates every packet at ttcDataFlagsSize+1 bytes — they are guarded because
+// the guarantee has to belong to this function rather than to a length check one
+// caller happens to perform.
+func (s *session) heldRefusalBlocks() bool {
+	held := s.heldRefusalNow()
+	if held == nil {
+		return false
+	}
+
+	// The nested recover is not belt-and-braces, even though the client relay
+	// goroutine now runs under safe.RunRelay and a panic escaping here would
+	// no longer reach the runtime. What it buys is one level finer: this runs
+	// from the recovery of a *decode* panic, and the session is meant to survive
+	// that — the relay's recover would end it instead. The teardown it performs
+	// (completeQuery, the store write it schedules) is exactly the kind of work
+	// that panicking on a malformed session would be worst in. Blocking is still
+	// the answer: a refusal is held, so forwarding was never on the table, even
+	// when the teardown did not finish.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.ErrorContext(s.ctx, logMsgRefusalTeardownPanic, slog.Any("panic", r))
+			}
+		}()
+
+		s.answerHeldRefusal(held, false)
+	}()
+
+	return true
 }
 
 // interceptUpstreamMessage handles response interception from upstream.
@@ -1398,6 +2484,14 @@ func (s *session) upstreamToClient() error {
 // Like interceptClientMessage, this is best-effort observability: any panic in
 // the response-decode path is recovered so the upstream packet is still
 // forwarded to the client and the session survives.
+//
+// This is the upstream leg's single trackerMu boundary: everything it reaches
+// (learnCursorID, handleQueryResultV2, handleResponse, handleContinuation,
+// handleOERStatus, completeQuery, captureRow…) runs with the lock held and
+// therefore takes it nowhere itself. Nothing in here does socket I/O, so
+// holding it for the whole call cannot stall the client leg on the network.
+// Note the defer order: the unlock is registered last and so runs *before* the
+// recover, releasing the lock even on a recovered decode panic.
 func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -1405,6 +2499,9 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 				slog.Any("panic", r))
 		}
 	}()
+
+	s.trackerMu.Lock()
+	defer s.trackerMu.Unlock()
 
 	funcCode, err := parseTTCFunctionCode(pkt.Payload)
 	if err != nil {
@@ -1415,6 +2512,23 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	if ttcPayload == nil {
 		return
 	}
+
+	// Every upstream response is a sample of the OER layout this client parses —
+	// the upstream negotiated with the client's own forwarded capabilities —
+	// which is what a refusal dbbat synthesizes has to match, and now also which
+	// encoding the *decoders* below read.
+	//
+	// It runs before cursor-id learning, not after, because the OER that names
+	// the allotted cursor is itself a sample of the layout it is written in: on
+	// an OCI session whose shape had not been learned yet, reading them in the
+	// other order left the scan guessing at the very packet that could have told
+	// it.
+	s.learnOERTail(ttcPayload)
+
+	// Before anything is completed: the response to an execute is where the
+	// server names the cursor it allotted, and that mapping is what lets a
+	// later re-execution be gated against the right statement.
+	s.learnCursorID(ttcPayload)
 
 	switch funcCode { //nolint:exhaustive // only handling response-related codes
 	case TTCFuncQueryResult:
@@ -1428,21 +2542,283 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	}
 }
 
+// observeClientAuthEncoding reads both OCI dialect flags off the client's AUTH
+// Phase 1, which is the earliest — and, for a session that never gets an OER
+// before it has to refuse one, the only — evidence of which one this client
+// speaks.
+//
+// The two are not redundant. clientWideEncoding says the key/value *lengths*
+// are fixed 4-byte fields rather than compressed ones, and shapes the challenge
+// dbbat issues. clientWide64Encoding says the *op headers and summary objects*
+// are 64-bit, and shapes the OER dbbat writes when it has learned nothing. Every
+// 64-bit client is also a wide one; the reverse does not hold, which is exactly
+// the Instant Client.
+func (s *session) observeClientAuthEncoding(phase1Payload []byte) {
+	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Payload)
+
+	if ttc := extractTTCPayload(phase1Payload); ttc != nil {
+		s.clientWide64Encoding = usesWide64OpHeader(ttc)
+	}
+}
+
+// learnOERTail keeps the session's picture of the TTC summary object honest
+// against the one the upstream actually sends, and tracks the end-to-end
+// sequence number so a synthesized error continues the session's count instead
+// of restarting it.
+//
+// Both are read from OERs dbbat is relaying anyway. The upstream leg negotiated
+// with this client's own forwarded capabilities, so its OERs are shaped exactly
+// the way the client parses one — which is the only reliable source for the
+// part of the layout no capability bit predicts (see oerShape.extraTailFields).
+// Learning is idempotent and cheap; it re-runs on every response so a session
+// that starts before the first sample still converges.
+func (s *session) learnOERTail(ttcPayload []byte) {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	// A session built without the constructor (tests, and any future path that
+	// skips it) carries a zero shape, which would decode nothing.
+	s.oer = s.oer.orDefault()
+
+	if info, _ := decodeOERFieldsForShape(s.oer, ttcPayload, 0); info != nil && info.SeqNumber > s.oerSeq {
+		s.oerSeq = info.SeqNumber
+	}
+
+	if s.oer.tailLearned {
+		return
+	}
+
+	if learnOERShape(&s.oer, ttcPayload) {
+		// fixed_width_64 is the discriminator between the two OCI layouts, and
+		// it is on this line because it is the first thing anyone debugging a
+		// hung OCI client needs: `fixed_width=true fixed_width_64=false` on a
+		// 64-bit client is the whole bug, and nothing else in the log says it.
+		s.logger.DebugContext(s.ctx, logMsgLearnedOERTail,
+			slog.Int("extra_tail_fields", s.oer.extraTailFields),
+			slog.Bool("fixed_width", s.oer.fixedWidth),
+			slog.Bool("fixed_width_64", s.oer.fixedWidth64),
+			slog.Bool("end_of_response", s.oer.endOfResponse))
+	}
+}
+
+// nextOERFrame returns the summary-object layout to write the next synthesized
+// OER with, and the end-to-end sequence number to stamp on it. No client
+// validates the sequence, but a value that walks forward with the session is
+// what a server sends and what dbbat's own OER locator bounds.
+//
+// When nothing has been sampled from the upstream, the client's AUTH framing
+// stands in for **all three** halves of the OCI shape. Seeding only the encoding
+// would be worse than useless: by encodeOERFixedWidth's own measurement, an OCI
+// client handed a fixed-width body with no end-of-response marker hangs exactly
+// as it did on the frame this whole change replaces. The two travel together
+// because the same client is on both sides of them — an OCI session's messages
+// carry the marker whatever the Accept said, and no thin session's do.
+//
+// fixedWidth64 is seeded from the same place, and it is not a nicety: learning
+// happens off the upstream's own OERs, so a session that must refuse *before*
+// one has arrived — an approval pattern matching the opening statement, a quota
+// already exhausted, a first statement that is a write under `read_only` — gets
+// this fallback and nothing else. A 64-bit client handed the 32-bit layout there
+// hangs exactly the way it did on every other frame written for the wrong
+// dialect, and no integration test can reach it, because sqlplus issues its own
+// login SELECTs before anything a grant would refuse. See
+// TestUnlearnedRefusalFollowsTheClientsOwnDialect.
+// oerShapeSnapshot returns the session's current picture of the summary-object
+// layout, for the paths that have to *read* an OER the upstream sent rather than
+// write one.
+//
+// It is deliberately not nextOERFrame: that one seeds the OCI dialect from the
+// client's own AUTH framing when nothing has been learned, because a refusal has
+// to be written in some encoding and a wrong guess hangs the client. A decoder
+// has the better option — an unlearned shape lets decodeOERFixedFieldsAt try
+// both layouts under the RetCode anchor, so nothing has to be guessed at all.
+func (s *session) oerShapeSnapshot() oerShape {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	return s.oer.orDefault()
+}
+
+func (s *session) nextOERFrame() (oerShape, int, byte) {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	s.oerSeq++
+
+	shape := s.oer.orDefault()
+	if !shape.tailLearned {
+		shape.fixedWidth = s.clientWideEncoding
+		shape.endOfResponse = s.clientWideEncoding
+		shape.fixedWidth64 = s.clientWide64Encoding
+	}
+
+	return shape, s.oerSeq, s.oerCallNumber
+}
+
+// observeClientCallNumber records the TTC sequence number of the call the
+// client is waiting on, so a refusal can end that call by number rather than by
+// zero. Every client message goes through here, including the ones dbbat has no
+// opinion about — a fetch continuing a result set in particular, which is its
+// own call with its own sequence number. That is what makes the number right for
+// a limit violation caught on the *response* leg: the call was forwarded
+// upstream a while ago, but its end-of-call OER has not reached the client, so
+// the client is still parked in the receive for it.
+//
+// It is never read outside a call. The one refusal that can fire while the
+// client is idle — the limit watchdog — writes no OER at all, deliberately; see
+// onLimitViolation.
+//
+// Reports whether the call could be named. False means the previous number is
+// kept rather than overwritten with a number that is *wrong* — a piggyback's
+// own sequence, with the real call stapled behind a body dbbat cannot walk.
+// Both legs depend on that: the client leg refuses nothing on a message it
+// could not name, and the response leg's mid-stream limit refusal keeps
+// pointing at the last call dbbat actually saw.
+func (s *session) observeClientCallNumber(ttcPayload []byte) bool {
+	number, ok := clientCallNumber(ttcPayload)
+	if !ok {
+		return false
+	}
+
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	s.oerCallNumber = number
+
+	return true
+}
+
+// observeOERServerCaps and observeOERClientVersion are the locked wrappers the
+// pre-auth relay uses.
+//
+// The relay is two goroutines by design (see relayPreAuthNegotiation): the pump
+// forwards the upstream's Set Protocol reply while the main loop is already
+// forwarding the client's Set Data Types. Both land on this shape, and the
+// version each writes is `min(existing, observed)` — a read-modify-write, not a
+// torn word, so it needs the mutex and not just an atomic.
+//
+// This did not show up in testing because make test-e2e-oracle runs without
+// -race, unlike make test. See
+// specs/todos/2026-08-11-10-race-detector-on-the-integration-suites.md.
+func (s *session) observeOERServerCaps(raw []byte) {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	observeOERCapabilities(&s.oer, raw)
+}
+
+func (s *session) observeOERClientVersion(ttcBody []byte) {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	observeClientTTCVersion(&s.oer, ttcBody)
+}
+
 // handleOERStatus processes a standalone OER (func=0x04) message. Servers send
 // it directly (after a marker exchange) when a statement fails, and as an
 // end-of-call status in some flows.
+//
+// This is the path a failing statement takes — measured, on both clients: a
+// SELECT against a missing table, a unique-key violation, a divide-by-zero, a
+// PL/SQL RAISE and a PL/SQL compile error all come back as a standalone 0x04
+// after a marker exchange, never as an OER embedded in a Response. So this
+// function is where queries.error is won or lost.
+//
+// It used to be lost. decodeOERAt demands the end-of-call bit, and the bit was
+// believed to be a client trait; it is not, it tracks the call. Only the failed
+// *DDL* carried it in either capture, so on every client the other five shapes
+// were dropped here and the statement was closed as a *success* by the next
+// statement's flushPendingQuery — a failed UPDATE logged with no error at all.
+//
+// What stands in for the bit is decodeErrorOER, which proves the tail is an
+// Oracle diagnostic naming the very code the fields reported. That is enough
+// outside a row stream, where the payload cannot be row bytes.
+//
+// Mid-fetch it is not, because this function is routed on byte 0 alone and a
+// row value's four-byte length prefix landing at the start of a TNS packet is
+// indistinguishable from an OER's marker. A failure raised there used to be
+// dropped outright — see midFetchOERNamesTheStreamingCursor for what replaced
+// that, and why the bar is higher on this side of the boundary.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleOERStatus(ttcPayload []byte) {
-	info := decodeOERAt(ttcPayload, 0)
+	if info := decodeOERAt(ttcPayload, 0); info != nil {
+		s.completeQueryFromOER(info)
+
+		return
+	}
+
+	if s.tracker.pendingQuery == nil {
+		return
+	}
+
+	info := decodeErrorOER(s.oerShapeSnapshot(), ttcPayload)
 	if info == nil {
+		return
+	}
+
+	if s.rowStreamActive() && !s.midFetchOERNamesTheStreamingCursor(info) {
 		return
 	}
 
 	s.completeQueryFromOER(info)
 }
 
+// midFetchOERNamesTheStreamingCursor is the extra anchor a proven diagnostic has
+// to clear to end a call *while rows are streaming*.
+//
+// Measured (testdata/{python_thin,go_ora}_midfetch_fail.pcapng: a TO_NUMBER that
+// blows up 14 900 rows into a 20 000-row fetch), a mid-fetch failure arrives
+// exactly the way a pre-first-row one does — a standalone func 0x04, CallStatus
+// 0x1, no end-of-call bit — and its cursorID field is the cursor whose rows are
+// on the wire, on both clients. Replaying the whole testdata corpus through a
+// real session says the cost of believing decodeErrorOER here is nil: of the 342
+// server packets that arrive mid-row-stream, 340 do not even begin with 0x04,
+// the two that do are these very failures, and a scan of the same predicate at
+// every 0x04 offset inside all of them accepts nothing. Those figures are
+// printed, not remembered — see TestDumpReplay_MidStreamOERFalsePositiveRate.
+//
+// The cursor check is not what that measurement justifies; it is aimed at the
+// one shape a corpus of numeric and temporal fixtures cannot contain — a result
+// set whose rows *carry* ORA- text, as `SELECT message FROM error_log` does.
+// Such a row would have to decode as seven bounded ints, be followed by the
+// ASCII spelling of the number its fourth field landed on, *and* have its
+// seventh field land on the streaming cursor's own id.
+//
+// It fails closed twice over: a mid-fetch diagnostic naming another cursor is
+// dropped, and so is one arriving on a fetch whose cursor id was never learned.
+// Either way the failure mode is the old missing error text and never a
+// fabricated one. The debug line is there because that is otherwise invisible —
+// if an unmeasured client ever reports a different cursor, this is what says so.
+//
+// One honest caveat about the reference value. `learnCursorID` runs on every
+// upstream packet and latches only once it has succeeded, so for a statement
+// whose id is never learned the anchored scan behind it keeps running over
+// row-stream bytes for the whole fetch — meaning the id this compares against
+// could itself have originated in row data. That is pre-existing (cursor-id
+// learning has always worked this way, and re-execution gating already trusts
+// it), but this anchor is what makes it load-bearing for query error text too.
+//
+// Callers hold trackerMu.
+func (s *session) midFetchOERNamesTheStreamingCursor(info *oerInfo) bool {
+	streaming := s.tracker.pendingQuery.cursor.cursorID
+	if streaming != 0 && info.CursorID == int(streaming) {
+		return true
+	}
+
+	s.logger.DebugContext(s.ctx, "mid-fetch OER does not name the streaming cursor; leaving the call open",
+		slog.Int("oer_cursor_id", info.CursorID),
+		slog.Int("streaming_cursor_id", int(streaming)),
+		slog.Int("ora_code", info.ErrorCode))
+
+	return false
+}
+
 // completeQueryFromOER finalizes the pending query from decoded OER fields:
 // rows affected on success, error text on failure, plain completion on
 // ORA-01403 (end-of-data, keeps captured-row counts).
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) completeQueryFromOER(info *oerInfo) {
 	switch {
 	case info.ErrorCode == oraNoDataFound:
@@ -1468,6 +2844,8 @@ func (s *session) completeQueryFromOER(info *oerInfo) {
 // row (0x15 [flag] [count] [bitmask] 0x07) indicates which columns will
 // have new values in the NEXT row. Columns not in the bitmask retain their
 // previous values.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleContinuation(ttcPayload []byte) {
 	if s.tracker.pendingQuery == nil || s.tracker.pendingQuery.cursor == nil {
 		return
@@ -1511,6 +2889,8 @@ func (s *session) handleContinuation(ttcPayload []byte) {
 // code. Column definitions are the marker of that window because they are set
 // exactly once per fetch (handleQueryResultV2 / handleResponse) and cleared
 // with the cursor.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) rowStreamActive() bool {
 	pending := s.tracker.pendingQuery
 
@@ -1520,6 +2900,8 @@ func (s *session) rowStreamActive() bool {
 // handleResponse processes a legacy TTC Response (func=0x08).
 // In v315+, most responses don't follow the legacy format so we skip them.
 // Query completion is handled by handleQueryResultV2 for func=0x10.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleResponse(ttcPayload []byte) {
 	// Mid-fetch, a leading 0x08 is NOT a fresh Response: it is row-stream
 	// content — an 8-byte first column value's length prefix, or the
@@ -1551,6 +2933,36 @@ func (s *session) handleResponse(ttcPayload []byte) {
 	if oer := findOERInResponse(ttcPayload); oer != nil {
 		s.completeQueryFromOER(oer)
 		return
+	}
+
+	// ...but the end-of-call bit findOERInResponse insists on is not a protocol
+	// invariant. On the successful calls that reach this branch it reads like a
+	// client trait — a python-oracledb thin session's OERs come with CallStatus
+	// 1–2 where go-ora's carry the bit — so every INSERT/UPDATE/DELETE those
+	// clients ran used to fall through here, stay pending, and be closed only by
+	// the *next* statement's flushPendingQuery — recording no rows_affected and a
+	// duration_ms that measured the client's think time (one live UPDATE was
+	// logged at 74 s because the session then sat idle). A session whose last
+	// statement was such a DML had it sealed by cleanup instead, timed to the
+	// disconnect.
+	//
+	// "Client trait" is the wrong generalisation, though, and only holds for the
+	// successful calls this branch sees: measured across six failure shapes, the
+	// bit tracks the *call*, and go-ora emits bit-less OERs too. That matters in
+	// handleOERStatus, not here — no failure arrives embedded in a Response at
+	// all (TestDumpReplay_NoFailureArrivesEmbeddedInAResponse).
+	//
+	// Outside a row stream the payload is a return-parameter block rather than
+	// row bytes, which is what the bit was defending against, so the anchored
+	// bounds that cursor-id learning already trusts on this very message are
+	// enough to complete on. They have to be: dbbat was reading cursor ids off
+	// these exact OERs while refusing to read the row count out of the same
+	// seven fields.
+	if s.tracker.pendingQuery != nil {
+		if oer := findPlausibleOERInResponse(s.oerShapeSnapshot(), ttcPayload); oer != nil {
+			s.completeQueryFromOER(oer)
+			return
+		}
 	}
 
 	resp, err := decodeTTCResponse(ttcPayload)
@@ -1604,7 +3016,13 @@ func (s *session) cleanup() {
 	// unset, and the streamed bytes never charged to the connection or the
 	// grant, which is a way to under-report against a byte quota. Same reasoning
 	// as the completeQuery on the quota-kill path in upstreamToClient.
+	//
+	// Under trackerMu: cleanup runs as soon as *one* relay direction returns,
+	// and the other goroutine can still be intercepting packets on the same
+	// tracker for as long as its own socket stays open.
+	s.trackerMu.Lock()
 	s.flushPendingQuery()
+	s.trackerMu.Unlock()
 
 	s.stream.Connection(s.ctx, shared.ConnectionClosed)
 

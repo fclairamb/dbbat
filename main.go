@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -171,6 +172,7 @@ func CmdRun() {
 				},
 			},
 			dumpCommand(),
+			auditCommand(flags),
 		},
 		Action: func(ctx context.Context, _ *cli.Command) error {
 			// Default action is to serve
@@ -252,6 +254,13 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	storeOpts := store.Options{
 		DropTablesFirst: cfg.RunMode == config.RunModeTest || cfg.RunMode == config.RunModeDemo,
 		InstanceID:      cfg.InstanceID,
+		// Seals the audit and query chains. The store keeps only an HKDF
+		// subkey of this; see docs/audit-chain.md.
+		EncryptionKey: cfg.EncryptionKey,
+		// Not what drives the sweep (startQueryRetentionSweep owns that) —
+		// what lets chain verification tell a session retention emptied from
+		// one somebody emptied.
+		QueryRetention: cfg.QueryStorage.RetentionDuration(),
 	}
 	if cfg.RunMode == config.RunModeTest {
 		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
@@ -316,6 +325,18 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	apiServer, approvals, approvalDeps := buildEventPlumbing(ctx, cfg, dataStore, logger)
 	apiServer.SetDumpStorage(dumpUploader)
 
+	// The six listener goroutines in this file — this one and the five protocol
+	// servers below — are the *only* goroutines in the process deliberately left
+	// without a panic guard, and the reason does not generalise to anything else
+	// here. Each one is a listener's accept loop, and each already treats its own
+	// failure as fatal: the os.Exit(1) below says the process without this
+	// listener is not a process worth keeping. Recovering would leave dbbat
+	// running while silently serving nothing on that port. Per-connection panics
+	// never reach here — handleConnection recovers them one session at a time.
+	//
+	// Everything else in package main that runs on a goroutine is guarded: see
+	// retention.go and heartbeat.go, both of which are ordinary maintenance loops
+	// under safe.RunMaintenance.
 	go func() {
 		if err := apiServer.Start(cfg.ListenAPI); err != nil {
 			logger.ErrorContext(context.Background(), "API server error", slog.Any("error", err))
@@ -910,7 +931,45 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 		logger.InfoContext(ctx, "Created test API key", slog.String("user", tk.user.Username), slog.String("key", tk.key))
 	}
 
+	// 8. Record a directory role sync against the viewer, so the users page
+	// has a "last synced from SSO" row to show. Only an OIDC login writes this
+	// event in production, and E2E has no identity provider to log in through.
+	if err := seedTestRoleSync(ctx, dataStore, viewerUser); err != nil {
+		return err
+	}
+	logger.InfoContext(ctx, "Recorded a directory role sync for the viewer user")
+
 	logger.InfoContext(ctx, "Test data provisioning complete")
+	return nil
+}
+
+// seedTestRoleSync writes the audit entry an OIDC login leaves behind when the
+// directory changes someone's roles (api.AuditEventOAuthRolesSynced), matching
+// auditRoleSync's payload field for field — the users page reads the groups
+// out of it to answer "why did this change?".
+func seedTestRoleSync(ctx context.Context, dataStore *store.Store, user *store.User) error {
+	details, err := json.Marshal(map[string]any{
+		"provider":       "oidc",
+		"groups":         []string{"analysts"},
+		"previous_roles": []string{store.RoleConnector},
+		"roles":          []string{store.RoleViewer},
+		"granted":        []string{store.RoleViewer},
+		"revoked":        []string{store.RoleConnector},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to encode test role sync details: %w", err)
+	}
+
+	// PerformedBy stays nil, as it does in production: no dbbat user made this
+	// decision, the identity provider did.
+	if err := dataStore.LogAuditEvent(ctx, &store.AuditEvent{
+		EventType: api.AuditEventOAuthRolesSynced,
+		UserID:    &user.UID,
+		Details:   details,
+	}); err != nil {
+		return fmt.Errorf("failed to record test role sync audit event: %w", err)
+	}
+
 	return nil
 }
 
@@ -1494,6 +1553,182 @@ func dumpCommand() *cli.Command {
 			},
 		},
 	}
+}
+
+// auditCommand builds the `dbbat audit` command tree.
+func auditCommand(flags *cliFlags) *cli.Command {
+	return &cli.Command{
+		Name:  "audit",
+		Usage: "Tamper-evidence commands for the audit trail",
+		Commands: []*cli.Command{
+			{
+				Name: "verify",
+				Usage: "Walk the HMAC chain and report the first break " +
+					"(exits non-zero when the chain does not verify)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:  "queries",
+						Usage: "verify the per-connection query chains instead of the audit log",
+					},
+					&cli.BoolFlag{
+						Name:  "rows",
+						Usage: "verify the per-query captured result row chains instead of the audit log",
+					},
+					&cli.StringFlag{
+						Name:  "connection",
+						Usage: "with --queries or --rows, verify only this connection uid",
+					},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return runAuditVerify(ctx, flags, cmd)
+				},
+			},
+		},
+	}
+}
+
+var (
+	errAuditChainBroken     = errors.New("audit chain verification failed")
+	errAuditConnectionScope = errors.New("--connection only applies together with --queries or --rows")
+	errAuditScopeConflict   = errors.New("--queries and --rows are different chains: pass one or the other")
+)
+
+func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) error {
+	cfg, err := loadConfigWithCLI(flags)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	logLevel := config.ParseLogLevel(cfg.LogLevel)
+
+	logger, logCleanup := setupLogger(cfg.RunMode, logLevel)
+	if logCleanup != nil {
+		defer logCleanup()
+	}
+
+	slog.SetDefault(logger)
+
+	if cmd.Bool("queries") && cmd.Bool("rows") {
+		return errAuditScopeConflict
+	}
+
+	connectionArg := cmd.String("connection")
+	if connectionArg != "" && !cmd.Bool("queries") && !cmd.Bool("rows") {
+		return errAuditConnectionScope
+	}
+
+	var connectionUID *uuid.UUID
+
+	if connectionArg != "" {
+		parsed, err := uuid.Parse(connectionArg)
+		if err != nil {
+			return fmt.Errorf("invalid --connection uid %q: %w", connectionArg, err)
+		}
+
+		connectionUID = &parsed
+	}
+
+	dataStore, err := store.New(ctx, cfg.DSN, store.Options{
+		EncryptionKey: cfg.EncryptionKey,
+		// A session with no statement left is only excusable inside the window
+		// the sweep deletes from, so the verifier has to be told what that
+		// window is — from the same configuration the sweep reads.
+		QueryRetention: cfg.QueryStorage.RetentionDuration(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize store: %w", err)
+	}
+
+	defer dataStore.Close()
+
+	if cmd.Bool("queries") {
+		return verifyQueryChains(ctx, dataStore, logger, connectionUID)
+	}
+
+	if cmd.Bool("rows") {
+		return verifyRowChains(ctx, dataStore, logger, connectionUID)
+	}
+
+	return verifyAuditChain(ctx, dataStore, logger)
+}
+
+func verifyAuditChain(ctx context.Context, dataStore *store.Store, logger *slog.Logger) error {
+	result, err := dataStore.VerifyAuditChain(ctx)
+	if err != nil {
+		return fmt.Errorf("audit chain verification failed: %w", err)
+	}
+
+	if !result.OK() {
+		logger.ErrorContext(ctx, "AUDIT CHAIN BROKEN",
+			slog.String("break", result.Break.String()),
+			slog.Int64("verified_before_break", result.Verified))
+
+		return errAuditChainBroken
+	}
+
+	logger.InfoContext(ctx, "Audit chain verified",
+		slog.Int64("entries", result.Verified),
+		slog.Int64("head_seq", result.HeadSeq),
+		slog.String("head_mac", result.HeadMACHex()),
+		// Rows written before the chain anchor. Nothing sealed them, so
+		// nothing can vouch for them; the count is reported rather than
+		// quietly folded into "verified".
+		slog.Int64("unverifiable_pre_anchor_entries", result.Unchained))
+
+	return nil
+}
+
+func verifyQueryChains(
+	ctx context.Context, dataStore *store.Store, logger *slog.Logger, connectionUID *uuid.UUID,
+) error {
+	result, err := dataStore.VerifyQueryChains(ctx, connectionUID)
+	if err != nil {
+		return fmt.Errorf("query chain verification failed: %w", err)
+	}
+
+	if !result.OK() {
+		logger.ErrorContext(ctx, "QUERY CHAIN BROKEN",
+			slog.String("break", result.Break.String()),
+			slog.Int64("verified_before_break", result.Verified))
+
+		return errAuditChainBroken
+	}
+
+	logger.InfoContext(ctx, "Query chains verified",
+		slog.Int64("connections", result.Connections),
+		slog.Int64("statements", result.Verified),
+		// A chain missing its oldest statements is what
+		// DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session,
+		// so it is counted rather than treated as tampering.
+		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated))
+
+	return nil
+}
+
+func verifyRowChains(
+	ctx context.Context, dataStore *store.Store, logger *slog.Logger, connectionUID *uuid.UUID,
+) error {
+	result, err := dataStore.VerifyRowChains(ctx, connectionUID)
+	if err != nil {
+		return fmt.Errorf("captured row chain verification failed: %w", err)
+	}
+
+	if !result.OK() {
+		logger.ErrorContext(ctx, "CAPTURED ROW CHAIN BROKEN",
+			slog.String("break", result.Break.String()),
+			slog.Int64("verified_before_break", result.Verified))
+
+		return errAuditChainBroken
+	}
+
+	logger.InfoContext(ctx, "Captured row chains verified",
+		slog.Int64("captures", result.Captures),
+		slog.Int64("rows", result.Verified),
+		// Rows captured before the row chain migration. Nothing sealed them,
+		// so they are reported rather than folded into "verified".
+		slog.Int64("unverifiable_pre_migration_rows", result.Unchained))
+
+	return nil
 }
 
 var errDumpAnonymiseUsage = errors.New("usage: dbbat dump anonymise [--keep-addresses] <input-file> [output-file]")

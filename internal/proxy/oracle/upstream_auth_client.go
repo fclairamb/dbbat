@@ -23,6 +23,20 @@ const (
 
 const defaultDriverName = "dbbat-oracle-proxy"
 
+// forceSyntheticUpstreamAuth makes the upstream AUTH path skip the client-packet
+// rewrite and drive the synthetic builders instead.
+//
+// It is always false in production — nothing but the integration suite writes
+// it, from a TestMain gated on forceSyntheticAuthEnv. The seam exists because
+// the rewrite always wins in practice, so the fallback never runs and rotted
+// unnoticed: it shipped a preamble one byte short of what any modern client
+// sends (two break markers + ORA-03120), and a green suite proved nothing about
+// it. With the flag on, the existing integration tests exercise the fallback
+// against a real Oracle:
+//
+//	DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1 go test -tags integration ./internal/proxy/oracle/
+var forceSyntheticUpstreamAuth bool
+
 // maxProgramNameLen bounds the AUTH_PROGRAM_NM value dbbat sends upstream.
 // Oracle's V$SESSION.PROGRAM column is historically VARCHAR2(48) across
 // widely-deployed versions (11g through 19c); keep to that width so the
@@ -86,7 +100,12 @@ func (s *session) oracleDbbatUsername() string {
 // from a captured AUTH packet (Phase 1 or Phase 2 — both carry it), so it can
 // be embedded as the "$appName" suffix of the upstream-facing program name.
 // Returns "" if pkt is nil or the key isn't present.
-func clientDeclaredProgramName(pkt *TNSPacket) string {
+//
+// bigChunks is the session's negotiated CLR long form. Unlike the two AUTH_*
+// keys parseAuthPhase2 extracts, a program name is free-form client text with
+// no Oracle-side length cap, so it is the one value these finders read that can
+// genuinely reach the long form.
+func clientDeclaredProgramName(pkt *TNSPacket, bigChunks bool) string {
 	if pkt == nil {
 		return ""
 	}
@@ -94,10 +113,10 @@ func clientDeclaredProgramName(pkt *TNSPacket) string {
 	payload := pkt.Payload
 
 	if payloadUsesWideKVEncoding(payload) {
-		return findKVByKeyBytesWide(payload, []byte(authKeyProgramNM))
+		return findKVByKeyBytesWide(payload, []byte(authKeyProgramNM), bigChunks)
 	}
 
-	return findKVByKeyBytes(payload, []byte(authKeyProgramNM))
+	return findKVByKeyBytes(payload, []byte(authKeyProgramNM), bigChunks)
 }
 
 // buildUpstreamProgramName composes the canonical dbbat-branded AUTH_PROGRAM_NM
@@ -106,7 +125,7 @@ func clientDeclaredProgramName(pkt *TNSPacket) string {
 // See shared.BuildUpstreamName for the truncation rules.
 func (s *session) buildUpstreamProgramName() string {
 	username := s.oracleDbbatUsername()
-	appName := clientDeclaredProgramName(s.clientAuthPhase1Pkt)
+	appName := clientDeclaredProgramName(s.clientAuthPhase1Pkt, s.clientBigClrChunks)
 
 	return shared.BuildUpstreamName(version.Version, username, appName, maxProgramNameLen)
 }
@@ -234,8 +253,23 @@ func (s *session) finishUpstreamAuth() error {
 // no-op if the key isn't present in the client's packet, so this is a safe
 // addition on top of the existing rewrite.
 func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentity, mode uint32) error {
-	if s.clientAuthPhase1Pkt == nil || len(s.clientAuthPhase1Pkt.Payload) <= ttcDataFlagsSize {
-		return s.writeUpstreamData(buildClientAuthPhase1(username, identity, mode))
+	synthetic := func() error {
+		if s.clientWideEncoding {
+			f := s.wideAuthFramingFor(s.clientAuthPhase1Pkt, PiggybackSubAuth1, authPhase1FuncSeq, mode)
+
+			return s.writeUpstreamData(
+				buildClientAuthPhase1Wide(f, username, identity, s.clientBigClrChunks), wideAuthDataFlags)
+		}
+
+		header := s.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
+
+		return s.writeUpstreamData(
+			buildClientAuthPhase1(header, username, identity, mode, s.clientBigClrChunks), thinAuthDataFlags)
+	}
+
+	if forceSyntheticUpstreamAuth ||
+		s.clientAuthPhase1Pkt == nil || len(s.clientAuthPhase1Pkt.Payload) <= ttcDataFlagsSize {
+		return synthetic()
 	}
 
 	clientPayload := s.clientAuthPhase1Pkt.Payload
@@ -247,10 +281,11 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 		s.logger.WarnContext(s.ctx, "Phase 1 rewrite failed; falling back to synthetic Phase 1",
 			slog.Any("error", err))
 
-		return s.writeUpstreamData(buildClientAuthPhase1(username, identity, mode))
+		return synthetic()
 	}
 
-	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName, payloadUsesWideKVEncoding(clientBody))
+	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName,
+		payloadUsesWideKVEncoding(clientBody), s.clientBigClrChunks)
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH: forwarding rewritten client Phase 1",
 		slog.Int("original_body_len", len(clientBody)),
@@ -287,8 +322,25 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 // present in the client's packet, so this is a safe addition on top of the
 // existing rewrite.
 func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentity, sec *upstreamAuthSecrets, mode uint32) error {
-	if s.clientAuthPhase2Pkt == nil || len(s.clientAuthPhase2Pkt.Payload) <= ttcDataFlagsSize {
-		return s.writeUpstreamData(buildClientAuthPhase2(username, identity, sec, mode))
+	synthetic := func() error {
+		if s.clientWideEncoding {
+			// Phase 2's own captured packet, not Phase 1's: the two carry
+			// different lead bytes and different logon-mode bits.
+			f := s.wideAuthFramingFor(s.clientAuthPhase2Pkt, PiggybackSubAuth2, authPhase2FuncSeq, mode)
+
+			return s.writeUpstreamData(
+				buildClientAuthPhase2Wide(f, username, identity, sec, s.clientBigClrChunks), wideAuthDataFlags)
+		}
+
+		header := s.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq)
+
+		return s.writeUpstreamData(
+			buildClientAuthPhase2(header, username, identity, sec, mode, s.clientBigClrChunks), thinAuthDataFlags)
+	}
+
+	if forceSyntheticUpstreamAuth ||
+		s.clientAuthPhase2Pkt == nil || len(s.clientAuthPhase2Pkt.Payload) <= ttcDataFlagsSize {
+		return synthetic()
 	}
 
 	clientPayload := s.clientAuthPhase2Pkt.Payload
@@ -300,10 +352,11 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 		s.logger.WarnContext(s.ctx, "Phase 2 rewrite failed; falling back to synthetic Phase 2",
 			slog.Any("error", err))
 
-		return s.writeUpstreamData(buildClientAuthPhase2(username, identity, sec, mode))
+		return synthetic()
 	}
 
-	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName, payloadUsesWideKVEncoding(clientBody))
+	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName,
+		payloadUsesWideKVEncoding(clientBody), s.clientBigClrChunks)
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH: forwarding rewritten client Phase 2",
 		slog.Int("original_body_len", len(clientBody)),
@@ -334,11 +387,15 @@ func (s *session) writeUpstreamPayload(payload []byte) error {
 	return nil
 }
 
-// writeUpstreamData wraps a TTC body in a v315+ TNS Data packet with a
-// zero data-flag prefix and writes it to the upstream socket.
-func (s *session) writeUpstreamData(body []byte) error {
+// thinAuthDataFlags is the TTC data-flags prefix a thin client puts on its AUTH
+// packets. OCI sends wideAuthDataFlags instead — see upstream_auth_client_wide.go.
+var thinAuthDataFlags = []byte{0x00, 0x00}
+
+// writeUpstreamData wraps a TTC body in a v315+ TNS Data packet with the given
+// data-flag prefix and writes it to the upstream socket.
+func (s *session) writeUpstreamData(body, dataFlags []byte) error {
 	payload := make([]byte, 0, ttcDataFlagsSize+len(body))
-	payload = append(payload, 0x00, 0x00) // data flags
+	payload = append(payload, dataFlags...)
 	payload = append(payload, body...)
 
 	pkt := encodeV315DataPacket(payload)
@@ -461,7 +518,13 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 		resp.fragTTCLens = append(resp.fragTTCLens, len(fragTTC))
 		buf = append(buf, fragTTC...)
 
-		if parseAuthMessageStream(buf, resp, s.clientWideEncoding) {
+		if parseAuthMessageStream(buf, resp, s.clientWideEncoding, s.clientBigClrChunks) {
+			// The AUTH response ends with the upstream's own OER, which is the
+			// earliest sample of the summary-object layout this client parses —
+			// and it lands before the first statement, so a session whose very
+			// first statement is refused already has it. See ttc_oer_encode.go.
+			s.learnOERTail(buf)
+
 			resp.dataFlags = dataFlags
 
 			merged := make([]byte, 0, ttcDataFlagsSize+len(buf))
@@ -535,7 +598,7 @@ func reframeAuthOK(mergedPacket, dataFlags []byte, fragTTCLens []int) []byte {
 //
 // The function is tolerant: when it cannot decode a region it returns false
 // so the caller reads more bytes.
-func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) bool {
+func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide, bigChunks bool) bool {
 	pos := 0
 
 	for pos < len(buf) {
@@ -544,7 +607,7 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) b
 
 		switch msgCode {
 		case 0x08:
-			consumed, ok := parseAuthKVDictionary(buf[pos:], resp, wide)
+			consumed, ok := parseAuthKVDictionary(buf[pos:], resp, wide, bigChunks)
 			if !ok {
 				return false
 			}
@@ -584,7 +647,13 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) b
 // The dictionary length is a TTC compressed integer, matching go-ora's
 // session.GetInt(2, bigEndian=true, compress=true). A 1-byte size prefix is
 // followed by `size` big-endian bytes encoding the count of KV pairs.
-func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (int, bool) {
+//
+// bigChunks is the session's negotiated CLR long form. It is the upstream
+// *server* that wrote these pairs, and the server is the peer that advertised
+// the capability in the first place, so this walk has to read in the form it
+// advertised — on either dialect. Without it the flag would never reach
+// readAuthKVPairWide at all: this is its only wide caller.
+func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide, bigChunks bool) (int, bool) {
 	var dictLen, pos int
 
 	if wide {
@@ -607,7 +676,7 @@ func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (i
 	}
 
 	for i := 0; i < dictLen; i++ {
-		pair, ok := readAuthKVPair(buf[pos:], wide, false)
+		pair, ok := readAuthKVPair(buf[pos:], wide, bigChunks)
 		if !ok {
 			return 0, false
 		}
@@ -631,11 +700,12 @@ type authKVPairResult struct {
 // session.GetKeyVal in go-ora. ok=false signals the buffer is truncated. wide
 // selects the OCI fixed 4-byte little-endian length/flag encoding. bigChunks
 // selects the UseBigClrChunks long-value encoding (compressed-int chunk lengths)
-// for the value CLR; keys are always short so are unaffected. bigChunks is
-// ignored in the wide path (OCI does not use it).
+// for the value CLR; keys are always short so are unaffected. It applies to both
+// dialects: the capability is negotiated per session, not per client flavor (see
+// readAuthKVPairWide).
 func readAuthKVPair(buf []byte, wide, bigChunks bool) (authKVPairResult, bool) {
 	if wide {
-		return readAuthKVPairWide(buf)
+		return readAuthKVPairWide(buf, bigChunks)
 	}
 
 	pos := 0
@@ -689,7 +759,27 @@ func readAuthKVPair(buf []byte, wide, bigChunks bool) (authKVPairResult, bool) {
 
 // readAuthKVPairWide is the OCI (4-byte little-endian) counterpart of
 // readAuthKVPair: keyLen:4 LE + keyCLR + valueLen:4 LE + valueCLR + flag:4 LE.
-func readAuthKVPairWide(buf []byte) (authKVPairResult, bool) {
+//
+// bigChunks is the session's negotiated CLR long form and applies here exactly
+// as it does on the thin path. It used to be dropped on the floor, on the claim
+// that "OCI does not use it" — an assertion no capture in this repo supports.
+// What testdata/sqlplus_cursor_reexec.pcapng (macOS Instant Client 23.3 →
+// Oracle 23ai Free) actually shows is measured by
+// TestSqlplusCapture_NegotiatesBigClrChunksAndCarriesNoLongValue:
+//
+//   - the session DOES negotiate UseBigClrChunks — the Set Protocol reply's
+//     ServerCompileTimeCaps[37] is 0x7f, the 0x20 bit set, so clientBigClrChunks
+//     is true on an OCI session too. The capability is a property of the
+//     *server*, not of the client dialect;
+//   - and every AUTH value in that login is short (longest 172 bytes,
+//     AUTH_CONNECT_STRING), so not one of them reaches the 0xFE long form. The
+//     capture therefore cannot show which chunk-length encoding OCI writes: the
+//     two are byte-identical over the whole capture.
+//
+// So the negotiated capability is the only evidence there is, and this leg now
+// follows it instead of hard-coding the opposite. It changes nothing below the
+// 252-byte short-form limit, which is every value dbbat handles today.
+func readAuthKVPairWide(buf []byte, bigChunks bool) (authKVPairResult, bool) {
 	pos := 0
 	out := authKVPairResult{}
 
@@ -718,7 +808,7 @@ func readAuthKVPairWide(buf []byte) (authKVPairResult, bool) {
 	pos += 4
 
 	if vLen > 0 {
-		v, vClrN := readCLR(buf[pos:])
+		v, vClrN := readCLRVariant(buf[pos:], bigChunks)
 		if vClrN == 0 {
 			return authKVPairResult{}, false
 		}
@@ -790,70 +880,100 @@ func parseAuthSummary(buf []byte, resp *upstreamAuthResponse) {
 	}
 }
 
+// TTC function-call sequence numbers dbbat stamps on a synthetic AUTH message.
+// AUTH Phase 1 is the first TTC function of a session and Phase 2 the second,
+// which is exactly what every modern capture shows (`03 76 01 …`, `03 73 02 …`).
+// go-ora v2 wrote a literal 0 there and Oracle accepted it, so the field is not
+// validated — but there is no reason to send anything but the real count.
+const (
+	authPhase1FuncSeq byte = 1
+	authPhase2FuncSeq byte = 2
+)
+
+// syntheticAuthHeader returns the TTC function header for a synthetic AUTH
+// message: the piggyback marker, the sub-op, the function sequence number and —
+// when the session negotiated a TTC field version that frames function calls
+// with an extra byte — a trailing 0x00.
+//
+// That trailing byte is the whole point. go-ora's PutTTCFunc appends it when
+// the negotiated TTCVersion (min of the client's and the server's
+// CompileTimeCaps[7]) is >= 18, and the builders here used to omit it
+// unconditionally: against a modern client/23ai negotiation the upstream then
+// read every field one byte early and answered two break markers plus
+// "ORA-03120: two-task conversion routine: integer overflow". Both widths are
+// real — see the captures under testdata: go-ora v3 and JDBC thin send
+// `03 76 01 00`, older python-oracledb thin sends `03 76 01`.
+//
+// dbbat does not track the negotiated version itself, so the width is read off
+// the client's own captured AUTH Phase 1 — same socket, same negotiation, and
+// by definition a framing this upstream accepts. With no capture to read (the
+// legacy non-relay path), the modern 4-byte form is assumed: it is what every
+// currently supported client/server pair negotiates.
+// The width comes from ttcAuthFuncHeaderLen — the one place that rule lives, so
+// the side that writes a header and the sides that read one cannot drift apart.
+// Its ok=false (a wide/OCI body, or one too short to tell) means "narrow by
+// default", which is right for a reader and wrong for a writer: narrowing a
+// header dbbat is about to send on a guess is exactly the corruption this whole
+// change is about. So only an affirmative narrow reading shortens it.
+func (s *session) syntheticAuthHeader(sub, seq byte) []byte {
+	header := []byte{byte(TTCFuncPiggyback), sub, seq, 0x00}
+
+	if s.clientAuthPhase1Pkt == nil || len(s.clientAuthPhase1Pkt.Payload) <= ttcDataFlagsSize {
+		return header
+	}
+
+	if width, ok := ttcAuthFuncHeaderLen(s.clientAuthPhase1Pkt.Payload[ttcDataFlagsSize:]); ok &&
+		width == ttcAuthFuncHeaderNarrow {
+		header = header[:ttcAuthFuncHeaderNarrow]
+	}
+
+	return header
+}
+
 // buildClientAuthPhase1 returns the TTC body for an AUTH Phase 1 message.
-// Layout matches go-ora's doAuth.
-func buildClientAuthPhase1(username string, ident driverIdentity, mode uint32) []byte {
+// Layout matches go-ora v3's doAuth:
+//
+//	<header> 01 | 01 <userLen> | 01 <mode> | 01 01 05 01 01 | <clr> username | KV pairs
+//
+// header is the TTC function header from syntheticAuthHeader — its width is
+// negotiated, not fixed, which is why it is a parameter rather than a literal.
+//
+// bigChunks is the session's negotiated CLR long form, exactly as on the wide
+// counterpart buildClientAuthPhase1Wide. The username deliberately stays on
+// ttcClr: Oracle caps an identifier at 128 bytes, half the 252-byte short-form
+// limit, so it can never reach the long form and the two encodings cannot
+// disagree about it. Every KV value goes through ttcKeyValChunked instead — a
+// hostname in AUTH_TERMINAL / AUTH_MACHINE has no such cap.
+func buildClientAuthPhase1(header []byte, username string, ident driverIdentity, mode uint32, bigChunks bool) []byte {
 	buf := make([]byte, 0, 256)
-	buf = append(buf, byte(TTCFuncPiggyback), PiggybackSubAuth1, 0x00, 0x01)
+	buf = append(buf, header...)
+	buf = append(buf, 0x01)
 
 	buf = append(buf, ttcCompressedUint(uint64(len(username)))...)
 	buf = append(buf, ttcCompressedUint(uint64(mode))...)
 	buf = append(buf, 0x01, 0x01, 0x05, 0x01, 0x01)
 	buf = append(buf, ttcClr([]byte(username))...)
 
-	pairs := []struct {
-		key, value string
-	}{
-		{"AUTH_TERMINAL", ident.HostName},
-		{"AUTH_PROGRAM_NM", ident.ProgramName},
-		{"AUTH_MACHINE", ident.HostName},
-		{"AUTH_PID", strconv.Itoa(ident.PID)},
-		{"AUTH_SID", ident.OSUser},
-	}
-
-	for _, p := range pairs {
-		buf = append(buf, ttcKeyVal(p.key, p.value, 0)...)
+	for _, p := range authPhase1Pairs(ident) {
+		buf = append(buf, ttcKeyValChunked(p.key, p.value, p.flag, bigChunks)...)
 	}
 
 	return buf
 }
 
 // buildClientAuthPhase2 returns the TTC body for an AUTH Phase 2 message.
-// Layout mirrors AuthObject.Write in go-ora/v2/auth_object.go.
-func buildClientAuthPhase2(username string, ident driverIdentity, sec *upstreamAuthSecrets, mode uint32) []byte {
-	type kv struct {
-		key, value string
-		flag       int
-	}
-
-	tz := localTimezoneString(time.Now())
-
-	pairs := []kv{
-		{"AUTH_SESSKEY", sec.encClientSessKey, 1},
-		{"AUTH_PASSWORD", sec.encPassword, 0},
-	}
-
-	if sec.eSpeedyKey != "" {
-		pairs = append(pairs, kv{"AUTH_PBKDF2_SPEEDY_KEY", sec.eSpeedyKey, 0})
-	}
-
-	pairs = append(pairs,
-		kv{"AUTH_TERMINAL", ident.HostName, 0},
-		kv{"AUTH_PROGRAM_NM", ident.ProgramName, 0},
-		kv{"AUTH_MACHINE", ident.HostName, 0},
-		kv{"AUTH_PID", strconv.Itoa(ident.PID), 0},
-		kv{"AUTH_SID", ident.OSUser, 0},
-		kv{"SESSION_CLIENT_CHARSET", "871", 0},
-		kv{"SESSION_CLIENT_LIB_TYPE", "0", 0},
-		kv{"SESSION_CLIENT_DRIVER_NAME", ident.DriverName, 0},
-		kv{"SESSION_CLIENT_VERSION", "2.0.0.0", 0},
-		kv{"SESSION_CLIENT_LOBATTR", "1", 0},
-		kv{"AUTH_ALTER_SESSION", fmt.Sprintf(
-			"ALTER SESSION SET NLS_LANGUAGE='AMERICAN' NLS_TERRITORY='AMERICA'  TIME_ZONE='%s'\x00", tz), 1},
-	)
+// Layout mirrors AuthObject.Write in go-ora/v3/auth_object.go:
+//
+//	<header> [01 <userLen> | 00 00] | <mode> | 01 <numPairs> | 01 01 | <clr> username | KV pairs
+//
+// header is the TTC function header from syntheticAuthHeader; bigChunks is the
+// session's negotiated CLR long form and the username stays on ttcClr for the
+// same reason — see buildClientAuthPhase1.
+func buildClientAuthPhase2(header []byte, username string, ident driverIdentity, sec *upstreamAuthSecrets, mode uint32, bigChunks bool) []byte {
+	pairs := authPhase2Pairs(ident, sec, false)
 
 	buf := make([]byte, 0, 512)
-	buf = append(buf, byte(TTCFuncPiggyback), PiggybackSubAuth2, 0x00)
+	buf = append(buf, header...)
 
 	usernameBytes := []byte(username)
 
@@ -874,7 +994,7 @@ func buildClientAuthPhase2(username string, ident driverIdentity, sec *upstreamA
 	}
 
 	for _, p := range pairs {
-		buf = append(buf, ttcKeyVal(p.key, p.value, p.flag)...)
+		buf = append(buf, ttcKeyValChunked(p.key, p.value, p.flag, bigChunks)...)
 	}
 
 	return buf

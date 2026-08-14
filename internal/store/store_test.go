@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -34,6 +35,10 @@ const (
 	testMaxConns          = 4
 	testContainerMaxConns = "300"
 )
+
+// testChainMasterKey is the master key every test store derives its chain key
+// from. A fixed 32-byte test vector, not a secret.
+var testChainMasterKey = bytes.Repeat([]byte{0x2a}, 32)
 
 var (
 	testContainer       *postgres.PostgresContainer
@@ -178,6 +183,22 @@ func setupTestStoreNoCleanup(t *testing.T) *Store {
 func setupTestStore(t *testing.T) *Store {
 	t.Helper()
 
+	return setupTestStoreWithClockSkew(t, 0)
+}
+
+// setupTestStoreWithClockSkew is setupTestStore against a database whose clock
+// reads `skew` away from the real one — negative for a store running *behind*
+// the process talking to it, which is the direction that hides a freshly
+// issued grant from the auth path.
+//
+// It is injected by shadowing NOW(): a public.now() wrapper plus a database
+// default of `search_path = public, pg_catalog` makes every unqualified NOW()
+// on that database — the auth path's window filters and the store's own clock
+// reads alike — resolve to the shifted one, exactly as a real machine whose
+// clock disagrees with dbbat's would. Nothing in the product knows.
+func setupTestStoreWithClockSkew(t *testing.T, skew time.Duration) *Store {
+	t.Helper()
+
 	setupPostgresContainer(t)
 
 	ctx := context.Background()
@@ -190,7 +211,13 @@ func setupTestStore(t *testing.T) *Store {
 		t.Fatalf("failed to create test database %s: %v", name, err)
 	}
 
-	store, err := New(ctx, testDatabaseDSN(name))
+	if skew != 0 {
+		applyTestClockSkew(t, name, skew)
+	}
+
+	// Every test store seals its audit and query chains, so the whole package
+	// exercises the chained write paths rather than only the tests that care.
+	store, err := New(ctx, testDatabaseDSN(name), Options{EncryptionKey: testChainMasterKey})
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -210,6 +237,37 @@ func setupTestStore(t *testing.T) *Store {
 	})
 
 	return store
+}
+
+// applyTestClockSkew installs the NOW() shadow described on
+// setupTestStoreWithClockSkew. It runs on its own short-lived connection to
+// the freshly created database, before the store under test opens its pool, so
+// every connection that store makes already sees the database-level
+// search_path.
+func applyTestClockSkew(t *testing.T, database string, skew time.Duration) {
+	t.Helper()
+
+	db := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(testDatabaseDSN(database))))
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close the clock-skew connection: %v", err)
+		}
+	}()
+
+	ctx := context.Background()
+	// Microseconds: PostgreSQL's timestamp resolution, and the interval is
+	// built from a Go duration rather than interpolated text.
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE FUNCTION public.now() RETURNS timestamptz LANGUAGE sql STABLE AS $$
+			SELECT pg_catalog.now() + make_interval(secs => %f)
+		$$`, skew.Seconds())); err != nil {
+		t.Fatalf("failed to install the NOW() shadow: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx,
+		"ALTER DATABASE "+database+" SET search_path = public, pg_catalog"); err != nil {
+		t.Fatalf("failed to point search_path at the NOW() shadow: %v", err)
+	}
 }
 
 func TestNew(t *testing.T) {

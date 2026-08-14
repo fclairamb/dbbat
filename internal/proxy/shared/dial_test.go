@@ -26,15 +26,17 @@ var (
 
 // fakeResolver is an in-memory ServerResolver for the dialer tests.
 type fakeResolver struct {
-	mu       sync.Mutex
-	servers  map[uuid.UUID]*store.Server
-	hostKeys map[uuid.UUID]string
+	mu         sync.Mutex
+	servers    map[uuid.UUID]*store.Server
+	hostKeys   map[uuid.UUID]string
+	k8sCACerts map[uuid.UUID]string
 }
 
 func newFakeResolver() *fakeResolver {
 	return &fakeResolver{
-		servers:  map[uuid.UUID]*store.Server{},
-		hostKeys: map[uuid.UUID]string{},
+		servers:    map[uuid.UUID]*store.Server{},
+		hostKeys:   map[uuid.UUID]string{},
+		k8sCACerts: map[uuid.UUID]string{},
 	}
 }
 
@@ -53,6 +55,10 @@ func (f *fakeResolver) GetServerByUID(_ context.Context, uid uuid.UUID) (*store.
 			sd := *pd.SSH
 			pd.SSH = &sd
 		}
+		if pd.Kubernetes != nil {
+			kd := *pd.Kubernetes
+			pd.Kubernetes = &kd
+		}
 		cp.ProtocolData = &pd
 	}
 	return &cp, nil
@@ -70,6 +76,22 @@ func (f *fakeResolver) SetKnownHostKey(_ context.Context, uid uuid.UUID, hostKey
 			srv.ProtocolData.SSH = &store.SSHServerData{}
 		}
 		srv.ProtocolData.SSH.KnownHostKey = hostKey
+	}
+	return nil
+}
+
+func (f *fakeResolver) SetKubernetesCACert(_ context.Context, uid uuid.UUID, caCert string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.k8sCACerts[uid] = caCert
+	if srv, ok := f.servers[uid]; ok {
+		if srv.ProtocolData == nil {
+			srv.ProtocolData = &store.ServerProtocolData{}
+		}
+		if srv.ProtocolData.Kubernetes == nil {
+			srv.ProtocolData.Kubernetes = &store.KubernetesServerData{}
+		}
+		srv.ProtocolData.Kubernetes.LearnedCACert = caCert
 	}
 	return nil
 }

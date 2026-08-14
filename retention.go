@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -14,6 +15,9 @@ import (
 // runs. Retention is configured in hours or days, so an hourly sweep is ample —
 // and it matches the cadence of the dump-file cleanup.
 const queryHistorySweepInterval = 1 * time.Hour
+
+// goroutineNameQueryRetentionSweep is what a panic in one sweep is logged under.
+const goroutineNameQueryRetentionSweep = "query history retention sweep"
 
 // queryRetentionSweeper deletes query history (and the result rows captured for
 // it) older than the configured retention.
@@ -70,8 +74,15 @@ func startQueryRetentionSweep(
 
 // run sweeps once at startup — so newly configured retention applies without
 // waiting a full interval — then on every tick until shutdown.
+//
+// Each sweep runs under safe.RunMaintenance, per turn, exactly as the five
+// proxies' dump-retention sweeps do. This is a goroutine of its own, so no
+// recover reaches it: a panic in CleanupOldQueryRows would otherwise end the
+// process and every live session on it. Per turn rather than around the loop,
+// because a retention sweep that silently stopped running looks exactly like
+// health from the outside while the history grows without bound.
 func (s *queryRetentionSweeper) run(ctx context.Context) {
-	s.sweep(ctx)
+	s.guardedSweep(ctx)
 
 	ticker := time.NewTicker(queryHistorySweepInterval)
 	defer ticker.Stop()
@@ -79,11 +90,18 @@ func (s *queryRetentionSweeper) run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			s.sweep(ctx)
+			s.guardedSweep(ctx)
 		case <-s.stop:
 			return
 		}
 	}
+}
+
+// guardedSweep is one sweep with a panic recover around it.
+func (s *queryRetentionSweeper) guardedSweep(ctx context.Context) {
+	safe.RunMaintenance(ctx, s.logger, goroutineNameQueryRetentionSweep, func() {
+		s.sweep(ctx)
+	})
 }
 
 func (s *queryRetentionSweeper) sweep(ctx context.Context) {

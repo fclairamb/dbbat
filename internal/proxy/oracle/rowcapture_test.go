@@ -22,6 +22,7 @@ const captureTestMaxBytes = int64(1) << 30
 type captureRowStore struct {
 	mu      sync.Mutex
 	batches [][]store.PendingQueryRow
+	sealed  []uuid.UUID
 }
 
 func (c *captureRowStore) StoreQueryRows(_ context.Context, rows []store.PendingQueryRow) error {
@@ -31,6 +32,17 @@ func (c *captureRowStore) StoreQueryRows(_ context.Context, rows []store.Pending
 	batch := make([]store.PendingQueryRow, len(rows))
 	copy(batch, rows)
 	c.batches = append(c.batches, batch)
+
+	return nil
+}
+
+// SealQueryRowChain is the row-chain stamp the real store writes at the flush
+// barrier; these tests only care that the writer calls it.
+func (c *captureRowStore) SealQueryRowChain(_ context.Context, queryUID uuid.UUID) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.sealed = append(c.sealed, queryUID)
 
 	return nil
 }

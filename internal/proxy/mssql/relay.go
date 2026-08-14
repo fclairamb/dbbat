@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // clientMessageHook is the seam stage 3 fills in.
@@ -49,6 +51,22 @@ type clientMessage struct {
 // nothing but the in-band cancel detection below.
 const clientReadAhead = 4
 
+// Names the per-session goroutines report themselves under when one of them
+// panics. Log labels, not identifiers.
+const (
+	relayNameClientToUpstream = "mssql client→upstream"
+	relayNameUpstreamToClient = "mssql upstream→client"
+	relayNameClientReader     = "mssql client reader"
+	relayNameWatchdog         = "mssql limit watchdog"
+
+	// The detached store writes. Each is named after what it writes, because
+	// that is the only thing the log line can usefully say: these goroutines
+	// outlive the call that spawned them, so the recover on handleConnection
+	// never sees them and nothing else records which write died.
+	goroutineNameQueryRecord         = "mssql query record"
+	goroutineNameHeldQueryCompletion = "mssql held query completion"
+)
+
 // relay pumps TDS both ways until either side closes.
 //
 // The two directions run independently rather than as a request/response loop,
@@ -63,12 +81,35 @@ const clientReadAhead = 4
 // goroutines. That is safe because the codec's read and write paths share no
 // mutable state — see the note on packetRW — and it is the reason neither side
 // takes a lock on the hot path.
+// All three run under the shared panic guards. None of them is reached by the
+// recover on handleConnection — that sits on a different goroutine — so an
+// unguarded panic in the TDS decode would end the process, dropping every other
+// live session, of every user, on every database.
+//
+// That a panicking pump still *yields a value* is load-bearing here in a way it
+// is not on a proxy that reads errCh once: this function drains it a second
+// time, to wait the other pump out. Before the recover existed a pump could not
+// die quietly — it took the process with it — so nothing was ever parked here.
+// Recovering is what creates the obligation, and RunRelay is what discharges it.
+//
+// The reader has no error channel and needs none — its own defers close
+// clientGone and clientMsgs, which is exactly how it ends the session on a read
+// failure. That is RunGuarded's whole precondition; see its doc.
 func (s *session) relay(ctx context.Context) error {
 	errCh := make(chan error, 2)
 
-	go s.readClientMessages()
-	go func() { errCh <- s.pumpClientToUpstream(ctx) }()
-	go func() { errCh <- s.pumpUpstreamToClient(ctx) }()
+	go safe.RunGuarded(ctx, s.logger, relayNameClientReader, s.readClientMessages)
+
+	go func() {
+		errCh <- safe.RunRelay(ctx, s.logger, relayNameClientToUpstream, func() error {
+			return s.pumpClientToUpstream(ctx)
+		})
+	}()
+	go func() {
+		errCh <- safe.RunRelay(ctx, s.logger, relayNameUpstreamToClient, func() error {
+			return s.pumpUpstreamToClient(ctx)
+		})
+	}()
 
 	err := <-errCh
 

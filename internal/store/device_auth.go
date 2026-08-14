@@ -80,13 +80,15 @@ func (s *Store) CreateDeviceAuthRequest(ctx context.Context, clientName, deviceC
 	}
 
 	state := &OAuthState{
-		State:     deviceCode,
-		Provider:  DeviceAuthProvider,
-		Metadata:  encoded,
-		ExpiresAt: time.Now().Add(DeviceAuthTTL),
+		State:    deviceCode,
+		Provider: DeviceAuthProvider,
+		Metadata: encoded,
 	}
 
-	if _, err := s.CreateOAuthState(ctx, state); err != nil {
+	// expires_at is stamped by the database (CreateOAuthState) and read back,
+	// so the TTL is exactly DeviceAuthTTL on the clock the four `expires_at >
+	// NOW()` filters below evaluate it against.
+	if _, err := s.CreateOAuthState(ctx, state, DeviceAuthTTL); err != nil {
 		return nil, err
 	}
 

@@ -1,0 +1,16 @@
+# The DB-bundled OCI client's AUTH Phase 1 (sqlplus 23.26, from
+# gvenzl/oracle-free:23-slim), captured whole against a dbbat proxy. TNS Data
+# payload: two data-flag bytes, then the TTC message.
+#
+# It opens with the same 64-bit op header its proxy-mode frames use:
+#
+#   03 76 02 00 00 <ub4 0> <sb8 3 = seq+1> fe(x8)
+#
+# The Instant Client 23.3 writes `03 76 02 01 03 fe(x8)` here -- five bytes
+# where this one writes seventeen. That difference is the only evidence a
+# session has of which summary object to write before its first upstream OER
+# arrives, which is why it is pinned rather than inferred.
+#
+# The AUTH_ keys further in are what payloadUsesWideKVEncoding reads, so the
+# whole packet is kept: both dialect flags are asserted off this one fixture.
+00000376020000000000000300000000000000feffffffffffffff0b00000001000000feffffffffffffff0500000000000000fefffffffffffffffeffffffffffffff0b637572736f7270726f62650d0000000d415554485f5445524d494e414c00000000000000000f0000000f415554485f50524f4752414d5f4e4d200000002073716c706c7573406230373637316437356135652028544e532056312d563329000000000c0000000c415554485f4d414348494e450c0000000c623037363731643735613565000000000800000008415554485f5049440300000003323732000000000800000008415554485f53494406000000066f7261636c6500000000

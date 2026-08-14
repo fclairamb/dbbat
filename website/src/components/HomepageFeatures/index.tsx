@@ -59,9 +59,10 @@ const FeatureList: FeatureItem[] = [
     emoji: "🛡️",
     description: (
       <>
-        Passwords hashed with Argon2id, database credentials encrypted with
-        AES-256-GCM and bound to the database UID. Append-only audit log of
-        every administrative change.
+        Passwords and API keys hashed with Argon2id, database credentials
+        encrypted with AES-256-GCM and bound to the database UID. Every
+        administrative change lands in an HMAC-chained audit log, so tampering
+        with it is detectable.
       </>
     ),
   },

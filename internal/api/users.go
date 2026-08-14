@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 
@@ -24,9 +26,13 @@ type CreateUserRequest struct {
 type UpdateUserRequest struct {
 	Password *string  `json:"password"`
 	Roles    []string `json:"roles"`
-	// GroupUIDs, when non-nil, replaces the user's group memberships
+	// UserGroupUIDs, when non-nil, replaces the user's user-group memberships
 	// wholesale. Admin-only, like Roles.
-	GroupUIDs []uuid.UUID `json:"group_uids"`
+	UserGroupUIDs []uuid.UUID `json:"user_group_uids"`
+	// RetiredGroupUIDs catches the pre-rename spelling of UserGroupUIDs. It
+	// is refused rather than folded onto UserGroupUIDs — silently ignoring a
+	// scope restriction fails *open*. See errRetiredGroupUIDs.
+	RetiredGroupUIDs []uuid.UUID `json:"group_uids"`
 }
 
 // setMongoVerifier derives and stores the user's MongoDB SCRAM-SHA-256 verifier
@@ -77,7 +83,7 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		"roles":    user.Roles,
 	})
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
-		EventType:   "user.created",
+		EventType:   AuditEventUserCreated,
 		UserID:      &user.UID,
 		PerformedBy: &currentUser.UID,
 		Details:     details,
@@ -104,6 +110,27 @@ func (s *Server) handleListUsers(c *gin.Context) {
 
 	// Others can only see themselves
 	successResponse(c, gin.H{"users": []any{currentUser}})
+}
+
+// handleListRoleSyncs returns the latest directory role sync per user.
+//
+// One row per user, computed in the database, rather than a slice of the audit
+// log filtered client-side: on an instance where hundreds of people sign in
+// through SSO, a user whose last sync fell outside such a slice would render as
+// "never synced" — the same thing shown for a user the directory has genuinely
+// never touched. Absent from this response is therefore the *exact* meaning of
+// "never synced".
+//
+// Admin-or-viewer, matching GET /audit, which is where these rows are read
+// from and where the same entries can be listed one by one.
+func (s *Server) handleListRoleSyncs(c *gin.Context) {
+	syncs, err := s.store.ListLatestEventPerUser(c.Request.Context(), AuditEventOAuthRolesSynced)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list role syncs")
+		return
+	}
+
+	successResponse(c, gin.H{"role_syncs": syncs})
 }
 
 // handleGetUser retrieves a specific user.
@@ -138,7 +165,7 @@ func (s *Server) handleGetUser(c *gin.Context) {
 
 	// Groups ride along on the detail response so the user editor can render
 	// (and edit) membership without a second round-trip.
-	groups, err := s.store.ListGroupsForUser(c.Request.Context(), uid)
+	groups, err := s.store.ListUserGroupsForUser(c.Request.Context(), uid)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list user groups")
 		return
@@ -151,7 +178,26 @@ func (s *Server) handleGetUser(c *gin.Context) {
 type userDetailResponse struct {
 	*store.User
 
-	Groups []store.UserGroup `json:"groups"`
+	Groups []store.UserGroup `json:"user_groups"`
+}
+
+// bindUpdateUserRequest decodes the PUT /users/:uid body and rejects it up
+// front when it is malformed or still carries the retired pre-rename
+// group_uids spelling — refusing rather than folding, since silently
+// ignoring a membership change would fail *open*. Returns false, having
+// already written the error response, when the update must not proceed.
+func (s *Server) bindUpdateUserRequest(c *gin.Context, req *UpdateUserRequest) bool {
+	if err := c.ShouldBindJSON(req); err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
+		return false
+	}
+
+	if req.RetiredGroupUIDs != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredGroupUIDs)
+		return false
+	}
+
+	return true
 }
 
 // handleUpdateUser updates a user
@@ -163,8 +209,7 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	}
 
 	var req UpdateUserRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
+	if !s.bindUpdateUserRequest(c, &req) {
 		return
 	}
 
@@ -189,7 +234,7 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		return
 	}
 
-	if !s.checkGroupsExist(c, req.GroupUIDs) {
+	if !s.checkGroupsExist(c, req.UserGroupUIDs) {
 		return
 	}
 
@@ -217,8 +262,8 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		return
 	}
 
-	if req.GroupUIDs != nil {
-		if err := s.store.SetUserGroups(c.Request.Context(), uid, req.GroupUIDs); err != nil {
+	if req.UserGroupUIDs != nil {
+		if err := s.store.SetUserGroups(c.Request.Context(), uid, req.UserGroupUIDs); err != nil {
 			writeInternalError(c, s.logger, err, "failed to update user groups")
 			return
 		}
@@ -242,10 +287,10 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 
 	// Membership is access-relevant (it gates grant definitions), so record
 	// it as its own event rather than burying it in user.updated.
-	if req.GroupUIDs != nil {
+	if req.UserGroupUIDs != nil {
 		groupDetails, _ := json.Marshal(map[string]interface{}{
-			"user_uid":   uid,
-			"group_uids": req.GroupUIDs,
+			"user_uid":        uid,
+			"user_group_uids": req.UserGroupUIDs,
 		})
 		_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
 			EventType:   "user_group.membership_set",
@@ -282,7 +327,7 @@ func (s *Server) checkSelfUpdateAllowed(
 		return false
 	}
 
-	if req.GroupUIDs != nil {
+	if req.UserGroupUIDs != nil {
 		writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change groups")
 		return false
 	}
@@ -319,22 +364,36 @@ func (s *Server) rejectLastAdminDemotion(c *gin.Context, uid uuid.UUID, roles []
 		return true
 	}
 
-	if !targetUser.IsAdmin() {
-		return false
-	}
-
-	adminCount, err := s.store.CountAdmins(c.Request.Context())
+	last, err := s.isLastAdmin(c.Request.Context(), targetUser)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to count admin users")
 		return true
 	}
 
-	if adminCount <= 1 {
+	if last {
 		writeError(c, http.StatusConflict, ErrCodeConflict, "cannot remove the admin role from the last admin user")
 		return true
 	}
 
 	return false
+}
+
+// isLastAdmin reports whether user is the only admin left, i.e. whether taking
+// the admin role away would leave the instance with nobody able to administer
+// it. Shared by the users API (which answers 409) and the OIDC group mapping
+// (which silently retains the role), so the two can never drift apart on what
+// "the last admin" means.
+func (s *Server) isLastAdmin(ctx context.Context, user *store.User) (bool, error) {
+	if !user.IsAdmin() {
+		return false, nil
+	}
+
+	adminCount, err := s.store.CountAdmins(ctx)
+	if err != nil {
+		return false, fmt.Errorf("count admin users: %w", err)
+	}
+
+	return adminCount <= 1, nil
 }
 
 // handleDeleteUser deletes a user

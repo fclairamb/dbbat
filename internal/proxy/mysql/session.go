@@ -20,6 +20,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -137,6 +138,19 @@ func newSession(clientConn net.Conn, server *Server) *Session {
 	}
 }
 
+// goroutineNameWatchdog is the label the limit watchdog reports itself under
+// when it panics. A log label, not an identifier.
+const goroutineNameWatchdog = "mysql limit watchdog"
+
+// The detached store writes. Each is named after what it writes, because that is
+// the only thing the log line can usefully say: these goroutines outlive the
+// call that spawned them, so the recover on handleConnection never sees them and
+// nothing else records which write died.
+const (
+	goroutineNameQueryRecord         = "mysql query record"
+	goroutineNameHeldQueryCompletion = "mysql held query completion"
+)
+
 // Run drives the session lifecycle:
 //  1. MySQL handshake with auth termination
 //  2. Connect to upstream MySQL using stored credentials
@@ -196,8 +210,25 @@ func (s *Session) Run() error {
 	upstreamConn := s.upstreamConn
 	clientConn := s.clientConn
 
-	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
-		s.onLimitViolation(upstreamConn, clientConn, err)
+	// Guarded because it is a goroutine of its own: the recover on
+	// handleConnection sits elsewhere and catches nothing raised here, and Go
+	// ends the process on an unrecovered panic in any goroutine. Unlike the other
+	// four protocols, MySQL has no second guarded site — go-mysql owns the wire
+	// and commandLoop runs synchronously on the connection's own goroutine, under
+	// that recover, so there are no relay goroutines to wrap.
+	//
+	// RunWatchdog, not RunGuarded, and here more than anywhere: this watchdog is
+	// the *entire* enforcement path. go-mysql buffers whole results, so there is
+	// no mid-stream checkpoint to fall back on — a watchdog that merely survived
+	// its own panic would leave the session with no expiry, no byte quota and no
+	// revocation check whatsoever. The teardown closes both conns, which is
+	// exactly how onLimitViolation enforces.
+	go safe.RunWatchdog(watchCtx, s.logger, goroutineNameWatchdog, func() {
+		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
+			s.onLimitViolation(upstreamConn, clientConn, err)
+		})
+	}, func() {
+		closeSessionConns(upstreamConn, clientConn)
 	})
 
 	s.logger.InfoContext(s.ctx, "MySQL session ready",
@@ -226,6 +257,20 @@ func (s *Session) onLimitViolation(upstreamConn, clientConn io.Closer, err error
 	s.logger.WarnContext(s.ctx, "terminating MySQL session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
+	closeSessionConns(upstreamConn, clientConn)
+}
+
+// closeSessionConns force-closes both conns, which is the enforcement mechanism
+// on this protocol: go-mysql owns the wire and buffers whole results, so there
+// is no message boundary at which to inject a clean error frame. Split out of
+// onLimitViolation so the watchdog's panic guard can perform the same teardown
+// without re-entering whatever panicked.
+//
+// It takes the conns rather than reading them off the session because
+// closeUpstream nils s.upstreamConn; the watchdog captured its locals for the
+// same reason. Safe to call twice, and safe concurrently with a blocked
+// Read/Write.
+func closeSessionConns(upstreamConn, clientConn io.Closer) {
 	if upstreamConn != nil {
 		_ = upstreamConn.Close()
 	}

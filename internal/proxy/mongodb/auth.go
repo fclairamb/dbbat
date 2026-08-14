@@ -2,7 +2,6 @@ package mongodb
 
 import (
 	"bytes"
-	"context"
 	"log/slog"
 	"strings"
 	"time"
@@ -235,7 +234,7 @@ func (s *Session) authenticateAPIKey(username, key string) (*store.User, error) 
 		return nil, ErrAuthenticationFailed
 	}
 
-	go func() { _ = s.server.store.IncrementAPIKeyUsage(context.Background(), verified.ID) }()
+	shared.BumpAPIKeyUsage(s.ctx, s.logger, s.server.store, verified.ID)
 
 	return user, nil
 }

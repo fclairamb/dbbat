@@ -10,6 +10,9 @@ export type UpdateUserRequest = components["schemas"]["UpdateUserRequest"];
 export type UserGroup = components["schemas"]["UserGroup"];
 export type CreateUserGroupRequest =
   components["schemas"]["CreateUserGroupRequest"];
+export type ServerGroup = components["schemas"]["ServerGroup"];
+export type CreateServerGroupRequest =
+  components["schemas"]["CreateServerGroupRequest"];
 export type Database = components["schemas"]["Database"];
 export type DatabaseLimited = components["schemas"]["DatabaseLimited"];
 export type CreateDatabaseRequest =
@@ -38,8 +41,16 @@ export type Connection = components["schemas"]["Connection"];
 export type ConnectionDetail = components["schemas"]["ConnectionDetail"];
 export type GrantSummary = components["schemas"]["GrantSummary"];
 export type Query = components["schemas"]["Query"];
+/**
+ * A held query as GET /queries/pending returns it: a Query plus
+ * `approver_role`, the hat the *calling* user would wear to resolve that
+ * particular hold ("admin", "definition_approver", "server_approver", or ""
+ * when they may see it but not release it).
+ */
+export type PendingQuery = Query & { approver_role?: string };
 export type QueryWithRows = components["schemas"]["QueryWithRows"];
 export type AuditEvent = components["schemas"]["AuditEvent"];
+export type UserRoleSync = components["schemas"]["UserRoleSync"];
 export type APIKey = components["schemas"]["APIKey"];
 export type CreateAPIKeyRequest = components["schemas"]["CreateAPIKeyRequest"];
 export type CreateAPIKeyResponse =
@@ -48,20 +59,62 @@ export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
 export type ConnectionTestResult =
   components["schemas"]["ConnectionTestResult"];
 export type DeviceConsentInfo = components["schemas"]["DeviceConsentInfo"];
+export type ChainBreak = components["schemas"]["ChainBreak"];
+export type AuditChainVerification =
+  components["schemas"]["AuditChainVerification"];
+export type QueryChainVerification =
+  components["schemas"]["QueryChainVerification"];
+export type RowChainVerification =
+  components["schemas"]["RowChainVerification"];
 
 // ============================================================================
 // Auth Providers
 // ============================================================================
 
+// The providers endpoint answers two questions in one round-trip: which login
+// buttons to draw, and which roles the identity provider owns. Both hooks
+// share the cache entry and differ only in what they select out of it.
+const AUTH_PROVIDERS_QUERY_KEY = ["auth-providers"];
+const AUTH_PROVIDERS_STALE_TIME = 5 * 60 * 1000; // Cache for 5 minutes
+
+async function fetchAuthProviders() {
+  const { data, error } = await apiClient.GET("/auth/providers");
+  if (error) throw error;
+  return data;
+}
+
 export function useAuthProviders() {
   return useQuery({
-    queryKey: ["auth-providers"],
-    queryFn: async () => {
-      const { data, error } = await apiClient.GET("/auth/providers");
-      if (error) throw error;
-      return data?.providers ?? [];
-    },
-    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
+    queryKey: AUTH_PROVIDERS_QUERY_KEY,
+    queryFn: fetchAuthProviders,
+    staleTime: AUTH_PROVIDERS_STALE_TIME,
+    select: (data) => data?.providers ?? [],
+  });
+}
+
+/**
+ * Which roles the identity provider's group mapping (DBB_OIDC_ROLE_MAPPING)
+ * owns. Those roles are re-resolved from directory groups on *every* login, so
+ * editing one by hand is temporary — the UI badges them and warns before the
+ * change is saved. Only role names come back; the directory group values never
+ * leave the server.
+ */
+export type SsoRoleMapping = {
+  enabled: boolean;
+  roles: string[];
+  provider?: string;
+};
+
+export function useSsoRoleMapping() {
+  return useQuery({
+    queryKey: AUTH_PROVIDERS_QUERY_KEY,
+    queryFn: fetchAuthProviders,
+    staleTime: AUTH_PROVIDERS_STALE_TIME,
+    select: (data): SsoRoleMapping => ({
+      enabled: data?.role_mapping?.enabled ?? false,
+      roles: data?.role_mapping?.roles ?? [],
+      provider: data?.role_mapping?.provider,
+    }),
   });
 }
 
@@ -248,6 +301,7 @@ export function useCreateDatabase(options?: {
     onSuccess: (db) => {
       queryClient.invalidateQueries({ queryKey: ["databases"] });
       queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["tunnel-servers"] });
       options?.onSuccess?.(db);
     },
     onError: options?.onError,
@@ -277,6 +331,7 @@ export function useUpdateDatabase(
       queryClient.invalidateQueries({ queryKey: ["databases"] });
       queryClient.invalidateQueries({ queryKey: ["databases", uid] });
       queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["tunnel-servers"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -301,6 +356,7 @@ export function useDeleteDatabase(options?: {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["databases"] });
       queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["tunnel-servers"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -329,6 +385,7 @@ export function useTestServerConnection(uid: string) {
     onSuccess: () => {
       // A first successful bastion check pins the host key, so the row changed.
       queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["tunnel-servers"] });
       queryClient.invalidateQueries({ queryKey: ["databases"] });
     },
   });
@@ -343,6 +400,23 @@ export function useSSHServers(enabled = true) {
       const response = await apiClient.GET("/ssh-servers");
       if (response.error) {
         throw new Error(response.error.message || "Failed to load ssh servers");
+      }
+      return response.data?.servers || [];
+    },
+    enabled,
+  });
+}
+
+// Tunnel (dial-path) servers: every ssh bastion *and* kubernetes cluster row.
+// This is what the target form's "via" selector reads — a target may be dialed
+// through either kind, so a bastion-only list would hide half the options.
+export function useTunnelServers(enabled = true) {
+  return useQuery({
+    queryKey: ["tunnel-servers"],
+    queryFn: async (): Promise<Database[]> => {
+      const response = await apiClient.GET("/tunnel-servers");
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to load tunnel servers");
       }
       return response.data?.servers || [];
     },
@@ -535,6 +609,109 @@ export function useDeleteUserGroup(options?: {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-groups"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+// ============================================================================
+// Server Groups
+// ============================================================================
+
+export function useServerGroups(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["server-groups"],
+    queryFn: async (): Promise<ServerGroup[]> => {
+      const response = await apiClient.GET("/server-groups");
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to load server groups"
+        );
+      }
+      return response.data?.server_groups || [];
+    },
+    enabled: options?.enabled ?? true,
+  });
+}
+
+export function useCreateServerGroup(options?: {
+  onSuccess?: (group: ServerGroup) => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (data: CreateServerGroupRequest): Promise<ServerGroup> => {
+      const response = await apiClient.POST("/server-groups", { body: data });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to create server group"
+        );
+      }
+      return response.data;
+    },
+    onSuccess: (group) => {
+      queryClient.invalidateQueries({ queryKey: ["server-groups"] });
+      // Membership is live, so a change here changes what live grants cover.
+      queryClient.invalidateQueries({ queryKey: ["grants"] });
+      options?.onSuccess?.(group);
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useUpdateServerGroup(options?: {
+  onSuccess?: (group: ServerGroup) => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (args: {
+      uid: string;
+      body: CreateServerGroupRequest;
+    }): Promise<ServerGroup> => {
+      const response = await apiClient.PATCH("/server-groups/{uid}", {
+        params: { path: { uid: args.uid } },
+        body: args.body,
+      });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to update server group"
+        );
+      }
+      return response.data;
+    },
+    onSuccess: (group) => {
+      queryClient.invalidateQueries({ queryKey: ["server-groups"] });
+      queryClient.invalidateQueries({ queryKey: ["grants"] });
+      options?.onSuccess?.(group);
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useDeleteServerGroup(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (uid: string): Promise<void> => {
+      const response = await apiClient.DELETE("/server-groups/{uid}", {
+        params: { path: { uid } },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to delete server group"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["server-groups"] });
+      queryClient.invalidateQueries({ queryKey: ["grants"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -1003,6 +1180,99 @@ export function useAuditEvents(filters?: {
   });
 }
 
+/**
+ * The most recent directory role sync per user, keyed by user UID.
+ *
+ * The backend does the per-user picking (`GET /users/role-syncs`, a DISTINCT ON
+ * over the `user.roles_synced` audit entries), so a user missing from this map
+ * has genuinely never been synced. The earlier shape — fetch the newest 200
+ * audit entries and keep the first one seen per user — could not tell that
+ * apart from "their last sync fell out of the window".
+ */
+export function useLastRoleSyncs(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["users", "role-syncs"],
+    enabled: options?.enabled ?? true,
+    queryFn: async (): Promise<Map<string, UserRoleSync>> => {
+      const response = await apiClient.GET("/users/role-syncs");
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to load role syncs");
+      }
+
+      const byUser = new Map<string, UserRoleSync>();
+      for (const sync of response.data?.role_syncs ?? []) {
+        byUser.set(sync.user_id, sync);
+      }
+      return byUser;
+    },
+  });
+}
+
+// ============================================================================
+// Audit chain verification (admin-only endpoints)
+// ============================================================================
+
+/**
+ * Walk the store-wide `audit_log` chain.
+ *
+ * A mutation rather than a query: verification is an explicit operator action
+ * (a walk is O(rows)), never something a page load should trigger.
+ */
+export function useVerifyAuditChain() {
+  return useMutation({
+    mutationFn: async (): Promise<AuditChainVerification> => {
+      const response = await apiClient.GET("/audit/verify");
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to verify the audit chain",
+        );
+      }
+      return response.data;
+    },
+  });
+}
+
+/** Walk the per-connection query chains (store-wide when unscoped). */
+export function useVerifyQueryChains() {
+  return useMutation({
+    mutationFn: async (
+      params?: { connection?: string },
+    ): Promise<QueryChainVerification> => {
+      const response = await apiClient.GET("/audit/verify/queries", {
+        params: { query: params?.connection ? { connection: params.connection } : {} },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to verify the query chains",
+        );
+      }
+      return response.data;
+    },
+  });
+}
+
+/** Walk the per-capture result-row chains (store-wide when unscoped). */
+export function useVerifyRowChains() {
+  return useMutation({
+    mutationFn: async (
+      params?: { connection?: string; query?: string },
+    ): Promise<RowChainVerification> => {
+      const query: Record<string, string> = {};
+      if (params?.connection) query.connection = params.connection;
+      if (params?.query) query.query = params.query;
+      const response = await apiClient.GET("/audit/verify/rows", {
+        params: { query },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to verify the row chains",
+        );
+      }
+      return response.data;
+    },
+  });
+}
+
 // ============================================================================
 // API Keys
 // ============================================================================
@@ -1316,7 +1586,7 @@ export function usePendingApprovals(options?: {
 }) {
   return useQuery({
     queryKey: ["queries", "pending"],
-    queryFn: async (): Promise<Query[]> => {
+    queryFn: async (): Promise<PendingQuery[]> => {
       const response = await apiClient.GET("/queries/pending");
       if (response.error) {
         throw new Error(

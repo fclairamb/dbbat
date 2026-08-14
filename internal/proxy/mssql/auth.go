@@ -127,7 +127,7 @@ func (s *session) authenticateAPIKey(ctx context.Context, username, key string) 
 	// Usage accounting must not sit in the login's latency path, and it must
 	// outlive the request context, which is canceled the moment the session
 	// ends.
-	go func() { _ = s.server.store.IncrementAPIKeyUsage(context.WithoutCancel(ctx), verified.ID) }()
+	shared.BumpAPIKeyUsage(ctx, s.logger, s.server.store, verified.ID)
 
 	return user, nil
 }

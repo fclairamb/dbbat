@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -54,6 +55,13 @@ const sinkResolveTimeout = 30 * time.Second
 // RowStore is the slice of the store the row writer needs.
 type RowStore interface {
 	StoreQueryRows(ctx context.Context, rows []store.PendingQueryRow) error
+
+	// SealQueryRowChain stamps the final head of a capture's tamper-evident
+	// row chain onto its query. It is called once per capture, at the flush
+	// barrier, because that is the first moment the head is final — see
+	// store.SealQueryRowChain and docs/audit-chain.md. Cheap for a query that
+	// captured nothing.
+	SealQueryRowChain(ctx context.Context, queryUID uuid.UUID) error
 }
 
 // RowWriter persists captured result rows in batches, off the proxy's data
@@ -109,6 +117,9 @@ type queueItem struct {
 	barrier chan struct{}
 }
 
+// GoroutineNameRowWriterDrain is what a panic in the drain loop is logged under.
+const GoroutineNameRowWriterDrain = "captured row writer drain"
+
 // NewRowWriter starts a writer against st. A nil store yields a nil writer,
 // which is inert — callers with no store keep working unchanged.
 func NewRowWriter(st RowStore, logger *slog.Logger) *RowWriter {
@@ -132,7 +143,11 @@ func NewRowWriter(st RowStore, logger *slog.Logger) *RowWriter {
 		cancel: cancel,
 	}
 
-	go w.run()
+	// Whole-loop guard, and one of the few places that is the right shape: run's
+	// own `defer close(w.done)` releases every producer parked in AddAll or
+	// Flush, so a recovered panic degrades capture process-wide instead of
+	// ending the process. See safe.RunGuarded.
+	go safe.RunGuarded(ctx, logger, GoroutineNameRowWriterDrain, w.run)
 
 	return w
 }
@@ -182,7 +197,20 @@ func (w *RowWriter) Close(ctx context.Context) {
 func (w *RowWriter) run() {
 	defer close(w.done)
 
+	// Producers that only ever call Add never block, so w.done alone would not
+	// stop them queueing rows into a channel nobody drains. Marking the writer
+	// stopped is what turns those into an honest "dropped". On the normal exit
+	// path Close has already set it, so this changes nothing there.
+	defer w.stopped.Store(true)
+
 	batch := &rowBatch{}
+
+	// A panic below leaves this batch unwritten while its captures still claim a
+	// complete result set, and the recover above cannot know which sinks were in
+	// flight. Marking them here is what keeps a lost capture reading as lost. On
+	// every normal exit the batch has already been flushed and reset, so this is
+	// a no-op there.
+	defer batch.markDropped()
 
 	for {
 		var item queueItem
@@ -312,6 +340,15 @@ func (b *rowBatch) full() bool {
 
 func (b *rowBatch) barriered() bool {
 	return len(b.barriers) > 0
+}
+
+// markDropped reports every capture contributing to this batch as having lost
+// rows. Only the drain's panic path uses it: a batch that reaches flush is
+// accounted for there, one that does not is simply gone.
+func (b *rowBatch) markDropped() {
+	for _, item := range b.items {
+		item.sink.markDropped()
+	}
 }
 
 // reset clears the batch and releases the barriers it carried — callers must
@@ -457,6 +494,9 @@ func (s *QuerySink) AddAll(ctx context.Context, rows []store.QueryRow) {
 // complete: without it the UI would show a finished query with rows still
 // arriving.
 //
+// It is also where the capture's tamper-evident row chain is sealed, because
+// the barrier is the first moment the chain head is final.
+//
 // Call it from the completion goroutine, never from the capture path.
 func (s *QuerySink) Flush(ctx context.Context) {
 	if s == nil || s.writer == nil {
@@ -476,8 +516,36 @@ func (s *QuerySink) Flush(ctx context.Context) {
 
 	select {
 	case <-barrier:
+		s.seal(ctx)
 	case <-ctx.Done():
 	case <-w.done:
+	}
+}
+
+// seal stamps the head of the capture's row chain, now that every row this
+// sink submitted is durable. Sealing any earlier would record a head the
+// capture then grows past; sealing on a sink whose parent record never
+// materialized would stamp a query that does not exist.
+//
+// A capture that stored nothing costs no round trip — the store answers from
+// its own head cache.
+func (s *QuerySink) seal(ctx context.Context) {
+	select {
+	case <-s.ready:
+	default:
+		// Nothing resolved this sink, so it owns no query to stamp.
+		return
+	}
+
+	queryUID, ok := s.resolution()
+	if !ok {
+		return
+	}
+
+	if err := s.writer.store.SealQueryRowChain(ctx, queryUID); err != nil {
+		s.writer.logger.ErrorContext(ctx, "failed to seal the captured row chain",
+			slog.String("query", queryUID.String()),
+			slog.Any("error", err))
 	}
 }
 

@@ -1,0 +1,23 @@
+-- Which format connections.query_chain_mac is in.
+--
+-- An earlier revision of this feature — never released; the whole chain ships
+-- in 0.24 — wrote the stamp as a *verbatim copy* of the last statement's MAC.
+-- That value is readable straight out of `queries`, so an attacker with
+-- write access to this database could delete the tail of a session and copy
+-- the new last statement's MAC over the stamp — no key required, and
+-- `dbbat audit verify --queries` reported a clean chain. From this migration
+-- onward the stamp is HMAC(chain key, domain ‖ connection_id ‖ version ‖
+-- query_chain_len ‖ head_mac), which cannot be recomputed without the key.
+--
+-- The two formats have to coexist: the chain key lives only in the serving
+-- process, never in the database, so no migration can re-seal what is already
+-- stored. Hence a version rather than a flag day — every row that exists right
+-- now is version 0 (unkeyed) and every session closed from here on is
+-- version 1 (keyed). Verification picks the check by version, and a version 0
+-- row is a break: an unkeyed stamp attests to nothing, and only a store written
+-- by a pre-0.24 development build can hold one.
+--
+-- The version is also covered by the version 1 MAC. Without that, relabelling
+-- a sealed row as version 0 would buy the attacker the legacy check for free.
+ALTER TABLE connections
+    ADD COLUMN query_chain_stamp_version SMALLINT NOT NULL DEFAULT 0;

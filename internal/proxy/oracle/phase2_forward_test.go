@@ -166,7 +166,7 @@ func TestRewriteAuthPhase2_RealJDBC(t *testing.T) {
 	// existing parseAuthPhase2 parser.
 	withFlags := append([]byte{0x00, 0x00}, out...)
 
-	gotSess, gotPwd, err := parseAuthPhase2(withFlags)
+	gotSess, gotPwd, err := parseAuthPhase2(withFlags, false)
 	if err != nil {
 		t.Fatalf("parseAuthPhase2 on rewritten body: %v", err)
 	}
@@ -199,6 +199,52 @@ func TestRewriteAuthPhase2_RealJDBC(t *testing.T) {
 
 	if bytes.Contains(out, []byte("LABEOMNGR_DEV")) {
 		t.Error("original username still present in rewritten body")
+	}
+}
+
+// TestParseAuthPhase2Header_ExtendedFuncHeader covers the 4-byte function
+// header go-ora v3 and JDBC thin open Phase 2 with (`03 73 02 00`, see
+// testdata/go_ora_cursor_reexec.pcapng). The parser used to assume a fixed
+// 3-byte header, so it read that extension byte as the has-username flag and
+// walked the rest of the preamble one byte early; the header must also survive
+// reassembly intact, or the upstream reads the rewritten body at the wrong
+// offset.
+func TestParseAuthPhase2Header_ExtendedFuncHeader(t *testing.T) {
+	t.Parallel()
+
+	pairs := []phase2KVForTest{
+		{"AUTH_SESSKEY", "DEADBEEF", 1},
+		{"AUTH_PASSWORD", "CAFEBABE", 0},
+	}
+
+	narrow := buildPhase2Body(t, "CONNECTOR", pairs, true, 0x02)
+
+	// Same body, extended header: splice the trailing 0x00 in after the
+	// sequence number.
+	extended := append([]byte{}, narrow[:3]...)
+	extended = append(extended, 0x00)
+	extended = append(extended, narrow[3:]...)
+
+	hdr, err := parseAuthPhase2Header(extended)
+	if err != nil {
+		t.Fatalf("parse extended header: %v", err)
+	}
+
+	if hdr.headerLen != 4 {
+		t.Fatalf("headerLen = %d, want 4", hdr.headerLen)
+	}
+
+	if !hdr.hasUsername || !hdr.hasCLRPrefix {
+		t.Fatalf("hasUsername=%v hasCLRPrefix=%v, want both true", hdr.hasUsername, hdr.hasCLRPrefix)
+	}
+
+	if hdr.pairCount != len(pairs) {
+		t.Fatalf("pairCount = %d, want %d", hdr.pairCount, len(pairs))
+	}
+
+	out := assembleAuthPhase2(extended, hdr, "CONNECTOR", extended[hdr.usernameEnd:])
+	if !bytes.Equal(out, extended) {
+		t.Fatalf("round-trip changed the body:\n got %x\nwant %x", out, extended)
 	}
 }
 

@@ -132,7 +132,7 @@ func (g *AccessGrant) MayApprove(userGroupUIDs []uuid.UUID) bool {
 		return false
 	}
 
-	for _, scoped := range g.ApproverGroupUIDs() {
+	for _, scoped := range g.ApproverUserGroupUIDs() {
 		for _, owned := range userGroupUIDs {
 			if scoped == owned {
 				return true
@@ -282,7 +282,7 @@ func (s *Store) HasApproverGroups(ctx context.Context, groupUIDs []uuid.UUID) (b
 		Join("JOIN grant_definitions AS gd ON gd.uid = ag.grant_definition_id").
 		Where("ag.revoked_at IS NULL").
 		Where("ag.expires_at > NOW()").
-		Where("gd.approver_group_uids && ?", pgdialect.Array(groupUIDs)).
+		Where("gd.approver_user_group_uids && ?", pgdialect.Array(groupUIDs)).
 		Exists(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to check approver groups: %w", err)

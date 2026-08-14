@@ -17,11 +17,13 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/auth"
+	"github.com/fclairamb/dbbat/internal/auth/oidc"
 	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/events"
+	"github.com/fclairamb/dbbat/internal/mcp"
 	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
@@ -67,6 +69,15 @@ type Server struct {
 	// storage. nil when DBB_DUMP_UPLOAD_URL is unset, in which case captures
 	// only ever exist in the local spool.
 	dumpStorage *dump.Uploader
+
+	// mcp serves the Model Context Protocol endpoint. Built in setupRouter,
+	// nil when DBB_MCP_ENABLED is false — in which case the routes are not
+	// registered either.
+	mcp *mcp.Server
+
+	// chainVerify bounds GET /audit/verify: a chain walk is O(rows), so its
+	// outcome is cached and only one walk runs at a time.
+	chainVerify *chainVerifyCache
 }
 
 // SetDumpStorage installs the blob store holding uploaded session captures, so
@@ -114,6 +125,28 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 		logger.InfoContext(context.Background(), "Slack OAuth provider enabled")
 	}
 
+	if cfg != nil && cfg.OIDCAuth.Enabled() {
+		// Construction does no network I/O — discovery is lazy — so an
+		// unreachable IdP delays the first login, it does not block startup.
+		provider, err := oidc.NewProvider(oidc.Config{
+			Issuer:       cfg.OIDCAuth.Issuer,
+			ClientID:     cfg.OIDCAuth.ClientID,
+			ClientSecret: cfg.OIDCAuth.ClientSecret,
+			Scopes:       cfg.OIDCAuth.ScopeList(),
+			Label:        cfg.OIDCAuth.DisplayName,
+			EmailDomains: cfg.OIDCAuth.EmailDomainList(),
+			GroupsClaim:  cfg.OIDCAuth.GroupsClaimName(),
+		})
+		if err != nil {
+			logger.ErrorContext(context.Background(), "OIDC provider misconfigured", slog.Any("error", err))
+		} else {
+			oauthProviders[oidc.ProviderName] = provider
+			logger.InfoContext(context.Background(), "OIDC provider enabled",
+				slog.String("issuer", cfg.OIDCAuth.Issuer),
+				slog.String("display_name", provider.DisplayName()))
+		}
+	}
+
 	// Initialize Slack notifier (outbound only — distinct from OAuth above)
 	var notifier *notify.SlackNotifier
 	if cfg != nil {
@@ -145,6 +178,7 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 		config:             cfg,
 		oauthProviders:     oauthProviders,
 		notifier:           notifier,
+		chainVerify:        newChainVerifyCache(),
 	}
 }
 
@@ -309,6 +343,11 @@ func (s *Server) setupRouter() *gin.Engine {
 			users := authenticated.Group("/users")
 			users.POST("", s.requireAdmin(), s.handleCreateUser)
 			users.GET("", s.handleListUsers) // Non-admins see only themselves
+			// Declared before the :uid route it shares a level with. gin
+			// matches the literal segment first either way, but the order
+			// keeps that obvious to a reader; users_test.go asserts both
+			// still resolve.
+			users.GET("/role-syncs", s.requireAdminOrViewer(), s.handleListRoleSyncs)
 			users.GET("/:uid", s.handleGetUser)
 			users.PUT("/:uid", s.handleUpdateUser)
 			// Note: PUT /:uid/password is registered separately (uses credential auth, not Bearer)
@@ -328,6 +367,20 @@ func (s *Server) setupRouter() *gin.Engine {
 			userGroups.PUT("/:uid/members/:user_uid", s.requireAdmin(), s.handleAddUserGroupMember)
 			userGroups.DELETE("/:uid/members/:user_uid", s.requireAdmin(), s.handleRemoveUserGroupMember)
 
+			// Server group endpoints — named sets of database servers, the unit
+			// rights are scoped on. Admin-only for the same reason user groups
+			// are: membership is access-relevant, and here it is *live* — see
+			// handleUpdateServerGroup.
+			serverGroups := authenticated.Group("/server-groups")
+			serverGroups.POST("", s.requireAdmin(), s.handleCreateServerGroup)
+			serverGroups.GET("", s.requireAdmin(), s.handleListServerGroups)
+			serverGroups.GET("/:uid", s.requireAdmin(), s.handleGetServerGroup)
+			serverGroups.PATCH("/:uid", s.requireAdmin(), s.handleUpdateServerGroup)
+			serverGroups.DELETE("/:uid", s.requireAdmin(), s.handleDeleteServerGroup)
+			serverGroups.GET("/:uid/members", s.requireAdmin(), s.handleListServerGroupMembers)
+			serverGroups.PUT("/:uid/members/:server_uid", s.requireAdmin(), s.handleAddServerGroupMember)
+			serverGroups.DELETE("/:uid/members/:server_uid", s.requireAdmin(), s.handleRemoveServerGroupMember)
+
 			// Server endpoints. The table now holds SSH bastions too (protocol
 			// 'ssh'); the route is /servers. Database *targets* are listed here
 			// (SSH rows are excluded by the store's targets-only scope).
@@ -346,6 +399,11 @@ func (s *Server) setupRouter() *gin.Engine {
 			// static /servers/ssh segment would conflict with /servers/:uid.
 			sshServers := authenticated.Group("/ssh-servers")
 			sshServers.GET("", s.requireAdmin(), s.handleListSSHServers)
+
+			// Every dial-path row (ssh bastions + kubernetes clusters), for the
+			// target form's "via" selector.
+			tunnelServers := authenticated.Group("/tunnel-servers")
+			tunnelServers.GET("", s.requireAdmin(), s.handleListTunnelServers)
 
 			// Grant endpoints
 			grants := authenticated.Group("/grants")
@@ -372,14 +430,17 @@ func (s *Server) setupRouter() *gin.Engine {
 			grantDefs.DELETE("/:uid", s.requireAdmin(), s.handleDeactivateGrantDefinition)
 
 			// Grant request endpoints — user self-service workflow.
-			// Approve/deny require admin; cancel is open to the requester
+			// Approve/deny are authorized in the handler, not by middleware:
+			// an admin decides anything, and an access approver resolved off
+			// the target server (or its server groups) decides that server's
+			// requests — never their own. Cancel is open to the requester
 			// (handler enforces ownership).
 			grantReqs := authenticated.Group("/grant-requests")
 			grantReqs.POST("", s.handleCreateGrantRequest)
 			grantReqs.GET("", s.handleListGrantRequests)
 			grantReqs.GET("/:uid", s.handleGetGrantRequest)
-			grantReqs.POST("/:uid/approve", s.requireAdmin(), s.handleApproveGrantRequest)
-			grantReqs.POST("/:uid/deny", s.requireAdmin(), s.handleDenyGrantRequest)
+			grantReqs.POST("/:uid/approve", s.handleApproveGrantRequest)
+			grantReqs.POST("/:uid/deny", s.handleDenyGrantRequest)
 			grantReqs.POST("/:uid/cancel", s.handleCancelGrantRequest)
 
 			// API Key endpoints
@@ -419,6 +480,15 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticated.GET("/queries/:uid/rows", s.requireAdminOrViewer(), s.handleGetQueryRows)
 			// Audit: admin/viewer only
 			authenticated.GET("/audit", s.requireAdminOrViewer(), s.handleListAudit)
+			// Tamper-evidence verification. Admin only — narrower than the
+			// audit list a viewer may read, because this is the control
+			// evidence itself and running it costs a full chain walk. See
+			// internal/api/audit_verify.go for the trust caveat: this answer
+			// is only as good as the process serving it, which is why
+			// `dbbat audit verify` stays the authoritative check.
+			authenticated.GET("/audit/verify", s.requireAdmin(), s.handleVerifyAuditChain)
+			authenticated.GET("/audit/verify/queries", s.requireAdmin(), s.handleVerifyQueryChains)
+			authenticated.GET("/audit/verify/rows", s.requireAdmin(), s.handleVerifyRowChains)
 
 			// Global parameters (admin-only CRUD; GET /instance open to any authenticated user)
 			params := authenticated.Group("/parameters")
@@ -430,6 +500,18 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Instance info
 			authenticated.GET("/instance", s.handleGetInstance)
 			authenticated.PUT("/instance/public", s.requireAdmin(), s.handleUpdateInstancePublic)
+
+			// Model Context Protocol endpoint (Streamable HTTP), for AI
+			// agents. Registered only when enabled: a disabled feature should
+			// not answer at all. GET and DELETE exist so an MCP client's
+			// session-management probes get the protocol's own 405 rather than
+			// a 404 it has to guess at — the server runs stateless.
+			if s.mcpEnabled() {
+				s.mcp = s.newMCPServer()
+				authenticated.POST("/mcp", s.handleMCP)
+				authenticated.GET("/mcp", s.handleMCP)
+				authenticated.DELETE("/mcp", s.handleMCP)
+			}
 		}
 	}
 

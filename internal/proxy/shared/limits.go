@@ -46,8 +46,30 @@ type LimitGuard struct {
 	// construction (before this session contributed anything). The live
 	// counters accumulate this session's bytes on top of it, so
 	// baseBytes + from + to is the grant's true running total at any instant.
+	//
+	// "The grant's" total, not "this database's": a grant bound to a server
+	// group covers every database in that group, and its quota is one budget
+	// spanning all of them. The store computes it that way
+	// (Store.populateGrantCounters), so this guard inherits group-wide
+	// accounting with no change of its own — the byte ceiling is consumed by
+	// whichever databases of the group the user connects to.
 	baseBytes int64
 	maxBytes  *int64
+
+	// expiresAt is the grant's end, stamped by the *store's* clock, and it is
+	// deliberately compared here against the *process's* (see now, below) —
+	// the one place dbbat knowingly mixes the two.
+	//
+	// Admission is the case that had to be fixed (grants.go, the OAuth/device
+	// TTLs): there PostgreSQL evaluates the window, so a process-stamped one is
+	// wrong for as long as the skew lasts and the effect has a threshold — a
+	// grant that is refused outright, a TTL silently lengthened. Here there is
+	// no threshold: the session is torn down `skew` early or late, on a window
+	// that is minutes to hours long, and the clocks are NTP-close in practice.
+	// Closing it would mean a database round trip per Check (i.e. per query and
+	// per watchdog tick) to buy back milliseconds — so it stays open, on
+	// purpose. GetActiveGrant remains the authoritative, store-clock check, and
+	// it runs at every new connection.
 	expiresAt time.Time
 
 	// revoked, when non-nil, is the session's shared revocation flag. It is

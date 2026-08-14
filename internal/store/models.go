@@ -170,7 +170,18 @@ const (
 	// ProtocolSSH marks a row that is an SSH bastion (a dial path), not a
 	// grantable/connectable database target.
 	ProtocolSSH = "ssh"
+	// ProtocolKubernetes marks a row that is a Kubernetes cluster (a dial path
+	// via `pods/portforward`), not a grantable/connectable database target.
+	// Like ProtocolSSH it is a tunnel discriminator, not a wire protocol.
+	ProtocolKubernetes = "kubernetes"
 )
+
+// IsTunnelProtocol reports whether a protocol names a *dial path* rather than a
+// database target. Tunnel rows are never grantable, never listable, and never
+// appear in target listings; they exist only to be pointed at by a via_uid.
+func IsTunnelProtocol(protocol string) bool {
+	return protocol == ProtocolSSH || protocol == ProtocolKubernetes
+}
 
 // IsMySQLFamily reports whether the given protocol speaks the MySQL wire
 // protocol. The MySQL proxy serves both — they share the same listener,
@@ -210,18 +221,31 @@ type Server struct {
 	// mirroring User.ProtocolData — rather than a dedicated column per setting.
 	ProtocolData *ServerProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
 	Listable     bool                `bun:"listable,notnull" json:"listable"`
-	CreatedBy    *uuid.UUID          `bun:"created_by,type:uuid" json:"created_by"`
-	CreatedAt    time.Time           `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	UpdatedAt    time.Time           `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
-	DeletedAt    *time.Time          `bun:"deleted_at,soft_delete" json:"-"`
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs are the two
+	// approver kinds attached to this server: who may decide grant *requests*
+	// targeting it, and who may release approval *holds* on statements against
+	// it. Empty (the default) falls back to the server groups this server
+	// belongs to, and then to admins — see ResolveServerApproverGroups.
+	//
+	// Read live at decision time, never snapshotted onto a grant: this is the
+	// second deliberate exception to the immutable-versioning rule, alongside
+	// live server-group membership.
+	AccessApproverUserGroupUIDs []uuid.UUID `bun:"access_approver_user_group_uids,array,notnull,default:'{}'" json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `bun:"query_approver_user_group_uids,array,notnull,default:'{}'" json:"query_approver_user_group_uids"`
+
+	CreatedBy *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
+	CreatedAt time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt *time.Time `bun:"deleted_at,soft_delete" json:"-"`
 }
 
 // ServerProtocolData is per-protocol material attached to a server, stored
 // as a single jsonb column so protocol-specific settings don't proliferate as
 // table columns — mirrors UserProtocolData. Absent protocols are omitted.
 type ServerProtocolData struct {
-	MongoDB *MongoDatabaseData `json:"mongodb,omitempty"`
-	SSH     *SSHServerData     `json:"ssh,omitempty"`
+	MongoDB    *MongoDatabaseData    `json:"mongodb,omitempty"`
+	SSH        *SSHServerData        `json:"ssh,omitempty"`
+	Kubernetes *KubernetesServerData `json:"kubernetes,omitempty"`
 }
 
 // MongoDatabaseData holds MongoDB-specific per-database settings.
@@ -247,6 +271,33 @@ type SSHServerData struct {
 	Passphrase string `json:"-"`
 }
 
+// KubernetesServerData holds the material for a Kubernetes cluster row. The
+// ServiceAccount bearer token is *not* here: it reuses the row's
+// password_encrypted column, so it travels the same AAD-bound encryption path
+// as a database password or an SSH private key.
+//
+// CACert is the API server's PEM CA bundle — public challenge material, stored
+// in clear and surfaced read-only in the API/UI, exactly like SSH's
+// KnownHostKey. Namespace scopes every lookup and every port-forward: it is the
+// namespace the Role/RoleBinding in docs/kubernetes.md grants access to.
+type KubernetesServerData struct {
+	CACert string `json:"ca_cert,omitempty"`
+	// LearnedCACert is the bundle dbbat pinned itself, on the first connect of
+	// a row that supplied none (TOFU) — deliberately a *separate* field from
+	// CACert so "I pasted this" and "we learned this" never blur into each
+	// other, and the UI can say which of the two is in force.
+	//
+	// It is only ever consulted when CACert is empty: an operator-supplied
+	// bundle always wins, and pasting one is what retires a stale learned pin.
+	LearnedCACert string `json:"learned_ca_cert,omitempty"`
+	Namespace     string `json:"namespace,omitempty"`
+	// InsecureSkipTLSVerify disables API server certificate verification. It
+	// exists for the throwaway-cluster case (a kind cluster with a rotating CA)
+	// and is deliberately not the default: with it set, anything that can
+	// intercept the API server connection can read the ServiceAccount token.
+	InsecureSkipTLSVerify bool `json:"insecure_skip_tls_verify,omitempty"`
+}
+
 // MongoData returns the server's MongoDB protocol material, or nil if absent.
 func (db *Server) MongoData() *MongoDatabaseData {
 	if db.ProtocolData == nil {
@@ -265,10 +316,42 @@ func (db *Server) SSHData() *SSHServerData {
 	return db.ProtocolData.SSH
 }
 
+// KubernetesData returns the server's Kubernetes material, or nil if absent.
+func (db *Server) KubernetesData() *KubernetesServerData {
+	if db.ProtocolData == nil {
+		return nil
+	}
+
+	return db.ProtocolData.Kubernetes
+}
+
 // IsSSH reports whether this server row is an SSH bastion rather than a
 // database target.
 func (db *Server) IsSSH() bool {
 	return db.Protocol == ProtocolSSH
+}
+
+// IsKubernetes reports whether this server row is a Kubernetes cluster tunnel
+// rather than a database target.
+func (db *Server) IsKubernetes() bool {
+	return db.Protocol == ProtocolKubernetes
+}
+
+// IsTunnel reports whether this row is a dial path (SSH bastion or Kubernetes
+// cluster) rather than a grantable database target.
+func (db *Server) IsTunnel() bool {
+	return IsTunnelProtocol(db.Protocol)
+}
+
+// KubernetesNamespaceOrDefault returns the namespace every lookup and
+// port-forward for this cluster row is scoped to, defaulting to "default" when
+// unset — the same convention kubectl applies to a context with no namespace.
+func (db *Server) KubernetesNamespaceOrDefault() string {
+	if kd := db.KubernetesData(); kd != nil && kd.Namespace != "" {
+		return kd.Namespace
+	}
+
+	return "default"
 }
 
 // ServerUpdate represents fields that can be updated
@@ -289,6 +372,22 @@ type ServerUpdate struct {
 	// SSH secrets (plaintext, to encrypt). Set on SSH server rows.
 	SSHPrivateKey *string
 	SSHPassphrase *string
+	// Kubernetes cluster material. Public (the CA bundle and the namespace),
+	// so unlike the ServiceAccount token — which travels as Password — these
+	// are stored in clear in protocol_data.kubernetes.
+	K8sCACert                *string
+	K8sNamespace             *string
+	K8sInsecureSkipTLSVerify *bool
+	// K8sClearLearnedCACert, when true, forgets the TOFU-learned bundle so the
+	// next connect learns afresh. It is the exit for a cluster whose CA
+	// rotated — the case that made TOFU worth having at all.
+	K8sClearLearnedCACert bool
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs replace the
+	// server's approver lists wholesale. nil leaves them untouched; an explicit
+	// empty slice clears them, which is what hands the decision back to the
+	// server groups (and then to admins).
+	AccessApproverUserGroupUIDs *[]uuid.UUID
+	QueryApproverUserGroupUIDs  *[]uuid.UUID
 }
 
 // Connection represents a connection through the proxy
@@ -354,6 +453,42 @@ type Connection struct {
 	// Either way, consumers (mayApproveQuery, populateGrantCounters) fall back
 	// to their pre-stamp heuristics.
 	GrantUID *uuid.UUID `bun:"grant_uid,type:uuid" json:"grant_uid"`
+
+	// QueryChainMAC is the head of this connection's query chain, and
+	// QueryChainLen is the position that head sits at. Without them, deleting
+	// the *last* queries of a connection would leave a chain that still
+	// verified; with them the stored head no longer matches what the surviving
+	// rows compute.
+	//
+	// Three writers, all sealing with the key: CloseConnection at a clean
+	// teardown, the reconcile for a session whose process died, and
+	// RefreshOpenChainStamps on the reclaim timer for a session that is still
+	// open. The last is why the stamp is not necessarily *final*: a live
+	// session's stamp is a prefix of its chain, re-sealed one sweep at a time,
+	// and checkStampedHead judges an open session accordingly.
+	//
+	// nil/0 on a connection that logged nothing, or one no sweep has reached
+	// yet. Those are the only two legitimate NULLs: a *closed* connection whose
+	// chained statements survive always carries a stamp, so a NULL one there is
+	// a break (checkMissingStamp), as is a surviving QueryChainLen beside a nil
+	// MAC — the three columns are only ever written together. Internal
+	// integrity state, not API surface.
+	QueryChainMAC []byte `bun:"query_chain_mac" json:"-"`
+
+	// QueryChainLen is the head's chain_seq — which, chain_seq being dense from
+	// 1, is the number of statements the session logged. Deliberately not a
+	// count of *surviving* statements: DBB_QUERY_STORAGE_RETENTION reaps the
+	// oldest statements of a long-lived session, and a stamp that moved with
+	// them would report a break on every truncated session.
+	QueryChainLen int64 `bun:"query_chain_len,notnull,default:0" json:"-"`
+
+	// QueryChainStampVersion says which format QueryChainMAC is in:
+	// queryChainStampLegacy (a verbatim copy of the head MAC, forgeable without
+	// the key) or queryChainStampKeyed. Every writer produces the keyed format,
+	// and only a store written by a pre-0.24 development build can hold an
+	// unkeyed one — which no migration can re-seal without the chain key, so it
+	// stays a break forever.
+	QueryChainStampVersion int16 `bun:"query_chain_stamp_version,notnull,default:0" json:"-"`
 }
 
 // Instance is one *run* of one dbbat process sharing this store. The row is
@@ -430,6 +565,36 @@ type Query struct {
 	ResolvedAt       *time.Time `bun:"resolved_at" json:"resolved_at,omitempty"`
 	ResolutionReason *string    `bun:"resolution_reason" json:"resolution_reason,omitempty"`
 
+	// Tamper-evidence: this statement's position in its *connection's* chain,
+	// and the HMAC sealing its immutable identity (uid, connection, position,
+	// SQL text, parameters, executed_at) plus PrevMAC. The outcome columns
+	// above are written after the insert and are deliberately not covered —
+	// see queryChainPayload. Internal integrity state, not API surface.
+	ChainSeq *int64 `bun:"chain_seq" json:"-"`
+	PrevMAC  []byte `bun:"prev_mac" json:"-"`
+	MAC      []byte `bun:"mac" json:"-"`
+
+	// RowChainMAC seals the final head of this query's *result row* chain when
+	// the capture finishes, and RowChainLen is how many captured rows that head
+	// covers. They are to query_rows what QueryChainMAC / QueryChainLen are to
+	// a connection's statements: the only thing that catches rows deleted from
+	// the *end* of a capture.
+	//
+	// It is a keyed MAC over (query, length, head MAC) — deliberately *not* a
+	// copy of the head MAC, which is readable from query_rows and could
+	// therefore be rewritten to match a truncated capture without the chain
+	// key. See rowChainStampMAC.
+	//
+	// RowChainLen is a count, not the head's row_number — a capture with gaps
+	// (rows the writer dropped, rows that failed to encode) has fewer stored
+	// rows than its last row_number.
+	//
+	// nil/0 for a query that captured nothing, for captures written before the
+	// row chain migration, and for a capture whose process died before the
+	// flush barrier. Internal integrity state, not API surface.
+	RowChainMAC []byte `bun:"row_chain_mac" json:"-"`
+	RowChainLen int64  `bun:"row_chain_len,notnull,default:0" json:"-"`
+
 	// Joined fields populated only by ListQueries (via a JOIN on connections);
 	// not stored on the queries table itself.
 	UserID     *uuid.UUID `bun:"user_id,scanonly" json:"user_id,omitempty"`
@@ -445,6 +610,14 @@ type QueryRowModel struct {
 	RowNumber    int             `bun:"row_number,notnull" json:"row_number"`
 	RowData      json.RawMessage `bun:"row_data,notnull,type:jsonb" json:"row_data"`
 	RowSizeBytes int64           `bun:"row_size_bytes,notnull" json:"row_size_bytes"`
+
+	// Tamper-evidence: the HMAC sealing this captured row (its query, its
+	// row_number, its uid, its data and its size) plus the previous stored
+	// row's MAC. The chain is per query and its position is row_number, which
+	// is an ordering and not a dense sequence — see rowChainPayload. Internal
+	// integrity state, not API surface.
+	PrevMAC []byte `bun:"prev_mac" json:"-"`
+	MAC     []byte `bun:"mac" json:"-"`
 }
 
 // QueryRow is an alias for API compatibility (without bun.BaseModel for simpler usage)
@@ -496,9 +669,30 @@ type QueryFilter struct {
 type AccessGrant struct {
 	bun.BaseModel `bun:"table:access_grants,alias:ag"`
 
-	UID        uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	UserID     uuid.UUID `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	UID    uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	UserID uuid.UUID `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	// DatabaseID is the grant's anchor: the database it was issued for. It is
+	// what an unbound grant covers, and what a group-bound one falls back to
+	// if its group is deleted outright.
 	DatabaseID uuid.UUID `bun:"database_id,notnull,type:uuid" json:"database_id"`
+	// ServerGroupUID, when set, binds this grant to a server group: the grant
+	// then covers every server the group contains **right now**, and only
+	// those — the binding replaces the single-database scope rather than
+	// adding to it, so a server removed from the group stops being covered
+	// even when it is the anchor. "Adding widens, removing narrows", with no
+	// exceptions to remember.
+	//
+	// Membership is live and never snapshotted, so an edit takes effect the
+	// instant it is saved — the one deliberate exception to "a live grant's
+	// behavior never changes under it" (see ServerGroup). nil = anchor
+	// database only, which is what every grant issued from an unscoped
+	// definition gets.
+	//
+	// Quotas and Priority follow the grant, not the database: one
+	// max_query_counts and one max_bytes_transferred budget are consumed
+	// across the whole group, and Priority ranks group-bound grants against
+	// each other on the databases where their groups overlap.
+	ServerGroupUID *uuid.UUID `bun:"server_group_uid,type:uuid" json:"server_group_uid,omitempty"`
 	// GrantDefinitionID pins the exact definition *version* this grant was
 	// issued from. Definitions are immutably versioned (an edit archives the
 	// row and inserts a successor), so this reference can never make a live
@@ -587,16 +781,16 @@ func (g *AccessGrant) ApprovalPatterns() []string {
 	return g.Definition.ApprovalPatterns
 }
 
-// ApproverGroupUIDs lists the groups whose members may resolve holds on this
+// ApproverUserGroupUIDs lists the groups whose members may resolve holds on this
 // grant, in addition to admins, read from the grant's definition. Empty =
 // admins only, which is also what a shapeless grant reports: the narrowest
 // possible approver set.
-func (g *AccessGrant) ApproverGroupUIDs() []uuid.UUID {
+func (g *AccessGrant) ApproverUserGroupUIDs() []uuid.UUID {
 	if g == nil || g.Definition == nil {
 		return nil
 	}
 
-	return g.Definition.ApproverGroupUIDs
+	return g.Definition.ApproverUserGroupUIDs
 }
 
 // newZeroQuota backs the fail-closed quota accessors: an exhausted quota,
@@ -678,18 +872,37 @@ type GrantDefinition struct {
 	// bypass the pending/admin-approval step: the request is approved and
 	// the grant materialized instantly at request time.
 	AutoApprove bool `bun:"auto_approve,notnull,default:false" json:"auto_approve"`
-	// GroupUIDs restricts which users may request this definition: a user
-	// must belong to at least one of the listed groups. Empty = every user
-	// (the pre-scoping behavior, which every existing definition keeps).
+	// UserGroupUIDs restricts which users may request this definition: a user
+	// must belong to at least one of the listed user groups. Empty = every
+	// user (the pre-scoping behavior, which every existing definition keeps).
 	//
 	// Stored as an array on the definition rather than a join table on
 	// purpose: an empty scope means "everyone", so a cascade-on-delete join
 	// table would fail *open* when a group is deleted. A dangling uid here
 	// matches nobody, so the definition fails closed until an admin fixes it.
-	GroupUIDs []uuid.UUID `bun:"group_uids,array,notnull,default:'{}'" json:"group_uids"`
-	// DatabaseUIDs restricts which databases this definition can be
-	// requested against. Empty = every database.
-	DatabaseUIDs []uuid.UUID `bun:"database_uids,array,notnull,default:'{}'" json:"database_uids"`
+	//
+	// Named `user_group_uids`, not `group_uids`: server groups exist too, and
+	// a bare "group" is ambiguous. The old JSON name is still accepted on
+	// input for one release; responses only ever emit the new one.
+	UserGroupUIDs []uuid.UUID `bun:"user_group_uids,array,notnull,default:'{}'" json:"user_group_uids"`
+	// ServerGroupUIDs restricts which databases this definition can be
+	// requested against, by naming server groups rather than enumerating
+	// servers: a database is in scope when it currently belongs to at least
+	// one of the listed groups. Empty = every database — the same semantics
+	// the old per-database list had, so every pre-existing definition keeps
+	// behaving as before.
+	//
+	// Membership is resolved **live**, exactly like the user-group scope
+	// above: adding a server to a scoped group makes the definition
+	// requestable against it immediately, with no edit and therefore no new
+	// version. That is the point of groups, and the reason fleet growth is no
+	// longer O(definitions) of toil.
+	//
+	// Stored as an array on the definition rather than a join table for the
+	// same reason UserGroupUIDs is: an empty scope means "every database", so
+	// a cascade-on-delete join table would fail *open* when a group is
+	// deleted. A dangling uid here matches no database — fail closed.
+	ServerGroupUIDs []uuid.UUID `bun:"server_group_uids,array,notnull,default:'{}'" json:"server_group_uids"`
 	// ApprovalPatterns are SQL patterns (RE2) that suspend a matching
 	// statement until an admin or an approver-group member approves it.
 	// Empty = no approval gating. Validated at save time so a bad pattern is
@@ -705,19 +918,44 @@ type GrantDefinition struct {
 	// not block the save — see POST /grant-definitions/validate-patterns,
 	// which reports match/no-match without failing the request.
 	SampleQueries StringArray `bun:"sample_queries,notnull,default:'{}'" json:"sample_queries"`
-	// ApproverGroupUIDs lists groups whose members may resolve holds on
-	// grants built from this definition, *in addition to* admins.
+	// ApproverUserGroupUIDs lists the user groups whose members may resolve
+	// holds on grants built from this definition, *in addition to* admins.
 	// Empty = admins only.
-	ApproverGroupUIDs []uuid.UUID `bun:"approver_group_uids,array,notnull,default:'{}'" json:"approver_group_uids"`
-	IsActive          bool        `bun:"is_active,notnull,default:true" json:"is_active"`
-	CreatedBy         uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
-	CreatedAt         time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	ApproverUserGroupUIDs []uuid.UUID `bun:"approver_user_group_uids,array,notnull,default:'{}'" json:"approver_user_group_uids"`
+	IsActive              bool        `bun:"is_active,notnull,default:true" json:"is_active"`
+	CreatedBy             uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
+	CreatedAt             time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 
 	// ActiveGrantCount is how many non-revoked, non-expired grants this
 	// definition's *lineage* is currently authorizing. Computed on listing
 	// (one grouped query, never per row) so the UI can tell an operator what
 	// deactivating it would cut off before they confirm.
 	ActiveGrantCount int64 `bun:"-" json:"active_grant_count"`
+
+	// ScopedDatabaseUIDs is ServerGroupUIDs resolved to the concrete
+	// databases currently in scope — a read-only convenience so a non-admin
+	// requester can narrow their database picker without needing the
+	// admin-gated /server-groups endpoint (membership is access-relevant,
+	// so that gate stays). It leaks no group names or membership shape,
+	// only "these databases are in scope," which a requester could already
+	// discover by trying. It is never the access-control gate: that stays
+	// enforceRequestScope in internal/api/grant_requests.go, which
+	// re-resolves scope itself and does not read this field.
+	//
+	// The two "in scope" states an empty ServerGroupUIDs and a scoped-but-
+	// currently-empty group set would otherwise both stringify as `[]` are
+	// told apart with a pointer:
+	//   - nil (omitted from the JSON response): ServerGroupUIDs is empty,
+	//     meaning every database is in scope.
+	//   - non-nil, possibly empty ([]): ServerGroupUIDs is non-empty; this
+	//     is the resolved union of every scoped group's current members. An
+	//     empty slice means the definition is scoped but currently covers
+	//     zero databases (e.g. every referenced group is empty).
+	//
+	// Only handleListGrantDefinitions and handleGetGrantDefinition populate
+	// this (one batched membership query per response, never one per
+	// definition); every other read or write path leaves it nil.
+	ScopedDatabaseUIDs *[]uuid.UUID `bun:"-" json:"scoped_database_uids,omitempty"`
 }
 
 // IsLive reports whether this is the current version of its lineage, as
@@ -726,14 +964,14 @@ func (d *GrantDefinition) IsLive() bool {
 	return d != nil && d.ArchivedAt == nil
 }
 
-// AppliesToGroups reports whether a user belonging to the given groups is
+// AppliesToUserGroups reports whether a user belonging to the given groups is
 // within this definition's group scope. An empty scope applies to everyone.
-func (d *GrantDefinition) AppliesToGroups(userGroupUIDs []uuid.UUID) bool {
-	if len(d.GroupUIDs) == 0 {
+func (d *GrantDefinition) AppliesToUserGroups(userGroupUIDs []uuid.UUID) bool {
+	if len(d.UserGroupUIDs) == 0 {
 		return true
 	}
 
-	for _, scoped := range d.GroupUIDs {
+	for _, scoped := range d.UserGroupUIDs {
 		for _, owned := range userGroupUIDs {
 			if scoped == owned {
 				return true
@@ -744,28 +982,58 @@ func (d *GrantDefinition) AppliesToGroups(userGroupUIDs []uuid.UUID) bool {
 	return false
 }
 
-// AppliesToDatabase reports whether the given database is within this
-// definition's database scope. An empty scope applies to every database.
-func (d *GrantDefinition) AppliesToDatabase(databaseUID uuid.UUID) bool {
-	if len(d.DatabaseUIDs) == 0 {
+// AppliesToServerGroups reports whether a database belonging to the given
+// server groups is within this definition's scope. An empty scope applies to
+// every database.
+//
+// The caller passes the target database's *current* group membership (see
+// Store.ListServerGroupUIDsForServer) rather than the database uid, which is
+// what makes the scope follow group membership live.
+func (d *GrantDefinition) AppliesToServerGroups(serverGroupUIDs []uuid.UUID) bool {
+	if len(d.ServerGroupUIDs) == 0 {
 		return true
 	}
 
-	for _, scoped := range d.DatabaseUIDs {
-		if scoped == databaseUID {
-			return true
+	for _, scoped := range d.ServerGroupUIDs {
+		for _, owned := range serverGroupUIDs {
+			if scoped == owned {
+				return true
+			}
 		}
 	}
 
 	return false
 }
 
+// MatchingServerGroup returns the definition's server group that the given
+// database currently belongs to — the group a grant materialized from this
+// definition binds to. The first of the definition's groups that contains the
+// database wins, so the choice is stable for a given definition version.
+//
+// nil means "no group binds": either the definition is unscoped (it applies to
+// every database, which is not the same thing as covering a named set) or the
+// database is not in any of its groups. Either way the resulting grant covers
+// its anchor database only.
+func (d *GrantDefinition) MatchingServerGroup(serverGroupUIDs []uuid.UUID) *uuid.UUID {
+	for _, scoped := range d.ServerGroupUIDs {
+		for _, owned := range serverGroupUIDs {
+			if scoped == owned {
+				match := scoped
+
+				return &match
+			}
+		}
+	}
+
+	return nil
+}
+
 // AppliesTo reports whether this definition can be requested by a user in the
 // given groups against the given database. Both scopes must pass; an empty
 // scope on either axis is unrestricted, which is what keeps every
 // pre-existing (unscoped) definition behaving exactly as before.
-func (d *GrantDefinition) AppliesTo(userGroupUIDs []uuid.UUID, databaseUID uuid.UUID) bool {
-	return d.AppliesToGroups(userGroupUIDs) && d.AppliesToDatabase(databaseUID)
+func (d *GrantDefinition) AppliesTo(userGroupUIDs, serverGroupUIDs []uuid.UUID) bool {
+	return d.AppliesToUserGroups(userGroupUIDs) && d.AppliesToServerGroups(serverGroupUIDs)
 }
 
 // GrantDefinitionFilter narrows ListGrantDefinitions queries.
@@ -794,6 +1062,44 @@ type UserGroupMember struct {
 
 	GroupUID uuid.UUID `bun:"group_uid,pk,type:uuid" json:"group_uid"`
 	UserUID  uuid.UUID `bun:"user_uid,pk,type:uuid" json:"user_uid"`
+}
+
+// ServerGroup is a named set of database servers ("the analytics replicas",
+// "all staging databases") — the unit rights are scoped on, so a policy names
+// a stable set instead of enumerating servers one by one.
+//
+// It is the server-side mirror of UserGroup, and its membership is
+// deliberately **live**: a grant bound to a group covers whatever the group
+// contains *right now*. Adding a server to a group therefore immediately
+// widens every live grant bound to it — the one place where dbbat's
+// "a live grant's behavior never changes under it" rule is knowingly broken,
+// because group membership is operational data, exactly as user-group
+// membership already is. See docs/grants.md.
+type ServerGroup struct {
+	bun.BaseModel `bun:"table:server_groups,alias:sg"`
+
+	UID         uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name        string    `bun:"name,notnull" json:"name"`
+	Description string    `bun:"description,notnull,default:''" json:"description"`
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs are the
+	// group-level fallback for the two approver kinds: they apply to every
+	// server in this group that names none of its own. Several groups holding
+	// the same server union, matching how a definition's approver groups union.
+	//
+	// Read live at decision time, like membership itself.
+	AccessApproverUserGroupUIDs []uuid.UUID `bun:"access_approver_user_group_uids,array,notnull,default:'{}'" json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `bun:"query_approver_user_group_uids,array,notnull,default:'{}'" json:"query_approver_user_group_uids"`
+	CreatedBy                   *uuid.UUID  `bun:"created_by,type:uuid" json:"created_by,omitempty"`
+	CreatedAt                   time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+}
+
+// ServerGroupMember is the group ↔ server join row, the exact counterpart of
+// UserGroupMember.
+type ServerGroupMember struct {
+	bun.BaseModel `bun:"table:server_group_members,alias:sgm"`
+
+	GroupUID  uuid.UUID `bun:"group_uid,pk,type:uuid" json:"group_uid"`
+	ServerUID uuid.UUID `bun:"server_uid,pk,type:uuid" json:"server_uid"`
 }
 
 // GrantRequestStatus enumerates the lifecycle states a request can be in.
@@ -877,10 +1183,38 @@ type AuditLog struct {
 	PerformedBy *uuid.UUID      `bun:"performed_by,type:uuid" json:"performed_by"`
 	Details     json.RawMessage `bun:"details,type:jsonb" json:"details"`
 	CreatedAt   time.Time       `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+
+	// Tamper-evidence: ChainSeq is this row's position in the audit chain, MAC
+	// is the HMAC over its canonical serialization plus PrevMAC. All three are
+	// nil/zero on rows written before the chain anchor (unverifiable by
+	// construction) and on a store built without an encryption key. They are
+	// internal integrity state, not API surface — hence json:"-"; `dbbat audit
+	// verify` is how they are consumed. See internal/store/chain.go.
+	ChainSeq *int64 `bun:"chain_seq" json:"-"`
+	PrevMAC  []byte `bun:"prev_mac" json:"-"`
+	MAC      []byte `bun:"mac" json:"-"`
 }
 
 // AuditEvent is an alias for backward compatibility
 type AuditEvent = AuditLog
+
+// UserRoleSync is the newest directory role-sync audit entry of one user.
+//
+// It is a projection of `audit_log`, not a table: the audit entry stays the
+// only record of what happened, and this carries it verbatim — `Details`
+// included, because the directory groups it names are the answer to "why did
+// this change?". The joined `Username` saves the caller a second lookup to
+// render a row.
+type UserRoleSync struct {
+	bun.BaseModel `bun:"table:audit_log,alias:al"`
+
+	UID       uuid.UUID       `bun:"uid,type:uuid" json:"uid"`
+	EventType string          `bun:"event_type" json:"event_type"`
+	UserID    uuid.UUID       `bun:"user_id,type:uuid" json:"user_id"`
+	Username  string          `bun:"username,scanonly" json:"username"`
+	Details   json.RawMessage `bun:"details,type:jsonb" json:"details"`
+	CreatedAt time.Time       `bun:"created_at" json:"created_at"`
+}
 
 // AuditFilter represents filters for listing audit events
 type AuditFilter struct {
@@ -892,6 +1226,13 @@ type AuditFilter struct {
 	BeforeUID   *uuid.UUID // Cursor: return events with UID < this value
 	Limit       int
 	Offset      int
+
+	// IncludeSessionEvents folds the per-session entries
+	// (SessionAuditEventTypes) back into an otherwise unfiltered listing. They
+	// are excluded by default because they outnumber control-plane events by
+	// orders of magnitude on a busy proxy; naming one in EventType returns it
+	// whatever this says.
+	IncludeSessionEvents bool
 }
 
 // ExtractSourceIP extracts the IP address from a net.Addr

@@ -58,6 +58,27 @@ func SanitizeQueryError(ctx context.Context, logger *slog.Logger, queryError *st
 	return &cleaned
 }
 
+// SanitizeStatementText applies the same judgement to a candidate *statement*
+// run, and exists so the reasoning and the threshold live in one place rather
+// than being reinvented per protocol.
+//
+// The Oracle execute decoder needs exactly this question answered: a run of
+// bytes is either the statement the header declared or it is misread binary,
+// and "is it valid UTF-8" is the wrong test for the same reason it is the wrong
+// test for a diagnostic — dbbat does not know the session charset, so a
+// perfectly ordinary `INSERT INTO t VALUES ('café')` from a WE8ISO8859P1
+// session is not valid UTF-8. Refusing it there does not merely lose fidelity:
+// the decoder falls back to a keyword scan that truncates the statement at the
+// first accented byte, so a blocked pattern or an approval pattern in the tail
+// stops matching.
+//
+// The repaired text is what callers store, and that matters beyond
+// readability: `queries.sql_text` is a Postgres `text` column, so a run kept
+// verbatim would fail the insert and take the audit row with it.
+func SanitizeStatementText(s string) (string, bool) {
+	return sanitizeErrorText(s)
+}
+
 func debugLogErrorText(ctx context.Context, logger *slog.Logger, msg string, length int) {
 	if logger == nil {
 		return

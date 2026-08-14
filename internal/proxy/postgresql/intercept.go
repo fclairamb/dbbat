@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -35,15 +36,14 @@ var readOnlyBypassPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bSET\s+ROLE\b`),
 }
 
-// handleQuery intercepts and logs queries - returns nil if query was handled.
-func (s *Session) handleQuery(query *pgproto3.Query) error {
-	sqlText := query.String
-
-	// Check quotas before executing query
-	if err := s.checkQuotas(); err != nil {
-		return err
-	}
-
+// validateStatement runs the deterministic, grant-derived controls one
+// statement has to clear before a single byte of it reaches upstream.
+//
+// It is shared by the simple-query path (handleQuery) and the extended-query
+// one (handleParse) so the two can never drift: a control that only one of them
+// enforced would be a control a client could pick its way around by choosing a
+// protocol.
+func (s *Session) validateStatement(sqlText string) error {
 	// Always block password changes regardless of controls
 	if isPasswordChangeQuery(sqlText) {
 		return ErrPasswordChangeNotAllowed
@@ -69,50 +69,59 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 		return ErrCopyNotPermitted
 	}
 
+	return nil
+}
+
+// handleQuery intercepts and logs queries - returns nil if query was handled.
+func (s *Session) handleQuery(query *pgproto3.Query) error {
+	sqlText := query.String
+
+	if err := s.book(func() error {
+		// Check quotas before executing query
+		if err := s.checkQuotas(); err != nil {
+			return s.refuse(sqlText, nil, err)
+		}
+
+		if err := s.validateStatement(sqlText); err != nil {
+			return s.refuse(sqlText, nil, err)
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	// Approval hold — last, after every cheap deterministic deny, and before
-	// a single byte reaches upstream. Blocks until a human decides.
+	// a single byte reaches upstream. Blocks until a human decides. Outside
+	// bookMu on purpose: the upstream reader takes that lock for every message
+	// it relays, and a hold has no timeout.
 	approvalUID, err := s.holdIfNeeded(sqlText, nil)
 	if err != nil {
 		return err
 	}
 
 	// Start tracking query for logging
-	s.currentQuery = &pendingQuery{
-		sql:         sqlText,
-		startTime:   time.Now(),
-		approvalUID: approvalUID,
-	}
+	return s.book(func() error {
+		s.currentQuery = &pendingQuery{
+			sql:         sqlText,
+			startTime:   time.Now(),
+			approvalUID: approvalUID,
+		}
 
-	return nil
+		return nil
+	})
 }
 
 // handleParse handles Parse messages (prepared statement creation) for Extended Query Protocol.
 func (s *Session) handleParse(msg *pgproto3.Parse) error {
 	sqlText := msg.Query
 
-	// Always block password changes regardless of controls
-	if isPasswordChangeQuery(sqlText) {
-		return ErrPasswordChangeNotAllowed
-	}
-
-	// Control: read_only bypass prevention
-	if s.grant.IsReadOnly() && isReadOnlyBypassAttempt(sqlText) {
-		return ErrReadOnlyBypassAttempt
-	}
-
-	// Control: read_only write prevention at Parse time (defense-in-depth)
-	if s.grant.IsReadOnly() && isWriteQuery(sqlText) {
-		return ErrWriteNotPermitted
-	}
-
-	// Control: block_ddl (only check if not already read_only, since read_only blocks DDL at PG level)
-	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && isDDLQuery(sqlText) {
-		return ErrDDLNotPermitted
-	}
-
-	// Control: block_copy
-	if s.grant.ShouldBlockCopy() && isCopyQuery(sqlText) {
-		return ErrCopyNotPermitted
+	// Same controls as the simple-query path, at Parse time (defense in depth:
+	// the statement is refused before it is even prepared upstream).
+	if err := s.validateStatement(sqlText); err != nil {
+		// refuse counts the attempt against the in-session quota, so it is
+		// booked like every other writer of those counters.
+		return s.book(func() error { return s.refuse(sqlText, nil, err) })
 	}
 
 	// Store the prepared statement with type OIDs. The OID slice is copied
@@ -223,48 +232,67 @@ func (s *Session) handleBind(msg *pgproto3.Bind) {
 
 // handleExecute handles Execute messages (query execution) for Extended Query Protocol.
 func (s *Session) handleExecute(msg *pgproto3.Execute) error {
+	// Resolve the statement first so a refusal below can be recorded against
+	// the SQL the client actually tried to run, rather than an empty row.
+	portal := s.extendedState.portals[msg.Portal]
+
+	var (
+		sqlText string
+		params  *store.QueryParameters
+	)
+
+	if portal != nil {
+		s.extendedState.mu.Lock()
+		stmt := s.extendedState.preparedStatements[portal.stmtName]
+		s.extendedState.mu.Unlock()
+
+		params = portal.parameters
+
+		if stmt != nil {
+			sqlText = stmt.sql
+		} else {
+			s.logger.WarnContext(s.ctx, "execute for unknown statement", slog.String("portal", msg.Portal), slog.String("stmt", portal.stmtName))
+		}
+	}
+
 	// Check quotas before executing
-	if err := s.checkQuotas(); err != nil {
+	if err := s.book(func() error {
+		if err := s.checkQuotas(); err != nil {
+			return s.refuse(sqlText, params, err)
+		}
+
+		return nil
+	}); err != nil {
 		return err
 	}
 
-	// Look up the portal
-	portal := s.extendedState.portals[msg.Portal]
 	if portal == nil {
 		s.logger.WarnContext(s.ctx, "execute for unknown portal", slog.String("portal", msg.Portal))
 		return nil
 	}
 
-	// Look up the statement
-	s.extendedState.mu.Lock()
-	stmt := s.extendedState.preparedStatements[portal.stmtName]
-	s.extendedState.mu.Unlock()
-
-	sqlText := ""
-	if stmt != nil {
-		sqlText = stmt.sql
-	} else {
-		s.logger.WarnContext(s.ctx, "execute for unknown statement", slog.String("portal", msg.Portal), slog.String("stmt", portal.stmtName))
-	}
-
 	// Approval hold at Execute, deliberately not at Parse: at Parse time the
 	// bind parameters are not yet known, and the SQL that ultimately runs is
-	// the portal's.
+	// the portal's. Outside bookMu — see handleQuery.
 	approvalUID, err := s.holdIfNeeded(sqlText, portal.parameters)
 	if err != nil {
 		return err
 	}
 
-	// Queue the query for logging (will be popped on CommandComplete)
+	// Queue the query for logging (will be popped on CommandComplete, by the
+	// upstream leg — hence the lock).
 	query := &pendingQuery{
 		sql:         sqlText,
 		startTime:   time.Now(),
 		parameters:  portal.parameters,
 		approvalUID: approvalUID,
 	}
-	s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
 
-	return nil
+	return s.book(func() error {
+		s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
+
+		return nil
+	})
 }
 
 // handleClose handles Close messages (cleanup) for Extended Query Protocol.
@@ -290,20 +318,22 @@ func isDDLQuery(sql string) bool {
 }
 
 // isCopyQuery checks if a query is a COPY operation.
+//
+// Comment-normalized, like everything else validateStatement runs: PostgreSQL
+// ignores `/* … */` wherever whitespace is allowed, so `/*x*/COPY t TO STDOUT`
+// is a COPY to the server and has to be one here too.
 func isCopyQuery(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	return strings.HasPrefix(upper, "COPY ")
+	return shared.HasNormalizedSQLPrefix(sql, "COPY ")
 }
 
 // isReadOnlyBypassAttempt checks if a query attempts to disable read-only mode.
+//
+// Every pattern in the list spans two or more keywords, so an inline comment
+// between them (`SET/**/ROLE postgres`) walked through it while the server read
+// the statement unchanged — the same hole shared.ValidateQuery closes, in a
+// check that sits one line away from it.
 func isReadOnlyBypassAttempt(sql string) bool {
-	for _, pattern := range readOnlyBypassPatterns {
-		if pattern.MatchString(sql) {
-			return true
-		}
-	}
-
-	return false
+	return shared.MatchesAnyNormalizedSQL(sql, readOnlyBypassPatterns)
 }
 
 // isPasswordChangeQuery checks if a query attempts to modify user/role passwords.
@@ -326,7 +356,71 @@ func parseRowsAffected(commandTag string) *int64 {
 	return nil
 }
 
+// refuse records a statement dbbat declined to forward and hands the refusal
+// back unchanged, so a caller reads as `return s.refuse(sql, params, err)`.
+func (s *Session) refuse(sqlText string, params *store.QueryParameters, refusal error) error {
+	s.recordBlockedQuery(sqlText, params, refusal)
+
+	return refusal
+}
+
+// recordBlockedQuery persists a queries row for a statement that was refused
+// before it ever reached upstream — a read_only write, a block_ddl DDL, a
+// block_copy COPY, a read-only bypass attempt, a password change, or an
+// exhausted quota.
+//
+// A refused statement is the single most interesting thing an access-control
+// proxy can record, and it used to leave nothing behind on PostgreSQL but an
+// slog WARN. MySQL/MariaDB, MongoDB and SQL Server have always recorded one;
+// this is the same row, with the same error-string shape, so the UI badge and
+// any log-based alerting treat all five protocols identically.
+//
+// duration_ms and rows_affected are both 0: the statement never ran. Bytes are
+// attributed to the *next* query rather than to this row — lastBytesSnapshot
+// belongs to the upstream→client goroutine and a refusal happens on the
+// client→upstream one, so the counter is deliberately left alone.
+//
+// Callers hold bookMu (it bumps the in-session query counter).
+func (s *Session) recordBlockedQuery(sqlText string, params *store.QueryParameters, refusal error) {
+	if refusal == nil {
+		return
+	}
+
+	s.logger.WarnContext(s.ctx, "statement blocked by access control",
+		slog.String("sql", sqlText),
+		slog.Any("error", refusal),
+	)
+
+	errText := refusal.Error()
+	duration := float64(0)
+	rowsAffected := int64(0)
+
+	query := &store.Query{
+		ConnectionID: s.connectionUID,
+		SQLText:      sqlText,
+		Parameters:   params,
+		ExecutedAt:   time.Now(),
+		DurationMs:   &duration,
+		RowsAffected: &rowsAffected,
+		// Last gate before the store: never persist an "error" that is not
+		// readable text. See shared.SanitizeQueryError.
+		Error: shared.SanitizeQueryError(s.ctx, s.logger, &errText),
+	}
+
+	// No capture sink and no COPY rows — there is no result to capture.
+	s.persistQueryAsync(query, nil, false, nil, 0)
+
+	// The attempt counts against the in-session query quota, exactly as it
+	// does on the three protocols that already recorded refusals.
+	if s.grant != nil {
+		s.grant.QueryCount++
+	}
+}
+
 // logQuery persists the query record to the store.
+//
+// Callers hold bookMu: it reads the in-flight query and advances the grant's
+// in-session counters, both of which the client leg also touches.
 func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransferred int64) {
 	if s.currentQuery == nil {
 		return
@@ -426,7 +520,12 @@ func (s *Session) persistQueryAsync(
 		return
 	}
 
-	go func() {
+	go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
+		// A panic here must not leave the sink unresolved: the shared row writer
+		// waits on it before inserting anything this query queued. Fail is a
+		// no-op once Resolve has run, so this only bites on the panic path.
+		defer sink.Fail()
+
 		queryUID, exists := s.resolveQueryRecord(query, sink, recordPending, len(copyRows) > 0)
 		if queryUID == uuid.Nil {
 			return
@@ -464,7 +563,7 @@ func (s *Session) persistQueryAsync(
 		if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 		}
-	}()
+	})
 }
 
 // resolveQueryRecord returns the uid of this query's row, inserting it when

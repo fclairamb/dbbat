@@ -10,6 +10,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -33,9 +34,7 @@ type handler struct {
 //
 // During handshake (s.authComplete == false) we just stash the requested
 // database name; the auth handler validates it in OnAuthSuccess. Command-time
-// switches are refused — staying on a single grant-bound database matches the
-// PostgreSQL proxy's behavior of disallowing mid-session \c. The synthetic
-// "USE <db>" SQL is logged for visibility either way.
+// switches go to switchDatabase, which is also where a text `USE` lands.
 func (h *handler) UseDB(dbName string) error {
 	if !h.session.authComplete {
 		h.session.requestedDB = dbName
@@ -43,17 +42,53 @@ func (h *handler) UseDB(dbName string) error {
 		return nil
 	}
 
-	syntheticSQL := "USE " + dbName
+	return h.switchDatabase("USE "+dbName, dbName)
+}
 
-	if dbName == h.session.database.Name || dbName == h.session.database.DatabaseName {
-		h.recordQuery(syntheticSQL, nil, time.Now(), nil)
+// switchDatabase is *the* decision on whether this session may move to another
+// database, and there is deliberately only one of it.
+//
+// A client can ask two ways — the `COM_INIT_DB` packet, and the SQL text `USE
+// otherdb` sent as an ordinary `COM_QUERY` — and go-mysql's command dispatch
+// routes them to different handlers, so for a while only the first was refused.
+// Two implementations of "may this session change database" is exactly the drift
+// that becomes an authorization bug, so both paths call this.
+//
+// Refusing is independent of the grant's controls: a full-write grant on one
+// database is not a grant on another, and because `queries` has no database
+// column of its own every statement after a successful switch would be recorded
+// against the database the grant *does* cover.
+//
+// Switching to the granted database stays allowed — clients emit it routinely
+// on connect — and is answered here rather than relayed, exactly as
+// `COM_INIT_DB` always was: the session is already on that database, and the
+// name the client used may be the dbbat entry's rather than the upstream's.
+//
+// The comparison is exact, matching what `COM_INIT_DB` has always done. MySQL's
+// own case sensitivity for database names is filesystem-dependent, so the exact
+// match is the fail-closed direction.
+func (h *handler) switchDatabase(sqlText, dbName string) error {
+	if h.namesSessionDatabase(dbName) {
+		h.recordQuery(sqlText, nil, time.Now(), nil)
 
 		return nil
 	}
 
-	h.recordQuery(syntheticSQL, nil, time.Now(), ptrErrString(ErrSwitchDatabaseDenied))
+	h.recordQuery(sqlText, nil, time.Now(), ptrErrString(ErrSwitchDatabaseDenied))
 
 	return ErrSwitchDatabaseDenied
+}
+
+// namesSessionDatabase reports whether dbName is this session's own database,
+// under either name it answers to: the dbbat entry's, which is what the client's
+// connection string carries, and the real one on the target.
+//
+// It is the comparison every "may this session change database" answer is built
+// on, and there is deliberately only one of it.
+func (h *handler) namesSessionDatabase(dbName string) bool {
+	db := h.session.database
+
+	return db != nil && (dbName == db.Name || dbName == db.DatabaseName)
 }
 
 // HandleQuery handles COM_QUERY (text protocol).
@@ -76,6 +111,20 @@ func (h *handler) HandleFieldList(table string, wildcard string) ([]*gomysql.Fie
 func (h *handler) HandleStmtPrepare(query string) (int, int, any, error) {
 	start := time.Now()
 	syntheticSQL := "PREPARE: " + query
+
+	// COM_STMT_EXECUTE reaches runIntercepted and is covered there, but a
+	// prepare is its own command and never passes through it — so the switch
+	// check has to be repeated on this path rather than assumed.
+	//
+	// Any `USE` shape is refused here, including the granted database: unlike
+	// COM_QUERY there is no OK packet to answer with, only a statement handle
+	// dbbat would have to invent. MySQL does not accept `USE` as a preparable
+	// statement in the first place, so nothing legitimate is lost.
+	if _, isUse := shared.MySQLUseTarget(query); isUse {
+		h.recordQuery(syntheticSQL, nil, start, ptrErrString(ErrSwitchDatabaseDenied))
+
+		return 0, 0, nil, ErrSwitchDatabaseDenied
+	}
 
 	stmt, err := h.session.upstreamConn.Prepare(query)
 	if err != nil {
@@ -154,6 +203,23 @@ func (h *handler) runIntercepted(
 		return nil, err
 	}
 
+	// A text `USE otherdb` is the same request as COM_INIT_DB and gets the same
+	// answer, from the same function. It sits ahead of the grant controls
+	// because it is not one of them: no combination of read_only, block_ddl and
+	// block_copy makes another database in scope.
+	//
+	// It is answered here rather than forwarded, so an allowed `USE <granted
+	// db>` costs no upstream round trip and a refused one never reaches the
+	// upstream at all. Returning a nil *Result with a nil error makes go-mysql
+	// write the OK packet the client expects.
+	if target, isUse := shared.MySQLUseTarget(sql); isUse {
+		return nil, h.switchDatabase(sql, target)
+	}
+
+	if err := h.checkPreparedSwitch(sql, params); err != nil {
+		return nil, err
+	}
+
 	if err := shared.ValidateMySQLQuery(sql, s.grant); err != nil {
 		errStr := err.Error()
 		h.recordQuery(sql, params, time.Now(), &errStr)
@@ -207,6 +273,52 @@ func (h *handler) runIntercepted(
 	return result, nil
 }
 
+// checkPreparedSwitch refuses a `PREPARE <name> FROM '<literal>'` whose literal
+// is a database switch.
+//
+// `PREPARE s FROM 'USE otherdb'` followed by `EXECUTE s` performs exactly the
+// switch this proxy refuses, one statement later and through text every check
+// around it steps over: `PREPARE` matches no write or DDL keyword and no blocked
+// pattern, and the switch scan reads the outer statement, not the literal. It is
+// the MySQL spelling of SQL Server's `EXEC('…')`.
+//
+// Scope is deliberately narrow: **only** the switch decision reaches inside the
+// literal. `PREPARE s FROM 'DELETE FROM t'` is still invisible to read_only,
+// which is the broader "dynamic SQL is opaque to the grant controls" problem —
+// shared with Oracle's `EXECUTE IMMEDIATE` — and is filed separately rather than
+// half-solved here. docs/mysql.md says so plainly.
+func (h *handler) checkPreparedSwitch(sql string, params *store.QueryParameters) error {
+	prepared, readable := shared.MySQLPreparedText(sql)
+	if !readable {
+		errStr := ErrPreparedTextNotCheckable.Error()
+		h.recordQuery(sql, params, time.Now(), &errStr)
+
+		return ErrPreparedTextNotCheckable
+	}
+
+	target, isUse := shared.MySQLUseTarget(prepared)
+	if !isUse {
+		return nil
+	}
+
+	// Its own database is refused too — the same superset COM_STMT_PREPARE
+	// refuses, and for the same reason. dbbat answers a switch itself rather
+	// than forwarding it, so there is no handle to hand back, and an OK here
+	// would leave the client holding a name that was never prepared upstream.
+	// Recorded as the refusal it is, rather than through switchDatabase's
+	// allowed branch, which would log a success the client never got.
+	if h.namesSessionDatabase(target) {
+		errStr := ErrSwitchDatabaseDenied.Error()
+		h.recordQuery(sql, params, time.Now(), &errStr)
+
+		return ErrSwitchDatabaseDenied
+	}
+
+	// A foreign database is switchDatabase's call, so it earns the same error
+	// and the same audit row a direct `USE otherdb` does.
+	return h.switchDatabase(sql, target)
+}
+
 // holdIfNeeded runs the approval gate for one MySQL statement.
 func (s *Session) holdIfNeeded(sql string, params *store.QueryParameters) (uuid.UUID, error) {
 	if !s.approvalGate.Active() {
@@ -247,11 +359,11 @@ func (h *handler) completeHeldQuery(queryUID uuid.UUID, cause error) {
 
 	errStr := cause.Error()
 
-	go func() {
+	go safe.RunGuarded(s.ctx, s.logger, goroutineNameHeldQueryCompletion, func() {
 		if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, nil, nil, &errStr, false, false); err != nil {
 			s.logger.DebugContext(s.ctx, "failed to complete held query", slog.Any("error", err))
 		}
-	}()
+	})
 }
 
 // KillHeldQuery ends a statement parked on a human in response to a
@@ -341,9 +453,15 @@ func (h *handler) recordQueryWithUID(
 	// finished while its rows are still arriving.
 	hasRows := len(capturedRows) > 0
 
-	go func() {
+	go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
 		sink := s.server.rowWriter.NewSink()
 		held := queryUID != uuid.Nil
+
+		// The sink is created here and never escapes, but a panic between
+		// Resolve and Flush would strand the rows already queued against it.
+		// Fail is a no-op once Resolve has run, so this only bites on the
+		// panic path.
+		defer sink.Fail()
 
 		if !held {
 			insert := record
@@ -396,7 +514,7 @@ func (h *handler) recordQueryWithUID(
 				s.logger.DebugContext(s.ctx, "increment connection stats failed", slog.Any("error", err))
 			}
 		}
-	}()
+	})
 
 	// In-session quota counters so the next checkQuotas() reflects this query.
 	if s.grant != nil {

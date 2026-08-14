@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -21,6 +23,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/fclairamb/dbbat/internal/auth"
+	"github.com/fclairamb/dbbat/internal/auth/oidc"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -40,6 +43,37 @@ type authProviderInfo struct {
 	Type         string `json:"type"`
 	Enabled      bool   `json:"enabled"`
 	AuthorizeURL string `json:"authorize_url,omitempty"`
+	// DisplayName is the login-button label for providers whose branding is
+	// operator-configured (the generic OIDC one). Empty for providers the
+	// frontend already knows how to label, like Slack.
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+// roleMappingInfo tells the admin UI which roles the directory owns, so the
+// users page can say "this one is managed by SSO" before someone edits a role
+// that the next login will silently put back (or take away).
+//
+// Only the role *names* travel. The group values are directory topology, this
+// endpoint is unauthenticated, and knowing that `admin` is directory-managed
+// is the whole of what the UI needs — knowing which AD group grants it is not.
+type roleMappingInfo struct {
+	// Enabled reports that a mapping is configured *and* that the provider it
+	// applies to is actually registered.
+	Enabled bool `json:"enabled"`
+	// Roles are the roles the mapping names, sorted. Empty when disabled.
+	Roles []string `json:"roles"`
+	// Provider is the provider key the mapping applies to, so the UI can look
+	// its display name up in the providers list above. Empty when disabled.
+	Provider string `json:"provider,omitempty"`
+}
+
+// oauthStateMetadata is the JSON payload stashed on the `oauth_states` row
+// for the duration of a single login round-trip. It currently carries only
+// the PKCE code verifier, which must be minted before the redirect and
+// presented at the callback — and must survive a restart or a hop to another
+// replica, so it cannot live in process memory.
+type oauthStateMetadata struct {
+	PKCEVerifier string `json:"pkce_verifier,omitempty"`
 }
 
 // handleAuthProviders returns which authentication methods are available.
@@ -48,15 +82,70 @@ func (s *Server) handleAuthProviders(c *gin.Context) {
 	providers := make([]authProviderInfo, 0, 1+len(s.oauthProviders))
 	providers = append(providers, authProviderInfo{Type: "password", Enabled: true})
 
-	for name := range s.oauthProviders {
-		providers = append(providers, authProviderInfo{
+	for name, provider := range s.oauthProviders {
+		info := authProviderInfo{
 			Type:         name,
 			Enabled:      true,
 			AuthorizeURL: "/api/v1/auth/" + name,
-		})
+		}
+
+		if namer, ok := provider.(auth.DisplayNamer); ok {
+			info.DisplayName = namer.DisplayName()
+		}
+
+		providers = append(providers, info)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"providers": providers})
+	c.JSON(http.StatusOK, gin.H{
+		"providers":    providers,
+		"role_mapping": s.roleMappingInfo(c.Request.Context()),
+	})
+}
+
+// roleMappingInfo describes DBB_OIDC_ROLE_MAPPING to the frontend.
+//
+// A mapping only ever applies to the generic OIDC provider (see
+// oauthRoleMapping), so one configured while that provider is not registered
+// governs nothing and is reported as disabled — advertising it would have the
+// users page warn about an override that can never happen.
+func (s *Server) roleMappingInfo(ctx context.Context) roleMappingInfo {
+	info := roleMappingInfo{Roles: []string{}}
+
+	if s.config == nil {
+		return info
+	}
+
+	if _, registered := s.oauthProviders[oidc.ProviderName]; !registered {
+		return info
+	}
+
+	mapping, err := s.config.OIDCAuth.ParseRoleMapping()
+	if err != nil {
+		// Unreachable in a booted process: Load refuses a malformed mapping.
+		// Fail closed anyway — claiming nothing is managed is the harmless
+		// direction, it just costs a warning banner.
+		s.logger.ErrorContext(ctx, "OIDC role mapping is malformed, reporting it as disabled",
+			slog.Any("error", err))
+
+		return info
+	}
+
+	if len(mapping) == 0 {
+		return info
+	}
+
+	roles := make([]string, 0, len(mapping))
+	for role := range mapping {
+		roles = append(roles, role)
+	}
+
+	sort.Strings(roles)
+
+	info.Enabled = true
+	info.Roles = roles
+	info.Provider = oidc.ProviderName
+
+	return info
 }
 
 // handleOAuthAuthorize returns a handler that initiates the OAuth flow.
@@ -76,6 +165,26 @@ func (s *Server) handleOAuthAuthorize(providerName string) gin.HandlerFunc {
 			return
 		}
 
+		callbackURL := s.buildCallbackURL(c.Request, providerName)
+
+		// PKCE-capable providers mint a code verifier here; it has to be
+		// persisted with the state row *before* the redirect, because the
+		// callback may well land on a different replica.
+		redirectURL, verifier, err := authorizeURLFor(c.Request.Context(), provider, stateToken, callbackURL)
+		if err != nil {
+			writeInternalError(c, s.logger, err, "failed to build OAuth authorization URL")
+			return
+		}
+
+		var metadata json.RawMessage
+		if verifier != "" {
+			metadata, err = json.Marshal(oauthStateMetadata{PKCEVerifier: verifier})
+			if err != nil {
+				writeInternalError(c, s.logger, err, "failed to encode OAuth state metadata")
+				return
+			}
+		}
+
 		// Persist state for CSRF validation. The state row also carries the
 		// post-login redirect target (e.g. the device consent page that
 		// bounced the user here), so the callback can send the user back to
@@ -84,19 +193,64 @@ func (s *Server) handleOAuthAuthorize(providerName string) gin.HandlerFunc {
 			State:       stateToken,
 			Provider:    providerName,
 			RedirectURL: sanitizeLoginRedirect(c.Query("redirect")),
-			ExpiresAt:   time.Now().Add(oauthStateTTL),
+			Metadata:    metadata,
 		}
 
-		if _, err := s.store.CreateOAuthState(c.Request.Context(), oauthState); err != nil {
+		// The TTL is applied by the store from the database clock — the same one
+		// the callback's `expires_at > NOW()` check reads.
+		if _, err := s.store.CreateOAuthState(c.Request.Context(), oauthState, oauthStateTTL); err != nil {
 			writeInternalError(c, s.logger, err, "failed to persist OAuth state")
 			return
 		}
 
-		callbackURL := s.buildCallbackURL(c.Request, providerName)
-		redirectURL := provider.AuthorizeURL(stateToken, callbackURL)
-
 		c.Redirect(http.StatusFound, redirectURL)
 	}
+}
+
+// authorizeURLFor builds the provider's authorization URL, using PKCE when
+// the provider supports it. The second return value is the code verifier to
+// persist ("" for providers without PKCE).
+func authorizeURLFor(
+	ctx context.Context,
+	provider auth.OAuthProvider,
+	state, callbackURL string,
+) (string, string, error) {
+	if pkce, ok := provider.(auth.PKCEProvider); ok {
+		return pkce.AuthorizeURLWithPKCE(ctx, state, callbackURL)
+	}
+
+	return provider.AuthorizeURL(state, callbackURL), "", nil
+}
+
+// exchangeCodeFor completes the code exchange, presenting the PKCE verifier
+// recovered from the state row when the provider supports PKCE.
+func exchangeCodeFor(
+	ctx context.Context,
+	provider auth.OAuthProvider,
+	code, callbackURL, verifier string,
+) (*auth.OAuthUser, error) {
+	if pkce, ok := provider.(auth.PKCEProvider); ok {
+		return pkce.ExchangeCodeWithVerifier(ctx, code, callbackURL, verifier)
+	}
+
+	return provider.ExchangeCode(ctx, code, callbackURL)
+}
+
+// pkceVerifier recovers the code verifier stashed on the state row. A row
+// without usable metadata yields "", which the provider treats as "no PKCE" —
+// the issuer then rejects the exchange if it expected a challenge, which is
+// the correct failure mode.
+func pkceVerifier(state *store.OAuthState) string {
+	if state == nil || len(state.Metadata) == 0 {
+		return ""
+	}
+
+	var metadata oauthStateMetadata
+	if err := json.Unmarshal(state.Metadata, &metadata); err != nil {
+		return ""
+	}
+
+	return metadata.PKCEVerifier
 }
 
 // handleOAuthCallback returns a handler that completes the OAuth flow.
@@ -153,7 +307,7 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 		callbackURL := s.buildCallbackURL(c.Request, providerName)
 		code := c.Query("code")
 
-		oauthUser, err := provider.ExchangeCode(ctx, code, callbackURL)
+		oauthUser, err := exchangeCodeFor(ctx, provider, code, callbackURL, pkceVerifier(oauthState))
 		if err != nil {
 			s.logger.ErrorContext(ctx, "OAuth code exchange failed",
 				slog.String("provider", providerName),
@@ -289,6 +443,11 @@ var errOAuthUserNotLinked = errors.New("no linked account and auto-create disabl
 //  1. Existing identity link (provider + provider_id)
 //  2. Match by email against existing usernames
 //  3. Auto-create if enabled
+//
+// Every path that returns an existing user runs the directory role mapping
+// first (see syncOAuthRoles): roles follow group membership on **every**
+// login, not only at creation, because the login that must demote someone is
+// never their first one.
 func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthProvider, oauthUser *auth.OAuthUser) (*store.User, error) {
 	providerName := provider.Name()
 
@@ -296,7 +455,7 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 	user, err := s.store.GetUserByIdentity(ctx, providerName, oauthUser.ProviderID)
 	switch {
 	case err == nil:
-		return user, nil
+		return s.syncOAuthRoles(ctx, user, providerName, oauthUser)
 	case errors.Is(err, store.ErrIdentityNotFound):
 		// fall through to email / auto-create
 	case errors.Is(err, store.ErrUserNotFound):
@@ -320,22 +479,22 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 			if linkErr := s.linkIdentity(ctx, user.UID, providerName, oauthUser); linkErr != nil {
 				return nil, fmt.Errorf("link identity: %w", linkErr)
 			}
-			return user, nil
+			return s.syncOAuthRoles(ctx, user, providerName, oauthUser)
 		}
 		if !errors.Is(err, store.ErrUserNotFound) {
 			return nil, fmt.Errorf("email lookup: %w", err)
 		}
 	}
 
-	// 3. Auto-create if enabled
-	if s.config == nil || !s.config.SlackAuth.AutoCreateUsers {
+	// 3. Auto-create if enabled for this provider
+	if !s.oauthAutoCreateUsers(providerName) {
 		return nil, errOAuthUserNotLinked
 	}
 
-	role := s.config.SlackAuth.DefaultRole
-	if role == "" {
-		role = store.RoleConnector
-	}
+	// A first login already resolves through the mapping, so a new engineer in
+	// db-admins lands on admin immediately rather than on the default role
+	// until they sign in a second time.
+	roles := s.oauthRolesForNewUser(ctx, providerName, oauthUser)
 
 	// Generate a unique username from the display name or email
 	username := s.generateUniqueUsername(ctx, oauthUser.DisplayName, oauthUser.Email)
@@ -351,7 +510,7 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	user, err = s.store.CreateUser(ctx, username, passwordHash, []string{role})
+	user, err = s.store.CreateUser(ctx, username, passwordHash, roles)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
@@ -372,7 +531,10 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 		slog.String("provider", providerName),
 		slog.String("username", username),
 		slog.String("email", oauthUser.Email),
+		slog.Any("roles", roles),
 		slog.Any("uid", user.UID))
+
+	s.auditOAuthUserCreated(ctx, user, providerName, oauthUser)
 
 	return user, nil
 }

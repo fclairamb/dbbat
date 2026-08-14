@@ -212,7 +212,28 @@ func findUserIDLenPos(body []byte, fieldStart, oldLen, newLen int) (int, byte) {
 		}
 	}
 
-	for i := fieldStart - 1; i >= 2 && i >= fieldStart-12; i-- {
+	// Thin clients sit a fixed [01 01 <numPairs> 01 01] block between the
+	// preamble integers and the username (go-ora's PutBytes(1, 1, 5, 1, 1);
+	// python-oracledb thin writes its own pair count there). numPairs is a small
+	// integer exactly like user_id_len, and it is *nearer* the username — so a
+	// backward scan from the username finds it first whenever
+	// len(username) == numPairs and rewrites the pair count instead of the
+	// length. That is the same trap the wide branch above anchors around, and it
+	// bites the thin path for every 5-character login name — "admin", dbbat's
+	// own default user, and "agent". The upstream then reads a stale
+	// user_id_len against a longer name and answers ORA-03120 (two-task
+	// conversion routine: integer overflow), preceded by two break markers.
+	//
+	// So step over the block before scanning. Only an exact shape match counts;
+	// anything else falls through to the original scan, which is what the bare
+	// (SQLcl/JDBC thin) preamble needs.
+	scanFrom := fieldStart - 1
+	if b := fieldStart - numPairsBlockLen; b >= 2 &&
+		body[b] == 0x01 && body[b+1] == 0x01 && body[b+3] == 0x01 && body[b+4] == 0x01 {
+		scanFrom = b - 1
+	}
+
+	for i := scanFrom; i >= 2 && i >= scanFrom-12; i-- {
 		if body[i] == byte(oldLen) {
 			return i, byte(newLen)
 		}
@@ -220,6 +241,10 @@ func findUserIDLenPos(body []byte, fieldStart, oldLen, newLen int) (int, byte) {
 
 	return -1, 0
 }
+
+// numPairsBlockLen is the width of the [01 01 <numPairs> 01 01] block a thin
+// client writes immediately before the login username in AUTH Phase 1.
+const numPairsBlockLen = 5
 
 // rewriteAuthPhase1Username takes a TTC AUTH Phase 1 body (everything after
 // the TNS frame header AND the 2-byte data-flags prefix — i.e. what would
@@ -242,7 +267,12 @@ func findUserIDLenPos(body []byte, fieldStart, oldLen, newLen int) (int, byte) {
 // username (AUTH_TERMINAL, AUTH_PROGRAM_NM, ...) are passed through
 // unchanged so the upstream sees the client's actual TTC capabilities.
 func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) {
-	const headerLen = 4 // [03 76 b0 b1] piggyback marker + sub-op + 2-byte trailer
+	// [03 76 <seq> (00)] TTC function header + the 0x01 username-present marker.
+	// The header's width is negotiated, not fixed — see ttcAuthFuncHeaderLen.
+	// A body this parser can't read the width off is a body it can't parse
+	// anyway (it is the thin fixed-offset path), so the narrow default is fine.
+	funcHeaderLen, _ := ttcAuthFuncHeaderLen(body)
+	headerLen := funcHeaderLen + 1
 
 	if len(body) < headerLen {
 		return nil, fmt.Errorf("%w: body too short for header", ErrAuthPhase1Rewrite)
@@ -360,3 +390,54 @@ func isPrintableASCIIRun(b []byte) bool {
 // ErrAuthPhase1Rewrite signals a Phase 1 body that does not match the
 // expected piggyback/sub-op/userLen/mode/magic/username layout.
 var ErrAuthPhase1Rewrite = errors.New("AUTH Phase 1 rewrite failed")
+
+// ttcAuthFuncHeaderNarrow is the width of a TTC function header without the
+// extension byte: [03 <sub> <seq>].
+const ttcAuthFuncHeaderNarrow = 3
+
+// ttcAuthFuncHeaderLen returns the width of the TTC function header opening an
+// AUTH body: [03 <sub> <seq>], plus one trailing 0x00 when the session
+// negotiated a TTC field version of 18 or more (go-ora's PutTTCFunc; the
+// version is the min of both ends' CompileTimeCaps[7]).
+//
+// Both widths are on the wire in testdata: go-ora v3 and JDBC thin open Phase 1
+// with `03 76 01 00`, older python-oracledb thin with `03 76 01`. Byte 3 tells
+// them apart — a **thin** body writes the 0x01 username-present marker there
+// once the header ends, so a 0x00 can only be the extension byte.
+//
+// ok=false means the width could not be read off this body and the narrow
+// default was returned:
+//
+//   - a wide (OCI/sqlplus) body, whose preamble is 4-byte little-endian fields
+//     and pointer runs rather than the marker — byte 3 says nothing there
+//     (`03 76 02 01 03 fe ff …` in sqlplus_cursor_reexec.pcapng, and a wide
+//     body may just as well carry a 0x00 in that position);
+//   - a body too short to tell.
+//
+// The narrow default is deliberate: it is the width the fixed-offset readers
+// assumed before any of this was understood, so an unreadable body keeps its
+// previous handling. A caller that *writes* a header (syntheticAuthHeader) must
+// not narrow on ok=false — guessing narrow there would corrupt the packet it is
+// about to send.
+//
+// The one ambiguity within thin bodies is a Phase 2 with NO username, which
+// writes [00 00] where a normal one writes [01]: three zeros in a row is the
+// extension byte followed by that pair, two is the pair on a narrow header.
+// dbbat never issues or forwards a username-less AUTH — it cannot authenticate
+// without one — but the check is cheap and keeps the reading side honest.
+func ttcAuthFuncHeaderLen(body []byte) (int, bool) {
+	if len(body) <= ttcAuthFuncHeaderNarrow || payloadUsesWideKVEncoding(body) {
+		return ttcAuthFuncHeaderNarrow, false
+	}
+
+	if body[ttcAuthFuncHeaderNarrow] != 0x00 {
+		return ttcAuthFuncHeaderNarrow, true
+	}
+
+	if body[1] == PiggybackSubAuth2 && len(body) > ttcAuthFuncHeaderNarrow+2 &&
+		body[ttcAuthFuncHeaderNarrow+1] == 0x00 && body[ttcAuthFuncHeaderNarrow+2] != 0x00 {
+		return ttcAuthFuncHeaderNarrow, true
+	}
+
+	return ttcAuthFuncHeaderNarrow + 1, true
+}

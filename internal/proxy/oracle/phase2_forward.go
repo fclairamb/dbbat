@@ -15,9 +15,16 @@ import (
 // without relying on the preamble layout (which varies by client). wide selects
 // the OCI fixed 4-byte little-endian length/flag encoding instead of the
 // compressed form thin clients use.
-func replaceAuthKVValue(body []byte, key, newValue string, wide bool) []byte {
+//
+// bigChunks selects the CLR long form — both for reading the value being
+// replaced and for writing the new one — so a value over the 252-byte
+// short-form limit is framed the way the session negotiated. It is a no-op for
+// every value dbbat substitutes today (all short), and applies to the wide/OCI
+// path too: the capability is advertised by the server, so it is set on an OCI
+// session as much as a thin one (see readAuthKVPairWide).
+func replaceAuthKVValue(body []byte, key, newValue string, wide, bigChunks bool) []byte {
 	if wide {
-		return replaceAuthKVValueWide(body, key, newValue)
+		return replaceAuthKVValueWide(body, key, newValue, bigChunks)
 	}
 
 	keyB := []byte(key)
@@ -46,7 +53,7 @@ func replaceAuthKVValue(body []byte, key, newValue string, wide bool) []byte {
 
 	valPos := pos + n
 
-	_, clrN := readCLR(body[valPos:])
+	_, clrN := readCLRVariant(body[valPos:], bigChunks)
 	if clrN == 0 {
 		return body
 	}
@@ -62,7 +69,7 @@ func replaceAuthKVValue(body []byte, key, newValue string, wide bool) []byte {
 
 	out := make([]byte, 0, kvStart+len(body)-end+len(newValue)+8)
 	out = append(out, body[:kvStart]...)
-	out = append(out, ttcKeyVal(key, newValue, flagVal)...)
+	out = append(out, ttcKeyValChunked(key, newValue, flagVal, bigChunks)...)
 	out = append(out, body[end:]...)
 
 	return out
@@ -82,7 +89,14 @@ func replaceAuthKVValue(body []byte, key, newValue string, wide bool) []byte {
 // client's caps level, rejects a spliced plain length with ORA-28041
 // ("authentication protocol internal error"). Mirror whichever convention the
 // original pair used.
-func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
+//
+// bigChunks is the session's negotiated CLR long form, applied to both sides of
+// the splice: the value being replaced is read with readCLRVariant and the new
+// one written with ttcClrVariant, so a value past the 252-byte short-form limit
+// keeps the framing the peers agreed on. It used to be omitted here on the
+// premise that OCI ignores the capability — see readAuthKVPairWide for what the
+// sqlplus capture does and does not establish about that.
+func replaceAuthKVValueWide(body []byte, key, newValue string, bigChunks bool) []byte {
 	keyB := []byte(key)
 
 	idx := bytes.Index(body, keyB)
@@ -104,7 +118,7 @@ func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
 	origValLen := binary.LittleEndian.Uint32(body[pos : pos+4])
 	valPos := pos + 4 // skip 4-byte LE valLen
 
-	origVal, clrN := readCLR(body[valPos:])
+	origVal, clrN := readCLRVariant(body[valPos:], bigChunks)
 	if clrN == 0 {
 		return body
 	}
@@ -125,7 +139,7 @@ func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
 	out := make([]byte, 0, pos+len(body)-end+len(newValue)+12)
 	out = append(out, body[:pos]...) // key side preserved verbatim
 	out = binary.LittleEndian.AppendUint32(out, newValLen)
-	out = append(out, ttcClr([]byte(newValue))...)
+	out = append(out, ttcClrVariant([]byte(newValue), bigChunks)...)
 	out = binary.LittleEndian.AppendUint32(out, flagVal)
 	out = append(out, body[end:]...)
 
@@ -137,7 +151,10 @@ func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
 // AUTH_PBKDF2_SPEEDY_KEY values by key search. Handles client Phase 2 framings
 // the fixed-offset parser misreads (notably python-oracledb thin's 18453 login,
 // whose preamble has an extra byte so hasUsername is read from the wrong offset).
-func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAuthSecrets) ([]byte, bool) {
+//
+// bigChunks is the session's negotiated CLR long form, forwarded to every
+// splice so the values it rewrites are read and re-encoded in that form.
+func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAuthSecrets, bigChunks bool) ([]byte, bool) {
 	out, ok := rewriteAuthPhase1UsernameAnchored(body, newUsername)
 	if !ok {
 		return nil, false
@@ -145,11 +162,11 @@ func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAut
 
 	wide := payloadUsesWideKVEncoding(body)
 
-	out = replaceAuthKVValue(out, authKeySessKey, sec.encClientSessKey, wide)
-	out = replaceAuthKVValue(out, authKeyPassword, sec.encPassword, wide)
+	out = replaceAuthKVValue(out, authKeySessKey, sec.encClientSessKey, wide, bigChunks)
+	out = replaceAuthKVValue(out, authKeyPassword, sec.encPassword, wide, bigChunks)
 
 	if sec.eSpeedyKey != "" {
-		out = replaceAuthKVValue(out, pbkdf2SpeedyKeyLabel, sec.eSpeedyKey, wide)
+		out = replaceAuthKVValue(out, pbkdf2SpeedyKeyLabel, sec.eSpeedyKey, wide, bigChunks)
 	}
 
 	return out, true
@@ -173,8 +190,10 @@ func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAut
 //
 // Phase 2 wire layout for go-ora-style clients:
 //
-//	[03 73 b0]                 -- piggyback header + sub-op + 1 client-specific byte
-//	                              (0x00 for go-ora; 0x02 for JDBC thin)
+//	[03 73 <seq> (00)]         -- piggyback header + sub-op + TTC function
+//	                              sequence number, plus a trailing 0x00 once the
+//	                              negotiated TTC field version reaches 18
+//	                              (ttcAuthFuncHeaderLen)
 //	[01]                       -- has-username flag
 //	[compressed-int user_id_len]
 //	[compressed-int mode]
@@ -184,18 +203,20 @@ func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAut
 //	[username bare OR CLR-prefixed]
 //	[KV pairs...]
 //
-// Both observed username encodings are handled. The b0 byte at offset 2 is
-// preserved verbatim (its meaning is opaque; preserving it keeps the upstream's
-// caps-conditioned parser happy).
+// Both observed username encodings are handled. The whole function header is
+// preserved verbatim, sequence number and extension byte included — the
+// upstream's caps-conditioned parser reads the preamble at exactly that width.
 //
 // The rewritten body is returned as a fresh slice; the input is not mutated.
 func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets, bigChunks bool) ([]byte, error) {
 	// Preferred: anchor on the AUTH_* keys (handles all client preambles,
-	// including python-oracledb thin's 18453 login). The anchored path splices
-	// only the short AUTH_SESSKEY / AUTH_PASSWORD / speedy-key values and never
-	// decodes long values, so it is unaffected by big-CLR-chunk encoding. Fall
-	// back to the full KV walk only if the anchor can't locate the username.
-	if out, ok := rewriteAuthPhase2Anchored(body, newUsername, sec); ok {
+	// including python-oracledb thin's 18453 login). The anchored path never
+	// decodes the long values it walks past, and the ones it does splice are all
+	// short today — but it takes bigChunks all the same, so a value that grows
+	// past the short-form limit is read and re-encoded in the negotiated form
+	// rather than silently desyncing. Fall back to the full KV walk only if the
+	// anchor can't locate the username.
+	if out, ok := rewriteAuthPhase2Anchored(body, newUsername, sec, bigChunks); ok {
 		return out, nil
 	}
 
@@ -215,6 +236,10 @@ func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets
 // authPhase2Header captures the byte boundaries needed to splice in a new
 // username and KV-pair set.
 type authPhase2Header struct {
+	// headerLen is the width of the leading TTC function header, which is
+	// negotiated rather than fixed (ttcAuthFuncHeaderLen). assembleAuthPhase2
+	// copies exactly those bytes back, extension byte included.
+	headerLen    int
 	hasUsername  bool
 	hasCLRPrefix bool
 	modeStart    int
@@ -227,9 +252,13 @@ type authPhase2Header struct {
 // flag, user_id_len, mode, pair_count, marker, and username field — returning
 // the offsets needed to reassemble the body.
 func parseAuthPhase2Header(body []byte) (authPhase2Header, error) {
-	const headerLen = 3 // [03 73 b0]
+	// [03 73 <seq>], plus the negotiated trailing 0x00 — go-ora v3 and JDBC thin
+	// against 23ai open Phase 2 with `03 73 02 00`, and reading that fourth byte
+	// as the has-username flag makes the whole preamble walk off by one. See
+	// ttcAuthFuncHeaderLen.
+	headerLen, _ := ttcAuthFuncHeaderLen(body)
 
-	out := authPhase2Header{}
+	out := authPhase2Header{headerLen: headerLen}
 
 	if len(body) < headerLen+1 {
 		return out, fmt.Errorf("%w: body too short for header", ErrAuthPhase2Rewrite)
@@ -326,10 +355,8 @@ func readPhase2UserLen(body []byte, pos *int, hasUsername bool) (int, error) {
 // assembleAuthPhase2 builds the rewritten body with the new username and
 // pre-rewritten KV pairs, preserving the original header / mode / marker bytes.
 func assembleAuthPhase2(body []byte, hdr authPhase2Header, newUsername string, rewrittenPairs []byte) []byte {
-	const headerLen = 3
-
 	out := make([]byte, 0, len(body)+len(newUsername))
-	out = append(out, body[:headerLen]...)
+	out = append(out, body[:hdr.headerLen]...)
 
 	if hdr.hasUsername {
 		out = append(out, 0x01)
@@ -378,7 +405,7 @@ func rewritePhase2KVPairs(buf []byte, pairCount int, sec *upstreamAuthSecrets, b
 
 		newValue, replaced := upstreamPhase2Value(string(pair.Key), sec)
 		if replaced {
-			out = append(out, ttcKeyVal(string(pair.Key), newValue, pair.Flag)...)
+			out = append(out, ttcKeyValChunked(string(pair.Key), newValue, pair.Flag, bigChunks)...)
 		} else {
 			out = append(out, buf[pos:pos+pair.Consumed]...)
 		}

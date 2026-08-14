@@ -22,6 +22,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -205,16 +206,26 @@ func (s *Session) Run() error {
 	defer s.closeDump()
 
 	// Watchdog: tears the session down the moment a time/bandwidth/revocation
-	// limit is crossed. Conn refs captured into locals so the goroutine never
-	// races the mutable s.upstream field (closeUpstream nils it).
+	// limit is crossed. Conn refs captured into locals so the goroutine reads
+	// them once here rather than off the session on every teardown.
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
 
 	upstream := s.upstream
 	clientConn := s.clientConn
 
-	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
-		s.onLimitViolation(upstream, clientConn, err)
+	// RunWatchdog, not RunGuarded, and on this protocol it is the whole of the
+	// enforcement: MongoDB has no mid-stream guard.Check() on the relay's hot
+	// path the way Oracle and PostgreSQL do, so a watchdog that merely survived
+	// its own panic would leave the session running with no expiry, no byte quota
+	// and no revocation check at all. The teardown closes both conns — what
+	// onLimitViolation does, minus the walk that may be what panicked.
+	go safe.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
+		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
+			s.onLimitViolation(upstream, clientConn, err)
+		})
+	}, func() {
+		closeSessionConns(upstream, clientConn)
 	})
 
 	s.logger.InfoContext(s.ctx, "MongoDB session ready",
@@ -375,12 +386,41 @@ func (s *Session) dispatchPreAuthOpMsg(m *message) (bool, error) {
 	}
 }
 
+// Names the per-session goroutines report themselves under when one of them
+// panics. Log labels, not identifiers.
+const (
+	relayNameClientToUpstream = "mongodb client→upstream"
+	relayNameUpstreamToClient = "mongodb upstream→client"
+	relayNameWatchdog         = "mongodb limit watchdog"
+
+	// The detached store writes. Each is named after what it writes, because
+	// that is the only thing the log line can usefully say: these goroutines
+	// outlive the call that spawned them, so the recover on handleConnection
+	// never sees them and nothing else records which write died.
+	goroutineNameCommandRecord         = "mongodb command record"
+	goroutineNameHeldCommandCompletion = "mongodb held command completion"
+)
+
 // relay pumps framed messages both ways after auth until either side ends.
+//
+// Both pumps run under safe.RunRelay. A recover on the goroutine that started
+// them catches nothing they raise, so an unguarded panic in the wire decode
+// would end the process and every other live session with it.
+//
+// That a panicking pump still *yields a value* is load-bearing here in a way it
+// is not on a proxy that reads errCh once: this function drains it a second
+// time, to wait the other pump out. Before the recover existed a pump could not
+// die quietly — it took the process with it — so nothing was ever parked here.
+// Recovering is what creates the obligation, and RunRelay is what discharges it.
 func (s *Session) relay() error {
 	errCh := make(chan error, 2)
 
-	go func() { errCh <- s.pumpClientToUpstream() }()
-	go func() { errCh <- s.pumpUpstreamToClient() }()
+	go func() {
+		errCh <- safe.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.pumpClientToUpstream)
+	}()
+	go func() {
+		errCh <- safe.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.pumpUpstreamToClient)
+	}()
 
 	err := <-errCh
 
@@ -500,6 +540,19 @@ func (s *Session) onLimitViolation(up *UpstreamConn, clientConn io.Closer, err e
 	s.logger.WarnContext(s.ctx, "terminating MongoDB session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
+	closeSessionConns(up, clientConn)
+}
+
+// closeSessionConns drops both sockets, which is how a session is ended from
+// outside its pumps: whichever pump is parked in a read or write returns, and
+// relay tears the session down. Split out of onLimitViolation so the watchdog's
+// panic guard can perform the same teardown without re-entering whatever
+// panicked.
+//
+// It takes the conns rather than reading them off the session so it stays
+// callable from a goroutine that must not touch session state. Safe to call
+// twice, and safe concurrently with a blocked read/write.
+func closeSessionConns(up *UpstreamConn, clientConn io.Closer) {
 	if up != nil {
 		up.close()
 	}
@@ -639,13 +692,16 @@ func (s *Session) closeDump() {
 }
 
 // closeUpstream closes the upstream connection if open.
+//
+// It deliberately does **not** clear s.upstream. relay() calls this from the
+// goroutine that saw the first pump return, purely to unblock the *other* pump
+// — which is at that instant still reading s.upstream. Nil-ing the field there
+// was a write racing that read (and intercept's write path), and it bought
+// nothing: UpstreamConn.close() is idempotent, so a second close from the
+// deferred call in Run() is already harmless. The field is written once, in
+// connectUpstream, before either pump exists.
 func (s *Session) closeUpstream() {
-	if s.upstream == nil {
-		return
-	}
-
 	s.upstream.close()
-	s.upstream = nil
 }
 
 // prefixConn returns a set of pre-read bytes before delegating to the wrapped

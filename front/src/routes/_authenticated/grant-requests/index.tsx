@@ -42,10 +42,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/contexts/AuthContext";
-import {
-  canApproveGrantRequest,
-  canRequestGrant,
-} from "@/lib/permissions";
+import { canApproveGrantRequest, canRequestGrant } from "@/lib/permissions";
+import { APPROVER_HAT } from "@/lib/approvers";
 
 export const Route = createFileRoute("/_authenticated/grant-requests/")({
   component: GrantRequestsPage,
@@ -63,6 +61,12 @@ function GrantRequestsPage() {
   const { user } = useAuth();
   const isAdmin = canApproveGrantRequest(user?.roles);
   const canRequest = canRequestGrant(user?.roles);
+
+  // Whether *this* viewer may decide *this* request. The server is the
+  // authority — it answers per request, because the answer is per server — so
+  // the UI reads its verdict instead of re-deriving one that could disagree.
+  const canDecide = (r: GrantRequest) =>
+    r.approver_role === "admin" || r.approver_role === "server_approver";
 
   const [tab, setTab] = useState<"pending" | "all">("pending");
   const [createOpen, setCreateOpen] = useState(false);
@@ -182,12 +186,42 @@ function GrantRequestsPage() {
         r.requested_at ? new Date(r.requested_at).toLocaleString() : "",
     },
     {
+      // Why *you* may decide this one. Approval is no longer admin-only, so
+      // "the buttons are there" is no longer a self-explanatory state: a
+      // delegated approver seeing them on the staging rows and not the
+      // production ones should be able to read the reason off the row.
+      key: "approver_role",
+      header: "You decide as",
+      cell: (r: GrantRequest) => {
+        if (r.status !== "pending") return null;
+
+        const hat = APPROVER_HAT[r.approver_role ?? ""];
+        if (!hat) {
+          return (
+            <span className="text-xs text-muted-foreground italic">
+              {r.user_id === user?.uid ? "your own request" : "—"}
+            </span>
+          );
+        }
+
+        return (
+          <span
+            className="text-xs bg-secondary px-1.5 py-0.5 rounded"
+            title={hat.hint}
+            data-testid={`request-approver-role-${r.uid}`}
+          >
+            {hat.label}
+          </span>
+        );
+      },
+    },
+    {
       key: "actions",
       header: "",
       cell: (r: GrantRequest) =>
         r.status !== "pending" ? null : (
           <div className="flex gap-1 justify-end">
-            {isAdmin && (
+            {canDecide(r) && (
               <>
                 <Button
                   size="sm"
@@ -255,7 +289,7 @@ function GrantRequestsPage() {
         description={
           isAdmin
             ? "Approve or deny grant requests submitted by users."
-            : "Track the status of your grant requests."
+            : "Track the status of your grant requests, and decide the ones you are an access approver for."
         }
         actions={
           canRequest && (
@@ -322,12 +356,20 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
   const selectedDefinition = definitions.find((d) => d.uid === definitionId);
   const justificationRequired = selectedDefinition?.auto_approve ?? false;
 
-  // A definition can be scoped to specific databases; an empty scope means
-  // every database. Narrow the picker so an out-of-scope pick (which the API
-  // rejects with 403) is not even offered.
-  const scopedDatabaseUids = selectedDefinition?.database_uids ?? [];
+  // The API resolves a definition's server-group scope to the concrete
+  // databases currently in scope (scoped_database_uids), so the picker
+  // narrows for every requester — not just admins, who are the only ones who
+  // could previously read /server-groups to compute this themselves.
+  //
+  // null/omitted means the definition is unscoped: every database is in
+  // scope. A present array — which may be empty — is the resolved set;
+  // treating null and [] the same here would be wrong in both directions
+  // (hiding every database, or offering every database when none are
+  // actually in scope). The server still enforces the scope on submit (403
+  // on an out-of-scope pick) — this is a convenience, never the control.
+  const scopedDatabaseUids = selectedDefinition?.scoped_database_uids ?? null;
   const selectableDatabases =
-    scopedDatabaseUids.length === 0
+    scopedDatabaseUids === null
       ? databases
       : databases.filter((d) => scopedDatabaseUids.includes(d.uid));
 

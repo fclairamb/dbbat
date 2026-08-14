@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // RateLimiter implements a sliding window rate limiter
@@ -47,26 +50,53 @@ func NewRateLimiter(cfg config.RateLimitConfig) *RateLimiter {
 	return rl
 }
 
+// goroutineNameRateLimitSweep is what a panic in the window sweep is logged
+// under. The limiter predates the server's logger, so it reports through
+// slog.Default().
+const goroutineNameRateLimitSweep = "rate limiter window sweep"
+
 // cleanup periodically removes old entries from the windows map
 func (rl *RateLimiter) cleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		rl.mu.Lock()
-		now := time.Now()
-		for key, window := range rl.windows {
-			window.mu.Lock()
-			// Remove if all timestamps are older than 1 minute
-			if len(window.timestamps) == 0 {
-				delete(rl.windows, key)
-			} else if now.Sub(window.timestamps[len(window.timestamps)-1]) > time.Minute {
-				delete(rl.windows, key)
+		// Per turn, so a panic neither ends the process nor retires the sweep:
+		// a rate limiter that stopped evicting windows would leak one map entry
+		// per client forever. See safe.RunMaintenance.
+		safe.RunMaintenance(context.Background(), slog.Default(), goroutineNameRateLimitSweep, func() {
+			rl.mu.Lock()
+			defer rl.mu.Unlock()
+
+			now := time.Now()
+			for key, window := range rl.windows {
+				if window.stale(now) {
+					delete(rl.windows, key)
+				}
 			}
-			window.mu.Unlock()
-		}
-		rl.mu.Unlock()
+		})
 	}
+}
+
+// stale reports whether a window has seen no request in the last minute and can
+// be evicted.
+//
+// The lock is released by defer, and that matters more here than anywhere else
+// in this file: the sweep above now survives a panic, so a manual Unlock skipped
+// by one would leak this window's mutex, and the *next* tick would block on it
+// while holding rl.mu — wedging every checkRateLimit caller in the process.
+// Recovering the turn has to be strictly better than dying, and without the
+// defer it would be strictly worse. Nothing in here can panic today; that is not
+// a reason to leave the loaded gun on the table.
+func (w *slidingWindow) stale(now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(w.timestamps) == 0 {
+		return true
+	}
+
+	return now.Sub(w.timestamps[len(w.timestamps)-1]) > time.Minute
 }
 
 // getWindow gets or creates a sliding window for the given key

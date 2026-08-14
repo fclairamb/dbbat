@@ -21,11 +21,236 @@ type denyRequest struct {
 	Reason string `json:"reason"`
 }
 
+// Approver hats — *why* the current user may resolve something. Returned
+// alongside each pending item so the UI can say which authority the viewer is
+// acting under instead of just enabling a button, which is the difference
+// between a delegated approver trusting the screen and guessing.
+const (
+	// ApproverHatNone means the viewer may see the item but not resolve it.
+	ApproverHatNone = ""
+	// ApproverHatAdmin — the admin role, which decides everything.
+	ApproverHatAdmin = "admin"
+	// ApproverHatDefinition — a member of the grant definition's
+	// approver_user_group_uids. Query holds only; it wins over the server chain.
+	ApproverHatDefinition = "definition_approver"
+	// ApproverHatServer — a member of a group resolved off the target server or
+	// its server groups (query approvers for a hold, access approvers for a
+	// grant request).
+	ApproverHatServer = "server_approver"
+)
+
+// pendingQueryResponse is a held query plus the hat the *current* viewer would
+// wear to resolve it.
+type pendingQueryResponse struct {
+	*store.Query
+
+	ApproverRole string `json:"approver_role"`
+}
+
+// listingApprovers is everything the approver chain needs to judge a whole
+// page, fetched once instead of once per row: the viewer's user groups (one
+// value for the entire page — they cannot change mid-page) and the approver
+// groups resolved for every distinct database the page names.
+//
+// It holds no rule of its own. Every decision is still
+// store.ServerApprovers.MayApprove over what store.ResolveServerApproverGroups
+// would have returned for that server, so a batched listing and a single-row
+// lookup cannot disagree — which matters, because this is an authorization
+// path and a second implementation of the chain would be the bug.
+//
+// A nil *listingApprovers means "nothing prefetched"; the row-at-a-time callers
+// pass it and the decision functions resolve just their own server. A non-nil
+// one whose lookup failed is empty, which is the same refusal the per-row error
+// path produced.
+type listingApprovers struct {
+	userGroups []uuid.UUID
+	byServer   store.ServerApprovers
+
+	// grantByQuery is the grant governing each held query, keyed by *query*
+	// uid — step 2 of the hold chain, which used to cost a connection read plus
+	// a grant read per row, twice over (the visibility gate and the hat each
+	// resolved it).
+	//
+	// It holds no rule either: every entry is what resolveApprovalGrant
+	// answered, fed the rows it would have fetched itself. An absent key means
+	// "no grant governs this hold" — the same thing the per-row path expresses
+	// by returning an error or a nil grant — so the decision falls through to
+	// the server chain exactly as before.
+	grantByQuery map[uuid.UUID]*store.Grant
+	// grantsPrefetched distinguishes "prefetched, and this query has no
+	// governing grant" from "never prefetched, go and resolve it". Without it an
+	// empty map would silently deny the definition-level hat to every row.
+	grantsPrefetched bool
+}
+
+// mayApproveFor is the single decision expression both the batched and the
+// row-at-a-time paths end at.
+func (p *listingApprovers) mayApproveFor(serverUID uuid.UUID) bool {
+	if p == nil {
+		return false
+	}
+
+	return p.byServer.MayApprove(serverUID, p.userGroups)
+}
+
+// prefetchApprovers resolves the approver picture for a set of databases in a
+// fixed number of queries — one for the viewer's user groups, two for the
+// servers and their groups — however many rows the listing holds.
+//
+// Admins short-circuit every chain before it is consulted, so they get an empty
+// prefetch and cost nothing extra. Any lookup failure also yields an empty one:
+// refusing is the fail-closed direction, and it is exactly what the per-row
+// path did with the same error.
+func (s *Server) prefetchApprovers(
+	ctx context.Context, user *store.User, kind store.ApproverKind, serverUIDs []uuid.UUID,
+) *listingApprovers {
+	if user == nil || user.IsAdmin() {
+		return &listingApprovers{}
+	}
+
+	groups, err := s.store.ListUserGroupUIDs(ctx, user.UID)
+	if err != nil || len(groups) == 0 {
+		return &listingApprovers{}
+	}
+
+	byServer, err := s.store.ResolveServerApproverGroupsByServers(ctx, serverUIDs, kind)
+	if err != nil {
+		return &listingApprovers{userGroups: groups}
+	}
+
+	return &listingApprovers{userGroups: groups, byServer: byServer}
+}
+
+// prefetchApprovalGrants fills the per-query half of the prefetch: the grant
+// governing each hold on the page, resolved in a fixed number of queries — one
+// for the distinct connections, two for the distinct grants they were stamped
+// with — instead of one connection read plus one grant read per row.
+//
+// It is deliberately a *filling* step over an existing prefetch rather than
+// part of prefetchApprovers: the databases come from the page's rows, the
+// grants from the page's connections, and only a caller judging a whole page
+// has either.
+//
+// Two short-circuits, both matching what the decision functions already do:
+// a viewer with no user groups can never reach step 2 (mayApproveQueryWith
+// returns false before it, and admins return true before that), and a lookup
+// failure leaves the prefetch unfilled, which falls back to resolving row by
+// row rather than to a wrong answer.
+func (s *Server) prefetchApprovalGrants(ctx context.Context, approvers *listingApprovers, pending []store.Query) {
+	if approvers == nil || len(approvers.userGroups) == 0 || len(pending) == 0 {
+		return
+	}
+
+	connUIDs := make([]uuid.UUID, 0, len(pending))
+	seenConns := make(map[uuid.UUID]struct{}, len(pending))
+
+	// The same session often parks several statements, so the distinct set is
+	// routinely much smaller than the page.
+	for i := range pending {
+		if _, dup := seenConns[pending[i].ConnectionID]; dup {
+			continue
+		}
+
+		seenConns[pending[i].ConnectionID] = struct{}{}
+		connUIDs = append(connUIDs, pending[i].ConnectionID)
+	}
+
+	connections, err := s.store.GetConnectionsByUIDs(ctx, connUIDs)
+	if err != nil {
+		return
+	}
+
+	grantUIDs := make([]uuid.UUID, 0, len(connections))
+	seenGrants := make(map[uuid.UUID]struct{}, len(connections))
+
+	for _, conn := range connections {
+		if conn.GrantUID == nil {
+			continue
+		}
+
+		if _, dup := seenGrants[*conn.GrantUID]; dup {
+			continue
+		}
+
+		seenGrants[*conn.GrantUID] = struct{}{}
+		grantUIDs = append(grantUIDs, *conn.GrantUID)
+	}
+
+	grants, err := s.store.GetGrantsByUIDs(ctx, grantUIDs)
+	if err != nil {
+		return
+	}
+
+	rows := &approvalGrantRows{connections: connections, grants: grants}
+	resolved := make(map[uuid.UUID]*store.Grant, len(pending))
+
+	// The choice is still resolveApprovalGrant's, made once per row against
+	// rows already in memory.
+	for i := range pending {
+		grant, err := s.resolveApprovalGrantWith(ctx, &pending[i], rows)
+		if err != nil || grant == nil {
+			continue
+		}
+
+		resolved[pending[i].UID] = grant
+	}
+
+	approvers.grantByQuery = resolved
+	approvers.grantsPrefetched = true
+}
+
+// approvalGrantFor is the single expression both decision functions use to
+// reach the grant governing a hold. With a filled prefetch it is a map read of
+// what resolveApprovalGrant already answered for this exact query; without one
+// it asks resolveApprovalGrant for this row. A resolution error is nil here,
+// which is what both callers already did with it: fall through to the server
+// chain rather than hard-deny.
+func (s *Server) approvalGrantFor(
+	ctx context.Context, query *store.Query, approvers *listingApprovers,
+) *store.Grant {
+	if approvers != nil && approvers.grantsPrefetched {
+		return approvers.grantByQuery[query.UID]
+	}
+
+	grant, err := s.resolveApprovalGrant(ctx, query)
+	if err != nil {
+		return nil
+	}
+
+	return grant
+}
+
+// distinctUIDs collapses a list of (possibly optional, possibly repeated)
+// database uids into the set a prefetch should ask about. The same handful of
+// servers recurs across a pending page, which is the whole reason batching
+// pays.
+func distinctUIDs(uids []*uuid.UUID) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{}, len(uids))
+	out := make([]uuid.UUID, 0, len(uids))
+
+	for _, uid := range uids {
+		if uid == nil {
+			continue
+		}
+
+		if _, dup := seen[*uid]; dup {
+			continue
+		}
+
+		seen[*uid] = struct{}{}
+		out = append(out, *uid)
+	}
+
+	return out
+}
+
 // handleListPendingApprovals returns every query currently parked awaiting a
 // decision. This is the authoritative "what is pending now" view: the stream
 // is best-effort for history and clients refetch this on every reconnect.
 func (s *Server) handleListPendingApprovals(c *gin.Context) {
-	pending, err := s.store.ListPendingApprovalQueries(c.Request.Context())
+	ctx := c.Request.Context()
+
+	pending, err := s.store.ListPendingApprovalQueries(ctx)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list pending approvals")
 
@@ -34,15 +259,119 @@ func (s *Server) handleListPendingApprovals(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	visible := make([]store.Query, 0, len(pending))
+	// One resolution for the whole page, reused by both the visibility gate and
+	// the hat — which used to walk the same chain twice per row.
+	databases := make([]*uuid.UUID, 0, len(pending))
+	for i := range pending {
+		databases = append(databases, pending[i].DatabaseID)
+	}
+
+	approvers := s.prefetchApprovers(ctx, currentUser, store.ApproverKindQuery, distinctUIDs(databases))
+
+	// Step 2 of the same chain, for the same page: the grant governing each
+	// hold, resolved from the page's distinct connections and grants instead of
+	// row by row.
+	s.prefetchApprovalGrants(ctx, approvers, pending)
+
+	visible := make([]pendingQueryResponse, 0, len(pending))
 
 	for i := range pending {
-		if s.mayViewQuery(c.Request.Context(), currentUser, &pending[i]) {
-			visible = append(visible, pending[i])
+		if !s.mayViewQueryWith(ctx, currentUser, &pending[i], approvers) {
+			continue
 		}
+
+		visible = append(visible, pendingQueryResponse{
+			Query:        &pending[i],
+			ApproverRole: s.approverHatForQueryWith(ctx, currentUser, &pending[i], approvers),
+		})
 	}
 
 	successResponse(c, gin.H{"queries": visible})
+}
+
+// approverHatForQuery names the authority under which the user may resolve this
+// hold, following the same order mayApproveQuery does — so the label can never
+// claim a right the gate would refuse.
+//
+// Self-approval yields no hat at all: the viewer can watch their own held
+// statement, but nothing lets them release it.
+func (s *Server) approverHatForQuery(ctx context.Context, user *store.User, query *store.Query) string {
+	return s.approverHatForQueryWith(ctx, user, query, nil)
+}
+
+// approverHatForQueryWith is approverHatForQuery against an optional
+// per-listing prefetch. nil means "resolve just this query's database", which
+// is what every single-row caller wants; the pending listing passes the map it
+// already built for the visibility gate.
+func (s *Server) approverHatForQueryWith(
+	ctx context.Context, user *store.User, query *store.Query, approvers *listingApprovers,
+) string {
+	if user == nil {
+		return ApproverHatNone
+	}
+
+	if query.UserID != nil && *query.UserID == user.UID {
+		return ApproverHatNone
+	}
+
+	if user.IsAdmin() {
+		return ApproverHatAdmin
+	}
+
+	if approvers == nil {
+		approvers = s.prefetchApprovers(
+			ctx, user, store.ApproverKindQuery, distinctUIDs([]*uuid.UUID{query.DatabaseID}),
+		)
+	}
+
+	if len(approvers.userGroups) == 0 {
+		return ApproverHatNone
+	}
+
+	grant := s.approvalGrantFor(ctx, query, approvers)
+	if grant != nil && len(grant.ApproverUserGroupUIDs()) > 0 {
+		if grant.MayApprove(approvers.userGroups) {
+			return ApproverHatDefinition
+		}
+
+		return ApproverHatNone
+	}
+
+	if query.DatabaseID == nil {
+		return ApproverHatNone
+	}
+
+	if approvers.mayApproveFor(*query.DatabaseID) {
+		return ApproverHatServer
+	}
+
+	return ApproverHatNone
+}
+
+// approverHatForRequest is approverHatForQuery's grant-request counterpart.
+// There is no definition-level hat here: grant-request approval never had one.
+func (s *Server) approverHatForRequest(ctx context.Context, user *store.User, req *store.GrantRequest) string {
+	return s.approverHatForRequestWith(ctx, user, req, nil)
+}
+
+// approverHatForRequestWith is approverHatForRequest against an optional
+// per-listing prefetch, on the same nil-means-resolve-one-server rule.
+func (s *Server) approverHatForRequestWith(
+	ctx context.Context, user *store.User, req *store.GrantRequest, approvers *listingApprovers,
+) string {
+	if user == nil || req == nil {
+		return ApproverHatNone
+	}
+
+	if user.IsAdmin() {
+		return ApproverHatAdmin
+	}
+
+	if s.mayDecideGrantRequestWith(ctx, user, req, approvers) {
+		return ApproverHatServer
+	}
+
+	return ApproverHatNone
 }
 
 // handleApproveQuery releases a parked statement.
@@ -301,15 +630,40 @@ func resolverPayload(u *store.User) map[string]any {
 	}
 }
 
-// mayApproveQuery reports whether the user may resolve holds on this query:
-// any admin, plus members of the grant's approver groups.
+// mayApproveQuery reports whether the user may resolve holds on this query.
 //
-// The grant is the one resolveApprovalGrant names — the connection's stamped
-// grant_uid when there is one, otherwise the (legacy) active grant for the
-// connection's user/database pair. Either way, if it is gone (deleted, or
-// — on the legacy path — revoked or expired since), only admins can still
-// resolve: that is the fail-closed direction.
+// The chain, most specific first:
+//
+//  1. any admin;
+//  2. a member of the **grant definition's** approver groups, when that list is
+//     non-empty — an explicit policy choice, so it wins outright;
+//  3. otherwise a member of the groups ResolveServerApproverGroups yields for
+//     the target database and ApproverKindQuery: the server's own query
+//     approvers, else the union of its server groups';
+//  4. otherwise nobody — admin-only, which is exactly the behavior of an
+//     instance that configures none of this.
+//
+// The grant in step 2 is the one resolveApprovalGrant names — the connection's
+// stamped grant_uid when there is one, otherwise the (legacy) active grant for
+// the connection's user/database pair. A grant that no longer resolves (deleted,
+// or revoked/expired on the legacy path) carries no readable approver list, so
+// it falls through to step 3 rather than to a hard deny: the server-level lists
+// are a property of the database, not of the grant, and an instance that
+// configures none of them still ends up exactly where it used to — admins only.
+//
+// Self-approval is *not* checked here. It is refused by every caller before
+// this function runs, and no membership can override it.
 func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *store.Query) bool {
+	return s.mayApproveQueryWith(ctx, user, query, nil)
+}
+
+// mayApproveQueryWith is mayApproveQuery against an optional per-listing
+// prefetch. nil resolves just this query's database, which is the behavior
+// every single-row caller had; a non-nil one is the same answer, read out of a
+// map the caller resolved for the whole page.
+func (s *Server) mayApproveQueryWith(
+	ctx context.Context, user *store.User, query *store.Query, approvers *listingApprovers,
+) bool {
 	if user == nil {
 		return false
 	}
@@ -318,20 +672,101 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 		return true
 	}
 
-	grant, err := s.resolveApprovalGrant(ctx, query)
-	if err != nil || grant == nil || len(grant.ApproverGroupUIDs()) == 0 {
+	if approvers == nil {
+		approvers = s.prefetchApprovers(
+			ctx, user, store.ApproverKindQuery, distinctUIDs([]*uuid.UUID{query.DatabaseID}),
+		)
+	}
+
+	if len(approvers.userGroups) == 0 {
 		return false
 	}
 
-	groups, err := s.store.ListUserGroupUIDs(ctx, user.UID)
-	if err != nil {
+	grant := s.approvalGrantFor(ctx, query, approvers)
+	if grant != nil && len(grant.ApproverUserGroupUIDs()) > 0 {
+		return grant.MayApprove(approvers.userGroups)
+	}
+
+	if query.DatabaseID == nil {
 		return false
 	}
 
-	return grant.MayApprove(groups)
+	return approvers.mayApproveFor(*query.DatabaseID)
 }
 
-// resolveApprovalGrant finds the grant whose approver_group_uids govern this
+// derefUUIDs reads an optional uid list, yielding nil when the field was
+// omitted. Used by the PATCH-shaped request bodies, where nil and [] mean
+// different things.
+func derefUUIDs(in *[]uuid.UUID) []uuid.UUID {
+	if in == nil {
+		return nil
+	}
+
+	return *in
+}
+
+// validateApproverUserGroups checks that every uid in the given approver lists
+// names a real user group, returning the message for a 400 otherwise. A list
+// pointing at a group that does not exist would fail closed and read as a bug,
+// exactly like a mis-scoped grant definition.
+func (s *Server) validateApproverUserGroups(ctx context.Context, lists ...[]uuid.UUID) string {
+	for _, list := range lists {
+		for _, groupUID := range list {
+			if _, err := s.store.GetUserGroup(ctx, groupUID); err != nil {
+				return "approver user group does not exist: " + groupUID.String()
+			}
+		}
+	}
+
+	return ""
+}
+
+// mayDecideGrantRequest reports whether the user may approve or deny a grant
+// request: any admin, plus whoever ResolveServerApproverGroups names as an
+// **access** approver for the target database — the server's own list, else the
+// union of its server groups'. Configuring neither leaves the decision
+// admin-only, which is exactly today's behavior.
+//
+// Self-approval is refused for everyone but an admin, and deliberately so on
+// both counts. A non-admin approver deciding their own request would defeat the
+// point of delegating: an ops group that can approve its members' requests to
+// its own servers must not be able to approve its *own*. An admin already has
+// POST /grants — refusing them here would be theater, not a control — so that
+// long-standing behavior is left alone.
+func (s *Server) mayDecideGrantRequest(ctx context.Context, user *store.User, req *store.GrantRequest) bool {
+	return s.mayDecideGrantRequestWith(ctx, user, req, nil)
+}
+
+// mayDecideGrantRequestWith is mayDecideGrantRequest against an optional
+// per-listing prefetch. nil resolves just this request's database — what every
+// single-row caller (including both Slack transports) does; the non-admin
+// listing passes a map covering its whole page. The rule below is the same
+// either way, self-approval refusal included.
+func (s *Server) mayDecideGrantRequestWith(
+	ctx context.Context, user *store.User, req *store.GrantRequest, approvers *listingApprovers,
+) bool {
+	if user == nil || req == nil {
+		return false
+	}
+
+	if user.IsAdmin() {
+		return true
+	}
+
+	if req.UserID == user.UID {
+		return false
+	}
+
+	if approvers == nil {
+		approvers = s.prefetchApprovers(
+			ctx, user, store.ApproverKindAccess, []uuid.UUID{req.DatabaseID},
+		)
+	}
+
+	return approvers.mayApproveFor(req.DatabaseID)
+}
+
+// resolveApprovalGrant finds the grant whose approver_user_group_uids govern this
 // query's hold.
 //
 // Preferred: the grant the query's connection was stamped with at auth time
@@ -341,7 +776,7 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 // stamp, the check re-resolves "the active grant" at approval time via
 // GetActiveGrant, which — if a newer, higher-priority grant was created for
 // the same user/database while the query sat on hold — returns that *newer*
-// grant, whose approver_group_uids have nothing to do with why the hold
+// grant, whose approver_user_group_uids have nothing to do with why the hold
 // exists.
 //
 // A stamped grant that fails to resolve (deleted) is reported as an error,
@@ -351,8 +786,73 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 // trust in the first place — a NULL grant_uid (a connection predating this
 // column) or a connection lookup failure.
 func (s *Server) resolveApprovalGrant(ctx context.Context, query *store.Query) (*store.Grant, error) {
-	if conn, err := s.store.GetConnectionByUID(ctx, query.ConnectionID); err == nil && conn.GrantUID != nil {
-		return s.store.GetGrantByUID(ctx, *conn.GrantUID)
+	return s.resolveApprovalGrantWith(ctx, query, nil)
+}
+
+// approvalGrantRows is the pair of row sets resolveApprovalGrant reads —
+// connections by uid, grants by uid — fetched once for a whole page instead of
+// twice per row.
+//
+// It carries no rule of its own. resolveApprovalGrant is still the one place
+// that decides *which* grant governs a hold; it just reads its two rows out of
+// here rather than out of the store, which is the difference between a batched
+// listing and a second implementation of an authorization rule.
+//
+// A nil *approvalGrantRows means "go to the store", which is what every
+// single-row caller does. A uid missing from either map yields the same error
+// the per-row path yields for a row that is not there (ErrConnectionNotFound /
+// ErrGrantNotFound), so a connection or grant deleted since the hold was parked
+// lands in the exact same branch either way.
+type approvalGrantRows struct {
+	connections map[uuid.UUID]*store.Connection
+	grants      map[uuid.UUID]*store.Grant
+}
+
+func (r *approvalGrantRows) connection(
+	ctx context.Context, s *Server, uid uuid.UUID,
+) (*store.Connection, error) {
+	if r == nil {
+		return s.store.GetConnectionByUID(ctx, uid)
+	}
+
+	if conn, found := r.connections[uid]; found {
+		return conn, nil
+	}
+
+	return nil, store.ErrConnectionNotFound
+}
+
+func (r *approvalGrantRows) grant(ctx context.Context, s *Server, uid uuid.UUID) (*store.Grant, error) {
+	if r == nil {
+		return s.store.GetGrantByUID(ctx, uid)
+	}
+
+	if grant, found := r.grants[uid]; found {
+		return grant, nil
+	}
+
+	return nil, store.ErrGrantNotFound
+}
+
+// resolveApprovalGrantWith is resolveApprovalGrant against an optional set of
+// already-fetched rows. The chain below is the only implementation of it; nil
+// rows simply means each read goes to the store, which is what a single-row
+// caller wants.
+//
+// The legacy GetActiveGrant(user, database) branch stays per-row on purpose,
+// even under a prefetch. It is keyed by a (user, database) *pair*, not by a uid
+// list, so batching it would mean re-expressing GetActiveGrant's window,
+// deactivation and priority ordering as a per-pair SQL rank — a second
+// implementation of the auth path's grant choice, which is precisely what this
+// function exists to prevent. It also only fires for a connection with no
+// stamped grant_uid (one predating that column) or one that cannot be read at
+// all, so the per-row cost it leaves behind is bounded by holds parked on
+// legacy sessions.
+func (s *Server) resolveApprovalGrantWith(
+	ctx context.Context, query *store.Query, rows *approvalGrantRows,
+) (*store.Grant, error) {
+	if conn, err := rows.connection(ctx, s, query.ConnectionID); err == nil && conn.GrantUID != nil {
+		return rows.grant(ctx, s, *conn.GrantUID)
 	}
 
 	if query.UserID == nil || query.DatabaseID == nil {
@@ -368,6 +868,13 @@ func (s *Server) resolveApprovalGrant(ctx context.Context, query *store.Query) (
 // it is never wider than that: an ordinary connector sees only holds they are
 // an approver for.
 func (s *Server) mayViewQuery(ctx context.Context, user *store.User, query *store.Query) bool {
+	return s.mayViewQueryWith(ctx, user, query, nil)
+}
+
+// mayViewQueryWith is mayViewQuery against an optional per-listing prefetch.
+func (s *Server) mayViewQueryWith(
+	ctx context.Context, user *store.User, query *store.Query, approvers *listingApprovers,
+) bool {
 	if user == nil {
 		return false
 	}
@@ -376,7 +883,7 @@ func (s *Server) mayViewQuery(ctx context.Context, user *store.User, query *stor
 		return true
 	}
 
-	return s.mayApproveQuery(ctx, user, query)
+	return s.mayApproveQueryWith(ctx, user, query, approvers)
 }
 
 // approvalEscalator is the slice of the Slack escalator the API needs, kept as

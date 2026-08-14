@@ -26,7 +26,7 @@ on:
       project:
         description: "Which showcase project to run"
         type: choice
-        options: ["all", "screenshots", "poster", "video"]
+        options: ["all", "screenshots", "poster", "video", "mcp-poster", "mcp-video"]
         default: "all"
   pull_request:
     branches: [main]

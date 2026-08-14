@@ -47,7 +47,8 @@ Users can also request the same definition themselves — see [Grant requests](.
 | Field | Lives on | Description |
 |-------|----------|-------------|
 | `user_id` | grant | UID of the user |
-| `database_id` | grant | UID of the database configuration |
+| `database_id` | grant | The grant's **anchor** database — the one it was issued for. What an unbound grant covers, and what a bound one falls back to if its group is deleted. |
+| `server_group_uid` | grant | The [server group](#server-groups) this grant is bound to, if any. A bound grant covers every server that group holds *right now*, and only those. `null` = anchor only. |
 | `grant_definition_id` | grant | The definition *version* this grant was issued from |
 | `starts_at` | grant | When the grant becomes active |
 | `expires_at` | grant | When it expires — `starts_at` plus the definition's `duration_seconds` |
@@ -56,8 +57,12 @@ Users can also request the same definition themselves — see [Grant requests](.
 | `max_query_counts` | definition | Maximum number of queries allowed |
 | `max_bytes_transferred` | definition | Maximum bytes transferred (response size) |
 | `duration_seconds` | definition | How long a grant issued from it lasts |
+| `user_group_uids` | definition | User groups whose members may request it. Empty = every user. |
+| `server_group_uids` | definition | Server groups it may be issued against. Empty = every database. |
 
 Definitions are immutably versioned, so editing one never changes a grant that is already live — the grant stays pinned to the version it was issued from. Deactivating a definition, on the other hand, **fails closed**: every grant issued from any of its versions stops authorising new connections.
+
+The one thing that *does* change under a live grant is the membership of the [server group](#server-groups) it is bound to. That is deliberate, and it is the point of groups.
 
 The grant model is the same across all engines (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server).
 
@@ -104,12 +109,161 @@ This is useful for:
 - Contractors with limited engagement periods
 - Scheduled maintenance windows
 
+## Server groups
+
+A **server group** is a named set of database servers — "the analytics
+replicas", "all staging databases". Definitions scope on groups instead of
+listing servers, and a grant binds to the group it was issued under, so growing
+the fleet stops meaning "edit every relevant policy".
+
+```bash
+curl -X POST http://localhost:4200/api/v1/server-groups \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "analytics-replicas",
+    "description": "Read replicas the analysts self-serve against",
+    "member_uids": ["660e8400-e29b-41d4-a716-446655440000"]
+  }'
+```
+
+A definition then points at the group rather than at servers:
+
+```json
+{ "server_group_uids": ["<the group uid>"] }
+```
+
+An empty `server_group_uids` means every database, exactly as an empty scope
+always did.
+
+### Membership is live
+
+:::warning Adding a server widens live grants immediately
+
+Server groups are **not versioned**, and membership is **never snapshotted at
+issuance**. The moment a server joins a group, every grant bound to that group
+covers it — including grants issued weeks ago and sessions already running.
+Removing a server narrows those grants the same way, immediately, with no
+exceptions: a bound grant covers what its group holds *now*, so even the
+database it was originally issued for stops being covered once it leaves the
+group.
+
+This is one of two deliberate exceptions to "a live grant's behaviour never
+changes under it" — the other being the approver lists below, for the same
+reason. It is what makes groups useful — a new replica inherits the fleet's
+policy without touching a definition — and it is why membership is an
+admin-only surface that reports how many live grants an edit moves before you
+save it.
+:::
+
+### One budget for the whole group
+
+Quotas and `priority` belong to the grant, and the grant now covers the whole
+group. A single `max_query_counts` and a single `max_bytes_transferred` budget
+is consumed across **every** database in the group, not one budget per
+database. `priority` ranks group-bound grants against each other on the
+databases where their groups overlap — see below.
+
+Deleting a server group is the one case where the anchor comes back, and it
+still narrows: grants bound to it unbind and fall back to the single database
+they were issued for. Definitions scoped to it match no database at all (fail
+closed) until an admin edits them.
+
+## Approvers on servers and server groups
+
+Who guards a database is a property of that **database**, not of the policy
+shape used to reach it. Two prod databases with different on-call teams should
+not force two clones of the same grant definition.
+
+So a server — and, as a fallback, a server group — carries two lists of user
+groups:
+
+| Field | Decides |
+|---|---|
+| `access_approver_user_group_uids` | **Grant requests** targeting this server: `POST /grant-requests/:uid/approve` and `/deny` |
+| `query_approver_user_group_uids` | **Approval holds** — a pattern-matched statement parked mid-flight against this server |
+
+```bash
+curl -X PUT http://localhost:4200/api/v1/servers/$DB_UID \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "access_approver_user_group_uids": ["'$OPS_GROUP_UID'"],
+    "query_approver_user_group_uids": ["'$LEAD_OPS_GROUP_UID'"]
+  }'
+```
+
+The split matches the two decisions' actual shape. A grant request is an
+asynchronous policy call: ops can take an hour over it. A hold blocks a live
+wire-protocol connection and needs the fastest competent responder, which is
+usually a smaller group. Different audiences, different latency.
+
+### The fallback chain
+
+For a **grant request**:
+
+1. the target server's `access_approver_user_group_uids`, if non-empty;
+2. otherwise the **union** of that field across every server group the server
+   currently belongs to;
+3. otherwise admins only.
+
+For an **approval hold**, one step is prepended:
+
+1. the grant definition's own `approver_user_group_uids`, if non-empty — an
+   explicit policy choice, so it wins outright;
+2. otherwise the server's `query_approver_user_group_uids`;
+3. otherwise the **union** across the server's groups;
+4. otherwise admins only.
+
+Admins decide at every step. Levels do not union with each other: naming a group
+on the server is how you *override* the group-level default for that one
+database. Groups at the same level do union — several server groups holding the
+same server contribute all their approvers, exactly as several approver groups
+on one definition already do.
+
+Configure none of it and you get today's behaviour unchanged: admin-only
+decisions, everywhere.
+
+### No hierarchy between the two kinds
+
+A query approver gains no say over grant requests, and an access approver gains
+no say over a held statement. Neither implies the other; an organisation that
+wants the same people doing both lists the same user group in both fields.
+
+### Resolution is live
+
+:::warning Editing an approver list changes who can act on work already waiting
+
+Both lists are read **at decision time** and never snapshotted onto a grant.
+Editing one — or moving a server between groups — immediately changes who may
+approve, including for requests already filed and statements already parked.
+
+This is the **second** deliberate exception to "a live grant's behaviour never
+changes under it", after live server-group membership, and for the same reason:
+approver lists are operational data. When a lead leaves, their replacement has to
+be able to release the hold that is blocking a connection *right now*, not from
+the next grant issuance onwards. The definition's `approver_user_group_uids`
+keeps the opposite, versioned behaviour.
+:::
+
+### Self-approval is never delegated
+
+Being named as an approver never lets you decide your own request or release
+your own held statement. That holds on every path — the API, the web UI, and
+both Slack transports.
+
+Each pending item reports `approver_role` for the calling user (`admin`,
+`definition_approver`, `server_approver`, or empty), which the UI renders as the
+hat you are wearing — so an approver can see *why* they can act on one row and
+not the next.
+
 ## Overlapping grants
 
 Nothing stops a user from holding several active grants on the same database at
 once — a read-only one they requested this morning and a read/write one an
-admin assigned for an incident, say. Exactly one of them applies to a session:
-its controls, quotas and approval patterns are the ones enforced.
+admin assigned for an incident, say, or two grants whose server groups happen
+to overlap on that database. Exactly one of them applies to a session: its
+controls, quotas and approval patterns are the ones enforced.
 
 The winner is the grant with the **highest `priority`**. Ties break on the
 latest `expires_at`, then the newest `created_at`.

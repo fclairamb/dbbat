@@ -9,7 +9,12 @@ import (
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/safe"
 )
+
+// goroutineNameCacheEviction labels the eviction loop in a recovered-panic log
+// line.
+const goroutineNameCacheEviction = "auth cache eviction"
 
 // AuthCache provides caching for password verification results to avoid
 // expensive argon2id re-computation on every request.
@@ -156,7 +161,11 @@ func (c *AuthCache) cleanupLoop() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		c.cleanup()
+		// Guarded per turn, not around the loop: a cache that silently stopped
+		// evicting would keep serving credential decisions past their TTL,
+		// which is a security property, not housekeeping. The cache has no
+		// logger of its own, so the panic reports through slog.Default().
+		safe.RunMaintenance(context.Background(), nil, goroutineNameCacheEviction, c.cleanup)
 	}
 }
 

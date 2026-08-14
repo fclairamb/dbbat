@@ -77,6 +77,43 @@ Approval atomically transitions `pending → approved` and builds a real grant f
 
 Requests carry one of: `pending`, `approved`, `denied`, `cancelled`, `expired`.
 
+### Who Decides
+
+Approval is **not admin-only**. Every admin decides everything, and in addition each server names the user groups allowed to decide requests targeting *it*:
+
+```
+target server's access_approver_user_group_uids
+        │  (empty?)
+        ▼
+union of the access_approver_user_group_uids of the
+server groups that server currently belongs to
+        │  (still empty?)
+        ▼
+admins only
+```
+
+Set neither and nothing changes: only admins decide, exactly as before. Set the list on one server and you have delegated that server's access requests — say, to the ops group that owns it — without handing anyone the admin role. Set it on a server group instead and it covers every member server that names no approvers of its own; a server naming its own overrides the group's rather than adding to it, and several groups holding the same server union their lists.
+
+```bash
+# The ops group decides requests for this server, alongside admins.
+curl -X PUT http://localhost:4200/api/v1/servers/$DB_UID \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"access_approver_user_group_uids": ["'$OPS_GROUP_UID'"]}'
+```
+
+Three things are worth knowing before you rely on it:
+
+- **Nobody approves their own request.** A named access approver filing their own request gets a `403` on it, whatever list they appear in. (Admins keep their long-standing ability to self-approve, since `POST /api/v1/grants` already lets them issue the same access directly — refusing them here would be a formality, not a control.)
+- **Resolution is live.** The lists are read when a decision is made, not copied onto the request when it is filed, so editing one immediately changes who may decide requests already waiting. That is on purpose: a departing lead's replacement should not have to wait for anything.
+- **This approver kind covers access only.** A *query* approver — the person who releases a pattern-triggered approval hold on a live statement — is configured separately in `query_approver_user_group_uids`, and neither role implies the other. See [Access Control](/docs/features/access-control#approvers-on-servers-and-server-groups).
+
+Each row of `GET /api/v1/grant-requests` reports `approver_role` for the calling user — `admin`, `server_approver`, or empty — and the UI shows it as a "you decide as" badge, so a delegated approver can see why the buttons are there on one row and not the next.
+
+### Who Gets Notified
+
+When Slack notifications are configured, the pending message @-mentions every admin **and** every member of the access-approver groups resolved for the target server, de-duplicated. The Approve / Deny buttons authorize against exactly the rule above — clicking one as somebody who may not decide returns an ephemeral refusal — and both Slack transports (the inbound signing-secret endpoint and Socket Mode) go through the same check. The message's deep link lands on the grant-requests page, which now lists an approver's decidable requests alongside their own.
+
 ## Auto-Approval
 
 Some access is routine enough that admin review is theatre — read-only access to a staging database, say. Flagging a definition `auto_approve` makes requests against it resolve instantly:

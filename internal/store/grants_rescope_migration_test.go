@@ -90,6 +90,28 @@ func TestGrantsRescopeMismatchedDefinitionsMigration(t *testing.T) {
 		t.Fatalf("migration %q not found — has it been renamed?", grantsRescopeMigrationName)
 	}
 
+	// The corrective migration is written against the schema as it stood when
+	// it was authored, and two later migrations moved that schema on:
+	// approver_group_uids was renamed to approver_user_group_uids (server
+	// groups made a bare "group" ambiguous) and database_uids was replaced by
+	// server-group scoping. bun records a migration by name and never re-runs
+	// it, so neither change matters in production — but this test *does*
+	// re-run it, so it restores the schema shape the migration was written for
+	// and puts it back afterwards.
+	exec := func(query string) {
+		if _, err := db.ExecContext(ctx, query); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+
+	exec("ALTER TABLE grant_definitions RENAME COLUMN approver_user_group_uids TO approver_group_uids")
+	exec("ALTER TABLE grant_definitions ADD COLUMN database_uids uuid[] NOT NULL DEFAULT '{}'")
+
+	t.Cleanup(func() {
+		exec("ALTER TABLE grant_definitions DROP COLUMN IF EXISTS database_uids")
+		exec("ALTER TABLE grant_definitions RENAME COLUMN approver_group_uids TO approver_user_group_uids")
+	})
+
 	f := seedRescopeFixture(t, ctx, db)
 
 	// Re-apply. Everything the fixture describes as damaged is repaired; the

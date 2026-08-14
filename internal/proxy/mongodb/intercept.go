@@ -9,6 +9,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -44,9 +45,7 @@ func (s *Session) pumpClientToUpstream() error {
 		}
 
 		if m.opCode != opCodeMsg {
-			// Post-auth, drivers speak OP_MSG exclusively (we advertised
-			// maxWireVersion >= 6). Forward anything else verbatim.
-			if err := s.forward(m); err != nil {
+			if err := s.refuseLegacyOpCode(m); err != nil {
 				return err
 			}
 
@@ -57,6 +56,39 @@ func (s *Session) pumpClientToUpstream() error {
 			return err
 		}
 	}
+}
+
+// refuseLegacyOpCode refuses a pre-OP_MSG opcode arriving after authentication
+// (OP_QUERY, OP_GET_MORE, OP_INSERT/UPDATE/DELETE, OP_KILL_CURSORS).
+//
+// Post-auth, drivers speak OP_MSG exclusively — we advertise
+// maxWireVersion 21 — and MongoDB itself removed the legacy opcodes in 5.1.
+// dbbat decodes none of them, so forwarding one verbatim (which is what it used
+// to do) put a command on the upstream that never reached
+// shared.ValidateMongoCommand: no $db check, no read_only check, nothing shaped
+// like a statement in the query log. Against an upstream older than 5.1 that
+// was a way around the grant, so the refusal is independent of grant controls,
+// exactly like the $db check. Writing decoders for a path MongoDB deleted was
+// weighed and rejected: it is a lot of wire code and new attack surface for
+// clients that no longer exist. The pre-auth handshake, which legitimately uses
+// OP_QUERY for the first hello, is unaffected — this runs only after auth.
+func (s *Session) refuseLegacyOpCode(m *message) error {
+	name := opCodeName(m.opCode)
+
+	s.logger.WarnContext(s.ctx, "MongoDB legacy opcode refused",
+		slog.String("opcode", name),
+		slog.Any("error", ErrLegacyOpCode))
+
+	// Logged as a statement so the attempt is visible in the query history
+	// rather than only in the process log.
+	errStr := ErrLegacyOpCode.Error()
+	s.recordQuery(&pendingQuery{command: name, sqlText: name, start: time.Now()}, nil, nil, &errStr)
+
+	if !opCodeExpectsReply(m.opCode) {
+		return nil
+	}
+
+	return s.replyOpReply(m.requestID, unauthorizedDoc(errStr))
 }
 
 // handleClientOpMsg parses, classifies, validates, forwards and registers one
@@ -242,11 +274,11 @@ func (s *Session) rejectHeldCommand(
 	if approvalUID != uuid.Nil && s.server != nil && s.server.store != nil {
 		errStr := cause.Error()
 
-		go func() {
+		go safe.RunGuarded(s.ctx, s.logger, goroutineNameHeldCommandCompletion, func() {
 			if err := s.server.store.UpdateQueryCompletion(s.ctx, approvalUID, nil, nil, &errStr, false, false); err != nil {
 				s.logger.DebugContext(s.ctx, "failed to complete held command", slog.Any("error", err))
 			}
-		}()
+		})
 
 		// The row already exists; only send the protocol-native error.
 		s.logger.InfoContext(s.ctx, "MongoDB command blocked by approval hold",

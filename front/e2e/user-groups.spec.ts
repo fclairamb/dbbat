@@ -71,12 +71,15 @@ test.describe("User Groups", () => {
     await page.getByTestId("create-grant-definition-button").click();
     await page.waitForSelector('[role="dialog"]');
 
-    const groupPicker = page.getByTestId("grant-definition-groups");
+    const groupPicker = page.getByTestId("grant-definition-user-groups");
     await expect(groupPicker).toBeVisible();
     await expect(groupPicker.getByText(groupName)).toBeVisible();
 
-    // Databases are the second scope axis and must be offered too.
-    await expect(page.getByTestId("grant-definition-databases")).toBeVisible();
+    // Server groups are the second scope axis and must be offered too — a
+    // definition scopes on groups of servers, never on servers directly.
+    await expect(
+      page.getByTestId("grant-definition-server-groups")
+    ).toBeVisible();
 
     await page.screenshot({
       path: "test-results/screenshots/grant-definition-scope.png",
@@ -106,7 +109,7 @@ test.describe("User Groups", () => {
     await page.getByTestId("grant-definition-name").fill(defName);
     await page.getByTestId("grant-definition-duration-value").fill("2");
     await page
-      .getByTestId("grant-definition-groups")
+      .getByTestId("grant-definition-user-groups")
       .getByText(groupName, { exact: true })
       .click();
     await page.getByTestId("grant-definition-submit").click();
@@ -114,7 +117,7 @@ test.describe("User Groups", () => {
     // The list summarises the scope instead of "all users".
     const row = page.locator("tr", { hasText: defName });
     await expect(row).toBeVisible();
-    await expect(row.getByText("1 group")).toBeVisible();
+    await expect(row.getByText("1 user group")).toBeVisible();
     await expect(row.getByText("all databases")).toBeVisible();
 
     // Re-opening the editor shows the scope checked, not blank.
@@ -123,7 +126,7 @@ test.describe("User Groups", () => {
     await editButton.click();
     await page.waitForSelector('[role="dialog"]');
 
-    const checkbox = page.getByTestId("grant-definition-groups").locator(
+    const checkbox = page.getByTestId("grant-definition-user-groups").locator(
       'button[role="checkbox"][data-state="checked"]'
     );
     await expect(checkbox).toHaveCount(1);

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -206,8 +208,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
+// handleConnection runs one client session on a goroutine of its own, which is
+// why the recover is not optional: without it a panic anywhere in the session —
+// handshake, auth, any command — ends the process and every other live session
+// with it.
+//
+// Unlike the other four protocols this one recover covers the whole session:
+// go-mysql owns the wire and commandLoop runs synchronously right here, so there
+// is no relay goroutine underneath it to guard separately. Only the limit
+// watchdog runs elsewhere, and it carries its own guard.
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer func() {
+		if r := recover(); r != nil {
+			s.logger.ErrorContext(s.ctx, "MySQL session panic",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())),
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		}
+
 		if err := clientConn.Close(); err != nil {
 			s.logger.DebugContext(s.ctx, "client close error", slog.Any("error", err))
 		}
@@ -226,6 +244,9 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 const dumpCleanupInterval = 1 * time.Hour
 
+// goroutineNameDumpRetention is what a panic in a retention sweep is logged under.
+const goroutineNameDumpRetention = "mysql dump retention sweep"
+
 func (s *Server) runDumpCleanup() {
 	retention, err := time.ParseDuration(s.dumpConfig.Retention)
 	if err != nil {
@@ -238,12 +259,17 @@ func (s *Server) runDumpCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
-			if err != nil {
-				s.logger.ErrorContext(s.ctx, "MySQL dump cleanup failed", slog.Any("error", err))
-			} else if deleted > 0 {
-				s.logger.InfoContext(s.ctx, "MySQL dump cleanup", slog.Int("deleted", deleted))
-			}
+			// One turn under the guard rather than the whole loop: a panic in a
+			// sweep must not take the process down, and must not retire retention
+			// for the life of the process either. See safe.RunMaintenance.
+			safe.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
+				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
+				if err != nil {
+					s.logger.ErrorContext(s.ctx, "MySQL dump cleanup failed", slog.Any("error", err))
+				} else if deleted > 0 {
+					s.logger.InfoContext(s.ctx, "MySQL dump cleanup", slog.Int("deleted", deleted))
+				}
+			})
 		case <-s.shutdown:
 			return
 		}

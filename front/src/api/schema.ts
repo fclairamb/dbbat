@@ -168,6 +168,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/oidc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Initiate generic OIDC login
+         * @description Redirects to the configured OpenID Connect issuer's authorization endpoint (with an S256 PKCE challenge). Registered only when DBB_OIDC_ISSUER is set.
+         */
+        get: operations["initiateOIDCAuth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/oidc/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Generic OIDC callback
+         * @description Handles the redirect back from the OIDC issuer. Verifies the ID token against the issuer's JWKS, applies the optional email-domain allowlist, creates or links the user, creates a session and redirects to the app.
+         */
+        get: operations["oidcAuthCallback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/slack": {
         parameters: {
             query?: never;
@@ -389,6 +429,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/role-syncs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Latest directory role sync per user
+         * @description Returns the most recent `user.roles_synced` audit entry for each user
+         *     that has one — one row per user, computed in the database, so the answer
+         *     stays exact however large the audit log is.
+         *
+         *     A user absent from this response has never had their roles resolved from
+         *     directory groups. That is the only meaning of absence: it is not a
+         *     windowing artefact.
+         *
+         *     Each row carries the audit entry verbatim, `details` included — the
+         *     directory groups recorded there are the answer to "why did these roles
+         *     change?". The audit log remains the record; this is a projection of it.
+         *
+         *     Requires admin or viewer role, like `GET /audit`.
+         */
+        get: operations["listUserRoleSyncs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users/{uid}": {
         parameters: {
             query?: never;
@@ -581,8 +653,8 @@ export interface paths {
          *     window's length is the definition's `duration_seconds`. There is
          *     deliberately no way to describe an ad-hoc shape here.
          *
-         *     The definition must be active, and its `database_uids` scope (when set)
-         *     must cover the target database. Its `group_uids` scope is *not*
+         *     The definition must be active, and its `server_group_uids` scope (when set)
+         *     must cover the target database. Its `user_group_uids` scope is *not*
          *     enforced: that scope governs who may self-request the definition, and
          *     an admin assigning access is the authority on who receives it.
          */
@@ -721,6 +793,112 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/server-groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List server groups (admin) */
+        get: operations["listServerGroups"];
+        put?: never;
+        /**
+         * Create server group (admin)
+         * @description Creates a server group: a named, stable set of database servers that
+         *     grant definitions scope on and grants bind to. SSH bastions cannot be
+         *     members — they are a dial path, not something access is granted on.
+         */
+        post: operations["createServerGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/server-groups/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** Get server group by UID (admin) */
+        get: operations["getServerGroup"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete server group (admin)
+         * @description Hard-deletes the group; memberships cascade away and grants bound to it
+         *     fall back to their anchor database (never widen). Grant definitions
+         *     scoped to the group keep the now-dangling uid, so they match no
+         *     database (fail closed) until an admin edits them.
+         */
+        delete: operations["deleteServerGroup"];
+        options?: never;
+        head?: never;
+        /**
+         * Update server group (admin)
+         * @description Replaces name and description. `member_uids` replaces membership
+         *     wholesale when present; omit it to leave membership untouched.
+         *
+         *     **Membership is live.** Adding a server here immediately widens every
+         *     grant bound to this group — there is no versioning in between.
+         *     `active_grant_count` on the response is the blast radius.
+         */
+        patch: operations["updateServerGroup"];
+        trace?: never;
+    };
+    "/server-groups/{uid}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** List server group members (admin) */
+        get: operations["listServerGroupMembers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/server-groups/{uid}/members/{server_uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                server_uid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Add a server to a group (admin)
+         * @description Idempotent — re-adding an existing member is a no-op. Takes effect
+         *     immediately for every live grant bound to the group.
+         */
+        put: operations["addServerGroupMember"];
+        post?: never;
+        /**
+         * Remove a server from a group (admin)
+         * @description Idempotent — removing a non-member is a no-op. Takes effect
+         *     immediately: live grants bound to the group stop covering this server.
+         */
+        delete: operations["removeServerGroupMember"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/grant-definitions": {
         parameters: {
             query?: never;
@@ -795,13 +973,13 @@ export interface paths {
          *     body is left untouched on the existing definition — so a caller that
          *     only means to flip `auto_approve`, say, can send just that field
          *     without risk of wiping the rest, notably `approval_patterns` and
-         *     `approver_group_uids`.
+         *     `approver_user_group_uids`.
          *
          *     **An edit creates a new version.** The current row is archived
          *     (`archived_at` set) and a successor carrying the change is inserted
          *     with a new `uid` and the same `lineage_uid`; the response is that new
          *     version. Grants already issued keep pointing at the version they were
-         *     issued from, so their behaviour never changes. An edit that changes
+         *     issued from, so their behavior never changes. An edit that changes
          *     nothing is not versioned.
          *
          *     Editing an already-archived version is refused with a 409 — history is
@@ -858,7 +1036,19 @@ export interface paths {
         };
         /**
          * List grant requests
-         * @description Admins see all (filterable). Non-admins see only their own.
+         * @description Admins see all, and the query parameters below filter that view.
+         *
+         *     Everybody else sees their own requests, plus the **pending** ones they
+         *     may decide as an access approver for the target server (see
+         *     `POST /grant-requests/{uid}/approve` for how that is resolved). The
+         *     query parameters do not apply to this view.
+         *
+         *     The pending restriction is about enumeration, not secrecy: an unfiltered
+         *     listing would turn an approver's page into the full request history of
+         *     every colleague who ever asked for access to their servers.
+         *     `GET /grant-requests/{uid}` is deliberately not status-scoped the same
+         *     way — re-reading one row you were entitled to decide is a different
+         *     exposure from browsing all of them.
          */
         get: operations["listGrantRequests"];
         put?: never;
@@ -889,7 +1079,18 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get grant request */
+        /**
+         * Get grant request
+         * @description Readable by the requester, by any admin, and by an access approver for
+         *     the target server.
+         *
+         *     Unlike the listing, this is **not** restricted to pending requests: an
+         *     approver may re-read one after it has been decided, including one they
+         *     decided themselves. Hiding the outcome of your own decision would be a
+         *     worse answer than the marginal exposure of a row you were entitled to
+         *     resolve — and a client refetching a request straight after approving it
+         *     would otherwise get a 403.
+         */
         get: operations["getGrantRequest"];
         put?: never;
         post?: never;
@@ -911,11 +1112,25 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Approve grant request (admin)
+         * Approve grant request (admin or access approver)
          * @description Atomically transitions pending → approved and creates a real
          *     AccessGrant from the linked definition + the request's
          *     user/database. Returns 409 if not pending or if the linked
          *     definition has been deactivated.
+         *
+         *     **Who may call this.** Any admin, plus any member of the
+         *     access-approver groups resolved for the target server: its own
+         *     `access_approver_user_group_uids` when non-empty, otherwise the union of
+         *     those on the server groups it belongs to. A server (and its groups) that
+         *     name none leave the decision to admins, which is the behavior of an
+         *     instance that configures none of this.
+         *
+         *     Resolution is live, at decision time — editing a list changes who may
+         *     decide requests that are already filed.
+         *
+         *     A non-admin can never decide **their own** request (403), however they
+         *     are named. Admins keep their long-standing ability to, since they can
+         *     issue the same access directly with `POST /grants`.
          */
         post: operations["approveGrantRequest"];
         delete?: never;
@@ -935,7 +1150,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Deny grant request (admin) */
+        /**
+         * Deny grant request (admin or access approver)
+         * @description Same authorization as `approve`: admins, plus the access approvers
+         *     resolved off the target server and its server groups, never the
+         *     requester themselves.
+         */
         post: operations["denyGrantRequest"];
         delete?: never;
         options?: never;
@@ -1235,7 +1455,12 @@ export interface paths {
          *     is best-effort for history, so clients refetch this on reconnect.
          *
          *     Admins and viewers see every hold; other users see only holds they are
-         *     an approver for.
+         *     an approver for — through the grant definition's
+         *     `approver_user_group_uids`, or through the target server's (or its
+         *     server groups') `query_approver_user_group_uids`.
+         *
+         *     Each row carries `approver_role`, the hat the calling user would wear to
+         *     resolve *that* hold.
          */
         get: operations["listPendingApprovals"];
         put?: never;
@@ -1418,9 +1643,156 @@ export interface paths {
          * List audit events
          * @description Returns a list of audit log events.
          *
+         *     The per-session entries (`connection.opened` and `connection.closed`)
+         *     are left out of an unfiltered listing: a busy proxy writes tens of
+         *     thousands of them a day and they would bury the control-plane changes
+         *     this list exists for. Ask for one by name with `event_type` to get it
+         *     back. They are ordinary chained audit rows either way — see
+         *     `docs/audit-chain.md`; the connections list is the surface for browsing
+         *     sessions.
+         *
          *     Requires admin or viewer role.
          */
         get: operations["listAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Verify the audit chain (admin only)
+         * @description Walks the store-wide HMAC audit chain oldest to newest and reports the
+         *     first record that does not add up, together with the chain head.
+         *
+         *     **This is not equivalent to `dbbat audit verify`.** The CLI runs where
+         *     the key lives and can be run by someone who does not trust the running
+         *     server; this endpoint is served *by* that server, so a compromised or
+         *     modified dbbat can answer `"verified": true` without walking anything.
+         *     The answer is also cached (see below), so it can be up to 60 seconds
+         *     old: a chain broken moments ago keeps reporting `"verified": true`
+         *     until the cached walk expires. This is a monitoring signal, not a
+         *     point-in-time attestation.
+         *
+         *     Use it for routine evidence collection, and the CLI (or an independent
+         *     re-run of it) when the integrity of the process itself is in question.
+         *
+         *     Record `head_mac` outside the database. A chain always verifies against
+         *     itself, so truncating and re-sealing it with a stolen key is invisible
+         *     from the inside; comparing today's head against the one recorded last
+         *     quarter is what closes that hole.
+         *
+         *     `unverifiable_pre_anchor_entries` counts rows written before chaining
+         *     was introduced. Nothing sealed them, and nothing can after the fact.
+         *
+         *     The response never contains the chain key, and never contains the
+         *     content of any audited record.
+         *
+         *     A full walk is O(rows), so the outcome of a walk is cached for a minute
+         *     (`cached` says whether this answer was reused, `checked_at` when it was
+         *     computed) and at most one walk runs at a time per instance.
+         *
+         *     Requires admin role.
+         */
+        get: operations["verifyAuditChain"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit/verify/queries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Verify the per-connection query chains (admin only)
+         * @description Walks the query chain of every connection that has one, or of a single
+         *     session when `connection` is given. A scoped walk additionally reports
+         *     that chain's head.
+         *
+         *     `chains_with_truncated_prefix` counts chains missing their oldest
+         *     statements — what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a
+         *     long-lived session. That is expected housekeeping, not tampering, and
+         *     everything after the truncation is still verified. A session retention
+         *     emptied *entirely* is counted there too; one emptied while it was too
+         *     young for the sweep to have reached it is a **break**, because the
+         *     stamp on the connection row still attests to statements that are gone.
+         *
+         *     A session carrying an unkeyed head stamp — a verbatim copy of the last
+         *     statement's MAC, forgeable by anyone who can write to the store — is a
+         *     **break**, reported as a tail that cannot be verified. There is no
+         *     counter for those sessions and no way to tolerate one; only a store
+         *     written by a pre-0.24 development build can hold such a row.
+         *
+         *     The same caveats as `GET /audit/verify` apply: an answer from the
+         *     server is only as trustworthy as the server, and it is cached, so it
+         *     can be up to 60 seconds old — a chain broken moments ago keeps
+         *     reporting `"verified": true` until the cached walk expires. The
+         *     response never contains the chain key, and never contains SQL text,
+         *     parameters or any other statement content.
+         *
+         *     Requires admin role.
+         */
+        get: operations["verifyQueryChains"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit/verify/rows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Verify the captured result-row chains (admin only)
+         * @description Walks the result-row chain of every capture that has one, of one
+         *     session's captures when `connection` is given, or of a single capture
+         *     when `query` is. A capture-scoped walk additionally reports that
+         *     chain's head. The two filters cannot be combined — a query already
+         *     names exactly one capture.
+         *
+         *     Unlike the query chains, a capture has no legitimate reason to be
+         *     missing its oldest rows: retention deletes whole queries (and whole
+         *     connections) rather than individual captured rows, so there is no
+         *     `chains_with_truncated_prefix` counterpart here — a first row that does
+         *     not follow the capture's genesis is a break. Nor is there any
+         *     unkeyed-stamp population to report: a capture's head stamp has always
+         *     been a keyed MAC, never a copy of the head.
+         *
+         *     `unverifiable_pre_migration_rows` counts rows captured before the row
+         *     chain migration. Nothing sealed them and nothing can after the fact.
+         *
+         *     The same caveats as `GET /audit/verify` apply: an answer from the
+         *     server is only as trustworthy as the server, and it is cached, so it
+         *     can be up to 60 seconds old — a chain broken moments ago keeps
+         *     reporting `"verified": true` until the cached walk expires. The
+         *     response never contains the chain key, and never contains a captured
+         *     row's data or any other record content.
+         *
+         *     Requires admin role.
+         */
+        get: operations["verifyRowChains"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1510,6 +1882,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tunnel-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List tunnel (dial-path) servers (admin only)
+         * @description Returns every dial-path row — SSH bastions (`ssh`) and Kubernetes
+         *     clusters (`kubernetes`) — for a target's "via" selector. These rows are
+         *     excluded from the regular database listing and from every
+         *     grantable/connectable target context. Secrets (SSH private key and
+         *     passphrase, ServiceAccount token) are never returned.
+         */
+        get: operations["listTunnelServers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/parameters": {
         parameters: {
             query?: never;
@@ -1584,6 +1980,81 @@ export interface paths {
         put: operations["updateInstancePublic"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mcp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * MCP server-to-client stream (not served)
+         * @description Part of the MCP Streamable HTTP transport. dbbat runs the server
+         *     stateless, so there is no long-lived server→client stream to open and
+         *     this always answers `405`. It is registered so a client's transport
+         *     probe gets the protocol's own answer instead of a `404` it has to guess
+         *     at.
+         */
+        get: operations["mcpStream"];
+        put?: never;
+        /**
+         * Model Context Protocol endpoint (Streamable HTTP)
+         * @description MCP endpoint for AI agents. This is **not a REST endpoint** — it speaks
+         *     JSON-RPC 2.0 over the MCP Streamable HTTP transport — but it is
+         *     documented here because it is part of the authenticated API surface and
+         *     shares its authentication.
+         *
+         *     Point any MCP-capable client at
+         *     `https://<dbbat>/api/v1/mcp` with an `Authorization: Bearer dbb_…`
+         *     header. Registered only when `DBB_MCP_ENABLED` is true (the default).
+         *
+         *     **Authentication is API-key only.** Basic Auth and browser session
+         *     tokens are refused with `403`: the key is not merely the caller's
+         *     credential here, it is also the password the loopback protocol client
+         *     authenticates to the proxy with.
+         *
+         *     **Execution model.** Every statement the agent runs is executed by
+         *     dialing dbbat's own PostgreSQL or MySQL proxy listener over loopback as
+         *     the API key's owner. There is no internal execution path, so grants,
+         *     `read_only` / `block_ddl` / `block_copy`, quotas, query logging, session
+         *     capture and approval holds all apply unchanged. Phase 1 covers
+         *     PostgreSQL and MySQL/MariaDB; Oracle, MongoDB and SQL Server report
+         *     `supported: false` in `list_databases`.
+         *
+         *     **Session model.** The server runs stateless: no `Mcp-Session-Id`, each
+         *     request re-authenticated, so a revoked key stops working on the next
+         *     call.
+         *
+         *     **Tools.**
+         *
+         *     | Tool | Purpose |
+         *     |---|---|
+         *     | `list_databases` | databases the caller holds an active grant on, with expiry, controls and quota usage |
+         *     | `query` | run one statement — `{database, sql, params?, max_rows?}`; rows are capped server-side |
+         *     | `describe` | list tables, or the columns of one table |
+         *     | `await_approval` | wait for a statement suspended by an approval hold |
+         *
+         *     **Approval holds.** A held statement blocks the wire connection. If it
+         *     is still parked after a short grace window, `query` returns
+         *     `status: "approval_pending"` with an `execution_id` and the held
+         *     `query_uid`, while the loopback connection stays parked in the
+         *     background; `await_approval` long-polls that execution. The agent never
+         *     silently times out — every result names the next action.
+         *
+         *     See `docs/mcp.md`.
+         */
+        post: operations["mcpEndpoint"];
+        /**
+         * Terminate an MCP session (not served)
+         * @description Part of the MCP Streamable HTTP transport. There are no sessions to
+         *     terminate on a stateless server, so this always answers `405`.
+         */
+        delete: operations["mcpDeleteSession"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1776,14 +2247,87 @@ export interface components {
              */
             member_uids?: string[];
         };
+        /**
+         * @description A named set of database servers — the unit rights are scoped on.
+         *     Membership is **live**: a grant bound to this group covers whatever the
+         *     group contains right now, so adding a server widens every live grant
+         *     bound to it the instant it is saved.
+         */
+        ServerGroup: {
+            /** Format: uuid */
+            uid: string;
+            name: string;
+            description: string;
+            /** @description UIDs of the servers belonging to this group. */
+            member_uids: string[];
+            /**
+             * Format: int64
+             * @description How many currently-authorizing grants are bound to this group —
+             *     the blast radius of a membership edit, since membership is live.
+             */
+            readonly active_grant_count: number;
+            /**
+             * @description User groups whose members may approve or deny **grant requests**
+             *     targeting any server in this group. It is the group-level fallback:
+             *     a server that names its own access approvers ignores it entirely.
+             *     Several groups holding the same server **union** their lists.
+             *     Empty everywhere leaves the decision to admins.
+             */
+            access_approver_user_group_uids: string[];
+            /**
+             * @description User groups whose members may release **approval holds** on
+             *     statements against any server in this group. Same fallback and
+             *     union rules as `access_approver_user_group_uids`, and no hierarchy
+             *     between the two — neither implies the other.
+             *
+             *     Read live at decision time: editing this changes who may decide
+             *     immediately, including for statements already parked.
+             */
+            query_approver_user_group_uids: string[];
+            /** Format: uuid */
+            readonly created_by?: string | null;
+            /** Format: date-time */
+            readonly created_at: string;
+        };
+        CreateServerGroupRequest: {
+            name: string;
+            description?: string;
+            /**
+             * @description Replaces the group's membership. On update, omit to leave
+             *     membership untouched; an explicit empty array empties the group.
+             *     SSH bastions are rejected.
+             */
+            member_uids?: string[];
+            /**
+             * @description Group-level fallback for who may decide **grant requests** on this
+             *     group's servers. Unlike `member_uids`, this is written on every
+             *     update — omitting it clears the list, which is a real policy change
+             *     (the decision falls back to admins). Every uid must name an
+             *     existing user group.
+             */
+            access_approver_user_group_uids?: string[];
+            /**
+             * @description Group-level fallback for who may release **approval holds** on this
+             *     group's servers. Same write semantics as
+             *     `access_approver_user_group_uids`.
+             */
+            query_approver_user_group_uids?: string[];
+        };
         UpdateUserRequest: {
             /** @description New password */
             password?: string;
             /** @description New roles (admin only) */
             roles?: ("admin" | "viewer" | "connector")[];
             /**
-             * @description Replaces the user's group memberships wholesale (admin only).
+             * @description Replaces the user's user-group memberships wholesale (admin only).
              *     Omit to leave membership untouched.
+             */
+            user_group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Pre-rename spelling of `user_group_uids`. Sending
+             *     this field is a `400`, not a no-op: silently ignoring a scope
+             *     restriction would fail *open*.
              */
             group_uids?: string[];
         };
@@ -1809,10 +2353,10 @@ export interface components {
             /** @description SSL mode (disable, prefer, require, etc.) */
             ssl_mode?: string;
             /**
-             * @description Server protocol (ssh = an SSH bastion, not a database target)
+             * @description Server protocol. `ssh` and `kubernetes` are dial paths, not database targets: they are never grantable, never listable, and exist only to be referenced by another row's `via_uid`.
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh" | "kubernetes";
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -1829,11 +2373,23 @@ export interface components {
             created_by?: string | null;
             /**
              * Format: uuid
-             * @description SSH server (bastion) UID to tunnel through; null for a direct dial
+             * @description Tunnel row (`ssh` bastion or `kubernetes` cluster) UID to dial through; null for a direct dial. When it points at a `kubernetes` row, `host` addresses a pod (`<pod-name>`) or a service (`svc/<name>`) **inside that row's namespace** and `port` is the container port — a port-forward reaches a pod's own port and nothing else, so a database merely routable from the cluster network is out of scope.
              */
             via_uid?: string | null;
             /** @description TOFU-pinned SSH bastion host key (read-only; ssh servers only) */
             ssh_known_host_key?: string;
+            /** @description Operator-supplied PEM CA bundle of the Kubernetes API server (kubernetes servers only). Public challenge material, so it round-trips; the ServiceAccount token never does. Optional — a row that supplies none is pinned on first connect instead, and the result lands in `k8s_learned_ca_cert`. */
+            k8s_ca_cert?: string;
+            /** @description PEM CA bundle dbbat pinned itself on the first connect of a cluster row that supplied none (trust on first use). Read-only, and kept apart from `k8s_ca_cert` so a client can say which of the two is in force: a supplied bundle always wins. Clear it with `k8s_reset_learned_ca_cert` when the cluster's CA has rotated. */
+            k8s_learned_ca_cert?: string;
+            /** @description Namespace every lookup and port-forward is scoped to (kubernetes servers only) */
+            k8s_namespace?: string;
+            /** @description Whether API server certificate verification is disabled (kubernetes servers only) */
+            k8s_insecure_skip_tls_verify?: boolean;
+            /** @description User groups allowed to decide **grant requests** for this server. Always present, empty included: empty is a meaningful state — the decision falls back to this server's groups, then to admins. */
+            access_approver_user_group_uids: string[];
+            /** @description User groups allowed to release **approval holds** on statements against this server, under the same fallback chain. Neither approver kind implies the other. */
+            query_approver_user_group_uids: string[];
             /** @description Present only when the create/update request set `test_connection: true` */
             connection_test?: components["schemas"]["ConnectionTestResult"];
         };
@@ -1853,20 +2409,28 @@ export interface components {
              *     - `bastion_auth`: the SSH handshake failed (host-key mismatch or rejected credentials)
              *     - `target_dial`: the database target could not be reached (through the tunnel when via_uid is set)
              *     - `target_auth`: the database handshake or login failed
+             *     - `cluster_api`: the Kubernetes API server could not be reached (DNS, routing, firewall, untrusted CA)
+             *     - `cluster_auth`: the API server rejected the ServiceAccount token
+             *     - `cluster_rbac`: authenticated, but not allowed to create `pods/portforward` in the namespace
+             *     - `cluster_target`: the addressed pod (or the ready pod behind `svc/<name>`) does not resolve or is not Ready
              * @enum {string}
              */
-            stage: "config" | "bastion_dial" | "bastion_auth" | "target_dial" | "target_auth";
+            stage: "config" | "bastion_dial" | "bastion_auth" | "target_dial" | "target_auth" | "cluster_api" | "cluster_auth" | "cluster_rbac" | "cluster_target";
             /**
              * @description Machine-readable classification within the stage; `ok` on success
              * @enum {string}
              */
-            code: "ok" | "dns_failure" | "timeout" | "unreachable" | "host_key_mismatch" | "auth_rejected" | "bad_private_key" | "no_auth_method" | "missing_config" | "via_cycle" | "via_not_ssh" | "handshake_failed" | "db_auth_failed" | "db_handshake_failed" | "auth_not_verified" | "internal_error";
+            code: "ok" | "dns_failure" | "timeout" | "unreachable" | "host_key_mismatch" | "auth_rejected" | "bad_private_key" | "no_auth_method" | "missing_config" | "via_cycle" | "via_not_ssh" | "handshake_failed" | "db_auth_failed" | "db_handshake_failed" | "auth_not_verified" | "k8s_forbidden" | "k8s_target_not_found" | "k8s_target_not_ready" | "k8s_ca_pin_mismatch" | "internal_error";
             /** @description Human-readable explanation, safe to display to an admin */
             message: string;
             /** @description True when this check performed the TOFU pin (first successful connect to a bastion) */
             host_key_pinned?: boolean;
             /** @description The bastion's public host key after the check (ssh servers only) */
             ssh_known_host_key?: string;
+            /** @description True when this check pinned the Kubernetes API server's CA on a first connect (kubernetes servers that supplied no bundle) */
+            k8s_ca_pinned?: boolean;
+            /** @description The cluster's TOFU-learned CA bundle after the check (kubernetes servers only); empty when the row supplied its own, which wins */
+            k8s_learned_ca_cert?: string;
             /**
              * Format: int64
              * @description How long the check took, in milliseconds
@@ -1909,11 +2473,11 @@ export interface components {
              */
             ssl_mode: string;
             /**
-             * @description Server protocol (ssh = an SSH bastion, not a database target)
+             * @description Server protocol. `ssh` and `kubernetes` are dial paths, not database targets: they are never grantable, never listable, and exist only to be referenced by another row's `via_uid`.
              * @default postgresql
              * @enum {string}
              */
-            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh";
+            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh" | "kubernetes";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -1925,13 +2489,38 @@ export interface components {
             listable: boolean;
             /**
              * Format: uuid
-             * @description SSH server (bastion) UID to tunnel through; null for a direct dial
+             * @description Tunnel row (`ssh` bastion or `kubernetes` cluster) UID to dial through; null for a direct dial. When it points at a `kubernetes` row, `host` addresses a pod (`<pod-name>`) or a service (`svc/<name>`) **inside that row's namespace** and `port` is the container port — a port-forward reaches a pod's own port and nothing else, so a database merely routable from the cluster network is out of scope.
              */
             via_uid?: string | null;
             /** @description SSH private key (PEM) for an ssh server; write-only, never returned */
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
+            /** @description PEM CA bundle of the Kubernetes API server. Optional: a `kubernetes` row that supplies none learns the API server's CA on first connect and verifies against it from then on (trust on first use), which is weaker than pasting the bundle but never falls back to the host's system trust store. Supplying one always wins over a learned pin, and retires it. */
+            k8s_ca_cert?: string;
+            /** @description Namespace the ServiceAccount's Role covers; every pod/service lookup and every port-forward is scoped to it. Required for a `kubernetes` row. */
+            k8s_namespace?: string;
+            /** @description Disable API server certificate verification. For throwaway clusters only: with it set, anything that can intercept the API server connection can read the ServiceAccount token. */
+            k8s_insecure_skip_tls_verify?: boolean;
+            /**
+             * @description User groups whose members may approve or deny **grant requests**
+             *     targeting this server, in addition to admins. Omitted or empty falls
+             *     back to the `access_approver_user_group_uids` of the server groups
+             *     this server belongs to (unioned across groups), and then to admins
+             *     alone — which is the behavior of a server that configures none of
+             *     this.
+             */
+            access_approver_user_group_uids?: string[];
+            /**
+             * @description User groups whose members may release **approval holds** on
+             *     statements against this server. Same fallback chain as
+             *     `access_approver_user_group_uids`, and no hierarchy between the two:
+             *     a query approver gains no say over grant requests, nor the reverse.
+             *
+             *     The grant definition's own `approver_user_group_uids` still wins
+             *     outright when it is non-empty; this is the fallback under it.
+             */
+            query_approver_user_group_uids?: string[];
             /**
              * @description Optional; defaults to false when omitted. When true, the API dials the newly created
              *     row once and returns the staged outcome as `connection_test` in the response.
@@ -1958,7 +2547,7 @@ export interface components {
              * @description Server protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh" | "kubernetes";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -1967,15 +2556,36 @@ export interface components {
             listable?: boolean;
             /**
              * Format: uuid
-             * @description SSH server (bastion) UID to tunnel through
+             * @description Tunnel row (`ssh` bastion or `kubernetes` cluster) UID to dial through; null for a direct dial. When it points at a `kubernetes` row, `host` addresses a pod (`<pod-name>`) or a service (`svc/<name>`) **inside that row's namespace** and `port` is the container port — a port-forward reaches a pod's own port and nothing else, so a database merely routable from the cluster network is out of scope.
              */
             via_uid?: string | null;
-            /** @description When true, removes the SSH tunnel (direct dial) */
+            /** @description When true, removes the tunnel (direct dial) */
             clear_via_uid?: boolean;
             /** @description SSH private key (PEM); write-only, never returned */
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
+            /** @description PEM CA bundle of the Kubernetes API server. Optional: a `kubernetes` row that supplies none learns the API server's CA on first connect and verifies against it from then on (trust on first use), which is weaker than pasting the bundle but never falls back to the host's system trust store. Supplying one always wins over a learned pin, and retires it. */
+            k8s_ca_cert?: string;
+            /** @description Namespace the ServiceAccount's Role covers; every pod/service lookup and every port-forward is scoped to it. Required for a `kubernetes` row. */
+            k8s_namespace?: string;
+            /** @description Disable API server certificate verification. For throwaway clusters only: with it set, anything that can intercept the API server connection can read the ServiceAccount token. */
+            k8s_insecure_skip_tls_verify?: boolean;
+            /** @description When true, forgets the CA bundle pinned on first connect so the next connect pins afresh. The exit from a stale pin when the cluster's CA rotated and you do not have the new bundle to paste; supplying a non-empty `k8s_ca_cert` clears it too. */
+            k8s_reset_learned_ca_cert?: boolean;
+            /**
+             * @description Replaces the server's grant-request approver list. Omit to leave it
+             *     alone; an explicit empty array clears it, handing the decision back
+             *     to the server groups and then to admins. Takes effect immediately,
+             *     including for requests already filed.
+             */
+            access_approver_user_group_uids?: string[];
+            /**
+             * @description Replaces the server's approval-hold approver list. Same semantics —
+             *     and it applies to statements *already parked*, since resolution is
+             *     live at decision time.
+             */
+            query_approver_user_group_uids?: string[];
             /**
              * @description Optional; defaults to false when omitted. When true, the API dials the updated row
              *     once and returns the staged outcome as `connection_test` in the response.
@@ -2032,6 +2642,19 @@ export interface components {
             decision_reason?: string | null;
             /** Format: uuid */
             resulting_grant_id?: string | null;
+            /**
+             * @description Which hat the **calling** user would wear to decide this request:
+             *     `admin`, `server_approver` (a member of the access-approver groups
+             *     resolved off the target server or its server groups), or empty when
+             *     they may see it but not decide it — most often their own request,
+             *     which nobody may self-approve.
+             *
+             *     Computed per request, because the answer is per server: an ops lead
+             *     can get `server_approver` on the staging rows of a listing and empty
+             *     on the production ones.
+             * @enum {string}
+             */
+            readonly approver_role?: "" | "admin" | "server_approver";
         };
         CreateGrantRequestPayload: {
             /**
@@ -2141,12 +2764,44 @@ export interface components {
              *     keeps behaving. A dangling uid (deleted group) matches nobody, so
              *     the definition fails closed.
              */
-            group_uids: string[];
+            user_group_uids: string[];
             /**
-             * @description Restricts this definition to these databases. An empty array means
-             *     every database.
+             * @description Restricts this definition to the databases currently belonging to
+             *     these server groups. An empty array means every database.
+             *
+             *     Membership is resolved **live**: adding a server to a scoped group
+             *     makes the definition requestable against it immediately, with no
+             *     edit and therefore no new version. A dangling uid (deleted group)
+             *     matches no database, so the definition fails closed.
+             *
+             *     Replaces the removed per-database `database_uids`; existing scopes
+             *     were mirrored into auto-created server groups by migration
+             *     20260809010000.
              */
-            database_uids: string[];
+            server_group_uids: string[];
+            /**
+             * @description `server_group_uids` resolved to the concrete databases currently
+             *     in scope, so a non-admin requester can narrow their database
+             *     picker without needing the admin-only `GET /server-groups`
+             *     (membership there is access-relevant, so that gate stays). Only
+             *     `GET /grant-definitions` and `GET /grant-definitions/{uid}`
+             *     populate this; it leaks no group name or membership shape beyond
+             *     "these databases are in scope," which a requester could already
+             *     discover by trying. It is a convenience only — never the
+             *     control: the server still enforces scope on
+             *     `POST /grant-requests` regardless of what a client sends or
+             *     ignores here.
+             *
+             *     `null` (or the key omitted) means `server_group_uids` is empty:
+             *     every database is in scope. A present array — which may be
+             *     `[]` — means `server_group_uids` is non-empty and this is the
+             *     resolved union of every scoped group's current members; `[]`
+             *     means the definition is scoped but currently covers zero
+             *     databases (e.g. every referenced group is empty). Do not treat
+             *     a missing key the same as `[]`: one is "everything", the other
+             *     is "nothing".
+             */
+            readonly scoped_database_uids?: string[] | null;
             /**
              * @description RE2 patterns that suspend a matching statement mid-flight until an
              *     admin or an approver-group member approves it. An empty array means
@@ -2173,7 +2828,7 @@ export interface components {
              *     from this definition, *in addition to* admins. An empty array means
              *     admins only. Self-approval is always rejected.
              */
-            approver_group_uids?: string[];
+            approver_user_group_uids?: string[];
             /**
              * @description `false` once an operator has deactivated the definition. This is a
              *     withdrawal, not an archival: it applies to every version of the
@@ -2231,12 +2886,12 @@ export interface components {
              *     keeps behaving. A dangling uid (deleted group) matches nobody, so
              *     the definition fails closed.
              */
-            group_uids?: string[];
+            user_group_uids?: string[];
             /**
-             * @description Restricts this definition to these databases. An empty array means
-             *     every database.
+             * @description Restricts this definition to the databases currently belonging to
+             *     these server groups. An empty array means every database.
              */
-            database_uids?: string[];
+            server_group_uids?: string[];
             /**
              * @description RE2 patterns that suspend a matching statement mid-flight until an
              *     admin or an approver-group member approves it. An empty array means
@@ -2252,9 +2907,30 @@ export interface components {
              */
             sample_queries?: string[];
             /**
-             * @description Groups whose members may resolve approval holds on grants built
-             *     from this definition, *in addition to* admins. An empty array means
-             *     admins only. Self-approval is always rejected.
+             * @description User groups whose members may resolve approval holds on grants
+             *     built from this definition, *in addition to* admins. An empty
+             *     array means admins only. Self-approval is always rejected.
+             */
+            approver_user_group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Per-database scoping was replaced by
+             *     `server_group_uids`. Sending this field is a `400`, not a no-op:
+             *     silently ignoring a scope restriction would fail *open*.
+             */
+            database_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Pre-rename spelling of `user_group_uids`. Sending
+             *     this field is a `400`, not a no-op: silently ignoring a scope
+             *     restriction would fail *open*.
+             */
+            group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Pre-rename spelling of `approver_user_group_uids`.
+             *     Sending this field is a `400`, not a no-op: silently ignoring a
+             *     scope restriction would fail *open*.
              */
             approver_group_uids?: string[];
         };
@@ -2295,15 +2971,36 @@ export interface components {
              *     step and are approved (and the grant materialized) instantly at request time.
              */
             auto_approve?: boolean;
-            /** @description Same semantics as `CreateGrantDefinitionRequest.group_uids`. */
-            group_uids?: string[];
-            /** @description Same semantics as `CreateGrantDefinitionRequest.database_uids`. */
-            database_uids?: string[];
+            /** @description Same semantics as `CreateGrantDefinitionRequest.user_group_uids`. */
+            user_group_uids?: string[];
+            /** @description Same semantics as `CreateGrantDefinitionRequest.server_group_uids`. */
+            server_group_uids?: string[];
             /** @description Same semantics as `CreateGrantDefinitionRequest.approval_patterns`. */
             approval_patterns?: string[];
             /** @description Same semantics as `CreateGrantDefinitionRequest.sample_queries`. */
             sample_queries?: string[];
-            /** @description Same semantics as `CreateGrantDefinitionRequest.approver_group_uids`. */
+            /** @description Same semantics as `CreateGrantDefinitionRequest.approver_user_group_uids`. */
+            approver_user_group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Per-database scoping was replaced by
+             *     `server_group_uids`. Sending this field is a `400`, not a no-op:
+             *     silently ignoring a scope restriction would fail *open*.
+             */
+            database_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Pre-rename spelling of `user_group_uids`. Sending
+             *     this field is a `400`, not a no-op: silently ignoring a scope
+             *     restriction would fail *open*.
+             */
+            group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Pre-rename spelling of `approver_user_group_uids`.
+             *     Sending this field is a `400`, not a no-op: silently ignoring a
+             *     scope restriction would fail *open*.
+             */
             approver_group_uids?: string[];
         };
         AccessGrant: {
@@ -2319,14 +3016,36 @@ export interface components {
             user_id: string;
             /**
              * Format: uuid
-             * @description Database UID
+             * @description The grant's anchor database — the one it was issued for. It is what
+             *     an unbound grant covers, and what a group-bound one falls back to
+             *     if its group is deleted outright.
              */
             database_id: string;
             /**
              * Format: uuid
+             * @description The server group this grant is bound to. A bound grant covers every
+             *     server the group contains **right now**, and only those: the
+             *     binding replaces the single-database scope rather than adding to
+             *     it, so a server removed from the group stops being covered even
+             *     when it is the anchor.
+             *
+             *     Membership is live and never snapshotted, so adding a server to the
+             *     group widens this grant the instant it is saved.
+             *
+             *     `null` — the default, and the state of every grant issued from a
+             *     definition with no server-group scope — means "anchor database
+             *     only".
+             *
+             *     Quotas and `priority` follow the grant, not the database: one
+             *     `max_query_counts` and one `max_bytes_transferred` budget are
+             *     consumed across the whole group.
+             */
+            server_group_uid?: string | null;
+            /**
+             * Format: uuid
              * @description The exact grant definition *version* this grant was issued from.
              *     Definitions are immutably versioned — an edit archives the current
-             *     row and inserts a successor — so this pins the behaviour the grant
+             *     row and inserts a successor — so this pins the behavior the grant
              *     was issued with and no later edit can change it.
              */
             grant_definition_id: string;
@@ -2888,6 +3607,236 @@ export interface components {
              */
             created_at: string;
         };
+        /**
+         * @description The newest `user.roles_synced` audit entry of one user, as returned by
+         *     `GET /users/role-syncs`. A projection of the audit log, carrying the
+         *     entry's own UID and details rather than summarising them.
+         */
+        UserRoleSync: {
+            /**
+             * Format: uuid
+             * @description UID of the audit entry this row projects
+             */
+            uid: string;
+            /** @description Always `user.roles_synced` */
+            event_type: string;
+            /**
+             * Format: uuid
+             * @description User whose roles the directory changed
+             */
+            user_id: string;
+            /** @description Username of that user, joined in to save a second lookup */
+            username: string;
+            /**
+             * @description The audit entry's details verbatim — `provider`, `groups`,
+             *     `previous_roles`, `roles`, `granted`, `revoked`. The groups are why
+             *     the change happened.
+             */
+            details?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Format: date-time
+             * @description When the sync happened
+             */
+            created_at: string;
+        };
+        /**
+         * @description The first record that failed to verify. It identifies the record and
+         *     says what did not add up; it never echoes the record's content.
+         */
+        ChainBreak: {
+            /**
+             * Format: uuid
+             * @description UID of the offending row, or of the connection when the break is a
+             *     stamped-head mismatch
+             */
+            uid: string;
+            /**
+             * Format: int64
+             * @description Position in the chain, or 0 when the break is about the chain as a whole
+             */
+            chain_seq: number;
+            /**
+             * Format: uuid
+             * @description Set for query-chain breaks
+             */
+            connection_uid?: string;
+            /**
+             * Format: uuid
+             * @description Set for captured-row-chain breaks. `chain_seq` then carries the
+             *     offending row's `row_number` rather than a chain position.
+             */
+            query_uid?: string;
+            /** @description Human-readable description of what did not add up */
+            reason: string;
+        };
+        /**
+         * @description Outcome of walking the store-wide audit chain. Carries counts,
+         *     positions and the chain head — never the chain key, never the content
+         *     of an audited record.
+         */
+        AuditChainVerification: {
+            /**
+             * @description Which chain was walked
+             * @enum {string}
+             */
+            chain: "audit";
+            /** @description True when the chain is intact */
+            verified: boolean;
+            /**
+             * Format: int64
+             * @description How many chained rows were walked. When there is a break, this is
+             *     how many verified before it: nothing after a break means anything.
+             */
+            entries: number;
+            /**
+             * Format: int64
+             * @description Chain position the walk ended on
+             */
+            head_seq: number;
+            /**
+             * @description The chain head, hex-encoded. Record it outside the database — it is
+             *     what detects a chain truncated and re-sealed by someone who had the
+             *     key. Publishing a MAC is safe; the key that produced it never
+             *     leaves the process.
+             */
+            head_mac: string;
+            /**
+             * Format: int64
+             * @description Rows written before chaining was introduced. No MAC exists for them
+             *     and none can be created after the fact, so they are reported rather
+             *     than folded into the verified count.
+             */
+            unverifiable_pre_anchor_entries: number;
+            break?: components["schemas"]["ChainBreak"];
+            /**
+             * Format: date-time
+             * @description When this walk ran
+             */
+            checked_at: string;
+            /**
+             * @description True when this answer is a remembered walk rather than one run for
+             *     this request. A chain walk is O(rows), so its outcome is cached for
+             *     a minute.
+             */
+            cached: boolean;
+        };
+        /**
+         * @description Outcome of walking the per-connection query chains. Carries counts,
+         *     positions and — for a single-connection walk — that chain's head. Never
+         *     the chain key, never SQL text, parameters or any other statement
+         *     content.
+         */
+        QueryChainVerification: {
+            /**
+             * @description Which chain was walked
+             * @enum {string}
+             */
+            chain: "queries";
+            /** @description True when every chain walked is intact */
+            verified: boolean;
+            /**
+             * Format: uuid
+             * @description Set only when the walk was scoped to one session
+             */
+            connection_uid?: string;
+            /**
+             * Format: int64
+             * @description How many sessions were walked
+             */
+            connections: number;
+            /**
+             * Format: int64
+             * @description How many chained statements were checked across them
+             */
+            statements: number;
+            /**
+             * Format: int64
+             * @description Chains missing their oldest statements — what
+             *     DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session.
+             *     Expected housekeeping, not tampering; everything after the
+             *     truncation is still verified. A session the sweep emptied of every
+             *     statement is counted here as well; an emptied session the sweep
+             *     cannot account for is a break instead.
+             */
+            chains_with_truncated_prefix: number;
+            /**
+             * Format: int64
+             * @description Chain position the walk ended on. Reported only for a
+             *     single-connection walk: an aggregate head over many independent
+             *     chains would not mean anything.
+             */
+            head_seq?: number;
+            /** @description That chain's head, hex-encoded. Single-connection walks only. */
+            head_mac?: string;
+            break?: components["schemas"]["ChainBreak"];
+            /**
+             * Format: date-time
+             * @description When this walk ran
+             */
+            checked_at: string;
+            /** @description True when this answer is a remembered walk rather than one run for this request */
+            cached: boolean;
+        };
+        /**
+         * @description Outcome of walking the per-capture result-row chains. Carries counts,
+         *     positions and — for a single-capture walk — that chain's head. Never
+         *     the chain key, never a captured row's data or any other record content.
+         */
+        RowChainVerification: {
+            /**
+             * @description Which chain was walked
+             * @enum {string}
+             */
+            chain: "rows";
+            /** @description True when every chain walked is intact */
+            verified: boolean;
+            /**
+             * Format: uuid
+             * @description Set only when the walk was scoped to one session
+             */
+            connection_uid?: string;
+            /**
+             * Format: uuid
+             * @description Set only when the walk was scoped to one capture
+             */
+            query_uid?: string;
+            /**
+             * Format: int64
+             * @description How many captures were walked
+             */
+            captures: number;
+            /**
+             * Format: int64
+             * @description How many chained captured rows were checked across them
+             */
+            rows: number;
+            /**
+             * Format: int64
+             * @description Rows captured before the row chain migration. No MAC exists for
+             *     them and none can be created after the fact, so they are reported
+             *     rather than folded into the verified count.
+             */
+            unverifiable_pre_migration_rows: number;
+            /**
+             * Format: int64
+             * @description The `row_number` the walk ended on. Reported only for a
+             *     single-capture walk: an aggregate head over many independent
+             *     chains would not mean anything.
+             */
+            head_row_number?: number;
+            /** @description That chain's head, hex-encoded. Single-capture walks only. */
+            head_mac?: string;
+            break?: components["schemas"]["ChainBreak"];
+            /**
+             * Format: date-time
+             * @description When this walk ran
+             */
+            checked_at: string;
+            /** @description True when this answer is a remembered walk rather than one run for this request */
+            cached: boolean;
+        };
         /** @description Ready-to-paste connection URL for a database */
         ConnectionInfo: {
             /** Format: uuid */
@@ -2992,6 +3941,31 @@ export interface components {
         MessageResponse: {
             /** @description Success message */
             message: string;
+        };
+        /**
+         * @description A JSON-RPC 2.0 message as defined by the Model Context Protocol. The
+         *     body may also be a batch (an array of these). The shape is deliberately
+         *     open: MCP owns this schema, and pinning it here would go stale against
+         *     the protocol rather than validate anything useful.
+         */
+        MCPMessage: {
+            /** @enum {string} */
+            jsonrpc: "2.0";
+            /** @description Request id; absent on notifications */
+            id?: string | number;
+            /** @description MCP method, e.g. initialize, tools/list, tools/call */
+            method?: string;
+            params?: {
+                [key: string]: unknown;
+            };
+            result?: {
+                [key: string]: unknown;
+            };
+            error?: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
         };
     };
     responses: {
@@ -3120,6 +4094,8 @@ export type User = components['schemas']['User'];
 export type CreateUserRequest = components['schemas']['CreateUserRequest'];
 export type UserGroup = components['schemas']['UserGroup'];
 export type CreateUserGroupRequest = components['schemas']['CreateUserGroupRequest'];
+export type ServerGroup = components['schemas']['ServerGroup'];
+export type CreateServerGroupRequest = components['schemas']['CreateServerGroupRequest'];
 export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
 export type Database = components['schemas']['Database'];
 export type ConnectionTestResult = components['schemas']['ConnectionTestResult'];
@@ -3162,6 +4138,11 @@ export type QueryWithRows = components['schemas']['QueryWithRows'];
 export type QueryRow = components['schemas']['QueryRow'];
 export type QueryRowsResponse = components['schemas']['QueryRowsResponse'];
 export type AuditEvent = components['schemas']['AuditEvent'];
+export type UserRoleSync = components['schemas']['UserRoleSync'];
+export type ChainBreak = components['schemas']['ChainBreak'];
+export type AuditChainVerification = components['schemas']['AuditChainVerification'];
+export type QueryChainVerification = components['schemas']['QueryChainVerification'];
+export type RowChainVerification = components['schemas']['RowChainVerification'];
 export type ConnectionInfo = components['schemas']['ConnectionInfo'];
 export type GlobalParameter = components['schemas']['GlobalParameter'];
 export type SetParameterRequest = components['schemas']['SetParameterRequest'];
@@ -3170,6 +4151,7 @@ export type ResolvedEndpoints = components['schemas']['ResolvedEndpoints'];
 export type InstanceInfo = components['schemas']['InstanceInfo'];
 export type Error = components['schemas']['Error'];
 export type MessageResponse = components['schemas']['MessageResponse'];
+export type McpMessage = components['schemas']['MCPMessage'];
 export type ResponseBadRequest = components['responses']['BadRequest'];
 export type ResponseUnauthorized = components['responses']['Unauthorized'];
 export type ResponseAuthRateLimited = components['responses']['AuthRateLimited'];
@@ -3391,13 +4373,66 @@ export interface operations {
                     "application/json": {
                         providers?: {
                             /** @enum {string} */
-                            type?: "password" | "slack";
+                            type?: "password" | "slack" | "oidc";
                             enabled?: boolean;
                             /** @description URL to initiate OAuth flow (only for OAuth providers) */
                             authorize_url?: string;
+                            /** @description Login-button label for providers whose branding is operator-configured (the generic OIDC provider, DBB_OIDC_DISPLAY_NAME). Absent for providers the frontend labels itself, such as Slack. */
+                            display_name?: string;
                         }[];
+                        /** @description Which dbbat roles the identity provider's group mapping (DBB_OIDC_ROLE_MAPPING) owns. Applied on every login, so the users page uses this to badge those roles as managed by SSO and to warn that a manual edit will be undone. Only the role names are returned — the directory group values are topology and never leave the server through this unauthenticated endpoint. */
+                        role_mapping?: {
+                            /** @description A mapping is configured and the provider it applies to is registered. False when either is missing. */
+                            enabled: boolean;
+                            /** @description The roles the mapping governs, sorted. Empty when disabled. */
+                            roles: ("admin" | "viewer" | "connector")[];
+                            /** @description Provider key the mapping applies to (`oidc`), so the UI can resolve its display name from the list above. Absent when disabled. */
+                            provider?: string;
+                        };
                     };
                 };
+            };
+        };
+    };
+    initiateOIDCAuth: {
+        parameters: {
+            query?: {
+                /** @description URL to redirect to after successful login */
+                redirect?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the issuer's authorization endpoint */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    oidcAuthCallback: {
+        parameters: {
+            query?: {
+                code?: string;
+                state?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to app with a one-time login exchange code */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -3690,6 +4725,31 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    listUserRoleSyncs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest role sync per user */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        role_syncs?: components["schemas"]["UserRoleSync"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     getUser: {
         parameters: {
             query?: never;
@@ -3709,7 +4769,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["User"] & {
-                        groups: components["schemas"]["UserGroup"][];
+                        user_groups: components["schemas"]["UserGroup"][];
                     };
                 };
             };
@@ -4353,6 +5413,221 @@ export interface operations {
             path: {
                 uid: string;
                 user_uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Member removed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listServerGroups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of server groups */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        server_groups?: components["schemas"]["ServerGroup"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createServerGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateServerGroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Group created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerGroup"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getServerGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Group details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerGroup"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteServerGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Group deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateServerGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateServerGroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Group updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerGroup"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listServerGroupMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Servers in the group */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        servers?: components["schemas"]["DatabaseLimited"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    addServerGroupMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                server_uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Member added */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    removeServerGroupMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                server_uid: string;
             };
             cookie?: never;
         };
@@ -5038,7 +6313,21 @@ export interface operations {
                 };
                 content: {
                     "application/json": {
-                        queries?: components["schemas"]["Query"][];
+                        queries?: (components["schemas"]["Query"] & {
+                            /**
+                             * @description Why the calling user may resolve this hold:
+                             *     `admin`; `definition_approver` (a member of the
+                             *     grant definition's approver groups, which wins
+                             *     whenever that list is non-empty);
+                             *     `server_approver` (a member of the query-approver
+                             *     groups resolved off the target server or its
+                             *     server groups); or empty when they may watch the
+                             *     hold but not release it — always the case for
+                             *     their own statement.
+                             * @enum {string}
+                             */
+                            readonly approver_role?: "" | "admin" | "definition_approver" | "server_approver";
+                        })[];
                     };
                 };
             };
@@ -5278,7 +6567,11 @@ export interface operations {
     listAudit: {
         parameters: {
             query?: {
-                /** @description Filter by event type (e.g., user.created, grant.revoked) */
+                /**
+                 * @description Filter by event type (e.g., user.created, grant.revoked). Naming
+                 *     `connection.opened` or `connection.closed` is also how those
+                 *     session entries are listed, since they are excluded by default.
+                 */
                 event_type?: string;
                 /** @description Filter by user UID (the user being acted upon) */
                 user_id?: string;
@@ -5312,6 +6605,112 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    verifyAuditChain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Verification outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditChainVerification"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description This instance has no chain key, so nothing it stores is chained */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    verifyQueryChains: {
+        parameters: {
+            query?: {
+                /** @description Verify only this connection's chain */
+                connection?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Verification outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryChainVerification"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description This instance has no chain key, so nothing it stores is chained */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    verifyRowChains: {
+        parameters: {
+            query?: {
+                /** @description Verify only this connection's captures */
+                connection?: string;
+                /** @description Verify only this capture (also reports that chain's head) */
+                query?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Verification outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RowChainVerification"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description This instance has no chain key, so nothing it stores is chained */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };
@@ -5388,6 +6787,31 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description List of SSH servers */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        servers?: components["schemas"]["Database"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listTunnelServers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of tunnel servers */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5558,6 +6982,104 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
+        };
+    };
+    mcpStream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            401: components["responses"]["Unauthorized"];
+            /** @description Not supported by a stateless MCP server */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mcpEndpoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MCPMessage"];
+            };
+        };
+        responses: {
+            /**
+             * @description JSON-RPC response, as `application/json` or as an
+             *     `text/event-stream` SSE body depending on what the client accepted.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPMessage"];
+                    "text/event-stream": string;
+                };
+            };
+            /** @description Notification or response accepted with no body */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description Authenticated, but not with an API key */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description MCP is disabled on this instance */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Request body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mcpDeleteSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            401: components["responses"]["Unauthorized"];
+            /** @description Not supported by a stateless MCP server */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -120,6 +121,53 @@ func TestApproveGrantRequest_CreatesGrant(t *testing.T) {
 	// Second approve should be a no-op error
 	if _, _, err := store.ApproveGrantRequest(ctx, req.UID, admin.UID); !errors.Is(err, ErrInvalidTransition) {
 		t.Errorf("double-approve err = %v, want ErrInvalidTransition", err)
+	}
+}
+
+// TestApprovedGrantIsUsableWhenTheStoreClockLagsTheProcess pins the clock a
+// grant's window is stamped from, which has to be the clock the auth path
+// compares it against: GetActiveGrant filters `starts_at <= NOW()`, and
+// PostgreSQL evaluates that against *its* clock. dbbat and its store are two
+// machines, so a window stamped from time.Now() is refused by every one of the
+// five proxies for as long as the process runs ahead of the store — an
+// "approved but not usable yet" hole exactly as wide as the skew, and what
+// made TestApprovedRequestBindsTheGrantToTheServerGroup flake on a laptop
+// whose Docker VM had drifted a few milliseconds.
+//
+// Five seconds of lag is a comically large skew for a machine and a very small
+// one for a test: it fails deterministically against a window stamped from the
+// process clock, and is invisible to one stamped from the store's.
+func TestApprovedGrantIsUsableWhenTheStoreClockLagsTheProcess(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStoreWithClockSkew(t, -5*time.Second)
+	ctx := context.Background()
+
+	admin, user, db, def := setupRequestFixtures(t, ctx, store, "dbclock")
+
+	req, err := store.CreateGrantRequest(ctx, &GrantRequest{
+		UserID:            user.UID,
+		GrantDefinitionID: def.UID,
+		DatabaseID:        db.UID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	grant, _, err := store.ApproveGrantRequest(ctx, req.UID, admin.UID)
+	if err != nil {
+		t.Fatalf("ApproveGrantRequest: %v", err)
+	}
+
+	// The grant authorizes a session the instant it exists — no waiting for
+	// two clocks to converge.
+	got, err := store.GetActiveGrant(ctx, user.UID, db.UID)
+	if err != nil {
+		t.Fatalf("GetActiveGrant right after approval: %v", err)
+	}
+
+	if got.UID != grant.UID {
+		t.Errorf("GetActiveGrant = %v, want the approved grant %v", got.UID, grant.UID)
 	}
 }
 

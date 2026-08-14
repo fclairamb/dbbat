@@ -22,6 +22,15 @@ For each query, DBBat records:
 - **Result rows**: optionally captured up to `query_storage.max_result_rows` / `max_result_bytes`
 - **Capture completeness**: `results_truncated` and `results_dropped` (see [Partial captures](#partial-captures))
 
+### Blocked statements
+
+A statement a grant refuses — a write under `read_only`, a `CREATE TABLE` under
+`block_ddl`, a `COPY` under `block_copy` — never reaches the upstream database,
+and is written to query history anyway, with the refusal as its **error** and
+`duration_ms` / `rows_affected` at zero. An attempt to do something a grant did
+not permit is evidence in its own right, so all five engines record it the same
+way and the UI badges it like any other failed query.
+
 ### Engine-specific notes
 
 - **PostgreSQL**: both Simple Query (`Q`) and Extended Query (`P`/`B`/`E`) are logged. Parameter values are stored as JSONB.

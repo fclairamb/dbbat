@@ -1,0 +1,293 @@
+---
+sidebar_position: 8
+sidebar_label: Tamper-Evident Audit Log
+title: Tamper-Evident Audit Log
+description: DBBat HMAC-chains its audit log, query history and captured result rows, so modifying, deleting or reordering a record is detectable with dbbat audit verify.
+---
+
+# Tamper-Evident Audit Log
+
+Logging everything is only half the story. The other half is being able to show
+that nobody edited the log afterwards — including the person who runs the
+database it lives in.
+
+DBBat chains its records with a keyed MAC. Every audit entry, every statement in
+a session's query history, and every row of a captured result set carries an
+HMAC over its own content plus the previous record's MAC. Change a record,
+delete one, swap two around, and the chain no longer adds up. `dbbat audit
+verify` walks it and names the first record that broke.
+
+The key is derived from DBBat's own encryption key (`DBB_KEY` /
+`DBB_KEYFILE`) and never leaves the process — it is never stored in the
+database and never logged. That is what makes this different from a plain hash
+chain: someone who rewrites a row can recompute a hash, but not an HMAC.
+**Direct access to DBBat's PostgreSQL store is not enough to forge the chain.**
+
+Nothing to turn on. Chaining is always active.
+
+## Verifying
+
+```bash
+# The administrative audit log: users, servers, grants, definitions, API keys
+dbbat audit verify
+
+# The per-connection query history
+dbbat audit verify --queries
+
+# A single session
+dbbat audit verify --queries --connection 019fe8bb-b9d5-74ab-b512-601b6eccda98
+
+# The captured result rows, per query (optionally scoped to one session)
+dbbat audit verify --rows
+```
+
+They all need the same `DBB_DSN` and encryption key the server runs with. The
+command exits non-zero if the chain does not verify, so it drops straight into
+a cron job or a CI check.
+
+A clean run reports the chain head:
+
+```json
+{"level":"INFO","msg":"Audit chain verified","entries":1284,"head_seq":1284,
+ "head_mac":"9f2c…","unverifiable_pre_anchor_entries":37}
+```
+
+:::tip Record the head MAC outside the database
+
+A chain always verifies against itself, so someone with the key could truncate
+it and re-seal it. Writing `head_mac` down somewhere else — an evidence file, a
+ticket, a signed note — is what closes that hole: the entry count must only
+grow, and the head you recorded last quarter must still be in the chain today.
+
+:::
+
+When something is wrong, the command names the first bad record and stops —
+everything after a break is meaningless anyway:
+
+```
+AUDIT CHAIN BROKEN break="chain_seq 412, row 019fe8bb-…: mac does not
+match the entry's content: the entry was modified"
+```
+
+## Verifying over the API
+
+The same walk is reachable over REST, so an evidence script does not need shell
+access to the host:
+
+```bash
+# The administrative audit chain
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify"
+
+# The per-connection query chains
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/queries"
+
+# A single session (also reports that chain's head)
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/queries?connection=019fe8bb-b9d5-74ab-b512-601b6eccda98"
+
+# The captured result rows — every capture, one session's, or one capture
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/rows"
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/rows?connection=019fe8bb-b9d5-74ab-b512-601b6eccda98"
+
+# A single capture (also reports that chain's head)
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/rows?query=019fe8c1-2a0f-70d3-9c14-8d2f0b4a6e77"
+```
+
+```json
+{"chain":"audit","verified":true,"entries":1284,"head_seq":1284,
+ "head_mac":"9f2c…","unverifiable_pre_anchor_entries":37,
+ "checked_at":"2026-08-10T09:14:02Z","cached":false}
+```
+
+```json
+{"chain":"rows","verified":true,"captures":318,"rows":54210,
+ "unverifiable_pre_migration_rows":0,
+ "checked_at":"2026-08-10T09:14:02Z","cached":false}
+```
+
+`?connection=` and `?query=` cannot be combined on the row endpoint — a query
+already names exactly one capture — and a capture-scoped walk is the only shape
+that reports a head, because an aggregate head over independent chains would
+not mean anything.
+
+All three endpoints require the **admin** role — narrower than the `GET /api/v1/audit`
+list a viewer may read. A broken chain still answers `200`, with
+`"verified": false` and a `break` object naming the first bad record: the
+failure is in the data, not in the request. The response carries counts,
+positions, the head MAC and the break reason, and never the chain key or the
+content of any record.
+
+:::warning The API answer is not equivalent to the CLI
+
+`dbbat audit verify` runs where the key lives and can be run by someone who
+does **not** trust the running server. `GET /api/v1/audit/verify` is served *by*
+that server — a compromised or modified DBBat can return `"verified": true`
+without walking anything, and the caller cannot tell.
+
+And because a walk's outcome is cached for a minute, **the answer can be up to
+60 seconds old**: a chain broken moments ago keeps reporting
+`"verified": true` until that cached walk expires. Treat the endpoint as a
+monitoring signal, not a point-in-time attestation — `dbbat audit verify` is the
+instrument for the latter.
+
+Use the endpoint for routine evidence collection, and the CLI (or an
+independent re-run of it from a trusted binary against the store directly) when
+the integrity of the DBBat process itself is part of what is being assessed.
+Do not present the two as interchangeable in a control narrative.
+
+:::
+
+A chain walk is `O(rows)`, so an instance remembers each walk's outcome for a
+minute and runs at most one walk at a time. `cached` tells you whether an answer
+was reused and `checked_at` when it was actually computed — poll for a fresh
+number, not a fresh timestamp.
+
+## What it detects
+
+| Tampering | Detected | How |
+|---|---|---|
+| A record's content is **modified** | Yes | Its own MAC no longer matches its content |
+| A record is **deleted** from the middle | Yes | The successor's `prev_mac` no longer matches, and its position leaves a gap |
+| Records are **reordered** | Yes | Positions and `prev_mac` links no longer line up |
+| The **first** records are deleted | Yes | The first entry's `prev_mac` is a genesis MAC derived from the key, which cannot be forged |
+| The **last** statements of a closed session are deleted | Yes | The session's final chain head is sealed onto the connection row with a keyed MAC when it closes, so correcting it after a deletion needs the key |
+| The **last** statements of a session that is still **open** are deleted | Yes, up to the last stamp sweep | DBBat re-seals the chain head of its open sessions every few minutes, so the exposed tail is the statements run since that sweep rather than the whole session |
+| **Every** statement of a session is deleted, not just the last ones | Yes, unless retention could account for it | The sealed stamp on the connection still attests to statements no longer there. Only a session that began before the retention cutoff is excused — with `DBB_QUERY_STORAGE_RETENTION` unset, the default, none is |
+| The stamp itself is **cleared** rather than rewritten, to remove the check instead of defeating it | Yes | A session that closed with statements in its history always carries a stamp, so a closed session whose statements survive without one is a break. And because the stamp's MAC, length and version are only ever written together, a length left behind by a cleared MAC is a break on its own — open sessions included |
+| The **last** rows of a captured result set are deleted | Yes | The capture's final head is sealed onto the query row with a keyed MAC when the capture finishes, so correcting it needs the key |
+| A captured result set is deleted **outright** | Yes | The sealed stamp on the query still attests to rows no longer there |
+| A **whole session** is deleted — the connection row, and with it every statement and captured row it cascades to | By comparison only — see the note below | Every session writes a chained `connection.opened` and `connection.closed` entry into the audit log, which the delete does not touch and retention never reaps |
+| A connection row is **edited in place** — `connected_at` backdated, for instance | By comparison only — see the note below | The same two entries record the row's immutable identity when it was written |
+| The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
+
+:::warning The connection row itself is not chained
+
+`connections` carries no MAC. Deleting a whole session, or editing the row in
+place, breaks no chain — and `dbbat audit verify` will not report it.
+
+What it leaves behind is the pair of chained audit entries every session writes:
+`connection.opened` when the session starts and `connection.closed` when it
+ends, each carrying the row's immutable identity (connection uid, user,
+database, source IP, `connected_at`, the instance and run stamps, the grant) and
+the close additionally carrying `disconnected_at` and the session's sealed
+query-chain head. Those entries live in the audit log, which the cascade does
+not touch and `DBB_QUERY_STORAGE_RETENTION` never reaps. So the evidence exists
+— but turning it into a finding is a **comparison you run**, listing
+`?event_type=connection.opened` against the connections that still exist, not
+something a chain walk does for you.
+
+One place this bites inside verification: a session whose statements are *all*
+gone is excused when it connected before the retention cutoff, and
+`connected_at` is exactly the unsealed column an attacker would backdate to earn
+that excuse. It only helps them on a deployment that sets
+`DBB_QUERY_STORAGE_RETENTION` — with retention off, which is the default, no
+session is excused and there is nothing to buy.
+
+These entries are kept out of the audit page's default listing on purpose: a
+busy proxy writes tens of thousands a day and they would bury the access changes
+the page exists for. Filter by event type to see them; the
+[connections list](/docs/features/query-logging) is the surface for browsing
+sessions.
+
+:::
+
+## What it does not do
+
+Be precise about this in a control narrative:
+
+- **It detects tampering; it does not prevent it.** This is evidence, not
+  enforcement. Locking down direct access to DBBat's storage database is still
+  your job.
+- **It does not cover records written before the feature shipped.** Upgrading
+  inserts an anchor row marking where chaining begins. Rows older than the
+  anchor have no MAC and none can be created after the fact, so verification
+  reports them separately as `unverifiable_pre_anchor_entries` instead of
+  counting them as verified.
+- **It does not seal the connection row.** `connections` is not chained. A whole
+  session can be deleted, or its row edited in place, without breaking anything
+  a chain walk checks. The `connection.opened` / `connection.closed` audit
+  entries are what make that detectable, and only by comparing them against the
+  rows that remain — see [the warning above](#what-it-detects). Say "detectable
+  by comparison", not "detected by verification", in a control narrative.
+- **On the query side it seals what ran, not how it went.** The MAC covers a
+  statement's identity — the SQL text, the bind parameters, the execution time,
+  the connection and the position in the session. It does not cover the outcome
+  columns (duration, rows affected, error, approval resolution), because those
+  are written after the statement is logged, and re-sealing them would
+  invalidate every record chained after it.
+- **On the captured rows it seals what was stored, not that the capture was
+  complete.** Every column of a captured row is covered, but the
+  `results_truncated` / `results_dropped` flags on the parent query are written
+  after the result set has been read — like the outcome columns above — so they
+  are not sealed either. A capture whose DBBat process died before its rows were
+  finalised also carries no head stamp, so only its beginning and middle are
+  protected.
+- **A live session is sealed up to the last sweep, not up to its last
+  statement.** DBBat re-stamps the chain head of the sessions it still has open
+  every few minutes, so a session that never ends — a `psql` window left open
+  all day, a pooled application connection, an approval hold waiting on a human
+  — is protected against a trailing deletion the same way a closed one is, but
+  only as far as the last sweep reached. Statements run since then are not yet
+  covered. The exposure is the sweep interval, not the length of the session. A
+  session younger than one sweep carries no stamp at all yet, which is why an
+  unstamped session is only a break once it has *closed*.
+- **A crashed session's tail is sealed at the last sweep, or at the reconcile.**
+  A session whose DBBat process died never gets to record its own final chain
+  head. It keeps whatever the last sweep sealed, and the reconcile that closes
+  crash-orphaned sessions then seals what is left in the same transaction that
+  marks the session disconnected — but never *below* the sweep's stamp, so
+  deleting the tail of a crashed session and waiting for the reconcile to bless
+  it does not work. What is still exposed is the same as for a live session:
+  statements run after the last sweep before the crash.
+- **It does not defend against someone who has the key.** Anyone who can read
+  `DBB_KEY` off the host can rewrite the store and re-seal it. Treat that key
+  the way you treat the database credentials it protects.
+
+## Retention does not break it
+
+The query chain is per connection, not one global chain across the whole table.
+That is deliberate: `DBB_QUERY_STORAGE_RETENTION` deletes old history, and a
+single global chain would break the first time it ran.
+
+- Retention deleting a whole connection takes that connection's chain with it.
+  Every other connection still verifies end to end.
+- Retention deleting the oldest statements of a long-running, still-open session
+  truncates that chain's beginning. Verification reports it as a truncated
+  prefix — counted, not flagged as tampering — and keeps verifying everything
+  after it.
+- Retention deleting *every* statement of a session whose connection record
+  survives — a pooled connection that went quiet long before it closed, or one
+  still open — is the extreme of the same case, and is counted the same way.
+  Verification excuses it only when the session began before the retention
+  cutoff, which is the only way the sweep could have taken all of them;
+  otherwise an emptied session is a break. One caveat follows from that: after
+  you **raise or disable** `DBB_QUERY_STORAGE_RETENTION`, sessions the previous
+  setting had legitimately emptied can start reading as breaks, because the
+  cutoff they are judged against moves backwards. Lowering it never has that
+  effect.
+
+Captured result rows follow the same logic one level down: their chain is per
+query, and retention deletes whole queries, so a reaped capture takes its own
+chain with it. Nothing legitimate ever deletes an *individual* captured row —
+which is why a capture missing its first rows is reported as tampering rather
+than as housekeeping.
+
+## Where it fits in an audit
+
+The chain is the mechanism behind **ISO/IEC 27001:2022 A.8.15** (the integrity
+half of logging) and **PCI DSS v4.0 requirement 10.3** — audit logs are
+protected from destruction and unauthorized modifications. See
+[Compliance](/docs/compliance) for the full mapping, and the
+[design note](https://github.com/fclairamb/dbbat/blob/main/docs/audit-chain.md)
+for the cryptography, the canonical serialization and the concurrency model.
+
+## See also
+
+- [Query Logging](/docs/features/query-logging) — what is recorded in the first place
+- [Compliance](/docs/compliance) — the control mappings
+- [Security](/docs/security) — the rest of DBBat's cryptography

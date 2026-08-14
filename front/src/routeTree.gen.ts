@@ -23,6 +23,7 @@ import { Route as AuthenticatedGrantRequestsIndexRouteImport } from './routes/_a
 import { Route as AuthenticatedGrantsIndexRouteImport } from './routes/_authenticated/grants/index'
 import { Route as AuthenticatedQueriesIndexRouteImport } from './routes/_authenticated/queries/index'
 import { Route as AuthenticatedQueriesUidRouteImport } from './routes/_authenticated/queries/$uid'
+import { Route as AuthenticatedServerGroupsIndexRouteImport } from './routes/_authenticated/server-groups/index'
 import { Route as AuthenticatedServersIndexRouteImport } from './routes/_authenticated/servers/index'
 import { Route as AuthenticatedSettingsIndexRouteImport } from './routes/_authenticated/settings/index'
 import { Route as AuthenticatedUserGroupsIndexRouteImport } from './routes/_authenticated/user-groups/index'
@@ -105,6 +106,12 @@ const AuthenticatedQueriesUidRoute = AuthenticatedQueriesUidRouteImport.update({
   path: '/queries/$uid',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedServerGroupsIndexRoute =
+  AuthenticatedServerGroupsIndexRouteImport.update({
+    id: '/server-groups/',
+    path: '/server-groups/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedServersIndexRoute =
   AuthenticatedServersIndexRouteImport.update({
     id: '/servers/',
@@ -143,6 +150,7 @@ export interface FileRoutesByFullPath {
   '/grant-requests/': typeof AuthenticatedGrantRequestsIndexRoute
   '/grants/': typeof AuthenticatedGrantsIndexRoute
   '/queries/': typeof AuthenticatedQueriesIndexRoute
+  '/server-groups/': typeof AuthenticatedServerGroupsIndexRoute
   '/servers/': typeof AuthenticatedServersIndexRoute
   '/settings/': typeof AuthenticatedSettingsIndexRoute
   '/user-groups/': typeof AuthenticatedUserGroupsIndexRoute
@@ -162,6 +170,7 @@ export interface FileRoutesByTo {
   '/grant-requests': typeof AuthenticatedGrantRequestsIndexRoute
   '/grants': typeof AuthenticatedGrantsIndexRoute
   '/queries': typeof AuthenticatedQueriesIndexRoute
+  '/server-groups': typeof AuthenticatedServerGroupsIndexRoute
   '/servers': typeof AuthenticatedServersIndexRoute
   '/settings': typeof AuthenticatedSettingsIndexRoute
   '/user-groups': typeof AuthenticatedUserGroupsIndexRoute
@@ -183,6 +192,7 @@ export interface FileRoutesById {
   '/_authenticated/grant-requests/': typeof AuthenticatedGrantRequestsIndexRoute
   '/_authenticated/grants/': typeof AuthenticatedGrantsIndexRoute
   '/_authenticated/queries/': typeof AuthenticatedQueriesIndexRoute
+  '/_authenticated/server-groups/': typeof AuthenticatedServerGroupsIndexRoute
   '/_authenticated/servers/': typeof AuthenticatedServersIndexRoute
   '/_authenticated/settings/': typeof AuthenticatedSettingsIndexRoute
   '/_authenticated/user-groups/': typeof AuthenticatedUserGroupsIndexRoute
@@ -204,6 +214,7 @@ export interface FileRouteTypes {
     | '/grant-requests/'
     | '/grants/'
     | '/queries/'
+    | '/server-groups/'
     | '/servers/'
     | '/settings/'
     | '/user-groups/'
@@ -223,6 +234,7 @@ export interface FileRouteTypes {
     | '/grant-requests'
     | '/grants'
     | '/queries'
+    | '/server-groups'
     | '/servers'
     | '/settings'
     | '/user-groups'
@@ -243,6 +255,7 @@ export interface FileRouteTypes {
     | '/_authenticated/grant-requests/'
     | '/_authenticated/grants/'
     | '/_authenticated/queries/'
+    | '/_authenticated/server-groups/'
     | '/_authenticated/servers/'
     | '/_authenticated/settings/'
     | '/_authenticated/user-groups/'
@@ -354,6 +367,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedQueriesUidRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/server-groups/': {
+      id: '/_authenticated/server-groups/'
+      path: '/server-groups'
+      fullPath: '/server-groups/'
+      preLoaderRoute: typeof AuthenticatedServerGroupsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/servers/': {
       id: '/_authenticated/servers/'
       path: '/servers'
@@ -398,6 +418,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedGrantRequestsIndexRoute: typeof AuthenticatedGrantRequestsIndexRoute
   AuthenticatedGrantsIndexRoute: typeof AuthenticatedGrantsIndexRoute
   AuthenticatedQueriesIndexRoute: typeof AuthenticatedQueriesIndexRoute
+  AuthenticatedServerGroupsIndexRoute: typeof AuthenticatedServerGroupsIndexRoute
   AuthenticatedServersIndexRoute: typeof AuthenticatedServersIndexRoute
   AuthenticatedSettingsIndexRoute: typeof AuthenticatedSettingsIndexRoute
   AuthenticatedUserGroupsIndexRoute: typeof AuthenticatedUserGroupsIndexRoute
@@ -418,6 +439,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedGrantRequestsIndexRoute: AuthenticatedGrantRequestsIndexRoute,
   AuthenticatedGrantsIndexRoute: AuthenticatedGrantsIndexRoute,
   AuthenticatedQueriesIndexRoute: AuthenticatedQueriesIndexRoute,
+  AuthenticatedServerGroupsIndexRoute: AuthenticatedServerGroupsIndexRoute,
   AuthenticatedServersIndexRoute: AuthenticatedServersIndexRoute,
   AuthenticatedSettingsIndexRoute: AuthenticatedSettingsIndexRoute,
   AuthenticatedUserGroupsIndexRoute: AuthenticatedUserGroupsIndexRoute,

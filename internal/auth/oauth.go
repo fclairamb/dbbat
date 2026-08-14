@@ -15,6 +15,32 @@ type OAuthProvider interface {
 	ExchangeCode(ctx context.Context, code, redirectURI string) (*OAuthUser, error)
 }
 
+// PKCEProvider is an optional extension implemented by providers that use
+// PKCE (RFC 7636). The code verifier is minted when the flow starts and must
+// survive until the callback, so the two halves are surfaced separately: the
+// caller persists the verifier alongside the CSRF state row and hands it back
+// on exchange.
+//
+// A provider that does not implement this interface is driven through the
+// plain OAuthProvider methods.
+type PKCEProvider interface {
+	OAuthProvider
+	// AuthorizeURLWithPKCE builds the authorization URL and returns the code
+	// verifier whose S256 challenge it carries.
+	AuthorizeURLWithPKCE(ctx context.Context, state, redirectURI string) (authorizeURL, verifier string, err error)
+	// ExchangeCodeWithVerifier exchanges an authorization code, presenting
+	// the verifier minted by AuthorizeURLWithPKCE.
+	ExchangeCodeWithVerifier(ctx context.Context, code, redirectURI, verifier string) (*OAuthUser, error)
+}
+
+// DisplayNamer is an optional extension implemented by providers whose login
+// button label is operator-configured rather than fixed by the brand. The
+// login page falls back to a name derived from the provider key when a
+// provider does not implement it.
+type DisplayNamer interface {
+	DisplayName() string
+}
+
 // OAuthUser represents normalized user info from any OAuth provider.
 type OAuthUser struct {
 	ProviderID  string          // Provider-specific user ID
@@ -24,4 +50,24 @@ type OAuthUser struct {
 	TeamName    string          // Optional workspace/org name
 	AvatarURL   string          // Optional profile picture URL
 	RawData     json.RawMessage // Full provider response
+	// Groups is the directory group membership the provider asserted, read
+	// out of a verified token. It is authorization input, so a provider must
+	// only populate it from something the issuer signed.
+	//
+	// nil and empty mean the same thing to consumers — "this identity is in
+	// none of the groups we asked about" — which, under a configured role
+	// mapping, revokes the mapped roles. Whether a mapping is applied to a
+	// given provider at all is decided by the caller, not by this field.
+	Groups []string
+	// GroupsOverage says the issuer refused to inline the group list and
+	// handed us a pointer to it instead — Microsoft Entra ID does this past
+	// roughly 200 memberships, dropping `groups` and substituting
+	// `_claim_names` / `_claim_sources` aimed at a Microsoft Graph endpoint.
+	//
+	// It is the one case where an empty Groups must NOT be read as "in no
+	// groups": membership is *unknown*, not empty. dbbat does not follow the
+	// pointer, so a consumer that maps groups to authorization has to leave
+	// what it cannot establish alone — otherwise the most heavily grouped
+	// people in a tenant are exactly the ones a login silently demotes.
+	GroupsOverage bool
 }

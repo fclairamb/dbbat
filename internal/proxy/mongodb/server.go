@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -202,8 +204,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
+// handleConnection runs one client session on a goroutine of its own, which is
+// why the recover is not optional: a panic anywhere in the session's own leg
+// (transport setup, auth, the BSON decode before the pumps split off) would
+// otherwise end the process and every other live session with it. The two pumps
+// are covered separately, in relay — a recover here does not reach them.
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer func() {
+		if r := recover(); r != nil {
+			s.logger.ErrorContext(s.ctx, "MongoDB session panic",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())),
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		}
+
 		if err := clientConn.Close(); err != nil {
 			s.logger.DebugContext(s.ctx, "client close error", slog.Any("error", err))
 		}
@@ -222,6 +236,9 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 const dumpCleanupInterval = 1 * time.Hour
 
+// goroutineNameDumpRetention is what a panic in a retention sweep is logged under.
+const goroutineNameDumpRetention = "mongodb dump retention sweep"
+
 func (s *Server) runDumpCleanup() {
 	retention, err := time.ParseDuration(s.dumpConfig.Retention)
 	if err != nil {
@@ -234,12 +251,17 @@ func (s *Server) runDumpCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
-			if err != nil {
-				s.logger.ErrorContext(s.ctx, "MongoDB dump cleanup failed", slog.Any("error", err))
-			} else if deleted > 0 {
-				s.logger.InfoContext(s.ctx, "MongoDB dump cleanup", slog.Int("deleted", deleted))
-			}
+			// One turn under the guard rather than the whole loop: a panic in a
+			// sweep must not take the process down, and must not retire retention
+			// for the life of the process either. See safe.RunMaintenance.
+			safe.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
+				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
+				if err != nil {
+					s.logger.ErrorContext(s.ctx, "MongoDB dump cleanup failed", slog.Any("error", err))
+				} else if deleted > 0 {
+					s.logger.InfoContext(s.ctx, "MongoDB dump cleanup", slog.Int("deleted", deleted))
+				}
+			})
 		case <-s.shutdown:
 			return
 		}
