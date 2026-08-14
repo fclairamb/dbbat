@@ -102,6 +102,18 @@ const (
 	logMsgRefusalGraceOutranBytes = "a held limit refusal was cut by its grace while the client was " +
 		"still draining the reply: on this link the overshoot bound was unreachable"
 
+	// logMsgRefusalCrossoverDeclined is the same measurement when the record
+	// above is *not* emitted, at DEBUG because the ordinary abandonment — a
+	// client that genuinely stopped talking — takes this path every time.
+	//
+	// It exists because the crossover is decided from four numbers that were
+	// otherwise nowhere: without it an abandoned hold that is not reported as a
+	// crossover says nothing about why, and "the record never fires" and "the
+	// link was fast enough" are indistinguishable in a log or in a test failure.
+	// See session.reportRefusalBoundCrossover.
+	logMsgRefusalCrossoverDeclined = "a held limit refusal was abandoned at its grace, but not as a " +
+		"bound crossover"
+
 	// logMsgRefusalTeardownPanic is the one that should never appear. It means
 	// the teardown of a held refusal panicked while itself running from a
 	// recovered decode panic. The relay goroutine above it does have a recover
@@ -128,6 +140,13 @@ const (
 	logAttrEffectiveBytesPerSec = "effective_bytes_per_second"
 	logAttrCrossoverBytesPerSec = "crossover_bytes_per_second"
 	logAttrRefusalBytesBound    = "refusal_bytes_bound"
+
+	// The two the declined record adds (logMsgRefusalCrossoverDeclined): how
+	// long before the grace expired the relay last fed the client (-1 when it
+	// never did), and whether the byte bound was out of reach at the observed
+	// rate. Between them they say which of the two predicates answered no.
+	logAttrSinceLastRelayMillis = "since_last_relay_ms"
+	logAttrBoundOutOfReach      = "bound_out_of_reach"
 )
 
 // trackedCursor tracks a parsed cursor and its SQL.
