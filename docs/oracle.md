@@ -206,16 +206,41 @@ the word-boundary rule removes strictly more than the three verbs add, and
 `TestBundledOCIFixturesCarryNoStatement` pins that none of the recorded binary
 frames reads as a statement.
 
-**A consequence worth knowing about:** now that the gate sees `ALTER SESSION SET
-…` for what it is, DBeaver — which sends five of them during connection setup —
-is refused under a `read_only` or `block_ddl` grant, where the fragment used to
-slip through. That is the gate working rather than a regression (the extractor
-returns exactly the bytes the header declares, so `IsDDLQuery` refusing them is
-policy), but it is a live behaviour change on the most common GUI client, and
-what to do about it is filed as
-`specs/todos/2026-08-13-10-alter-session-now-trips-read-only-for-gui-clients.md`.
-SQL Developer over the OCI driver is expected to behave the same way; that is
-inference, not measurement — it is not in the corpus.
+### `ALTER SESSION SET …` and the statement gate
+
+Once the gate saw `ALTER SESSION SET …` for what it is, `ALTER` being in both
+`writeKeywords` and `ddlKeywords` meant a `read_only` or `block_ddl` grant
+refused it — and DBeaver sends five of them *during connection setup*, so the
+grant stopped the client from connecting at all rather than stopping it on a
+write. (Under the pre-fix extractor the same statements reached the gate as a
+bare `SET` fragment and slipped through; that was the bypass, not this.)
+
+The resolution is a **parameter allowlist**, in `shared.IsAllowedAlterSession`
+(`internal/proxy/shared/validation.go`), consulted by both `IsWriteQuery` and
+`IsDDLQuery`: `ALTER SESSION SET <parameter>` is neither a write nor DDL when
+**every** parameter it sets is on the list. It covers `CURRENT_SCHEMA`,
+`OPTIMIZER_FEATURES_ENABLE`, the `_optimizer_*` hidden-parameter family, the
+`NLS_*` formatting and collation settings and `TIME_ZONE` — session-scoped
+settings Oracle reverts at disconnect.
+
+It is a list of parameter names and **not** a prefix match on
+`ALTER SESSION SET`, and the reason is `CONTAINER`: that one switches the
+session's pluggable database, and a dbbat grant is scoped to one database, so a
+prefix match would let a read-only session step outside what its grant covers.
+`CONTAINER` is excluded; so is anything unenumerated, and a statement mixing an
+allowed parameter with an unenumerated one is refused whole rather than
+partially honoured. Anything the scanner cannot read end to end with confidence
+— an unterminated quote, a missing `=`, a second statement stapled on behind a
+`;` — is refused too. `ALTER SYSTEM` is untouched: `oracleBlockedPatterns`
+blocks it outright whatever the grant says.
+
+An allowed `ALTER SESSION` is **still recorded** in `/queries` like any other
+statement; this changes classification, not visibility. The five statements the
+corpus carries are asserted against the allowlist itself by
+`TestSurveyAlterSessionMisreadAsSet`, so a re-recording that introduces a new
+parameter fails the suite instead of quietly reintroducing the connect-time
+refusal. SQL Developer over the OCI driver is expected to send the same shapes;
+that is inference, not measurement — it is not in the corpus.
 
 ### Cursor re-execution (what clients actually send)
 
