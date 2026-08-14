@@ -1442,6 +1442,31 @@ failure being measured produced an `InternalError` with no ORA code anywhere in
 it, so "the driver parsed the refusal" and "the driver could not read the frame"
 are indistinguishable from the message alone.
 
+**The third refusal — an ambiguous service name — is covered by unit test only,
+and that boundary is deliberate.** It is the one the original report was about
+(`MUTU01`, a service name shared by several dbbat databases), and it is issued
+from a different branch: `disambiguateDatabase`, which runs *before* the
+challenge, off the username in AUTH Phase 1.
+`TestDisambiguateDatabase_RefusesWithAReadableORAError` drives that branch against
+a real store — three server rows sharing one `oracle_service_name`, grants on
+two of them — and follows the same three steps `run()` does
+(`disambiguateDatabase` → `authRejectFor` → `sendAuthFailed`), decoding the frame
+off the socket: the ORA code, the whole 92-character sentence, the OER's own
+field walk, and the call number of the Phase 1 the client is parked on. Its
+sibling subtests cover the other two outcomes of the same branch (no grant on any
+candidate → ORA-01045 "no active grant", exactly one → that database selected).
+
+What no test does is drive it with a *live client*, and the reason is
+`resolveDatabase`: it resolves the connect string against a dbbat server **name**
+first and only falls through to the shared-service-name candidate list when that
+misses. The Oracle fixture's single server is named after the service it serves,
+so reaching the candidate list from `TestIntegration_AuthRefusalAcrossClients`
+would mean renaming or deleting that row mid-fixture — and a rename is not
+something dbbat supports today. The frame is the same one the two measured
+refusals carry (same builder, same shape decision, same summary tail), so what
+goes unmeasured is the *branch's* wiring, not the encoding — and that is what the
+unit test pins.
+
 ### Oracle NUMBER Encoding
 
 Oracle NUMBER is a variable-length, sign-and-magnitude, base-100 format:

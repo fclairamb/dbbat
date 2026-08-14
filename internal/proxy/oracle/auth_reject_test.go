@@ -1,14 +1,19 @@
 package oracle
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // readAuthRejectFrame reads one whole frame written by sendAuthFailed off the
@@ -288,6 +293,191 @@ func TestSendAuthFailed_OCIDialect(t *testing.T) {
 	tail, ok := oerFixedWidthTailFieldsAt(body, 0)
 	require.True(t, ok, "the frame must decode as a fixed-width summary object")
 	assert.Equal(t, oerModernExtraTailFields, tail.extraFields)
+}
+
+// mutualizedServiceName is a service name shared by several dbbat databases and
+// held by none of them as its own name, which is what makes resolveDatabase fall
+// through to the candidate list — the mutualized-instance case (a real one: the
+// report behind this frame was against a service called MUTU01).
+const mutualizedServiceName = "MUTU01"
+
+// TestDisambiguateDatabase_RefusesWithAReadableORAError closes the one gap the
+// tests above leave. They assert the frame for all three refusal messages, but
+// two of the three *paths* that produce one live in disambiguateDatabase, and
+// nothing exercised it: the integration cases go through authenticateClient's
+// grant check against a single-database fixture, where disambiguateDatabase
+// no-ops (`len(candidates) < 2`).
+//
+// So this drives the real branch, against a real store, and follows the same
+// three steps run() does — disambiguateDatabase → authRejectFor → sendAuthFailed
+// — decoding what lands on the socket. A wrong ORA code, a wrong message, or a
+// frame no client can read would fail here.
+//
+// The store is dbbat's own PostgreSQL and nothing else: the branch is decided by
+// which candidates the user holds grants on, so no Oracle is involved and this
+// stays out of the integration suite.
+func TestDisambiguateDatabase_RefusesWithAReadableORAError(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dataStore := newOracleTestStore(t)
+
+	// The server rows' password is never decrypted on this path, so any 32-byte
+	// key encrypts it.
+	serverKey := make([]byte, 32)
+	for i := range serverKey {
+		serverKey[i] = byte(0x5A + i)
+	}
+
+	// Three databases behind one upstream service name — the shape the branch
+	// exists for. Which of them the user can reach is what each subtest sets.
+	candidates := make([]store.Server, 0, 3)
+
+	for _, name := range []string{"mutu-a", "mutu-b", "mutu-c"} {
+		service := mutualizedServiceName
+
+		db, err := dataStore.CreateServer(ctx, &store.Server{
+			Name:              name,
+			Host:              "127.0.0.1",
+			Port:              1521,
+			DatabaseName:      name,
+			OracleServiceName: &service,
+			Username:          "system",
+			Password:          "oracle",
+			Protocol:          store.ProtocolOracle,
+		}, serverKey)
+		require.NoError(t, err)
+
+		candidates = append(candidates, *db)
+	}
+
+	for name, tc := range map[string]struct {
+		// username is this subtest's own user, so the subtests can run in
+		// parallel: the branch is decided by grants, which are per user.
+		username string
+
+		// grantOn is how many of the candidates that user holds a grant on.
+		grantOn int
+
+		wantErr     error
+		wantCode    uint16
+		wantMessage string
+	}{
+		// The reported case: grants on several databases behind one service name.
+		// Nobody can pick for the user, so they are told to name the database.
+		"several candidates": {
+			username: "mutuseveral",
+			grantOn:  2,
+			wantErr:  ErrAmbiguousServiceName,
+			wantCode: ORA01045,
+			wantMessage: "ORA-01045: service name matches multiple dbbat databases; " +
+				"connect using the dbbat database name instead",
+		},
+
+		// No grant on any of them is the ordinary no-access answer, reached here
+		// rather than in authenticateClient.
+		"no candidate": {
+			username:    "mutunone",
+			grantOn:     0,
+			wantErr:     ErrNoActiveGrant,
+			wantCode:    ORA01045,
+			wantMessage: "ORA-01045: no active grant for this database; request access via dbbat",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			phase1Pkt := newMutuProbeUser(t, dataStore, tc.username, candidates[:tc.grantOn])
+
+			client, server := newPipeConns(t)
+
+			s := newTestErrorSession(t, server)
+			s.store = dataStore
+			s.serviceName = mutualizedServiceName
+			s.database = &candidates[0]
+			s.databaseCandidates = candidates
+			s.clientAuthPhase1Pkt = phase1Pkt
+
+			// The three steps run() performs on this branch, in order.
+			err := s.disambiguateDatabase(phase1Pkt)
+			require.ErrorIs(t, err, tc.wantErr)
+
+			code, message := authRejectFor(err)
+			assert.Equal(t, tc.wantCode, code)
+
+			go s.sendAuthFailed(code, message)
+
+			body := readAuthRejectFrame(t, client)
+
+			shape, _, _ := s.authRefusalOERShape()
+			gotCode, gotMessage, callNumber := decodeAuthRejectOER(t, shape, body)
+
+			assert.Equal(t, int(tc.wantCode), gotCode)
+			assert.Equal(t, tc.wantMessage, gotMessage,
+				"the client has to read the actionable sentence for this branch")
+			assert.Equal(t, authPhase1FuncSeq, callNumber,
+				"refused before the challenge, the client is parked on AUTH Phase 1")
+		})
+	}
+
+	// The branch that is not a refusal, for the same reason the two above are
+	// tested: it is the one that has to keep working when they fire.
+	t.Run("exactly one candidate selects it", func(t *testing.T) {
+		t.Parallel()
+
+		phase1Pkt := newMutuProbeUser(t, dataStore, "mutuone", candidates[1:2])
+
+		s := newTestErrorSession(t, nil)
+		s.store = dataStore
+		s.serviceName = mutualizedServiceName
+		s.database = &candidates[0]
+		s.databaseCandidates = candidates
+
+		require.NoError(t, s.disambiguateDatabase(phase1Pkt))
+		assert.Equal(t, candidates[1].UID, s.database.UID,
+			"the one database the user can reach must be the one selected, not the relay's placeholder")
+	})
+}
+
+// newMutuProbeUser creates a user holding a grant on each of grantOn and returns
+// the AUTH Phase 1 packet a thin client would send for it.
+//
+// One user per subtest is what lets them run in parallel: the branch
+// disambiguateDatabase takes is decided by *this user's* grants, so nothing is
+// shared but the candidate rows, which are read-only.
+//
+// The packet comes out of the same builder dbbat uses to drive a Phase 1 upstream
+// rather than a hand-written body, and the username is read back through the
+// production parser before it is handed over — a probe whose name cannot be
+// parsed would send every branch to ErrUserNotFound and prove nothing.
+func newMutuProbeUser(t *testing.T, dataStore *store.Store, username string, grantOn []store.Server) *TNSPacket {
+	t.Helper()
+
+	ctx := context.Background()
+
+	user, err := dataStore.CreateUser(ctx, username,
+		"$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
+	require.NoError(t, err)
+
+	for i := range grantOn {
+		_, err := testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, grantOn[i].UID, nil)
+		require.NoError(t, err)
+	}
+
+	body := buildClientAuthPhase1((&session{}).syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq),
+		strings.ToUpper(username), defaultDriverIdentity(), logonModeNoNewPass, false)
+
+	pkt := &TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: append([]byte{0x00, 0x00}, body...),
+	}
+
+	parsed, err := parseAuthPhase1(pkt.Payload)
+	require.NoError(t, err)
+	require.Equal(t, strings.ToUpper(username), parsed,
+		"the probe packet has to carry a username the production parser recovers")
+
+	return pkt
 }
 
 func TestAuthRejectFor(t *testing.T) {
