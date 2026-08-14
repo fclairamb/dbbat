@@ -546,6 +546,42 @@ constructs that spell it without switching anything — `OPTION (USE PLAN …)` 
 `OPTION (USE HINT (…))` — are skipped by name. A `USE` whose target dbbat cannot
 read is refused, not forwarded.
 
+### Dynamic SQL, and how far the checks reach into it
+
+`EXEC('<statement>')` runs the literal's contents as a batch of its own. That
+breaks the invariant everything above rests on — that no statement begins inside
+a string literal — and it broke it for *every* control, not just the switch
+refusal: `EXEC('DELETE FROM t')` starts with `EXEC`, so the prefix-shaped
+classifiers behind `read_only` and `block_ddl` saw no write at all.
+
+`session.validateStatement` therefore unwraps the decidable forms and runs the
+**same** checks over the inner statement that the outer batch gets — a second,
+laxer rule set for dynamic SQL would turn every control into a suggestion:
+
+| Form | Treatment |
+|------|-----------|
+| `EXEC('…')`, `EXECUTE('…')`, incl. `N'…'`, `EXEC (` with a space, `''` doubling | statement text extracted and checked |
+| `sp_executesql N'…'` sent as **batch text** (`EXEC [sys.]sp_executesql N'…'`) | same |
+| `sp_executesql` sent as an **RPC** | already enforced, unchanged — see "RPC is enforced, not log-only" |
+| dynamic SQL nested inside dynamic SQL | **refused** (`ErrDynamicSQLNotCheckable`) rather than unwrapped further |
+| `EXEC(@sql)`, `EXEC('USE ' + @db)` | **not checked** — see below |
+| `EXEC dbo.some_proc` | an ordinary procedure call: opaque, and already failed closed under a restrictive grant |
+
+**dbbat validates dynamic SQL only when the statement text is a literal.** The
+extraction is a static read of the batch, so it can only see what is written in
+the batch. `EXEC(@sql)` — and any concatenation that builds the text at runtime —
+is assembled by the server from values dbbat never sees, so **it reaches the
+database unvalidated**: no `read_only`, no `block_ddl`, no `block_copy`, no
+database-switch refusal. That is a real gap, stated plainly rather than papered
+over; closing it would need dbbat to evaluate T-SQL, which it does not do. It is
+not refused outright either, because a blanket refusal of variable-built dynamic
+SQL would break ordinary application code. If that boundary matters for a target,
+constrain the login dbbat connects with.
+
+Unwrapping stops at one level. A `EXEC('EXEC(''…'')')` is refused, not unwrapped
+again: recursion has to stop somewhere, and stopping *silently* would leave a
+hole the exact shape of the one the unwrapping closed.
+
 **Three-part names are out of scope, deliberately.**
 `SELECT * FROM otherdb.dbo.t` reaches another database with no switch to
 intercept, and so does a cross-database `INSERT`, a synonym, or a view defined
@@ -660,6 +696,9 @@ Plainly, so nobody assumes more coverage than there is:
 - **Result sets behind an unmodelled token.** `COMPUTE BY` (`ALTMETADATA` /
   `ALTROW`) and Always Encrypted column metadata desynchronise the accountant,
   so those queries get a row count from the tail DONE and no captured rows.
+- **What a variable-built `EXEC` will say.** `EXEC('…')` with a literal is
+  unwrapped and checked (see above); `EXEC(@sql)` is assembled at runtime and
+  reaches the database with no control applied to it.
 - **A cross-database reference that never switches database.** `USE otherdb` is
   refused (see above), but `otherdb.dbo.t` in an ordinary statement is not
   detected — nor is a synonym, a view, or a linked-server `OPENQUERY` that
