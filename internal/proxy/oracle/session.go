@@ -2469,7 +2469,7 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 // seventh field land on the streaming cursor's own id.
 //
 // It fails closed: a mid-fetch diagnostic naming another cursor is dropped,
-// which is exactly the behaviour this whole change replaced, so the failure mode
+// which is exactly the behavior this whole change replaced, so the failure mode
 // is the old missing error text and never a fabricated one. The debug line is
 // there because that is otherwise invisible — if an unmeasured client ever
 // reports a different cursor, this is what says so.

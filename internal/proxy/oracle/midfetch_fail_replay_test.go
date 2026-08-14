@@ -38,8 +38,14 @@ const (
 	goOraMidFetchDump  = "go_ora_midfetch_fail.pcapng"
 )
 
-// oraMidFetchCode is the ORA code both recordings raise mid-fetch.
-const oraMidFetchCode = 1722
+// oraMidFetchCode is the ORA code both recordings raise mid-fetch, and
+// oerMidFetchCallStatus the CallStatus both carry it with — no end-of-call bit,
+// which is what used to make it undecodable.
+const (
+	oraMidFetchCode       = 1722
+	oerMidFetchCallStatus = 0x1
+	oerMidFetchSeqNumber  = 7
+)
 
 // midFetchDumps is the pair, for the tests that assert on both.
 func midFetchDumps() []string {
@@ -50,11 +56,11 @@ func midFetchDumps() []string {
 // buildOER always writes it as 0, and that field is the one the mid-fetch anchor
 // reads, so it needs its own builder rather than a wider signature on the shared
 // one.
-func buildOERNamingCursor(callStatus, seqNum, curRowNumber, errNum, cursorID int) []byte {
+func buildOERNamingCursor(curRowNumber, errNum, cursorID int) []byte {
 	out := make([]byte, 0, 16)
 	out = append(out, 0x04)
 
-	for _, v := range []int{callStatus, seqNum, curRowNumber, errNum, 0, 0, cursorID} {
+	for _, v := range []int{oerMidFetchCallStatus, oerMidFetchSeqNumber, curRowNumber, errNum, 0, 0, cursorID} {
 		out = append(out, ttcCompressedUint(uint64(v))...)
 	}
 
@@ -83,11 +89,16 @@ type midStreamOER struct {
 // because that predicate — a pending query whose cursor already has column
 // definitions — is exactly what handleOERStatus consults, and a second
 // implementation of it in a test would measure the wrong thing.
-func walkMidStreamOERs(t *testing.T, name string) (found []midStreamOER, midStreamPackets int) {
+func walkMidStreamOERs(t *testing.T, name string) ([]midStreamOER, int) {
 	t.Helper()
 
 	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 	s.clientConn = drainedPipe(t)
+
+	var (
+		found            []midStreamOER
+		midStreamPackets int
+	)
 
 	for i, pkt := range loadTestDump(t, name).Packets {
 		tns, err := parseTNSFromDumpPacket(pkt.Data)
@@ -399,7 +410,7 @@ func recordingErrorsForSelect(t *testing.T, recorder *collectingCompletionStore)
 // error_log` — is a shape no fixture in testdata/ contains, and a row that
 // happened to be laid out as an OER would clear it. Naming the streaming cursor
 // is the second anchor, and it fails closed: the call simply stays open, which
-// is exactly the behaviour this change replaced.
+// is exactly the behavior this change replaced.
 func TestHandleOERStatus_MidFetchRequiresTheOERToNameTheStreamingCursor(t *testing.T) {
 	t.Parallel()
 
@@ -410,7 +421,7 @@ func TestHandleOERStatus_MidFetchRequiresTheOERToNameTheStreamingCursor(t *testi
 	tail := []byte("\x00\x00KORA-01722: unable to convert string value containing 'n' to a number: TXT")
 
 	oerNaming := func(cursor int) []byte {
-		return append(buildOERNamingCursor(1, 7, 14999, oraMidFetchCode, cursor), tail...)
+		return append(buildOERNamingCursor(14999, oraMidFetchCode, cursor), tail...)
 	}
 
 	require.NotNil(t, decodeErrorOER(oerNaming(streamingCursor)),
@@ -466,9 +477,9 @@ func TestHandleOERStatus_MidFetchStillRefusesEverythingWithoutADiagnostic(t *tes
 		name string
 		oer  []byte
 	}{
-		{name: "success", oer: buildOERNamingCursor(1, 7, 100, 0, streamingCursor)},
-		{name: "end of data", oer: buildOERNamingCursor(1, 7, 100, oraNoDataFound, streamingCursor)},
-		{name: "a code with no diagnostic behind it", oer: buildOERNamingCursor(1, 7, 100, oraMidFetchCode, streamingCursor)},
+		{name: "success", oer: buildOERNamingCursor(100, 0, streamingCursor)},
+		{name: "end of data", oer: buildOERNamingCursor(100, oraNoDataFound, streamingCursor)},
+		{name: "a code with no diagnostic behind it", oer: buildOERNamingCursor(100, oraMidFetchCode, streamingCursor)},
 	}
 
 	for _, tc := range tests {
