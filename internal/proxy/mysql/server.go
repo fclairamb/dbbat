@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -206,8 +207,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
+// handleConnection runs one client session on a goroutine of its own, which is
+// why the recover is not optional: without it a panic anywhere in the session —
+// handshake, auth, any command — ends the process and every other live session
+// with it.
+//
+// Unlike the other four protocols this one recover covers the whole session:
+// go-mysql owns the wire and commandLoop runs synchronously right here, so there
+// is no relay goroutine underneath it to guard separately. Only the limit
+// watchdog runs elsewhere, and it carries its own guard.
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer func() {
+		if r := recover(); r != nil {
+			s.logger.ErrorContext(s.ctx, "MySQL session panic",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())),
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		}
+
 		if err := clientConn.Close(); err != nil {
 			s.logger.DebugContext(s.ctx, "client close error", slog.Any("error", err))
 		}

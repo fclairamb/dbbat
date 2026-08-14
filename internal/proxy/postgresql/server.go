@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -224,8 +225,21 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // handleConnection handles a single client connection.
+//
+// It runs on a goroutine of its own, so the recover is not optional: without it
+// a panic anywhere in the session's own leg — auth, startup negotiation,
+// anything before the relays split off — ends the process and with it every
+// other live session. The relays themselves are covered separately, in
+// proxyMessages, because a recover here does not reach them.
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer func() {
+		if r := recover(); r != nil {
+			s.logger.ErrorContext(s.ctx, "PostgreSQL session panic",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())),
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		}
+
 		if err := clientConn.Close(); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close client connection", slog.Any("error", err))
 		}
