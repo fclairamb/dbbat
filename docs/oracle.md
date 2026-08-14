@@ -1282,7 +1282,7 @@ surface as ORA-03113.
 
 So the crossover names itself in the log instead. When the grace expires on a
 hold that was **still being fed** — bytes moved past the violation, and the last
-of them reached the client within a tenth of the grace — `onLimitViolation` emits
+of them reached the client within a third of the grace — `onLimitViolation` emits
 a second WARN alongside the teardown:
 
 ```
@@ -1303,10 +1303,34 @@ fit entirely in the client socket's send buffer is handed to TCP in one go, so
 the relay sees no progress while the client is still draining it. The crossover
 only arises for overshoots far larger than a socket buffer.
 
+**Both of those numbers — the window and the buffer — were first sized against
+the wrong quantity, and the end-to-end subtest is what found it.** The record was
+unit-tested from synthetic state and passed, but it never once fired against a
+live slow client:
+
+- the relay's writes are not paced by the packet rate. A write completes when
+  the client socket frees space, and TCP frees it in receive-window updates,
+  which arrive at roughly *half the receive buffer* at a time. Measured through a
+  32 KiB/s tap, a relay writing continuously right up to the teardown still had
+  **4.5s between its last two completed writes** — outside the tenth-of-the-grace
+  window the predicate used, so the record was skipped. Hence a third.
+- "a socket buffer" is not a few hundred kilobytes. A **683 100-byte** tail went
+  into a loopback socket in **1.5s** and was still being drained by the client
+  **100s** later, with nothing for the relay to see in between. On a real link
+  TCP sizes that buffer to the bandwidth-delay product, so a poor link keeps it
+  small; a userspace throttle on loopback does not. The subtest therefore has to
+  drive megabytes to reach the regime a WAN reaches with hundreds of kilobytes.
+
 `TestAbandonedHoldNamesTheCrossoverOnlyWhenTheClientWasStillDraining` pins the
 three shapes as unit tests; the third subtest of
-`TestIntegration_HeldRefusalHandoffCost` drives python-oracledb over an 8 KiB/s
-tap, where a real tail outlasts the real 30s grace, and reads the record back.
+`TestIntegration_HeldRefusalHandoffCost` drives python-oracledb at a 1500-row
+array size on 4000-byte rows (a ~6 MB tail) over a 32 KiB/s tap, where a real
+tail outlasts the real 30s grace, and reads the record back — 1 589 756 bytes in
+30 002 ms, an effective **52 988 B/s** against the 279 620 B/s crossover rate,
+19% of the byte bound. When it declines instead, the same four numbers go out at
+DEBUG (`a held limit refusal was abandoned at its grace, but not as a bound
+crossover`), which is what makes a missing record diagnosable rather than
+silent.
 
 **The values are kept, and this is why.** Narrowing either would push clients
 that are behaving normally onto the socket close, which is the pre-fix behaviour
