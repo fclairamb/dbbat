@@ -2414,16 +2414,15 @@ func (s *session) observeOERClientVersion(ttcBody []byte) {
 // were dropped here and the statement was closed as a *success* by the next
 // statement's flushPendingQuery — a failed UPDATE logged with no error at all.
 //
-// Two things stand in for the bit on the relaxed second attempt, and both are
-// necessary because this function is routed on byte 0 alone:
+// What stands in for the bit is decodeErrorOER, which proves the tail is an
+// Oracle diagnostic naming the very code the fields reported. That is enough
+// outside a row stream, where the payload cannot be row bytes.
 //
-//   - rowStreamActive: mid-fetch a 0x04 run is a row value's length prefix, so
-//     the strict decoder remains the only thing that may end a call there.
-//     Nothing is given up — no measured failure arrives with columns already
-//     decoded, the divide-by-zero included, because the server sends the OER
-//     instead of the QueryResult rather than after it.
-//   - decodeErrorOER, which proves the tail is an Oracle diagnostic naming
-//     the very code the fields reported.
+// Mid-fetch it is not, because this function is routed on byte 0 alone and a
+// row value's four-byte length prefix landing at the start of a TNS packet is
+// indistinguishable from an OER's marker. A failure raised there used to be
+// dropped outright — see midFetchOERNamesTheStreamingCursor for what replaced
+// that, and why the bar is higher on this side of the boundary.
 //
 // Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleOERStatus(ttcPayload []byte) {
@@ -2433,13 +2432,61 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 		return
 	}
 
-	if s.tracker.pendingQuery == nil || s.rowStreamActive() {
+	if s.tracker.pendingQuery == nil {
 		return
 	}
 
-	if info := decodeErrorOER(ttcPayload); info != nil {
-		s.completeQueryFromOER(info)
+	info := decodeErrorOER(ttcPayload)
+	if info == nil {
+		return
 	}
+
+	if s.rowStreamActive() && !s.midFetchOERNamesTheStreamingCursor(info) {
+		return
+	}
+
+	s.completeQueryFromOER(info)
+}
+
+// midFetchOERNamesTheStreamingCursor is the extra anchor a proven diagnostic has
+// to clear to end a call *while rows are streaming*.
+//
+// Measured (testdata/{python_thin,go_ora}_midfetch_fail.pcapng: a TO_NUMBER that
+// blows up 14 900 rows into a 20 000-row fetch), a mid-fetch failure arrives
+// exactly the way a pre-first-row one does — a standalone func 0x04, CallStatus
+// 0x1, no end-of-call bit — and its cursorID field is the cursor whose rows are
+// on the wire, on both clients. Replaying the whole testdata corpus through a
+// real session says the cost of believing decodeErrorOER here is nil: of 343
+// server packets that arrive mid-row-stream, 341 do not even begin with 0x04,
+// the two that do are these very failures, and a scan of the same predicate at
+// every 0x04 offset inside all 343 accepts nothing.
+//
+// The cursor check is not what that measurement justifies; it is aimed at the
+// one shape a corpus of numeric and temporal fixtures cannot contain — a result
+// set whose rows *carry* ORA- text, as `SELECT message FROM error_log` does.
+// Such a row would have to decode as seven bounded ints, be followed by the
+// ASCII spelling of the number its fourth field landed on, *and* have its
+// seventh field land on the streaming cursor's own id.
+//
+// It fails closed: a mid-fetch diagnostic naming another cursor is dropped,
+// which is exactly the behaviour this whole change replaced, so the failure mode
+// is the old missing error text and never a fabricated one. The debug line is
+// there because that is otherwise invisible — if an unmeasured client ever
+// reports a different cursor, this is what says so.
+//
+// Callers hold trackerMu.
+func (s *session) midFetchOERNamesTheStreamingCursor(info *oerInfo) bool {
+	streaming := s.tracker.pendingQuery.cursor.cursorID
+	if streaming != 0 && info.CursorID == int(streaming) {
+		return true
+	}
+
+	s.logger.DebugContext(s.ctx, "mid-fetch OER does not name the streaming cursor; leaving the call open",
+		slog.Int("oer_cursor_id", info.CursorID),
+		slog.Int("streaming_cursor_id", int(streaming)),
+		slog.Int("ora_code", info.ErrorCode))
+
+	return false
 }
 
 // completeQueryFromOER finalizes the pending query from decoded OER fields:

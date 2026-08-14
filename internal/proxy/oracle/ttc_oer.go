@@ -25,10 +25,12 @@ type oerInfo struct {
 // clients agree, and only a failed DDL carries it (see decodeErrorOER).
 //
 // Byte runs inside a row stream that happen to start with 0x04 don't carry it
-// either, which is what makes it worth keeping as the discriminator exactly
-// where row bytes are what a false positive would be made of — anything
-// mid-fetch, and a standalone func=0x04 that reports no error to prove itself
-// with. Outside those, see findPlausibleOERInResponse and decodeErrorOER.
+// either, which is what makes it worth keeping as the discriminator wherever
+// row bytes are what a false positive would be made of and nothing else stands
+// in for it: a standalone func=0x04 that reports no error has no text to prove
+// itself with, and anything scanned at an arbitrary offset inside a Response
+// mid-fetch is data. Outside those, see findPlausibleOERInResponse,
+// decodeErrorOER and midFetchOERNamesTheStreamingCursor.
 const oerEndOfCallBit = 0x010000
 
 // oraNoDataFound is ORA-01403, the normal end-of-data status — not an error.
@@ -131,8 +133,10 @@ func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 // Every measured diagnostic satisfies it, PL/SQL included (errNum 6550 →
 // "ORA-06550: line 1, column 7:"), which is why it is a check and not a hope.
 //
-// Callers must still refuse to run this mid-row-stream, where a 0x04 run is row
-// data by definition — see handleOERStatus.
+// Mid-row-stream, where a 0x04 lead byte can be a row value's length prefix
+// rather than a function code, this proof is necessary but not sufficient: the
+// caller must additionally require the OER to name the streaming cursor. See
+// handleOERStatus and midFetchOERNamesTheStreamingCursor.
 func decodeErrorOER(payload []byte) *oerInfo {
 	info, rest := decodeOERFieldsAt(payload, 0)
 	if info == nil {

@@ -340,40 +340,48 @@ func TestHandleOERStatus_RelaxationIsErrorsOnly(t *testing.T) {
 	}
 }
 
-// TestHandleOERStatus_MidRowStreamStillRequiresTheEndOfCallBit is the guard
-// that keeps this fix from becoming the bug it is descended from. Mid-fetch a
-// 0x04 lead byte is a row value's length prefix, so the strict decoder stays
-// the only thing allowed to end a call there — even for a payload the relaxed
-// decoder would happily accept.
-func TestHandleOERStatus_MidRowStreamStillRequiresTheEndOfCallBit(t *testing.T) {
+// TestHandleOERStatus_MidRowStreamRefusesAnOERForAnotherCursor is the guard that
+// keeps this fix from becoming the bug it is descended from.
+//
+// It used to assert something stronger and, as it turned out, too strong: that
+// mid-fetch the *strict* decoder is the only thing allowed to end a call, on the
+// grounds that a 0x04 lead byte there is a row value's length prefix. That
+// dropped real failures — see midfetch_fail_replay_test.go, where a TO_NUMBER
+// dies 14 900 rows into a fetch and its ORA-01722 arrives in exactly this shape.
+// What survives of the rule is the part row bytes cannot fake on demand: an OER
+// that ends a fetch has to name the cursor whose rows it interrupted. Every
+// failure recorded here belongs to some *other* statement, so none of them may
+// end this one.
+func TestHandleOERStatus_MidRowStreamRefusesAnOERForAnotherCursor(t *testing.T) {
 	t.Parallel()
+
+	const streamingCursor = 4
 
 	failures := recordedFailureOERs(t, pythonFailedStmtDump)
 	require.NotEmpty(t, failures)
 
-	var bitless []byte
-
 	for _, f := range failures {
-		if f.fields.CallStatus&oerEndOfCallBit == 0 {
-			bitless = f.payload
-
-			break
+		if f.fields.CallStatus&oerEndOfCallBit != 0 || f.fields.CursorID == streamingCursor {
+			continue
 		}
+
+		t.Run(fmt.Sprintf("ORA-%05d at #%d", f.fields.ErrorCode, f.index), func(t *testing.T) {
+			t.Parallel()
+
+			require.NotNil(t, decodeErrorOER(f.payload), "outside a row stream these bytes complete a call")
+
+			s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+			require.NoError(t, s.handleOALL8(buildOALL8("SELECT id FROM emp", nil, streamingCursor)))
+
+			s.tracker.pendingQuery.cursor.columns = []columnDef{{Name: "ID"}}
+			require.True(t, s.rowStreamActive())
+
+			s.handleOERStatus(f.payload)
+
+			assert.NotNil(t, s.tracker.pendingQuery,
+				"mid-fetch, a 0x04 run that names another cursor is row data and must not end the fetch")
+		})
 	}
-
-	require.NotNil(t, bitless, "the recording must contain a bit-less failure to try this with")
-	require.NotNil(t, decodeErrorOER(bitless), "outside a row stream these bytes complete a call")
-
-	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
-	require.NoError(t, s.handleOALL8(buildOALL8("SELECT id FROM emp", nil, 4)))
-
-	s.tracker.pendingQuery.cursor.columns = []columnDef{{Name: "ID"}}
-	require.True(t, s.rowStreamActive())
-
-	s.handleOERStatus(bitless)
-
-	assert.NotNil(t, s.tracker.pendingQuery,
-		"mid-fetch, a bit-less 0x04 run is row data and must not end the fetch")
 }
 
 // TestDecodeErrorOER_DemandsThatTheDiagnosticNameTheCode is the anchor that
