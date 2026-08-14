@@ -3,6 +3,7 @@ package oracle
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 )
 
 // This file is the writing half of ttc_oer.go: it builds the OER (message type
@@ -292,6 +293,64 @@ func encodeOERFixedWidth(shape oerShape, sum oerSummary) []byte {
 	}
 
 	return buf
+}
+
+// encodeOERPacket frames an OER as the TNS Data packet a client reads off the
+// wire: the two data-flag bytes, the summary object, and — on a session whose
+// peer terminates messages with it — the TTC end-of-response marker.
+//
+// It is the single frame builder for every refusal dbbat synthesizes, mid-session
+// (writeTTCError) and at AUTH (sendAuthFailed). The AUTH path used to hand-roll a
+// weaker frame of its own — `0x00 0x00 0x08` plus a compressed ORA code and a
+// CLR — and it cost exactly what a second implementation of a wire format costs:
+// python-oracledb thin read that 0x08 as a *return-parameters* message, walked
+// into the CLR's length byte looking for a ub4, and reported
+// `DPY-5002: internal error: read integer of length N when expecting integer of
+// no more than length 4` — where N was the byte length of dbbat's own message.
+// Every refusal at AUTH (no grant, ambiguous service name, bad key) therefore
+// looked like a protocol crash rather than the actionable text it carried.
+//
+// The two callers differ only in which shape they pass: see nextOERFrame and
+// authRefusalOERShape.
+func encodeOERPacket(shape oerShape, sum oerSummary) []byte {
+	body := encodeOER(shape, sum)
+
+	payload := make([]byte, 0, ttcDataFlagsSize+len(body)+1)
+	payload = append(payload, 0x00, 0x00) // data flags
+	payload = append(payload, body...)
+
+	// A session whose upstream terminates messages with the end-of-response
+	// marker needs one here too. OCI/sqlplus negotiates it and waits for it:
+	// with a byte-perfect OER and no marker it hung exactly as it did on the
+	// old frame.
+	if shape.endOfResponse {
+		payload = append(payload, ttcEndOfResponse)
+	}
+
+	// v315+ framing: after the TNS Accept a modern client reads the packet
+	// length as a 4-byte field, and the legacy 2-byte framing writeTNSPacket
+	// emits leaves the length bytes reading as a multi-megabyte packet. That was
+	// the *other* half of the mid-session frame's hang, and the half a correct
+	// OER body alone does not fix — measured against Oracle 23ai Free, go-ora
+	// parked on a byte-perfect OER until it was framed this way. The AUTH reject
+	// has always been framed this way, for the same reason spelled out one layer
+	// down: a legacy-framed reject surfaces as ORA-12566 with no useful reason.
+	return encodeV315DataPacket(payload)
+}
+
+// oerErrorText renders the message an OER carries — "ORA-NNNNN: reason", the
+// form a real server sends and the form both client parsers surface verbatim.
+//
+// The truncation is deliberate: a message long enough to need the chunked CLR
+// form would have to match the session's negotiated UseBigClrChunks, and no
+// refusal reason needs the room.
+func oerErrorText(oraCode int, message string) string {
+	text := fmt.Sprintf("ORA-%05d: %s", oraCode, message)
+	if len(text) > oerMaxMessageLen {
+		text = text[:oerMaxMessageLen]
+	}
+
+	return text
 }
 
 // clientCallNumber returns the TTC sequence number of the call carried by a

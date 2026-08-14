@@ -1161,45 +1161,20 @@ func (s *session) finalizeQuery(
 // the end of the response, so both come back with the ORA code and text and the
 // connection stays usable for the next statement.
 //
-// The truncation is deliberate: a message long enough to need the chunked CLR
-// form would have to match the session's negotiated UseBigClrChunks, and no
-// refusal reason needs the room.
+// The frame itself is built by encodeOERPacket, which the AUTH-phase refusal
+// shares — see its comment for what a second, hand-rolled frame builder cost.
 func (s *session) writeTTCError(oraErrorCode int, message string) error {
-	errMsg := fmt.Sprintf("ORA-%05d: %s", oraErrorCode, message)
-	if len(errMsg) > oerMaxMessageLen {
-		errMsg = errMsg[:oerMaxMessageLen]
-	}
-
 	shape, seq, callNumber := s.nextOERFrame()
 
-	body := encodeOER(shape, oerSummary{
+	frame := encodeOERPacket(shape, oerSummary{
 		CallStatus:   1,
 		SeqNumber:    seq,
 		ErrorCode:    oraErrorCode,
-		ErrorMessage: errMsg,
+		ErrorMessage: oerErrorText(oraErrorCode, message),
 		CallNumber:   callNumber,
 	})
 
-	payload := make([]byte, 0, ttcDataFlagsSize+len(body)+1)
-	payload = append(payload, 0x00, 0x00) // data flags
-	payload = append(payload, body...)
-
-	// A session whose upstream terminates messages with the end-of-response
-	// marker needs one here too. OCI/sqlplus negotiates it and waits for it:
-	// with a byte-perfect OER and no marker it hung exactly as it did on the
-	// old frame.
-	if shape.endOfResponse {
-		payload = append(payload, ttcEndOfResponse)
-	}
-
-	// v315+ framing, for the same reason sendAuthFailed spells out: after the
-	// Accept a modern client reads the packet length as a 4-byte field, and the
-	// legacy 2-byte framing writeTNSPacket emits leaves the length bytes reading
-	// as a multi-megabyte packet. That was the *other* half of this frame's
-	// hang, and the half a correct OER body alone does not fix — measured
-	// against Oracle 23ai Free, go-ora parked on a byte-perfect OER until it was
-	// framed this way.
-	if _, err := s.clientConn.Write(encodeV315DataPacket(payload)); err != nil {
+	if _, err := s.clientConn.Write(frame); err != nil {
 		return fmt.Errorf("write TTC error frame: %w", err)
 	}
 

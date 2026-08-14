@@ -83,6 +83,14 @@ type session struct {
 	// "Two OCI encodings, not one".
 	clientWide64Encoding bool
 
+	// clientVerifierType is the O5LOGON verifier the challenge dbbat issued this
+	// client was built with (VerifierType6949 or VerifierType18453), or 0 before
+	// the challenge exists. Read by authChallengeIsModern, which shapes the tail
+	// of an AUTH-phase refusal's summary object off the same line: the two
+	// end-of-call summaries buildAuthChallengeEndMarker returns for these two
+	// verifiers differ by exactly that tail.
+	clientVerifierType int
+
 	// clientBigClrChunks records whether the upstream advertised
 	// ServerCompileTimeCaps[37]&0x20 (UseBigClrChunks) during the pre-auth relay.
 	// When set, clients encode long CLR values with compressed-int chunk lengths
@@ -366,6 +374,13 @@ func (s *session) run() error {
 	s.upstreamConn = upstreamConn
 	s.clientAuthPhase1Pkt = phase1Pkt
 
+	// Read the client's OCI dialect flags off AUTH Phase 1 before anything can
+	// refuse it. They shape the challenge (step 4b/5) but also every refusal
+	// frame — an OCI client handed a thin-dialect one waits for the rest of a
+	// response that has already arrived — and the first refusal below (step 4a)
+	// happens before the challenge exists.
+	s.observeClientAuthEncoding(phase1Pkt.Payload)
+
 	// Step 4a: If the connect string's service name matched several dbbat
 	// databases (mutualized upstream), pick the real one now that AUTH Phase 1
 	// has revealed the username — the user's active grants decide. This MUST
@@ -387,9 +402,8 @@ func (s *session) run() error {
 	// leaves unread bytes in the OCI client's TTC buffer, and the client aborts
 	// the AUTH call with a break/reset marker exchange — the "sqlplus stalls
 	// before AUTH Phase 2" failure. Thin clients keep the proven hand-built
-	// summaries and the original ordering.
-	s.observeClientAuthEncoding(phase1Pkt.Payload)
-
+	// summaries and the original ordering. (The dialect itself was read off
+	// Phase 1 above, before step 4a could refuse anything.)
 	if s.clientWideEncoding {
 		if err := s.beginUpstreamAuth(); err != nil {
 			return fmt.Errorf("upstream auth failed: %w", err)
@@ -508,21 +522,140 @@ func encodeV315DataPacket(payload []byte) []byte {
 	return buf
 }
 
-// sendAuthFailed sends an ORA error TTC AUTH-reject frame to the client before
-// the socket is closed, so the client renders a real ORA code instead of a
+// sendAuthFailed sends an ORA error to a client refused at AUTH — no active
+// grant, an ambiguous service name, a bad key — before the socket is closed, so
+// the client renders the real ORA code and the actionable text instead of a
 // generic ORA-12566 / ORA-03113 protocol error.
 //
-// The frame MUST use v315+ framing (4-byte length header, the 2-byte length
-// field left 0x0000) — the same as the AUTH challenge (encodeV315DataPacket).
-// After the TNS Accept, modern clients read the packet length as a 4-byte field;
-// a legacy 2-byte-framed reject (the old writeTNSPacket path) is misread as an
-// oversized/malformed packet and surfaces as ORA-12566 with no useful reason.
+// It is the same OER (message type 0x04) a real server ends a rejected login
+// with, built by the same encoder the mid-session refusal uses. It used to be a
+// three-part frame of its own making — a TTC Response (0x08), a compressed ORA
+// code and a CLR — and python-oracledb thin turned every refusal into
+// `DPY-5002: internal error: read integer of length N …`, N being the length of
+// dbbat's own message; see encodeOERPacket.
 func (s *session) sendAuthFailed(oraCode uint16, message string) {
-	frame := encodeV315DataPacket(buildAuthFailed(int(oraCode), message))
+	s.observeAuthCallNumber()
+
+	shape, seq, callNumber := s.authRefusalOERShape()
+
+	s.logger.DebugContext(s.ctx, "sending AUTH reject",
+		slog.Int("ora_code", int(oraCode)),
+		slog.Int("extra_tail_fields", shape.extraTailFields),
+		slog.Bool("tail_learned", shape.tailLearned),
+		slog.Bool("fixed_width", shape.fixedWidth),
+		slog.Bool("fixed_width_64", shape.fixedWidth64),
+		slog.Int("call_number", int(callNumber)))
+
+	frame := encodeOERPacket(shape, oerSummary{
+		CallStatus:   1,
+		SeqNumber:    seq,
+		ErrorCode:    int(oraCode),
+		ErrorMessage: oerErrorText(int(oraCode), message),
+		CallNumber:   callNumber,
+	})
+
 	if _, err := s.clientConn.Write(frame); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to send auth failed", slog.Any("error", err))
 	}
 }
+
+// observeAuthCallNumber stamps the session's call number from the AUTH call the
+// client is parked in, which during authentication is the only call there is:
+// observeClientCallNumber runs on every message of the *proxy* loop, and a
+// session refused at AUTH never reaches it, so the refusal would otherwise end
+// call zero.
+//
+// The newest AUTH packet is the one to name. A client refused before the
+// challenge (no grant, ambiguous service name) is waiting on Phase 1; one
+// refused on its key is waiting on Phase 2. Both are ordinary TTC ops
+// (`03 76 <seq> …` / `03 73 <seq> …`), so clientCallNumber reads the sequence at
+// its usual offset, 64-bit OCI headers included (usesWide64OpHeader keys off the
+// very same byte).
+func (s *session) observeAuthCallNumber() {
+	pkt := s.clientAuthPhase2Pkt
+	if pkt == nil {
+		pkt = s.clientAuthPhase1Pkt
+	}
+
+	if pkt == nil {
+		return
+	}
+
+	s.observeClientCallNumber(extractTTCPayload(pkt.Payload))
+}
+
+// authRefusalOERShape is nextOERFrame for the AUTH phase: the same layout, with
+// the one field the AUTH phase cannot afford to leave at its default filled in
+// from what this session knows about the client.
+//
+// That field is the tail count. Mid-session a wrong one costs the message text
+// and nothing else, which is why nextOERFrame leaves it at zero until an
+// upstream OER teaches it better. At AUTH the text *is* the fix — "no active
+// grant; request access via dbbat" is what the user has to read — and a client
+// that expects the two "fields added in Oracle Database 20c" and does not find
+// them reads the message's own length byte as the first of them, which is how
+// DPY-5002 reports "length 39" for a 39-byte message. The tail therefore has to
+// be right before anything has been learned.
+//
+// The discriminator is customHash, and it is measured rather than reasoned:
+//
+//   - go-ora negotiates no customHash, takes the legacy 6949 challenge, and a
+//     real 23ai server ends its AUTH response with a summary carrying **no**
+//     extra fields (oerFixtureGoOraOK).
+//   - python-oracledb thin negotiates customHash, takes the 12c/18453
+//     challenge, and the same server ends its AUTH response with **two**
+//     (oerFixturePythonOK).
+//   - the 153-byte OCI capture buildAuthChallengeEndMarker returns for a wide
+//     client decodes as the 64-bit summary with two extra fields as well.
+//
+// So the two end-of-call summaries dbbat already sends at challenge time — and
+// which each of those clients demonstrably accepts — differ by exactly this
+// count, and along exactly this line. It is not the negotiated TTC field
+// version: go-ora's is the *higher* of the two (docs/oracle.md, "The AUTH
+// function header is negotiated, not fixed"), so a version rule would get both
+// clients backwards.
+//
+// A shape learned off a real upstream OER always wins, and for an OCI client
+// there is one: beginUpstreamAuth runs before the client is challenged and
+// learnOERTail reads the upstream's own AUTH summary out of it.
+func (s *session) authRefusalOERShape() (oerShape, int, byte) {
+	shape, seq, callNumber := s.nextOERFrame()
+	if shape.tailLearned {
+		return shape, seq, callNumber
+	}
+
+	if s.authChallengeIsModern() {
+		shape.extraTailFields = oerModernExtraTailFields
+	}
+
+	return shape, seq, callNumber
+}
+
+// authChallengeIsModern reports whether this session's O5LOGON challenge is the
+// 12c/18453 one rather than the legacy 6949 — the "modern client" line
+// authRefusalOERShape keys the summary tail off.
+//
+// It reads the verifier the challenge was actually built with when there is one,
+// and falls back to the negotiation for the two refusals that happen *before*
+// the challenge (an ambiguous service name, resolved from the username in Phase
+// 1; a missing grant, checked before the verifiers are even loaded). The
+// fallback is the same condition authenticateClient applies, minus the API key's
+// own verifier inventory: a key with no 18453 verifier is answered with the
+// legacy challenge whatever the server offered, which is why the recorded type
+// takes precedence once it exists.
+func (s *session) authChallengeIsModern() bool {
+	if s.clientVerifierType != 0 {
+		return s.clientVerifierType == VerifierType18453
+	}
+
+	return s.upstreamCustomHash
+}
+
+// oerModernExtraTailFields is the tail a modern client's summary object carries:
+// the two "fields added in Oracle Database 20c" (a SQL type and a server
+// checksum) that python-oracledb thin's error parser reads and go-ora's does
+// not.
+const oerModernExtraTailFields = 2
 
 // authRejectFor maps a client-authentication failure to the ORA code and message
 // dbbat surfaces to the client. A missing grant is actionable — the user simply
@@ -948,6 +1081,11 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	if err != nil {
 		return fmt.Errorf("failed to generate O5LOGON challenge: %w", err)
 	}
+
+	// Recorded before the challenge goes out, so a refusal on the key that comes
+	// back (ORA-01017) is framed for the summary shape this client was just
+	// handed. See authChallengeIsModern.
+	s.clientVerifierType = o5.VerifierType()
 
 	// OCI clients (sqlplus / instant client) negotiate fixed 4-byte little-endian
 	// key/value lengths in the AUTH messages, whereas thin clients use the

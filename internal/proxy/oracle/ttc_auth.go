@@ -478,16 +478,13 @@ func buildAuthChallengeEndMarker(verifierType int, wide bool) []byte {
 }
 
 // buildAuthOK constructs the TTC AUTH success response.
-
-// buildAuthFailed constructs the TTC AUTH failure response with an ORA error code.
-func buildAuthFailed(oraCode int, message string) []byte {
-	buf := make([]byte, 0, 3+8+len(message)+2)
-	buf = append(buf, 0x00, 0x00, byte(TTCFuncResponse))
-	buf = append(buf, ttcCompressedUint(uint64(oraCode))...)
-	buf = append(buf, ttcClr([]byte(message))...)
-
-	return buf
-}
+//
+// There is no buildAuthFailed beside it any more: the AUTH failure response is
+// the same OER a real server ends a rejected login with, written by the encoder
+// the mid-session refusal shares (encodeOERPacket, from sendAuthFailed). The
+// frame that used to live here — `0x00 0x00 0x08`, a compressed ORA code and a
+// CLR — was not an error structure at all, and python-oracledb thin reported
+// every refusal built from it as DPY-5002.
 
 // ttcKeyVal encodes a key-value pair using Oracle's TTC wire format with
 // single-byte CLR chunk lengths.
