@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -104,7 +105,7 @@ const (
 	// logMsgRefusalTeardownPanic is the one that should never appear. It means
 	// the teardown of a held refusal panicked while itself running from a
 	// recovered decode panic. The relay goroutine above it does have a recover
-	// now (shared.RunRelay), so the nested one no longer stands between this and
+	// now (safe.RunRelay), so the nested one no longer stands between this and
 	// process death — it stands between this and losing a session that was
 	// supposed to survive a malformed frame.
 	logMsgRefusalTeardownPanic = "recovered from panic tearing down a held limit refusal"
@@ -971,7 +972,7 @@ func (s *session) recordBlockedQuery(sql string, binds []string, refusal error) 
 		Error: shared.SanitizeQueryError(s.ctx, s.logger, &errText),
 	}
 
-	go shared.RunGuarded(s.ctx, s.logger, goroutineNameBlockedQuery, func() {
+	go safe.RunGuarded(s.ctx, s.logger, goroutineNameBlockedQuery, func() {
 		created, err := s.completionStore.CreateQuery(s.ctx, query)
 		if err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to log blocked query", slog.Any("error", err))
@@ -1058,7 +1059,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 		// Update with duration, error, rows affected. results_truncated is only
 		// known now: the row was inserted before any row was streamed.
 		if s.completionStore != nil {
-			go shared.RunGuarded(s.ctx, s.logger, goroutineNameQueryCompletion, func() {
+			go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryCompletion, func() {
 				s.finalizeQuery(pending.queryUID, pending.rowSink, &duration,
 					rowsAffected, queryError, pending.truncated, bytesTransferred)
 			})
@@ -1076,7 +1077,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 			ResultsTruncated: pending.truncated,
 		}
 
-		go shared.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
+		go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
 			if _, err := s.completionStore.CreateQuery(s.ctx, query); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
 			}

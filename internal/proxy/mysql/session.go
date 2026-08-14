@@ -20,6 +20,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -222,7 +223,7 @@ func (s *Session) Run() error {
 	// its own panic would leave the session with no expiry, no byte quota and no
 	// revocation check whatsoever. The teardown closes both conns, which is
 	// exactly how onLimitViolation enforces.
-	go shared.RunWatchdog(watchCtx, s.logger, goroutineNameWatchdog, func() {
+	go safe.RunWatchdog(watchCtx, s.logger, goroutineNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
 			s.onLimitViolation(upstreamConn, clientConn, err)
 		})

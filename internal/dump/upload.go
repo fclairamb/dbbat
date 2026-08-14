@@ -14,11 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/google/uuid"
 	"gocloud.dev/blob"
 	"gocloud.dev/gcerrors"
-
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
 
 	// Blank imports register the blob drivers dbbat supports. "file" is not
 	// only for tests: it is also how a capture archive on a mounted volume is
@@ -412,8 +411,8 @@ func (u *Uploader) work(ctx context.Context) {
 		// Per job rather than around the loop: a panic must not end the process,
 		// and must not retire this worker either — a proxy that silently stopped
 		// shipping captures is worse than one that loses a single upload. See
-		// shared.RunMaintenance.
-		shared.RunMaintenance(ctx, u.logger, goroutineNameUpload, func() {
+		// safe.RunMaintenance.
+		safe.RunMaintenance(ctx, u.logger, goroutineNameUpload, func() {
 			u.uploadWithRetry(ctx, uid)
 		})
 	}

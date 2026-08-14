@@ -9,6 +9,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -242,7 +243,7 @@ func (s *Session) rejectHeldCommand(
 	if approvalUID != uuid.Nil && s.server != nil && s.server.store != nil {
 		errStr := cause.Error()
 
-		go shared.RunGuarded(s.ctx, s.logger, goroutineNameHeldCommandCompletion, func() {
+		go safe.RunGuarded(s.ctx, s.logger, goroutineNameHeldCommandCompletion, func() {
 			if err := s.server.store.UpdateQueryCompletion(s.ctx, approvalUID, nil, nil, &errStr, false, false); err != nil {
 				s.logger.DebugContext(s.ctx, "failed to complete held command", slog.Any("error", err))
 			}

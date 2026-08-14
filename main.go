@@ -336,7 +336,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	//
 	// Everything else in package main that runs on a goroutine is guarded: see
 	// retention.go and heartbeat.go, both of which are ordinary maintenance loops
-	// under shared.RunMaintenance.
+	// under safe.RunMaintenance.
 	go func() {
 		if err := apiServer.Start(cfg.ListenAPI); err != nil {
 			logger.ErrorContext(context.Background(), "API server error", slog.Any("error", err))

@@ -14,7 +14,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/events"
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -150,7 +150,7 @@ func (s *Server) handleStream(c *gin.Context) {
 	// The read loop's own `defer cancel()` is what ends the socket, so a
 	// recovered panic tears this stream down exactly as a client disconnect
 	// does. That is RunGuarded's precondition; see its doc.
-	go shared.RunGuarded(ctx, s.logger, goroutineNameStreamReadLoop, func() {
+	go safe.RunGuarded(ctx, s.logger, goroutineNameStreamReadLoop, func() {
 		s.streamReadLoop(ctx, cancel, conn, sub)
 	})
 
@@ -609,9 +609,9 @@ func (s *Server) StartEventListener(ctx context.Context) {
 	// ListenEvents itself, whose stopping is a state the warn below already
 	// describes — and which beats the process dying with every live proxy
 	// session on it.
-	go shared.RunGuarded(ctx, s.logger, goroutineNameEventListener, func() {
+	go safe.RunGuarded(ctx, s.logger, goroutineNameEventListener, func() {
 		err := s.store.ListenEvents(ctx, s.logger, func(n store.EventNotification) {
-			shared.RunMaintenance(ctx, s.logger, goroutineNameEventRepublish, func() {
+			safe.RunMaintenance(ctx, s.logger, goroutineNameEventRepublish, func() {
 				s.republish(ctx, n)
 			})
 		})

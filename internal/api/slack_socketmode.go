@@ -5,10 +5,9 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
-
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // What a panic on the Socket Mode transport is logged under.
@@ -44,7 +43,7 @@ func (s *Server) startSocketMode() {
 	// its own error (the warn below), so a recovered panic lands on a state the
 	// transport is designed for — and one that is not the process dying with
 	// every live proxy session on it.
-	go shared.RunGuarded(ctx, s.logger, goroutineNameSlackSocketRun, func() {
+	go safe.RunGuarded(ctx, s.logger, goroutineNameSlackSocketRun, func() {
 		// RunContext blocks and reconnects internally until ctx is canceled.
 		if err := client.RunContext(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.logger.WarnContext(ctx, "slack socket mode stopped", slog.Any("error", err))
@@ -71,7 +70,7 @@ func (s *Server) runSocketMode(ctx context.Context, client *socketmode.Client) {
 			// the one turn worth losing. Retiring the whole receiver would
 			// leave the socket connected and every later Approve/Deny click
 			// silently ignored.
-			shared.RunMaintenance(ctx, s.logger, goroutineNameSlackSocketEvent, func() {
+			safe.RunMaintenance(ctx, s.logger, goroutineNameSlackSocketEvent, func() {
 				s.handleSocketEvent(ctx, client, evt)
 			})
 		}
@@ -132,7 +131,7 @@ func (s *Server) dispatchSlackCallback(decider slackDecider, callback slack.Inte
 	slackUserID := callback.User.ID
 	responseURL := callback.ResponseURL
 
-	go shared.RunGuarded(context.Background(), s.logger, goroutineNameSlackGrantDecision, func() {
+	go safe.RunGuarded(context.Background(), s.logger, goroutineNameSlackGrantDecision, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackInteractionTimeout)
 		defer cancel()
 

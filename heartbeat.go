@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -214,7 +214,7 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 	reclaim := time.NewTimer(nextReclaimDelay())
 	defer reclaim.Stop()
 
-	// Every unit of work runs under shared.RunMaintenance, per turn and
+	// Every unit of work runs under safe.RunMaintenance, per turn and
 	// individually. This is a goroutine of its own, so no recover reaches it and
 	// an unguarded panic in any of these store calls would end the process with
 	// every live session on it.
@@ -244,7 +244,7 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 // guarded runs one unit of the heartbeat loop's work with a panic recover
 // around it.
 func (h *instanceHeartbeat) guarded(ctx context.Context, name string, fn func()) {
-	shared.RunMaintenance(ctx, h.logger, name, fn)
+	safe.RunMaintenance(ctx, h.logger, name, fn)
 }
 
 // nextReclaimDelay spreads the reclaim over [half, one and a half] times

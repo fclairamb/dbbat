@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -651,7 +652,7 @@ func (s *session) recordQuery(ctx context.Context, pending *pendingQuery, outcom
 
 	hasRows := len(outcome.rows) > 0
 
-	go shared.RunGuarded(ctx, s.logger, goroutineNameQueryRecord, func() {
+	go safe.RunGuarded(ctx, s.logger, goroutineNameQueryRecord, func() {
 		s.persistQuery(ctx, pending.approvalUID, record, outcome, hasRows, bytesTransferred)
 	})
 
@@ -735,7 +736,7 @@ func (s *session) completeHeldQuery(ctx context.Context, queryUID uuid.UUID, err
 		return
 	}
 
-	go shared.RunGuarded(ctx, s.logger, goroutineNameHeldQueryCompletion, func() {
+	go safe.RunGuarded(ctx, s.logger, goroutineNameHeldQueryCompletion, func() {
 		if err := s.server.store.UpdateQueryCompletion(ctx, queryUID, nil, nil, &errText, false, false); err != nil {
 			s.logger.DebugContext(ctx, "MSSQL failed to complete a held query", slog.Any("error", err))
 		}

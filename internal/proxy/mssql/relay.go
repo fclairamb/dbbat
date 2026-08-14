@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"net"
 
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // clientMessageHook is the seam stage 3 fills in.
@@ -98,15 +98,15 @@ const (
 func (s *session) relay(ctx context.Context) error {
 	errCh := make(chan error, 2)
 
-	go shared.RunGuarded(ctx, s.logger, relayNameClientReader, s.readClientMessages)
+	go safe.RunGuarded(ctx, s.logger, relayNameClientReader, s.readClientMessages)
 
 	go func() {
-		errCh <- shared.RunRelay(ctx, s.logger, relayNameClientToUpstream, func() error {
+		errCh <- safe.RunRelay(ctx, s.logger, relayNameClientToUpstream, func() error {
 			return s.pumpClientToUpstream(ctx)
 		})
 	}()
 	go func() {
-		errCh <- shared.RunRelay(ctx, s.logger, relayNameUpstreamToClient, func() error {
+		errCh <- safe.RunRelay(ctx, s.logger, relayNameUpstreamToClient, func() error {
 			return s.pumpUpstreamToClient(ctx)
 		})
 	}()

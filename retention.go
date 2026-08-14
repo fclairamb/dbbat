@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/config"
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -75,7 +75,7 @@ func startQueryRetentionSweep(
 // run sweeps once at startup — so newly configured retention applies without
 // waiting a full interval — then on every tick until shutdown.
 //
-// Each sweep runs under shared.RunMaintenance, per turn, exactly as the five
+// Each sweep runs under safe.RunMaintenance, per turn, exactly as the five
 // proxies' dump-retention sweeps do. This is a goroutine of its own, so no
 // recover reaches it: a panic in CleanupOldQueryRows would otherwise end the
 // process and every live session on it. Per turn rather than around the loop,
@@ -99,7 +99,7 @@ func (s *queryRetentionSweeper) run(ctx context.Context) {
 
 // guardedSweep is one sweep with a panic recover around it.
 func (s *queryRetentionSweeper) guardedSweep(ctx context.Context) {
-	shared.RunMaintenance(ctx, s.logger, goroutineNameQueryRetentionSweep, func() {
+	safe.RunMaintenance(ctx, s.logger, goroutineNameQueryRetentionSweep, func() {
 		s.sweep(ctx)
 	})
 }

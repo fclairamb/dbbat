@@ -21,6 +21,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -861,7 +862,7 @@ func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifiers []*o5Logo
 		// do this (it has no plaintext).
 		if od := apiKey.OracleData(); od != nil && !od.UserSalt {
 			keyID, plain, encKey := apiKey.ID, plainPassword, s.encryptionKey
-			go shared.RunGuarded(context.Background(), s.logger, goroutineNameVerifierUpgrade, func() {
+			go safe.RunGuarded(context.Background(), s.logger, goroutineNameVerifierUpgrade, func() {
 				if err := s.store.UpgradeAPIKeyO5LogonVerifiers(context.Background(), keyID, plain, encKey); err != nil {
 					s.logger.WarnContext(context.Background(), "failed to upgrade legacy O5LOGON verifiers to user salts",
 						slog.String("key_id", keyID.String()), slog.Any("error", err))
@@ -1272,13 +1273,13 @@ func (s *session) proxyMessages() error {
 	// revocation. onLimitViolation is where a panic is most plausible (it walks a
 	// held refusal's handoff), so the teardown here is the blunt half of what it
 	// does — closing both conns, which ends whichever relay is parked on them.
-	go shared.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
+	go safe.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
 	}, s.closeConns)
 
 	errChan := make(chan error, 2)
 
-	// Both directions run under shared.RunRelay, which turns a panic into an
+	// Both directions run under safe.RunRelay, which turns a panic into an
 	// error on errChan instead of a dead process: these are goroutines of their
 	// own, and the only other recover in the Oracle proxy is on
 	// handleConnection, which runs on a *different* goroutine and catches
@@ -1290,11 +1291,11 @@ func (s *session) proxyMessages() error {
 	// session leaks its conns. errChan is buffered at 2, so neither send blocks
 	// even though only the first is read.
 	go func() {
-		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.clientToUpstream)
+		errChan <- safe.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.clientToUpstream)
 	}()
 
 	go func() {
-		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.upstreamToClient)
+		errChan <- safe.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.upstreamToClient)
 	}()
 
 	// Wait for either direction to close
@@ -2406,7 +2407,7 @@ func (s *session) heldRefusalBlocks() bool {
 	}
 
 	// The nested recover is not belt-and-braces, even though the client relay
-	// goroutine now runs under shared.RunRelay and a panic escaping here would
+	// goroutine now runs under safe.RunRelay and a panic escaping here would
 	// no longer reach the runtime. What it buys is one level finer: this runs
 	// from the recovery of a *decode* panic, and the session is meant to survive
 	// that — the relay's recover would end it instead. The teardown it performs

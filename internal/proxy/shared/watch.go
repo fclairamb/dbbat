@@ -8,6 +8,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // Client TCP keepalive settings. With no approval timeout, a hold ends only on
@@ -172,10 +174,10 @@ func (w *WatchedConn) Park() <-chan struct{} {
 	w.mu.Unlock()
 
 	// The watcher's own `defer close(stopped)` is what releases Unpark, which
-	// blocks on it — that is RunGuarded's precondition. WatchedConn has no
+	// blocks on it — that is safe.RunGuarded's precondition. WatchedConn has no
 	// logger of its own (it wraps a net.Conn, nothing more), so the panic
 	// reports through slog.Default().
-	go RunGuarded(context.Background(), nil, GoroutineNameParkWatcher, func() {
+	go safe.RunGuarded(context.Background(), nil, GoroutineNameParkWatcher, func() {
 		w.watch(gone, stopped)
 	})
 

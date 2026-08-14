@@ -11,7 +11,7 @@ import (
 // package main owns.
 //
 // Both run on goroutines of their own, so no recover reaches them: before
-// shared.RunMaintenance, a panic in CleanupOldQueryRows, HeartbeatInstance,
+// safe.RunMaintenance, a panic in CleanupOldQueryRows, HeartbeatInstance,
 // reclaim or refreshOpenStamps ended the process — every live session, of every
 // user, on every database — over a housekeeping tick. They are the same shape as
 // the five proxies' dump-retention sweeps, and the accept-loop exemption

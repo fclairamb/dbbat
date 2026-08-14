@@ -12,7 +12,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/fclairamb/dbbat/internal/events"
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
 )
@@ -328,7 +328,7 @@ func (s *Server) start(ctx context.Context, caller *Caller, a accessible, sqlTex
 
 	// Started before the statement so the hold's pending event cannot be
 	// published into a broker nobody is listening to yet.
-	go shared.RunGuarded(execCtx, s.deps.Logger, goroutineNameHoldWatcher, func() {
+	go safe.RunGuarded(execCtx, s.deps.Logger, goroutineNameHoldWatcher, func() {
 		watchHold(execCtx, s.brokerOrNil(), s.execs, e)
 	})
 
@@ -348,7 +348,7 @@ func (s *Server) start(ctx context.Context, caller *Caller, a accessible, sqlTex
 				return
 			}
 
-			shared.LogGoroutinePanic(execCtx, s.deps.Logger, goroutineNameExecute, r)
+			safe.LogGoroutinePanic(execCtx, s.deps.Logger, goroutineNameExecute, r)
 
 			if !e.finished() {
 				e.finish(nil, fmt.Errorf("%w: %v", ErrExecutionPanicked, r))

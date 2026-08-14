@@ -1,4 +1,20 @@
-package shared
+// Package safe holds the goroutine panic guards every other package wraps its
+// detached goroutines in.
+//
+// It is deliberately a *leaf*: it imports the standard library and nothing else,
+// which is the whole reason it exists as its own package rather than living in
+// internal/proxy/shared alongside the proxies that were its first callers.
+// `shared` sits mid-graph — it imports internal/cache and
+// internal/proxy/upstream — so a goroutine in either of those could not reach
+// the guards without an import cycle, and had to hand-copy the recover instead.
+// Two copies of a recover is exactly one copy too many: the log message, the
+// attribute names and the stack handling drift, silently, and the drift only
+// shows up in an incident.
+//
+// Keep it a leaf. A dependency on any dbbat package here re-creates the cycle
+// for whoever is unlucky enough to sit downstream of it; TestPackageImportsOnly
+// StandardLibrary fails the build if one is added.
+package safe
 
 import (
 	"context"
@@ -56,7 +72,7 @@ const (
 // teardown an I/O error takes.
 //
 // The returned error is what makes that true: the caller's pattern is
-// `errCh <- shared.RunRelay(...)`, so the send happens on the panic path too.
+// `errCh <- safe.RunRelay(...)`, so the send happens on the panic path too.
 // Dropping it would park the session's wait on a relay that is already gone.
 func RunRelay(ctx context.Context, logger *slog.Logger, direction string, fn func() error) (err error) {
 	defer func() {

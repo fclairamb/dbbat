@@ -474,7 +474,7 @@ func TestHeldRefusalBlocksAFrameItCannotRead(t *testing.T) {
 // That path is only reachable through a panicking write, which is why the
 // teardown in answerHeldRefusal is deferred rather than sequential — a
 // sequential one would skip the recording and leave both sockets open, and the
-// panic would then escape to the client relay goroutine. Since shared.RunRelay
+// panic would then escape to the client relay goroutine. Since safe.RunRelay
 // that costs the session rather than the process — better, but still the
 // session. So this asserts the two halves that keep the exits at four: the
 // statement is still finalized with the real reason, and nothing escapes.

@@ -15,7 +15,7 @@ import (
 	"github.com/slack-go/slack"
 
 	"github.com/fclairamb/dbbat/internal/notify"
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -167,7 +167,7 @@ func (s *Server) serveSlackInteraction(c *gin.Context, signingSecret string, dec
 	responseURL := callback.ResponseURL
 	slackUserID := callback.User.ID
 
-	go shared.RunGuarded(context.Background(), s.logger, goroutineNameSlackGrantDecision, func() {
+	go safe.RunGuarded(context.Background(), s.logger, goroutineNameSlackGrantDecision, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackInteractionTimeout)
 		defer cancel()
 
@@ -585,7 +585,7 @@ func (s *Server) dispatchSlackQueryDecision(callback slack.InteractionCallback) 
 	slackUserID := callback.User.ID
 	responseURL := callback.ResponseURL
 
-	go shared.RunGuarded(context.Background(), s.logger, goroutineNameSlackQueryDecision, func() {
+	go safe.RunGuarded(context.Background(), s.logger, goroutineNameSlackQueryDecision, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackInteractionTimeout)
 		defer cancel()
 

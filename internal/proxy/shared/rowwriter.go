@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -145,8 +146,8 @@ func NewRowWriter(st RowStore, logger *slog.Logger) *RowWriter {
 	// Whole-loop guard, and one of the few places that is the right shape: run's
 	// own `defer close(w.done)` releases every producer parked in AddAll or
 	// Flush, so a recovered panic degrades capture process-wide instead of
-	// ending the process. See RunGuarded.
-	go RunGuarded(ctx, logger, GoroutineNameRowWriterDrain, w.run)
+	// ending the process. See safe.RunGuarded.
+	go safe.RunGuarded(ctx, logger, GoroutineNameRowWriterDrain, w.run)
 
 	return w
 }
