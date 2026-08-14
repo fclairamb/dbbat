@@ -940,6 +940,146 @@ func TestHeldRefusalWatchdogFallsBackAfterItsGraceRunsOut(t *testing.T) {
 	assert.Positive(t, grant.BytesTransferred, "its streamed bytes must still be charged to the grant")
 }
 
+// TestAbandonedHoldNamesTheCrossoverOnlyWhenTheClientWasStillDraining covers
+// the one thing the grace fail-safe cannot say for itself.
+//
+// The two bounds meet at a link speed: below ~280 KiB/s relaying
+// refusalHoldMaxBytes takes longer than refusalHandoffGrace, so the clock always
+// fires first and the byte bound is unreachable. A handoff cut there is a *slow*
+// client, not the silent one the grace exists for, and both produce the same
+// ORA-03113. Neither bound moves for it (see refusalHandoffGrace) — the WARN is
+// the whole remedy, so what it fires on is the behaviour under test.
+//
+// Both shapes are driven through the production path: the relay's own
+// enforceMidStreamLimits is what stamps a hold as still receiving, and
+// onLimitViolation is what classifies it. Only armedAt is moved by hand, so the
+// grace is spent without a 30s test.
+func TestAbandonedHoldNamesTheCrossoverOnlyWhenTheClientWasStillDraining(t *testing.T) {
+	t.Parallel()
+
+	// The bytes the slow client is still being fed while it holds: far under the
+	// 8 MiB bound, which is the crossover — it was draining the whole time and
+	// the bound was never within reach at that rate.
+	const relayedWhileHeld = 512 << 10
+
+	t.Run("still draining at the grace: the crossover is named", func(t *testing.T) {
+		t.Parallel()
+
+		s, logs, clientTestEnd := newAbandonedHoldSession(t)
+
+		// The relay keeps feeding the parked client, through the very call
+		// upstreamToClient makes after every forwarded packet.
+		s.bytesToClient.Add(relayedWhileHeld)
+		require.NoError(t, s.enforceMidStreamLimits(), "inside the byte bound the relay keeps going")
+
+		backdateHeldRefusal(s)
+		s.onLimitViolation(shared.ErrByteQuotaExceeded)
+
+		assertOraclePeerClosed(t, clientTestEnd, "client conn")
+		assert.Equal(t, 1, logs.count(logMsgWatchdogTeardown),
+			"the teardown itself is unchanged: the grace still ends the session")
+		require.Equal(t, 1, logs.count(logMsgRefusalGraceOutranBytes),
+			"a hold that relayed bytes right up to the grace must be reported as the crossover")
+
+		assert.Equal(t, []int64{relayedWhileHeld},
+			logs.intsFor(logMsgRefusalGraceOutranBytes, logAttrRelayedBytesSince),
+			"the record must carry what the abandoned hold actually relayed")
+
+		heldFor := logs.intsFor(logMsgRefusalGraceOutranBytes, logAttrHeldForMillis)
+		require.Len(t, heldFor, 1)
+		assert.GreaterOrEqual(t, heldFor[0], refusalHandoffGrace.Milliseconds(),
+			"and that the clock, not the byte bound, is what ran out")
+
+		effective := logs.intsFor(logMsgRefusalGraceOutranBytes, logAttrEffectiveBytesPerSec)
+		crossover := logs.intsFor(logMsgRefusalGraceOutranBytes, logAttrCrossoverBytesPerSec)
+		require.Len(t, effective, 1)
+		require.Len(t, crossover, 1)
+		assert.Equal(t, int64(refusalHoldMaxBytes)*1000/refusalHandoffGrace.Milliseconds(), crossover[0],
+			"the crossover rate is the byte bound divided by the grace and nothing else")
+		assert.Less(t, effective[0], crossover[0],
+			"the whole claim of the record: below the crossover rate the byte bound was unreachable")
+	})
+
+	t.Run("silent since it was armed: no crossover, just the teardown", func(t *testing.T) {
+		t.Parallel()
+
+		s, logs, clientTestEnd := newAbandonedHoldSession(t)
+
+		// Nothing is relayed at all — the client stopped talking, which is
+		// exactly what the grace is the fail-safe for and not a crossover.
+		backdateHeldRefusal(s)
+		s.onLimitViolation(shared.ErrByteQuotaExceeded)
+
+		assertOraclePeerClosed(t, clientTestEnd, "client conn")
+		assert.Equal(t, 1, logs.count(logMsgWatchdogTeardown),
+			"the silent client still loses its session at the grace")
+		assert.Zero(t, logs.count(logMsgRefusalGraceOutranBytes),
+			"a client that was never being fed must not be reported as one the link was too slow for")
+	})
+
+	t.Run("fed early, quiet by the grace: still not a crossover", func(t *testing.T) {
+		t.Parallel()
+
+		s, logs, clientTestEnd := newAbandonedHoldSession(t)
+
+		s.bytesToClient.Add(relayedWhileHeld)
+		require.NoError(t, s.enforceMidStreamLimits())
+
+		// The tail arrived at the start of the hold and nothing followed, which
+		// is a client that went quiet however much it was handed first. Aging
+		// the last relay past the idle window is what says so.
+		s.refusalMu.Lock()
+		s.held.lastRelayAt = s.held.lastRelayAt.Add(-s.refusalStillReceivingIdle() - time.Second)
+		s.refusalMu.Unlock()
+
+		backdateHeldRefusal(s)
+		s.onLimitViolation(shared.ErrByteQuotaExceeded)
+
+		assertOraclePeerClosed(t, clientTestEnd, "client conn")
+		assert.Zero(t, logs.count(logMsgRefusalGraceOutranBytes),
+			"progress made early in the hold is not progress made at the grace")
+	})
+}
+
+// newAbandonedHoldSession is a session with a mid-stream refusal armed the way
+// the relay arms it and nothing yet relayed past it, plus the handler its
+// records land in and the client's end of the pipe.
+func newAbandonedHoldSession(t *testing.T) (*session, *countingHandler, net.Conn) {
+	t.Helper()
+
+	clientProxyEnd, clientTestEnd := net.Pipe()
+
+	t.Cleanup(func() {
+		_ = clientProxyEnd.Close()
+		_ = clientTestEnd.Close()
+	})
+
+	grant := &store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}
+
+	var from, to atomic.Int64
+
+	to.Store(4096)
+
+	logs := newCountingHandler()
+
+	s := newTestSession(grant)
+	s.logger = slog.New(logs)
+	s.clientConn = clientProxyEnd
+	s.bytesFromClient = &from
+	s.bytesToClient = &to
+	s.tracker.pendingQuery = &pendingOracleQuery{
+		cursor:    &trackedCursor{sql: "SELECT * FROM big"},
+		startTime: time.Now(),
+	}
+
+	require.True(t, s.holdRefusal(shared.ErrByteQuotaExceeded))
+
+	return s, logs, clientTestEnd
+}
+
 // assertOracleConnStillOpen is the inverse of assertOraclePeerClosed: a read
 // that times out proves the conn was neither closed nor written to.
 func assertOracleConnStillOpen(t *testing.T, c net.Conn) {

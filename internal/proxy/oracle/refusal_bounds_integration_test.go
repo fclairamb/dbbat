@@ -54,6 +54,25 @@ const (
 	throttledProbeFetch         = 2000
 )
 
+// The link the *crossover* between the two bounds is measured over, which is a
+// different question from the one above: not "what does a legitimate handoff
+// cost on a poor link" but "what happens on a link so poor that the grace runs
+// out before the byte bound ever could".
+//
+// 8 KiB/s is far below the ~280 KiB/s the two bounds meet at
+// (refusalHoldMaxBytes / refusalHandoffGrace), and it is chosen so the tail left
+// in flight is minutes of relaying rather than seconds — the abandonment has to
+// be the *clock* and not a batch that happened to finish. crossoverProbeBudget
+// is smaller than quotaClientBudget for the same reason the rate is low: the
+// quota must trip early enough that the run is the 30s grace plus a little,
+// while still outweighing python-oracledb's connect several times over so the
+// statement is admitted and cut afterwards rather than refused at the gate.
+const (
+	crossoverLinkBytesPerSecond = 8 * 1024
+	crossoverProbeBudget        = 150_000
+	crossoverProbeDeadline      = 4 * refusalDeadline
+)
+
 // boundsProbeScript drains a table at a caller-chosen array size and reports how
 // far it got. It is the quota probe from async_refusal_clients_integration_test.go
 // with the table and the fetch size lifted out, because the whole point here is
@@ -180,6 +199,7 @@ func TestIntegration_HeldRefusalHandoffCost(t *testing.T) {
 		// time cost is that divided by the rate.
 		tap := startThrottledRecordingTap(t, env.host, env.port, throttledLinkBytesPerSecond)
 		before := newRefusalCounters(env)
+		crossoversBefore := env.logs.count(logMsgRefusalGraceOutranBytes)
 
 		runCtx, cancel := context.WithTimeout(ctx, wideProbeDeadline)
 		defer cancel()
@@ -219,6 +239,74 @@ func TestIntegration_HeldRefusalHandoffCost(t *testing.T) {
 				float64(cost.bytes)/float64(cost.millis)*1000/1024,
 				throttledLinkBytesPerSecond/1024)
 		}
+
+		// A poor link is not the crossover. This handoff landed inside the grace,
+		// so nothing was cut by the clock and the record that says otherwise must
+		// stay silent — see the subtest below for the case it is for.
+		assert.Equal(t, crossoversBefore, env.logs.count(logMsgRefusalGraceOutranBytes),
+			"a handoff that completed inside the grace must not be reported as a bound crossover")
+	})
+
+	t.Run("below the crossover rate the grace fires first, and says so", func(t *testing.T) {
+		script := requirePythonOracleDB(t, "bounds.py", boundsProbeScript)
+
+		env.replaceGrant(t, nil, testsupport.WithMaxBytesTransferred(crossoverProbeBudget))
+
+		// The same probe again, over a link 16× slower. At 8 KiB/s the tail left
+		// in flight when the quota trips is minutes of relaying, so the client is
+		// still draining when refusalHandoffGrace runs out — the one case where
+		// the two fail-safes constrain each other rather than each covering its
+		// own failure, and the one refusalHoldMaxBytes cannot reach.
+		tap := startThrottledRecordingTap(t, env.host, env.port, crossoverLinkBytesPerSecond)
+		before := newRefusalCounters(env)
+		crossoversBefore := env.logs.count(logMsgRefusalGraceOutranBytes)
+
+		runCtx, cancel := context.WithTimeout(ctx, crossoverProbeDeadline)
+		defer cancel()
+
+		output := runBoundsProbe(t, runCtx, script, tap, env, "dbbat_quota_probe", throttledProbeFetch)
+
+		logTappedOERs(t, tap)
+
+		delta := before.since(t, env)
+
+		require.Contains(t, output, "read-ok 1",
+			"the client must get through its first statement before the quota bites:\n%s", outputTail(output))
+		require.NotContains(t, output, "QUOTA-NOT-TRIPPED",
+			"the result set was drained without the quota tripping:\n%s", outputTail(output))
+
+		require.Positive(t, delta.held,
+			"the violation must have been held for the client's next call")
+		require.Positive(t, delta.watchdog,
+			"and the grace must be what ended it — if the client got its ORA-00028, the link is "+
+				"not slow enough for the tail to outlast refusalHandoffGrace and this measures nothing")
+		assert.Zero(t, delta.abandoned,
+			"the byte bound must NOT be what fired: that it cannot fire at this rate is the finding")
+
+		cost := reportHandoffCost(t, before, fmt.Sprintf(
+			"python-oracledb thin, arraysize/prefetch %d on %d-byte rows, %d KiB/s link (below crossover)",
+			throttledProbeFetch, quotaProbeWidth, crossoverLinkBytesPerSecond/1024))
+
+		assert.Less(t, cost.bytes, int64(refusalHoldMaxBytes),
+			"the hold was abandoned well under the byte bound, which is the crossover: at this rate "+
+				"the clock always wins")
+
+		require.Equal(t, crossoversBefore+1, env.logs.count(logMsgRefusalGraceOutranBytes),
+			"a client still draining when its grace ran out must be reported as the crossover, not "+
+				"left indistinguishable from one that stopped talking")
+
+		effective := env.logs.intsFor(logMsgRefusalGraceOutranBytes, logAttrEffectiveBytesPerSec)
+		crossover := env.logs.intsFor(logMsgRefusalGraceOutranBytes, logAttrCrossoverBytesPerSec)
+		require.NotEmpty(t, effective)
+		require.NotEmpty(t, crossover)
+
+		t.Logf("BOUND CROSSOVER — effective %d B/s against a crossover rate of %d B/s "+
+			"(%d-byte bound over a %s grace)",
+			effective[len(effective)-1], crossover[len(crossover)-1],
+			int64(refusalHoldMaxBytes), refusalHandoffGrace)
+
+		assert.Less(t, effective[len(effective)-1], crossover[len(crossover)-1],
+			"the record's whole claim: the link was below the rate the two bounds meet at")
 	})
 }
 
