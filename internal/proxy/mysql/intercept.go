@@ -34,9 +34,7 @@ type handler struct {
 //
 // During handshake (s.authComplete == false) we just stash the requested
 // database name; the auth handler validates it in OnAuthSuccess. Command-time
-// switches are refused — staying on a single grant-bound database matches the
-// PostgreSQL proxy's behavior of disallowing mid-session \c. The synthetic
-// "USE <db>" SQL is logged for visibility either way.
+// switches go to switchDatabase, which is also where a text `USE` lands.
 func (h *handler) UseDB(dbName string) error {
 	if !h.session.authComplete {
 		h.session.requestedDB = dbName
@@ -44,15 +42,41 @@ func (h *handler) UseDB(dbName string) error {
 		return nil
 	}
 
-	syntheticSQL := "USE " + dbName
+	return h.switchDatabase("USE "+dbName, dbName)
+}
 
-	if dbName == h.session.database.Name || dbName == h.session.database.DatabaseName {
-		h.recordQuery(syntheticSQL, nil, time.Now(), nil)
+// switchDatabase is *the* decision on whether this session may move to another
+// database, and there is deliberately only one of it.
+//
+// A client can ask two ways — the `COM_INIT_DB` packet, and the SQL text `USE
+// otherdb` sent as an ordinary `COM_QUERY` — and go-mysql's command dispatch
+// routes them to different handlers, so for a while only the first was refused.
+// Two implementations of "may this session change database" is exactly the drift
+// that becomes an authorization bug, so both paths call this.
+//
+// Refusing is independent of the grant's controls: a full-write grant on one
+// database is not a grant on another, and because `queries` has no database
+// column of its own every statement after a successful switch would be recorded
+// against the database the grant *does* cover.
+//
+// Switching to the granted database stays allowed — clients emit it routinely
+// on connect — and is answered here rather than relayed, exactly as
+// `COM_INIT_DB` always was: the session is already on that database, and the
+// name the client used may be the dbbat entry's rather than the upstream's.
+//
+// The comparison is exact, matching what `COM_INIT_DB` has always done. MySQL's
+// own case sensitivity for database names is filesystem-dependent, so the exact
+// match is the fail-closed direction.
+func (h *handler) switchDatabase(sqlText, dbName string) error {
+	db := h.session.database
+
+	if db != nil && (dbName == db.Name || dbName == db.DatabaseName) {
+		h.recordQuery(sqlText, nil, time.Now(), nil)
 
 		return nil
 	}
 
-	h.recordQuery(syntheticSQL, nil, time.Now(), ptrErrString(ErrSwitchDatabaseDenied))
+	h.recordQuery(sqlText, nil, time.Now(), ptrErrString(ErrSwitchDatabaseDenied))
 
 	return ErrSwitchDatabaseDenied
 }
@@ -77,6 +101,20 @@ func (h *handler) HandleFieldList(table string, wildcard string) ([]*gomysql.Fie
 func (h *handler) HandleStmtPrepare(query string) (int, int, any, error) {
 	start := time.Now()
 	syntheticSQL := "PREPARE: " + query
+
+	// COM_STMT_EXECUTE reaches runIntercepted and is covered there, but a
+	// prepare is its own command and never passes through it — so the switch
+	// check has to be repeated on this path rather than assumed.
+	//
+	// Any `USE` shape is refused here, including the granted database: unlike
+	// COM_QUERY there is no OK packet to answer with, only a statement handle
+	// dbbat would have to invent. MySQL does not accept `USE` as a preparable
+	// statement in the first place, so nothing legitimate is lost.
+	if _, isUse := shared.MySQLUseTarget(query); isUse {
+		h.recordQuery(syntheticSQL, nil, start, ptrErrString(ErrSwitchDatabaseDenied))
+
+		return 0, 0, nil, ErrSwitchDatabaseDenied
+	}
 
 	stmt, err := h.session.upstreamConn.Prepare(query)
 	if err != nil {
@@ -153,6 +191,19 @@ func (h *handler) runIntercepted(
 		h.recordQuery(sql, params, time.Now(), &errStr)
 
 		return nil, err
+	}
+
+	// A text `USE otherdb` is the same request as COM_INIT_DB and gets the same
+	// answer, from the same function. It sits ahead of the grant controls
+	// because it is not one of them: no combination of read_only, block_ddl and
+	// block_copy makes another database in scope.
+	//
+	// It is answered here rather than forwarded, so an allowed `USE <granted
+	// db>` costs no upstream round trip and a refused one never reaches the
+	// upstream at all. Returning a nil *Result with a nil error makes go-mysql
+	// write the OK packet the client expects.
+	if target, isUse := shared.MySQLUseTarget(sql); isUse {
+		return nil, h.switchDatabase(sql, target)
 	}
 
 	if err := shared.ValidateMySQLQuery(sql, s.grant); err != nil {
