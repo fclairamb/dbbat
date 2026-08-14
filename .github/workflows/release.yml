@@ -150,7 +150,7 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v5.0.1
         with:
-          version: v4.2.3
+          version: v4.2.4
 
       - name: Login to GHCR
         run: |
