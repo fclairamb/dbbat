@@ -116,10 +116,10 @@ func TestPythonThinDMLResponse_FixtureShape(t *testing.T) {
 	// Nothing earlier in the envelope may be mistaken for the OER — first match
 	// wins, so a decoy in the return-parameter block would make the tests below
 	// pass on the wrong bytes.
-	assert.Nil(t, findPlausibleOERInResponse(payload[:pythonThinOEROffset]),
+	assert.Nil(t, findPlausibleOERInResponse(thinOERShape(), payload[:pythonThinOEROffset]),
 		"the return-parameter block must hold no OER-shaped decoy")
 
-	found := findPlausibleOERInResponse(payload)
+	found := findPlausibleOERInResponse(thinOERShape(), payload)
 	require.NotNil(t, found, "the relaxed scan is what has to find it")
 	assert.Equal(t, 1, found.CurRowNumber)
 	assert.Equal(t, 4, found.CursorID)
@@ -285,7 +285,7 @@ func TestHandleResponse_MidRowStreamStillRequiresTheEndOfCallBit(t *testing.T) {
 	require.True(t, s.rowStreamActive())
 
 	payload := pythonThinDMLResponse()
-	require.NotNil(t, findPlausibleOERInResponse(payload), "the relaxed scan would accept these bytes")
+	require.NotNil(t, findPlausibleOERInResponse(thinOERShape(), payload), "the relaxed scan would accept these bytes")
 
 	s.handleResponse(payload)
 
@@ -325,9 +325,9 @@ func TestFindPlausibleOERInResponse_KeepsItsAnchors(t *testing.T) {
 			payload := append([]byte{byte(TTCFuncResponse), 0x01}, oer...)
 
 			if tc.accept {
-				require.NotNil(t, findPlausibleOERInResponse(payload))
+				require.NotNil(t, findPlausibleOERInResponse(thinOERShape(), payload))
 			} else {
-				require.Nil(t, findPlausibleOERInResponse(payload))
+				require.Nil(t, findPlausibleOERInResponse(thinOERShape(), payload))
 			}
 		})
 	}

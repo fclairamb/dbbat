@@ -34,28 +34,24 @@ import (
 // only now with the column definitions and dozens of fetch round trips behind
 // it.
 //
-// Four clients were measured, and the shape is the same on all four. What is not
-// the same is whether dbbat can read it: the three thin clients marshal the
+// Four clients were measured, and the shape is the same on all four. What used
+// to differ is whether dbbat could read it: the three thin clients marshal the
 // summary object as TTC compressed integers, and sqlplus (OCI) marshals it
-// fixed-width, which this decoder does not read at all. See
-// sqlplusMidFetchDump.
+// fixed-width, which the decoder did not read at all. It does now
+// (decodeOERFieldsAtLayout), so all four are on the same footing here.
 //
 // Regenerate with
 // `go test -tags capture -run 'TestCapture_.*MidFetchFailure' ./internal/proxy/oracle/`.
-// The four recordings are three thin clients and one OCI client, and they do
-// not all end up in the same list: see midFetchDumps and sqlplusMidFetchDump.
 const (
 	pythonMidFetchDump = "python_thin_midfetch_fail.pcapng"
 	goOraMidFetchDump  = "go_ora_midfetch_fail.pcapng"
 	jdbcMidFetchDump   = "jdbc_thin_midfetch_fail.pcapng"
 
-	// sqlplusMidFetchDump is the same fixture on an OCI client, and it is kept
-	// out of midFetchDumps deliberately. Its failure is on the wire in the same
-	// place and the same shape, but marshaled in the fixed-width OCI encoding
-	// dbbat's *decoder* does not read at all — so nothing downstream of
-	// decodeErrorOER can hold for it. What it does send, and what dbbat does
-	// with it today, is pinned in
-	// TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndUnreadable.
+	// sqlplusMidFetchDump is the same fixture on an OCI client. Its failure is
+	// on the wire in the same place and the same shape, only marshaled in the
+	// fixed-width OCI encoding — which is why it used to sit outside
+	// midFetchDumps proving nothing. The byte-level reading of it is pinned in
+	// TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndReadable.
 	sqlplusMidFetchDump = "sqlplus_midfetch_fail.pcapng"
 )
 
@@ -82,10 +78,11 @@ const (
 )
 
 // midFetchDumps is the set of recordings whose mid-fetch failure dbbat can
-// read: the three thin clients. The OCI recording is measured separately —
-// see sqlplusMidFetchDump.
+// read: all four clients, since the fixed-width decoder landed. The OCI
+// recording joining this list is what puts it through the cursor anchor and both
+// RecordsItsORAText tests rather than only through a byte-level measurement.
 func midFetchDumps() []string {
-	return []string{pythonMidFetchDump, goOraMidFetchDump, jdbcMidFetchDump}
+	return []string{pythonMidFetchDump, goOraMidFetchDump, jdbcMidFetchDump, sqlplusMidFetchDump}
 }
 
 // buildOERNamingCursor is buildOER with the seventh field — the cursor id — set.
@@ -134,7 +131,10 @@ type midStreamWalk struct {
 // It reads `rowStreamActive()` off a real session rather than reconstructing it,
 // because that predicate — a pending query whose cursor already has column
 // definitions — is exactly what handleOERStatus consults, and a second
-// implementation of it in a test would measure the wrong thing.
+// implementation of it in a test would measure the wrong thing. The summary-
+// object shape is taken off the same session for the same reason: which encoding
+// the decoders read is what the session has learned from the upstream by that
+// point in the recording, not a constant.
 func walkMidStreamOERs(t *testing.T, name string) (midStreamWalk, int) {
 	t.Helper()
 
@@ -173,14 +173,15 @@ func walkMidStreamOERs(t *testing.T, name string) (midStreamWalk, int) {
 			found.leadingBytes[ttc[0]]++
 
 			if TTCFunctionCode(ttc[0]) == TTCFuncOERR {
-				fields, _ := decodeOERFieldsAt(ttc, 0)
+				shape := s.oerShapeSnapshot()
+				fields, _ := decodeOERFieldsForShape(shape, ttc, 0)
 
 				found.oers = append(found.oers, midStreamOER{
 					dump:     name,
 					index:    i,
 					payload:  ttc,
 					fields:   fields,
-					relaxed:  decodeErrorOER(ttc),
+					relaxed:  decodeErrorOER(shape, ttc),
 					strict:   decodeOERAt(ttc, 0) != nil,
 					streamed: streaming,
 				})
@@ -257,29 +258,29 @@ const (
 	ociMidFetchCallNumber = 169
 )
 
-// TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndUnreadable is the fourth
-// client, and the one the measurement did not go the same way on.
+// TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndReadable is the fourth
+// client, and the measurement that used to go the other way.
 //
-// The shape the mid-fetch relaxation turns on holds: sqlplus takes its
+// The shape the mid-fetch relaxation turns on always held: sqlplus takes its
 // ORA-01722 as a standalone func 0x04 at byte 0 of a whole TNS Data packet,
 // arriving 150 packets into a row stream, with no end-of-call bit, naming a
 // cursor, and reporting the same 14 999 rows the thin clients see. Every field
 // the two anchors read is *there*.
 //
-// What is not there is a decoder that can read them. sqlplus negotiates the
+// What was missing was a decoder that could read them. sqlplus negotiates the
 // fixed-width OCI encoding (see encodeOERFixedWidth), so the seven leading
 // fields are little-endian integers at constant offsets rather than TTC
-// compressed ones, and decodeOERFieldsAt — which is the entry point of both
-// decodeErrorOER and the cursor-id learning the second anchor compares against
-// — returns nil for the whole block. dbbat is not failing this anchor closed on
-// a judgement call; it never gets as far as the judgement.
+// compressed ones, and decodeOERFieldsAt — the entry point of both
+// decodeErrorOER and the cursor-id learning the second anchor compares against —
+// returned nil for the whole block. dbbat was not failing the anchor closed on a
+// judgement call; it never got as far as the judgement.
 //
-// So this test pins the bytes rather than the behavior, in both directions: the
-// field values, so a future fixed-width decoder has a measurement to land on,
-// and the current refusal, so that decoder cannot arrive without this test and
-// the "A failure raised mid-fetch" section of docs/oracle.md being revisited
-// together.
-func TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndUnreadable(t *testing.T) {
+// The field values below are unchanged from when this test pinned that refusal:
+// they are the fixture decodeOERFieldsAtLayout has to reproduce, asserted both
+// as raw bytes at oerFixed32Layout's offsets and as what the decoder now makes
+// of them. Reading the same numbers twice is the point — a decoder that agreed
+// with itself but not with the wire would pass only one half.
+func TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndReadable(t *testing.T) {
 	t.Parallel()
 
 	midStream, total := walkMidStreamOERs(t, sqlplusMidFetchDump)
@@ -292,15 +293,7 @@ func TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndUnreadable(t *testing.T) {
 	assert.Greater(t, got.index, midFetchMinRowStreamPackets,
 		"packet #%d: the failure must be late in the recording", got.index)
 
-	// The refusal, which is what makes the rest of this test a measurement of
-	// something dbbat cannot act on rather than a description of what it does.
-	assert.Nil(t, got.fields, "the compressed decoder cannot read a fixed-width summary object")
-	assert.Nil(t, got.relaxed, "so decodeErrorOER refuses it, and the mid-fetch relaxation never fires")
-	assert.False(t, got.strict, "nor does the strict decoder")
-	assert.Zero(t, got.streamed,
-		"and cursor-id learning, which reads the same fields, never learned an id for this fetch either")
-
-	// The fields the server did send, at oerFixed32Layout's offsets.
+	// The fields the server sent, at oerFixed32Layout's offsets.
 	p := got.payload
 	require.GreaterOrEqual(t, len(p), oerFixedWidthPrefixLen+4, "the prefix must be whole")
 
@@ -311,9 +304,9 @@ func TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndUnreadable(t *testing.T) {
 	assert.Equal(t, uint16(oraMidFetchCode), binary.LittleEndian.Uint16(p[oerFixedErrNumOffset:]),
 		"the error number")
 	assert.Equal(t, uint32(oraMidFetchCode), binary.LittleEndian.Uint32(p[oerFixedRetCodeOffset:]),
-		"repeated as the RetCode, which is what oerFixedWidthTailFieldsAt anchors the layout on")
+		"repeated as the RetCode, which is what the decoder anchors the layout on")
 	assert.Equal(t, uint16(ociMidFetchCursorID), binary.LittleEndian.Uint16(p[oerFixedCursorIDOffset:]),
-		"the OER does name a cursor — dbbat simply has nothing to compare it against")
+		"the OER names a cursor")
 	assert.Equal(t, uint32(ociMidFetchCallNumber), binary.LittleEndian.Uint32(p[oerFixedCallNumberOffset:]))
 
 	// The row count is the one field the 32-bit layout leaves compressed, and it
@@ -323,22 +316,42 @@ func TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndUnreadable(t *testing.T) {
 	assert.Equal(t, ociMidFetchCurRow, rowCount, "the same 14 999 rows the thin clients are told about")
 	assert.Equal(t, oerMidFetchCurRow, rowCount, "and the same the fixture pins everywhere else")
 
-	// And the diagnostic text is right there behind it, unread.
-	assert.Contains(t, string(p), "ORA-01722",
-		"the ORA text is in the packet; nothing dbbat runs on this path can reach it")
+	assert.Contains(t, string(p), "ORA-01722", "and the diagnostic text is right behind it")
+
+	// And now the decoder's own reading of exactly those bytes.
+	require.NotNil(t, got.fields, "the fixed-width summary object must decode")
+	assert.Equal(t, ociMidFetchCallStatus, got.fields.CallStatus)
+	assert.Zero(t, got.fields.CallStatus&oerEndOfCallBit)
+	assert.Equal(t, ociMidFetchECID, got.fields.SeqNumber)
+	assert.Equal(t, oraMidFetchCode, got.fields.ErrorCode)
+	assert.Equal(t, ociMidFetchCursorID, got.fields.CursorID)
+	assert.Equal(t, ociMidFetchCurRow, got.fields.CurRowNumber)
+
+	assert.False(t, got.strict, "the strict decoder is exactly why this used to be dropped")
+
+	require.NotNil(t, got.relaxed, "decodeErrorOER must prove it a diagnostic")
+	assert.Contains(t, got.relaxed.ErrorMessage, "ORA-01722")
+
+	// The second anchor, which is what cursor-id learning going blind on these
+	// sessions used to make unreachable: the OER names the cursor whose rows
+	// were on the wire, and dbbat now holds that id to compare it against.
+	assert.Equal(t, ociMidFetchCursorID, int(got.streamed),
+		"cursor-id learning must have read the same fixed-width fields")
+	assert.Equal(t, int(got.streamed), got.fields.CursorID,
+		"packet #%d: the OER names the cursor whose rows it interrupted", got.index)
 }
 
-// TestDumpReplay_OCIFailuresAreNotRecordedAtAll is the scope of the gap above,
-// and the reason it is not filed as a mid-fetch bug.
+// TestDumpReplay_OCIFailuresAreRecordedWithTheirORAText is the scope of the fix,
+// and the reason it was never really a mid-fetch bug.
 //
 // The same recording opens with a `DROP TABLE` of a table that does not exist —
 // an ORA-00942 raised *before the first row*, which is the shape
 // failed_stmt_replay_test.go measured on the thin clients and
-// failed_stmt_integration_test.go drives live. It is on the wire, and it is
-// recorded with no error either. A fixed-width decoder is therefore not a
-// mid-fetch feature: it is what OCI clients need before any of this applies to
-// them. See specs/todos for the follow-up.
-func TestDumpReplay_OCIFailuresAreNotRecordedAtAll(t *testing.T) {
+// failed_stmt_integration_test.go drives live. It was on the wire and recorded
+// with no error either, so on an OCI client *every* failing statement went into
+// `queries` as a success, mid-fetch or not. Both must now carry their
+// diagnostic.
+func TestDumpReplay_OCIFailuresAreRecordedWithTheirORAText(t *testing.T) {
 	t.Parallel()
 
 	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
@@ -356,31 +369,49 @@ func TestDumpReplay_OCIFailuresAreNotRecordedAtAll(t *testing.T) {
 	require.Contains(t, raw.String(), "ORA-00942", "the setup DROP failed upstream")
 	require.Contains(t, raw.String(), "ORA-01722", "and so did the SELECT, mid-fetch")
 
-	for _, sql := range []string{"DROP TABLE dbbat_midfetch", midFetchSelectFragment} {
+	// The recording runs `DROP TABLE dbbat_midfetch` twice — once as setup,
+	// against a table that does not exist yet, and once as teardown against one
+	// that does — so the SQL text alone does not identify the failure. What is
+	// asserted is that *a* statement of that text carries the diagnostic, which
+	// is exactly what was missing before: every one of them read as a success.
+	wanted := []struct {
+		sql     string
+		wantORA string
+	}{
+		{sql: "DROP TABLE dbbat_midfetch", wantORA: "ORA-00942"},
+		{sql: midFetchSelectFragment, wantORA: "ORA-01722"},
+	}
+
+	for _, w := range wanted {
 		// Both store writes are asynchronous; a returned replay has not
 		// necessarily written yet.
-		var errs []string
+		var (
+			errs  []string
+			found bool
+		)
 
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			errs = recorder.createdErrorsFor(sql)
-			if len(errs) > 0 || time.Now().After(deadline) {
+			errs, found = recorder.createdErrorsFor(w.sql), false
+
+			for _, got := range errs {
+				if contains(got, w.wantORA) {
+					found = true
+				}
+			}
+
+			if found || time.Now().After(deadline) {
 				break
 			}
 
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		require.NotEmptyf(t, errs, "%q must be persisted at all", sql)
-
-		for _, got := range errs {
-			assert.Emptyf(t, got,
-				"%q: this pins today's gap, not a desirable outcome — an OCI client's "+
-					"diagnostics are unreadable, so the statement is recorded as a success. "+
-					"If this now carries ORA text, the fixed-width decoder landed: delete this "+
-					"test, move the recording into midFetchDumps, and update docs/oracle.md",
-				sql)
-		}
+		require.NotEmptyf(t, errs, "%q must be persisted at all", w.sql)
+		assert.Truef(t, found,
+			"%q: an OCI client's diagnostics are readable now, so its failure must carry %s "+
+				"rather than be recorded as a success; got %q",
+			w.sql, w.wantORA, errs)
 	}
 }
 
@@ -415,13 +446,15 @@ func midStreamCorpus(t *testing.T) []string {
 // else is row data read as an error, which is the production incident this
 // guard descends from.
 //
-// "Genuine" is midFetchDumps(), not "every mid-fetch fixture": the OCI
-// recording's failure is genuine too and is deliberately *not* accepted,
-// because its fixed-width summary object is unreadable to this decoder. It
-// stays in the corpus as a denominator — its 150 mid-stream packets are counted
-// like everyone else's — and
-// TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndUnreadable is what would
-// notice if that ever changed.
+// "Genuine" is midFetchDumps(), which is now all four recordings: the OCI one
+// used to be a denominator only — its 150 mid-stream packets counted, its
+// fixed-width failure unreadable and therefore never accepted — and the accepted
+// count moved from three to four when the decoder landed. Its own reading is
+// pinned in TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndReadable.
+//
+// The fixed-width reading widens nothing for the thin recordings: their sessions
+// learn a compressed shape off the upstream, and decodeOERFixedFieldsAt refuses
+// to offer a layout a learned shape did not ask for.
 //
 // The stress count is the same predicate run at every 0x04 offset *inside* those
 // mid-stream packets. Nothing routes that way — handleOERStatus only ever sees
@@ -527,9 +560,10 @@ func midStreamStressAcceptances(t *testing.T, name string) int {
 
 		if active {
 			ttc := extractTTCPayload(tns.Payload)
+			shape := s.oerShapeSnapshot()
 
 			for off := 1; off < len(ttc); off++ {
-				if ttc[off] == 0x04 && decodeErrorOER(ttc[off:]) != nil {
+				if ttc[off] == 0x04 && decodeErrorOER(shape, ttc[off:]) != nil {
 					acceptances++
 				}
 			}
@@ -804,9 +838,9 @@ func TestHandleOERStatus_MidFetchRequiresTheOERToNameTheStreamingCursor(t *testi
 		return append(buildOERNamingCursor(14999, oraMidFetchCode, cursor), tail...)
 	}
 
-	require.NotNil(t, decodeErrorOER(oerNaming(streamingCursor)),
+	require.NotNil(t, decodeErrorOER(thinOERShape(), oerNaming(streamingCursor)),
 		"the synthesized OER must be provable, or this test is measuring the wrong refusal")
-	require.NotNil(t, decodeErrorOER(oerNaming(streamingCursor+1)),
+	require.NotNil(t, decodeErrorOER(thinOERShape(), oerNaming(streamingCursor+1)),
 		"...and so must the one naming another cursor, so the cursor is what separates them")
 
 	tests := []struct {
