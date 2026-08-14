@@ -338,6 +338,13 @@ compressed ints, error code success or ORA-01403, a sequence number inside its
 16-bit field, a 16-bit cursor id, first match wins — because a run of row bytes
 can otherwise parse as an OER. It runs at most once per statement.
 
+The same scan reads the **fixed-width** OCI encoding of that OER, under the same
+bounds plus that encoding's own RetCode anchor; which encoding is offered comes
+from the session's learned `oerShape`, so a client known to speak compressed
+integers is never scanned for a fixed-width block. Until that landed, cursor-id
+learning was blind on every OCI session — see "The OCI client, on every shape"
+below.
+
 Query completion out of a row stream shares that same scan; see "the OER
 end-of-call bit is not universal" below.
 
@@ -529,47 +536,70 @@ which is the shape already covered — at array size 100. Every client fetches
 | end-of-call bit | no | no | no | no |
 | `CurRowNumber` | 14999 | 14999 | 14999 | 14999 |
 | OER `cursorID` | 4 | 3 | 4 | 5 |
-| the cursor dbbat was streaming | 4 | 3 | 4 | **never learned** |
+| the cursor dbbat was streaming | 4 | 3 | 4 | 5 |
 | summary object encoding | TTC compressed | TTC compressed | TTC compressed | **fixed-width** |
 
 So it is the same bit-less standalone shape as every other failure, only with the
 column definitions and dozens of fetch round trips behind it — and `decodeOERAt`
 dropped it exactly the way it dropped the other five.
 
-###### The OCI client is measured and still not covered
+###### The OCI client, on every shape
 
-The last two rows are the finding the fourth client added, and they are not a
-case of the anchor failing closed on a judgement call. sqlplus negotiates the
-**fixed-width** summary object (the encoding `encodeOERFixedWidth` already
-*writes* for it — see "All four drivers, five client builds, measured" below),
-so the seven leading fields
+The last row is the finding the fourth client added, and for a while it was a
+hole rather than a variant. sqlplus negotiates the **fixed-width** summary
+object (the encoding `encodeOERFixedWidth` already *writes* for it — see "All
+four drivers, five client builds, measured" below), so the seven leading fields
 are little-endian integers at constant offsets rather than TTC compressed ones.
-`decodeOERFieldsAt` reads compressed integers only and returns nil for the whole
-block, so `decodeErrorOER` refuses it, `handleOERStatus` never reaches either
-anchor, and the same blindness is why cursor-id learning holds no id for that
-fetch to compare against.
+`decodeOERFieldsAt` reads compressed integers only and returned nil for the
+whole block, so `decodeErrorOER` refused it, `handleOERStatus` never reached
+either anchor, and the same blindness left cursor-id learning with no id for
+that fetch to compare against.
 
-Every field the two anchors want is on the wire. Read at
-`oerFixed32Layout`'s own offsets, the recorded ORA-01722 carries call status `1`
-(no end-of-call bit) at 1, ECID 166 at 5, error number 1722 at 11 and again as
-the RetCode at 66, cursor id **5** at 17, call number 169 at 45, the row count
-14999 compressed at 70, and the `ORA-01722` CLR right behind it.
-`TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndUnreadable` pins all of that
-*and* today's refusal, so a future fixed-width decoder has a measurement to land
-on and cannot land silently.
+The gap was **not** mid-fetch specific, which is why the anchor was never
+touched for it: the same recording opens with a `DROP TABLE` of a missing table,
+an ORA-00942 raised before the first row — the shape the rest of this section
+says already works — and dbbat recorded that as a success too. On an OCI client
+(sqlplus, Instant Client, SQL*Developer over OCI) *every* failing statement went
+into `queries` as a success, and it was invisible: the client saw its ORA text,
+the query row said nothing happened.
 
-The gap is **not** mid-fetch specific, which is why the anchor was not touched
-for it: the same recording opens with a `DROP TABLE` of a missing table, an
-ORA-00942 raised before the first row — the shape the rest of this section says
-already works — and dbbat records that as a success too
-(`TestDumpReplay_OCIFailuresAreNotRecordedAtAll`). An OCI client needs a
-fixed-width *decoder* before any of this applies to it; relaxing the mid-fetch
-anchor would buy it nothing. Filed as a follow-up in `specs/todos/`.
+`decodeOERFieldsAtLayout` is the reading half of `encodeOERFixedWidth`, at the
+very offsets that encoder writes. Read at `oerFixed32Layout`'s own offsets, the
+recorded ORA-01722 carries call status `1` (no end-of-call bit) at 1, ECID 166
+at 5, error number 1722 at 11 and again as the RetCode at 66, cursor id **5** at
+17, call number 169 at 45, the row count 14999 compressed at 70, and the
+`ORA-01722` CLR right behind it.
+`TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndReadable` asserts all of that
+twice — as raw bytes and as what the decoder makes of them — and
+`TestDumpReplay_OCIFailuresAreRecordedWithTheirORAText` covers the pre-first-row
+ORA-00942 from the same recording. Live, `failed_stmt_integration_test.go` drives
+four failing shapes through a real sqlplus
+(`TestIntegration_FailingStatementsRecordTheirORAErrorOCI`).
 
-`testdata/sqlplus_midfetch_fail.pcapng` is therefore deliberately **not** in
-`midFetchDumps()`. It stays in the false-positive corpus below — its 150
-mid-stream packets are counted like everyone else's — and contributes no
-acceptance.
+Two things keep that decoder from being a new way to misread row data:
+
+- **The RetCode anchor, not a length.** The error number at `errNum` must be
+  repeated as the RetCode at `retCode`, which is the same invariant
+  `oerFixedWidthTailFieldsAt` already validates the *encoder's* offsets with. It
+  is the only structural proof available — every other field in the prefix is
+  legitimately zero — so a run of zeroes is additionally rejected on a zero call
+  status, and the callers keep the proof they already applied: the tail must
+  still spell the code the fields report (`diagnosticNamesCode`), and the cursor
+  bounds still apply to a status OER.
+- **Which layout is asked, not sniffed.** The session learns `fixedWidth` /
+  `fixedWidth64` from the upstream's own OERs, so a session known to speak
+  compressed integers is offered no fixed-width reading at all. The ordering trap
+  — the shape is learned from a *server* OER, so the first OER of a session can
+  arrive before anything is known — is mostly closed by
+  `readUpstreamAuthMessages`, which learns off the AUTH exchange before any
+  statement runs; where it is not, the fallback is to try **both** layouts under
+  the RetCode anchor rather than to accept the wrong one. `learnOERTail` also
+  runs *before* `learnCursorID` on each upstream packet, so the OER that names
+  the allotted cursor is itself allowed to teach the layout it is written in.
+
+`testdata/sqlplus_midfetch_fail.pcapng` is therefore in `midFetchDumps()` like
+the other three, which is what puts it through the cursor anchor and both
+`RecordsItsORAText` tests instead of only a byte-level measurement.
 
 What the mid-stream path accepts now is byte-0 routing **plus** `decodeErrorOER`
 **plus** `midFetchOERNamesTheStreamingCursor`. The cost of the first two was
@@ -580,9 +610,9 @@ real session so `rowStreamActive()` is the session's own
 - across **26** recordings, **641** server packets arrive mid-row-stream;
 - **4** of them begin with `0x04` — the four genuine ORA-01722s; 623 of the rest
   begin with `0x06`;
-- `decodeErrorOER` accepts exactly the **3** compressed ones and nothing else:
-  **false-positive rate 0**. The fourth is sqlplus's, refused for being
-  unreadable rather than for being row data — see above;
+- `decodeErrorOER` accepts exactly those **4** and nothing else:
+  **false-positive rate 0**. It was 3 before the fixed-width decoder, the fourth
+  being sqlplus's, refused for being unreadable rather than for being row data;
 - running the same predicate at *every* `0x04` offset **inside** all of those
   mid-stream packets accepts **0**. Nothing routes that way — `handleOERStatus`
   only ever sees byte 0 — so it is not a rate, it is how far real row data is
@@ -634,9 +664,12 @@ row-stream bytes for the whole fetch — the reference value this anchor compare
 against could itself have come from row data. Pre-existing (re-execution gating
 already trusts it), but now load-bearing for error text too.
 
-Cursor-id learning is on none of those rows and was not touched: it reads
-`findPlausibleOERInResponse`, which still refuses any OER reporting a real
-failure, because such an OER assigns no cursor. That same property is why it
+Cursor-id learning is on none of those rows and its bounds were not touched: it
+reads `findPlausibleOERInResponse`, which still refuses any OER reporting a real
+failure, because such an OER assigns no cursor. It gained only the second
+encoding — the fixed-width block above, under those same bounds plus the RetCode
+anchor — which is what gives an OCI fetch a streaming cursor id for the anchor to
+compare against at all. That same property is why it
 cannot be used to *ask* whether a Response carries a failure — it would always
 answer no — and why
 `TestDumpReplay_NoFailureArrivesEmbeddedInAResponse` scans with `decodeErrorOER`
@@ -649,8 +682,9 @@ production dump, which is not in the repository. The failures are replayed
 straight out of the two capture files in `failed_stmt_replay_test.go`, and
 driven through the whole proxy against a live Oracle in
 `failed_stmt_integration_test.go` — which covers the mid-fetch case too
-(`TestIntegration_MidFetchFailureRecordsItsORAError`), so the relaxation is not
-evidenced only by replayed bytes.
+(`TestIntegration_MidFetchFailureRecordsItsORAError`) and the OCI client
+(`TestIntegration_FailingStatementsRecordTheirORAErrorOCI`), so neither the
+relaxation nor the fixed-width decoder is evidenced only by replayed bytes.
 
 A re-execution naming a cursor dbbat cannot resolve goes through
 `refuseUnknownCursor`, exactly like the SQL-less `OALL8`: refused under a grant
@@ -849,6 +883,12 @@ end-of-response marker `0x1d` even after dbbat has cleared
 `HAS_END_OF_RESPONSE` from the Accept. Both are learned in the same pass;
 with a byte-perfect compressed OER, or a byte-perfect fixed-width one with no
 trailing marker, sqlplus hangs exactly as it did on the old frame.
+
+The same learned flag now also selects how dbbat **reads** an OER, not only how
+it writes one (`decodeOERFieldsAtLayout`). That the two halves were once
+asymmetric — writing an encoding it could not read — is why every failing
+statement on an OCI client was recorded as a success; see "The OCI client, on
+every shape".
 
 Verified end to end against Oracle 23ai Free with **four** live clients — go-ora
 v3, python-oracledb thin, sqlplus (OCI) and JDBC thin (ojdbc11 23.2.0.0 and
@@ -1448,7 +1488,7 @@ for names containing spaces or parentheses.
 - **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the two re-execution frames that are real (the SQL-less `OALL8` and the `03/0x4e|0x04` piggyback) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
-- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. That now includes a failure raised **mid-fetch**, once column definitions are decoded — measured at 14 900 rows into a 20 000-row fetch on both clients, and accepted there only when the OER also names the cursor whose rows are streaming; see "A failure raised mid-fetch". What is still not covered is a mid-fetch failure whose OER names a *different* cursor (none has been observed; it fails closed to the old no-error behaviour and logs a DEBUG line), and any mid-fetch failure on the clients not captured — JDBC thin and the OCI clients. See `ttc_oer.go`.
+- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. That now includes a failure raised **mid-fetch**, once column definitions are decoded — measured at 14 900 rows into a 20 000-row fetch on **four** clients, and accepted there only when the OER also names the cursor whose rows are streaming; see "A failure raised mid-fetch". "Every client" includes the OCI ones (sqlplus, Instant Client, SQL*Developer over OCI) only since `decodeOERFieldsAtLayout`: they marshal the summary object fixed-width, dbbat read TTC compressed integers only, and until then *every* failing statement on those clients — mid-fetch or not — was recorded as a success. What is still not covered is a mid-fetch failure whose OER names a *different* cursor (none has been observed; it fails closed to the old no-error behaviour and logs a DEBUG line), and any mid-fetch failure on a client not captured. See `ttc_oer.go`.
 - **Bind values (parameterized queries)**: Bind values are captured from both the legacy `OALL8` execute path (`decodeBindValues`) and the v315+ **piggyback exec** path that modern clients use (`extractPiggybackBinds`, func `0x03` sub `0x5e`). The piggyback binds sit length-prefixed at the tail of the message; they're located as the suffix that parses as exactly as many values as there are distinct bind placeholders in the SQL, and each is decoded by content via `decodeOracleRawValue` (so a NUMBER bind like `42` renders as `42`, not hex). Verified against `testdata/go_ora_binds.pcapng` (`TestDumpReplay_Binds`). Captured binds are now persisted to `queries.parameters` (`formatOracleBinds` wired into `persistQueryRecord` and `completeQuery`), so the API (`GET /api/v1/queries/:uid`) and the UI Parameters card report them. Not yet handled: binds over ~253 bytes (extended length encoding) and full type-aware decoding from the bind-definition records.
 - **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results, verified end-to-end against `testdata/go_ora_temporal.pcapng` (`TestDumpReplay_Temporal`). The tz form renders the local wall clock plus its numeric offset, honouring byte 11's `0x40` "time in zone" flag (prefix stored as local vs UTC). Named-region time zones fall back to the stored wall clock without an offset suffix.
 - **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.pcapng`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.
