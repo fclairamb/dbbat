@@ -206,8 +206,8 @@ func (s *Session) Run() error {
 	defer s.closeDump()
 
 	// Watchdog: tears the session down the moment a time/bandwidth/revocation
-	// limit is crossed. Conn refs captured into locals so the goroutine never
-	// races the mutable s.upstream field (closeUpstream nils it).
+	// limit is crossed. Conn refs captured into locals so the goroutine reads
+	// them once here rather than off the session on every teardown.
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
 
@@ -549,9 +549,9 @@ func (s *Session) onLimitViolation(up *UpstreamConn, clientConn io.Closer, err e
 // panic guard can perform the same teardown without re-entering whatever
 // panicked.
 //
-// It takes the conns rather than reading them off the session because
-// closeUpstream nils s.upstream; the watchdog captured its locals for the same
-// reason. Safe to call twice, and safe concurrently with a blocked read/write.
+// It takes the conns rather than reading them off the session so it stays
+// callable from a goroutine that must not touch session state. Safe to call
+// twice, and safe concurrently with a blocked read/write.
 func closeSessionConns(up *UpstreamConn, clientConn io.Closer) {
 	if up != nil {
 		up.close()
@@ -692,13 +692,16 @@ func (s *Session) closeDump() {
 }
 
 // closeUpstream closes the upstream connection if open.
+//
+// It deliberately does **not** clear s.upstream. relay() calls this from the
+// goroutine that saw the first pump return, purely to unblock the *other* pump
+// — which is at that instant still reading s.upstream. Nil-ing the field there
+// was a write racing that read (and intercept's write path), and it bought
+// nothing: UpstreamConn.close() is idempotent, so a second close from the
+// deferred call in Run() is already harmless. The field is written once, in
+// connectUpstream, before either pump exists.
 func (s *Session) closeUpstream() {
-	if s.upstream == nil {
-		return
-	}
-
 	s.upstream.close()
-	s.upstream = nil
 }
 
 // prefixConn returns a set of pre-read bytes before delegating to the wrapped
