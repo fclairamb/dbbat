@@ -386,31 +386,6 @@ func TestIntegration_AuthRefusalAcrossClients(t *testing.T) {
 		assert.Contains(t, output, "done", "the probe must finish rather than throw")
 	})
 
-	t.Run("python-oracledb thin reads a bad key the same way", func(t *testing.T) {
-		// The post-challenge refusal, and a different summary shape decision: by
-		// now the challenge has gone out, so the tail follows the verifier it was
-		// built with rather than the negotiation (authChallengeIsModern). It is
-		// also the 39-byte message whose length DPY-5002 used to report.
-		script := requirePythonOracleDB(t, "auth_badkey.py", pythonAuthScript)
-
-		runCtx, cancel := context.WithTimeout(ctx, refusalDeadline)
-		defer cancel()
-
-		out, runErr := exec.CommandContext(runCtx, "python3", script,
-			env.host, strconv.Itoa(env.port), env.service, env.username, "dbb_not-a-real-key").CombinedOutput()
-		output := string(out)
-
-		t.Logf("python-oracledb exit: %v\n%s", runErr, outputTail(output))
-
-		require.NoError(t, runCtx.Err(), "python-oracledb never came back from the AUTH refusal")
-		require.NotContains(t, output, "CONNECTED-UNEXPECTEDLY", "a bogus key must be refused")
-
-		assert.Contains(t, output, "full_code=ORA-01017",
-			"a bad key is the generic credentials error, and it has to arrive as one:\n%s", outputTail(output))
-		assert.Contains(t, output, "class=DatabaseError", outputTail(output))
-		assert.NotContains(t, output, "DPY-5002", outputTail(output))
-	})
-
 	t.Run("go-ora reads the ORA code out of the refusal", func(t *testing.T) {
 		client, err := sql.Open("oracle", env.dsn)
 		require.NoError(t, err)
@@ -426,12 +401,15 @@ func TestIntegration_AuthRefusalAcrossClients(t *testing.T) {
 
 		t.Logf("go-ora reported: %v", err)
 
-		// The claim is the ORA code, not the wording. go-ora's summary parser
-		// reads the message CLR straight after the wide RetCode pair, so on a
-		// session that negotiated the modern challenge it sees dbbat's trailing
-		// 20c fields there and renders its own text for the code instead — see
-		// authRefusalOERShape for why that tail is chosen for the client that
-		// *crashes* without it rather than the one that loses a sentence.
+		// The claim is the ORA code, not the wording, and that is a measurement
+		// rather than caution: go-ora reports `ORA-1045 error occur at position:
+		// 0` — its own rendering of the code, with dbbat's sentence lost. Its
+		// summary parser reads the message CLR straight after the wide RetCode
+		// pair, and go-ora negotiates customHash like a modern client, so it finds
+		// dbbat's two trailing 20c fields there and reads the first as an empty
+		// message. The two layouts are mutually exclusive; see
+		// authRefusalOERShape for why the tail is chosen for the client that
+		// *crashes* without it over the one that loses a sentence.
 		assert.Contains(t, err.Error(), "1045",
 			"go-ora must surface the refusal's ORA code rather than a dead socket")
 		assert.NotContains(t, err.Error(), "ORA-03113",
@@ -462,6 +440,40 @@ func TestIntegration_AuthRefusalAcrossClients(t *testing.T) {
 		assert.Contains(t, output, "ORA-01045",
 			"sqlplus prints the ORA text unchanged, so this is the end-to-end evidence that the "+
 				"AUTH refusal is readable in the OCI encoding too:\n%s", outputTail(output))
+	})
+
+	// Last, because it is the one case that needs a grant: the refusal it
+	// measures happens *after* the challenge, and a user with no grant is turned
+	// away before their key is ever looked at (authenticateClient checks the
+	// grant first, which is why every subtest above reports ORA-01045 whatever
+	// password it sends).
+	t.Run("python-oracledb thin reads a refused key the same way", func(t *testing.T) {
+		script := requirePythonOracleDB(t, "auth_badkey.py", pythonAuthScript)
+
+		env.replaceGrant(t, nil)
+
+		runCtx, cancel := context.WithTimeout(ctx, refusalDeadline)
+		defer cancel()
+
+		out, runErr := exec.CommandContext(runCtx, "python3", script,
+			env.host, strconv.Itoa(env.port), env.service, env.username, "dbb_not-a-real-key").CombinedOutput()
+		output := string(out)
+
+		t.Logf("python-oracledb exit: %v\n%s", runErr, outputTail(output))
+
+		require.NoError(t, runCtx.Err(), "python-oracledb never came back from the AUTH refusal")
+		require.NotContains(t, output, "CONNECTED-UNEXPECTEDLY", "a bogus key must be refused")
+
+		// The other half of the summary-shape decision: the challenge has gone out
+		// by now, so the tail follows the verifier it was built with rather than
+		// the negotiation (authChallengeIsModern). It is also the 39-byte message
+		// whose length DPY-5002 used to report as an integer width.
+		assert.Contains(t, output, "full_code=ORA-01017",
+			"a refused key is the generic credentials error, and it has to arrive as one:\n%s", outputTail(output))
+		assert.Contains(t, output, "class=DatabaseError", outputTail(output))
+		assert.Contains(t, output, "invalid username/password",
+			"the 39-byte message whose length DPY-5002 reported:\n%s", outputTail(output))
+		assert.NotContains(t, output, "DPY-5002", outputTail(output))
 	})
 }
 

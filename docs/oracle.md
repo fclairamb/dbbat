@@ -1354,6 +1354,94 @@ of the two it is no longer has to be inferred — the byte case logs
 `ended the session: a held limit refusal never reached a call boundary`, and the
 slow-link case logs the crossover record above.
 
+##### The refusal that happens before the session: AUTH Phase 2
+
+A client can be refused before there is a session at all — no active grant, a
+service name matching several dbbat databases, a key that answers no verifier —
+and `sendAuthFailed` writes that refusal. It used to write a frame of its own
+invention: `0x00 0x00 0x08`, the ORA code as a compressed integer, and the
+message as a bare CLR. That is not an error structure, and **python-oracledb thin
+turned every AUTH-phase refusal into a driver bug**:
+
+```
+DPY-5002: internal error: read integer of length 39 when expecting integer
+of no more than length 4
+```
+
+39 is not a protocol quantity. It is `len("invalid username/password; logon
+denied")`. The driver read type `0x08` as a return-parameters message, called
+`read_str_with_length` → `read_ub4`, landed on the CLR's length byte and reported
+it as an integer width. The three refusals therefore reported 39, 59 and 92 — the
+lengths of dbbat's own three messages — and the reporter concluded the thin
+driver was at fault and began porting to thick mode, which would not have helped.
+
+The frame is now the same OER `writeTTCError` sends, from the same builder
+(`encodeOERPacket`); `buildAuthFailed` is gone. Two fields the mid-session path
+gets for free have to be supplied here:
+
+**The call number.** `observeClientCallNumber` runs on the proxy loop, which a
+session refused at AUTH never reaches, so the refusal would end call zero — the
+ORA-18745 case above. `observeAuthCallNumber` takes it off the newest AUTH packet
+instead: Phase 1 for a client refused before the challenge, Phase 2 for one
+refused on its key. Both are ordinary TTC ops (`03 76 <seq>` / `03 73 <seq>`).
+
+**The summary's trailing field count**, which is the one that cannot be left at
+its default. Mid-session an unlearned tail costs the message text and nothing
+else, which is why `nextOERFrame` writes zero until an upstream OER teaches it
+better. At AUTH the text *is* the fix — "request access via dbbat" is the whole
+point of the frame — and a client that expects the two 20c fields and does not
+find them lands on the message's length byte, which is DPY-5002 again, this time
+inside a well-formed OER. `authRefusalOERShape` therefore guesses, and the guess
+is **customHash**: a modern client (the 12c/18453 challenge) gets two, a legacy
+one (go-ora's 6949) gets none. That is the line the two hard-coded challenge
+summaries in `buildAuthChallengeEndMarker` already fall on — decode them and the
+6949 one carries no extra fields, the 18453 one carries two, and the 153-byte OCI
+capture carries two in the 64-bit fixed-width layout — and it is the line the
+real server OERs in `ttc_oer_encode_test.go` fall on. It is **not** the negotiated
+TTC field version: go-ora's is the *higher* of the two (see "The AUTH function
+header is negotiated, not fixed"), so a version rule gets both clients backwards.
+A tail learned off a real upstream OER still wins, and an OCI session has one
+before it is ever challenged (`beginUpstreamAuth` runs first).
+
+`TestIntegration_AuthRefusalAcrossClients` revokes the fixture user's grant and
+meets the refusal with each client. Measured against Oracle 23ai Free:
+
+| Client | What the client reported |
+|---|---|
+| python-oracledb thin 3.4.2 | `class=DatabaseError code=1045 full_code=ORA-01045`, message `ORA-01045: no active grant for this database; request access via dbbat` — where it used to report DPY-5002 |
+| sqlplus, Instant Client 23.3 (macOS, on PATH) | `ORA-01045: no active grant for this database; request access via dbbat`, printed verbatim |
+| go-ora v3 | `ORA-1045 error occur at position: 0` — the code, its own wording |
+
+A fourth subtest takes the *post-challenge* refusal, which is where the summary
+tail follows the verifier the challenge was actually built with rather than the
+negotiation: with a grant in place and a bogus key, python-oracledb reports
+`class=DatabaseError code=1017 full_code=ORA-01017`, message `ORA-01017: invalid
+username/password; logon denied` — the 39-byte message whose length DPY-5002 used
+to report. It runs last because it is the one case that needs a grant: a user
+without one is turned away before their key is looked at, so every other subtest
+reports ORA-01045 whatever password it sends.
+
+The sqlplus row is the flavor `plannedOCIClient` settled on for that run (a
+client on PATH wins when there is one); CI has none and measures the bundled
+23.26 client instead, which takes the 64-bit fixed-width layout — the same split
+the mid-reply table above spells out.
+
+The go-ora row is the accepted cost of the guess, and it is a real trade rather
+than an oversight. go-ora negotiates customHash like a modern client but parses
+like a legacy one — its summary reader takes the message CLR straight after the
+wide RetCode pair — so it reads dbbat's first trailing 20c field as an empty
+message and renders the code itself. The two layouts are mutually exclusive: no
+byte sequence puts a non-empty CLR where go-ora looks *and* two integers where
+python-oracledb looks. Given that, the tail goes to the client that **cannot
+parse the frame at all** without it over the one that loses a sentence. The
+refusal's ORA code reaches both.
+
+The probe reads python-oracledb's exception *object* — `class`, `code`,
+`full_code` — and not its text, for the same reason the mid-fetch probe does: the
+failure being measured produced an `InternalError` with no ORA code anywhere in
+it, so "the driver parsed the refusal" and "the driver could not read the frame"
+are indistinguishable from the message alone.
+
 ### Oracle NUMBER Encoding
 
 Oracle NUMBER is a variable-length, sign-and-magnitude, base-100 format:
