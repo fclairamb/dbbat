@@ -213,10 +213,18 @@ func (s *Session) Run() error {
 	upstream := s.upstream
 	clientConn := s.clientConn
 
-	go shared.RunGuarded(watchCtx, s.logger, relayNameWatchdog, func() {
+	// RunWatchdog, not RunGuarded, and on this protocol it is the whole of the
+	// enforcement: MongoDB has no mid-stream guard.Check() on the relay's hot
+	// path the way Oracle and PostgreSQL do, so a watchdog that merely survived
+	// its own panic would leave the session running with no expiry, no byte quota
+	// and no revocation check at all. The teardown closes both conns — what
+	// onLimitViolation does, minus the walk that may be what panicked.
+	go shared.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
 			s.onLimitViolation(upstream, clientConn, err)
 		})
+	}, func() {
+		closeSessionConns(upstream, clientConn)
 	})
 
 	s.logger.InfoContext(s.ctx, "MongoDB session ready",
@@ -389,10 +397,13 @@ const (
 //
 // Both pumps run under shared.RunRelay. A recover on the goroutine that started
 // them catches nothing they raise, so an unguarded panic in the wire decode
-// would end the process and every other live session with it. Reporting the
-// panic as an error is the load-bearing half here twice over: this function
-// drains errCh a second time, so a pump that died silently would park the
-// session for good rather than merely leaking it.
+// would end the process and every other live session with it.
+//
+// That a panicking pump still *yields a value* is load-bearing here in a way it
+// is not on a proxy that reads errCh once: this function drains it a second
+// time, to wait the other pump out. Before the recover existed a pump could not
+// die quietly — it took the process with it — so nothing was ever parked here.
+// Recovering is what creates the obligation, and RunRelay is what discharges it.
 func (s *Session) relay() error {
 	errCh := make(chan error, 2)
 
@@ -521,6 +532,19 @@ func (s *Session) onLimitViolation(up *UpstreamConn, clientConn io.Closer, err e
 	s.logger.WarnContext(s.ctx, "terminating MongoDB session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
+	closeSessionConns(up, clientConn)
+}
+
+// closeSessionConns drops both sockets, which is how a session is ended from
+// outside its pumps: whichever pump is parked in a read or write returns, and
+// relay tears the session down. Split out of onLimitViolation so the watchdog's
+// panic guard can perform the same teardown without re-entering whatever
+// panicked.
+//
+// It takes the conns rather than reading them off the session because
+// closeUpstream nils s.upstream; the watchdog captured its locals for the same
+// reason. Safe to call twice, and safe concurrently with a blocked read/write.
+func closeSessionConns(up *UpstreamConn, clientConn io.Closer) {
 	if up != nil {
 		up.close()
 	}

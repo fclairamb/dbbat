@@ -77,11 +77,17 @@ const (
 // All three run under the shared panic guards. None of them is reached by the
 // recover on handleConnection — that sits on a different goroutine — so an
 // unguarded panic in the TDS decode would end the process, dropping every other
-// live session, of every user, on every database. The two pumps report through
-// errCh, which matters twice: this function drains it a second time, so a pump
-// that died without reporting would park the session for good. The reader has no
-// error channel and needs none — its own defers close clientGone and clientMsgs,
-// which is exactly how it ends the session on a read failure.
+// live session, of every user, on every database.
+//
+// That a panicking pump still *yields a value* is load-bearing here in a way it
+// is not on a proxy that reads errCh once: this function drains it a second
+// time, to wait the other pump out. Before the recover existed a pump could not
+// die quietly — it took the process with it — so nothing was ever parked here.
+// Recovering is what creates the obligation, and RunRelay is what discharges it.
+//
+// The reader has no error channel and needs none — its own defers close
+// clientGone and clientMsgs, which is exactly how it ends the session on a read
+// failure. That is RunGuarded's whole precondition; see its doc.
 func (s *session) relay(ctx context.Context) error {
 	errCh := make(chan error, 2)
 

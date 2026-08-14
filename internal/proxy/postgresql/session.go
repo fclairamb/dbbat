@@ -371,9 +371,13 @@ func (s *Session) proxyMessages() error {
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
 
-	go shared.RunGuarded(watchCtx, s.logger, relayNameWatchdog, func() {
+	// RunWatchdog, not RunGuarded: a watchdog that merely survives its own panic
+	// leaves the session running with nothing enforcing its expiry, quota or
+	// revocation. The teardown is what onLimitViolation does — close both conns,
+	// which ends whichever relay is parked on them.
+	go shared.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
-	})
+	}, s.closeConns)
 
 	// Channel to receive errors from goroutines
 	errChan := make(chan error, 2)
@@ -407,6 +411,17 @@ func (s *Session) onLimitViolation(err error) {
 	s.logger.WarnContext(s.ctx, "terminating session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
+	s.closeConns()
+}
+
+// closeConns drops both sockets, which is how a session is ended from outside
+// its relays: whichever leg is parked in a Read or Write returns, and
+// proxyMessages runs its cleanup. Split out of onLimitViolation so the
+// watchdog's panic guard can perform the same teardown without re-entering
+// whatever panicked.
+//
+// Safe to call twice, and safe concurrently with a blocked Read/Write.
+func (s *Session) closeConns() {
 	if s.upstreamConn != nil {
 		_ = s.upstreamConn.Close()
 	}

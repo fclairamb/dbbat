@@ -95,7 +95,17 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 	// until it sees AUTH Phase 1, which it returns (unforwarded) to the caller.
 	pumpDone := make(chan error, 1)
 
-	go s.pumpPreAuthUpstream(upstream, pumpDone)
+	// Under shared.RunRelay for the same reason the post-auth relays are: this is
+	// a goroutine of its own reading and writing raw TNS frames, and the recover
+	// on handleConnection catches nothing it raises. The always-yield-a-value
+	// contract is sharper here than anywhere else — pumpDone is buffered 1 and
+	// stopPump *blocks* on it below, so a pump that panicked without reporting
+	// would hang the session's auth handover rather than merely leak it.
+	go func() {
+		pumpDone <- shared.RunRelay(s.ctx, s.logger, relayNamePreAuthPump, func() error {
+			return s.pumpPreAuthUpstream(upstream)
+		})
+	}()
 
 	// stopPump hands the upstream socket back to the caller for the O5LOGON
 	// handover. Clients pipeline the pre-auth sequence — they send AUTH Phase 1
@@ -174,16 +184,18 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 }
 
 // pumpPreAuthUpstream continuously forwards upstream→client TNS packets during
-// the pre-auth relay, reporting the first read/write error (including the
-// drain-grace deadline that stopPump arms) on pumpDone. See
-// relayPreAuthNegotiation for why the relay is a concurrent pump, not lockstep.
-func (s *session) pumpPreAuthUpstream(upstream net.Conn, pumpDone chan<- error) {
+// the pre-auth relay, returning the first read/write error (including the
+// drain-grace deadline that stopPump arms). See relayPreAuthNegotiation for why
+// the relay is a concurrent pump, not lockstep.
+//
+// It returns rather than sending on the done channel itself so that its caller
+// owns the send — which is what lets shared.RunRelay turn a panic into that same
+// send instead of a hung stopPump.
+func (s *session) pumpPreAuthUpstream(upstream net.Conn) error {
 	for {
 		pkt, err := readTNSPacket(upstream)
 		if err != nil {
-			pumpDone <- err
-
-			return
+			return err
 		}
 
 		// Set Protocol responses carry ServerCompileTimeCaps; caps[4]&0x20
@@ -211,9 +223,7 @@ func (s *session) pumpPreAuthUpstream(upstream net.Conn, pumpDone chan<- error) 
 			slog.Int("len", len(pkt.Raw)))
 
 		if _, err := s.clientConn.Write(pkt.Raw); err != nil {
-			pumpDone <- err
-
-			return
+			return err
 		}
 	}
 }

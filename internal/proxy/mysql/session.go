@@ -206,10 +206,19 @@ func (s *Session) Run() error {
 	// four protocols, MySQL has no second guarded site — go-mysql owns the wire
 	// and commandLoop runs synchronously on the connection's own goroutine, under
 	// that recover, so there are no relay goroutines to wrap.
-	go shared.RunGuarded(watchCtx, s.logger, goroutineNameWatchdog, func() {
+	//
+	// RunWatchdog, not RunGuarded, and here more than anywhere: this watchdog is
+	// the *entire* enforcement path. go-mysql buffers whole results, so there is
+	// no mid-stream checkpoint to fall back on — a watchdog that merely survived
+	// its own panic would leave the session with no expiry, no byte quota and no
+	// revocation check whatsoever. The teardown closes both conns, which is
+	// exactly how onLimitViolation enforces.
+	go shared.RunWatchdog(watchCtx, s.logger, goroutineNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
 			s.onLimitViolation(upstreamConn, clientConn, err)
 		})
+	}, func() {
+		closeSessionConns(upstreamConn, clientConn)
 	})
 
 	s.logger.InfoContext(s.ctx, "MySQL session ready",
@@ -238,6 +247,20 @@ func (s *Session) onLimitViolation(upstreamConn, clientConn io.Closer, err error
 	s.logger.WarnContext(s.ctx, "terminating MySQL session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
+	closeSessionConns(upstreamConn, clientConn)
+}
+
+// closeSessionConns force-closes both conns, which is the enforcement mechanism
+// on this protocol: go-mysql owns the wire and buffers whole results, so there
+// is no message boundary at which to inject a clean error frame. Split out of
+// onLimitViolation so the watchdog's panic guard can perform the same teardown
+// without re-entering whatever panicked.
+//
+// It takes the conns rather than reading them off the session because
+// closeUpstream nils s.upstreamConn; the watchdog captured its locals for the
+// same reason. Safe to call twice, and safe concurrently with a blocked
+// Read/Write.
+func closeSessionConns(upstreamConn, clientConn io.Closer) {
 	if upstreamConn != nil {
 		_ = upstreamConn.Close()
 	}
