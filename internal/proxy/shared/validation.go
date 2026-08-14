@@ -27,6 +27,12 @@ var (
 	ErrMongoCommandBlocked  = errors.New("dbbat: command not permitted through dbbat")
 	ErrMongoUnknownCommand  = errors.New("dbbat: command not on the proxy allowlist")
 	ErrMongoDatabaseBlocked = errors.New("dbbat: access to this database is not permitted")
+	// ErrMongoPipelineNotCheckable — the aggregation pipeline could not be fully
+	// inspected (too deeply nested, or a stage dbbat cannot parse), so the
+	// databases it names cannot be established. Refused rather than forwarded:
+	// an unreadable pipeline is not a pipeline that writes nowhere.
+	ErrMongoPipelineNotCheckable = errors.New("dbbat: aggregation pipeline is too deeply nested " +
+		"or malformed to be checked")
 )
 
 // Write keywords that should be blocked for read-only grants.
@@ -589,8 +595,9 @@ var mongoBlockedCommands = map[string]bool{
 	"compact": true,
 }
 
-// classifyMongoCommand maps a command name (+ body, for aggregate) to a class.
-func classifyMongoCommand(cmd string, body bson.Raw) mongoCmdClass {
+// classifyMongoCommand maps a command name (+ its scanned pipeline, for
+// aggregate and explain) to a class.
+func classifyMongoCommand(cmd string, scan mongoPipelineScan) mongoCmdClass {
 	switch {
 	case mongoBlockedCommands[cmd]:
 		return classBlocked
@@ -603,7 +610,10 @@ func classifyMongoCommand(cmd string, body bson.Raw) mongoCmdClass {
 	case mongoWriteCommands[cmd]:
 		return classWrite
 	case mongoReadCommands[cmd]:
-		if cmd == "aggregate" && aggregatePipelineWrites(body) {
+		// Not gated on cmd == "aggregate": `explain` wraps the aggregate's
+		// pipeline in a nested command document, and the scan reaches into it.
+		// Commands with no pipeline at all scan to nothing.
+		if scan.writes {
 			return classWrite
 		}
 
@@ -614,153 +624,282 @@ func classifyMongoCommand(cmd string, body bson.Raw) mongoCmdClass {
 }
 
 // mongoPipelineMaxDepth bounds the recursion into nested pipelines
-// ($lookup/$unionWith/$facet) so a hostile document can't drive the scan into
-// unbounded recursion.
+// ($lookup/$unionWith/$facet, and the command an explain wraps) so a hostile
+// document can't drive the scan into unbounded recursion. Exceeding it is a
+// refusal, not a stop: see ErrMongoPipelineNotCheckable.
 const mongoPipelineMaxDepth = 8
 
+// bsonTypeAbsent is the zero bson.Type a Lookup miss returns. Any other type is
+// a field that is present — malformed or not.
+const bsonTypeAbsent bson.Type = 0
+
 // mongoPipelineScan is the result of walking an aggregation pipeline: whether
-// it writes ($out/$merge) and which databases those stages name explicitly.
+// it writes ($out/$merge) and which databases its stages name explicitly, split
+// by what the naming stage does.
 type mongoPipelineScan struct {
 	writes bool
-	// targetDBs holds the non-empty `db` values found on $out/$merge stages.
-	// A stage that names no database targets the command's own $db, which the
-	// $db check already covers.
-	targetDBs []string
+	// writeTargets holds the non-empty `db` values found on $out/$merge; they
+	// are checked as writes. readTargets holds the ones found on $lookup /
+	// $graphLookup `from` and $unionWith `coll`. A stage that names no database
+	// targets the command's own $db, which the $db check already covers.
+	writeTargets []string
+	readTargets  []string
 }
 
-// scanMongoPipeline walks the `pipeline` field of a command body. Nested
-// pipelines ($lookup, $unionWith, $facet) are walked too: MongoDB itself
-// forbids $out/$merge inside them, so this is belt-and-braces rather than a
-// path a server would honor — but the cost is a few lines and the alternative
-// is trusting the upstream's validation to be our access control.
-func scanMongoPipeline(body bson.Raw) mongoPipelineScan {
-	pipeline, ok := body.Lookup("pipeline").ArrayOK()
-	if !ok {
-		return mongoPipelineScan{}
+// scanMongoPipeline walks a command body's `pipeline`, plus the nested command
+// an `explain` wraps.
+//
+// It fails **closed**. Every path that cannot see the whole pipeline — the
+// depth cap, an unparseable stage, a `pipeline` that is not an array — returns
+// ErrMongoPipelineNotCheckable rather than reporting an empty scan. That
+// direction is load-bearing twice over: the same walk is what sets `writes`, so
+// a scan that quietly gave up would leave a $merge nested past the cap
+// classified as a *read* and let it through a read_only grant. Falling back on
+// the upstream refusing what dbbat could not read is exactly the posture the
+// rest of this file exists to avoid.
+//
+// Nested pipelines ($lookup, $unionWith, $facet) are walked because MongoDB
+// forbidding $out/$merge inside them is the upstream's validation, not dbbat's.
+func scanMongoPipeline(body bson.Raw) (mongoPipelineScan, error) {
+	var scan mongoPipelineScan
+
+	err := scan.command(body, 0)
+
+	return scan, err
+}
+
+// command scans one command document: its own `pipeline`, and recursively the
+// command an `explain` wraps ({explain: {aggregate: …, pipeline: […]}}), which
+// otherwise hides a pipeline from every check below.
+func (p *mongoPipelineScan) command(body bson.Raw, depth int) error {
+	if depth > mongoPipelineMaxDepth {
+		return ErrMongoPipelineNotCheckable
 	}
 
-	var scan mongoPipelineScan
-	scan.walk(pipeline, 0)
+	if val := body.Lookup("pipeline"); val.Type != bsonTypeAbsent {
+		pipeline, ok := val.ArrayOK()
+		if !ok {
+			return ErrMongoPipelineNotCheckable
+		}
 
-	return scan
+		if err := p.walk(pipeline, depth); err != nil {
+			return err
+		}
+	}
+
+	if val := body.Lookup("explain"); val.Type != bsonTypeAbsent {
+		// `explain` is a document for the command form and a boolean/number when
+		// it rides along as an option — only the former wraps a command.
+		if inner, ok := val.DocumentOK(); ok {
+			return p.command(inner, depth+1)
+		}
+	}
+
+	return nil
 }
 
 // walk visits every stage of one pipeline level.
-func (p *mongoPipelineScan) walk(pipeline bson.RawArray, depth int) {
+func (p *mongoPipelineScan) walk(pipeline bson.RawArray, depth int) error {
 	if depth > mongoPipelineMaxDepth {
-		return
+		return ErrMongoPipelineNotCheckable
 	}
 
 	stages, err := pipeline.Values()
 	if err != nil {
-		return
+		return ErrMongoPipelineNotCheckable
 	}
 
 	for _, stageVal := range stages {
 		stage, ok := stageVal.DocumentOK()
 		if !ok {
-			continue
+			return ErrMongoPipelineNotCheckable
 		}
 
 		elems, err := stage.Elements()
 		if err != nil {
-			continue
+			return ErrMongoPipelineNotCheckable
 		}
 
 		for _, e := range elems {
-			p.stage(e.Key(), e.Value(), depth)
-		}
-	}
-}
-
-// stage handles one pipeline stage: the two writing stages, and the three that
-// can carry a sub-pipeline.
-func (p *mongoPipelineScan) stage(key string, val bson.RawValue, depth int) {
-	switch key {
-	case "$out":
-		p.writes = true
-		p.addTarget(mongoOutTargetDB(val))
-	case "$merge":
-		p.writes = true
-		p.addTarget(mongoMergeTargetDB(val))
-	case "$lookup", "$unionWith":
-		doc, ok := val.DocumentOK()
-		if !ok {
-			return
-		}
-
-		if sub, ok := doc.Lookup("pipeline").ArrayOK(); ok {
-			p.walk(sub, depth+1)
-		}
-	case "$facet":
-		doc, ok := val.DocumentOK()
-		if !ok {
-			return
-		}
-
-		elems, err := doc.Elements()
-		if err != nil {
-			return
-		}
-
-		for _, e := range elems {
-			if sub, ok := e.Value().ArrayOK(); ok {
-				p.walk(sub, depth+1)
+			if err := p.stage(e.Key(), e.Value(), depth); err != nil {
+				return err
 			}
 		}
 	}
+
+	return nil
 }
 
-func (p *mongoPipelineScan) addTarget(dbName string) {
+// stage handles one pipeline stage: the two writing stages, the ones that name
+// a source collection, and the ones that carry a sub-pipeline.
+func (p *mongoPipelineScan) stage(key string, val bson.RawValue, depth int) error {
+	switch key {
+	case "$out":
+		p.writes = true
+
+		return p.addWriteTarget(mongoStageTargetDB(val, ""))
+	case "$merge":
+		p.writes = true
+
+		return p.addWriteTarget(mongoStageTargetDB(val, "into"))
+	case "$lookup", "$graphLookup":
+		// `from` is either a collection name (same database) or {db, coll}. The
+		// latter is a real cross-database *read*, which read_only does not stop.
+		if err := p.addReadTarget(mongoStageTargetDB(val, "from")); err != nil {
+			return err
+		}
+
+		return p.walkSubPipeline(val, depth)
+	case "$unionWith":
+		// Same shape, spelled `coll`.
+		if err := p.addReadTarget(mongoStageTargetDB(val, "coll")); err != nil {
+			return err
+		}
+
+		return p.walkSubPipeline(val, depth)
+	case "$facet":
+		return p.walkFacet(val, depth)
+	}
+
+	return nil
+}
+
+// walkSubPipeline descends into a $lookup / $unionWith sub-pipeline.
+func (p *mongoPipelineScan) walkSubPipeline(val bson.RawValue, depth int) error {
+	doc, ok := val.DocumentOK()
+	if !ok {
+		// The string shorthand ($unionWith: "coll") carries no sub-pipeline.
+		return nil
+	}
+
+	sub := doc.Lookup("pipeline")
+	if sub.Type == bsonTypeAbsent {
+		return nil
+	}
+
+	arr, ok := sub.ArrayOK()
+	if !ok {
+		return ErrMongoPipelineNotCheckable
+	}
+
+	return p.walk(arr, depth+1)
+}
+
+// walkFacet descends into each of a $facet's named sub-pipelines.
+func (p *mongoPipelineScan) walkFacet(val bson.RawValue, depth int) error {
+	doc, ok := val.DocumentOK()
+	if !ok {
+		return ErrMongoPipelineNotCheckable
+	}
+
+	elems, err := doc.Elements()
+	if err != nil {
+		return ErrMongoPipelineNotCheckable
+	}
+
+	for _, e := range elems {
+		arr, ok := e.Value().ArrayOK()
+		if !ok {
+			return ErrMongoPipelineNotCheckable
+		}
+
+		if err := p.walk(arr, depth+1); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (p *mongoPipelineScan) addWriteTarget(dbName string, err error) error {
+	if err != nil {
+		return err
+	}
+
 	if dbName != "" {
-		p.targetDBs = append(p.targetDBs, dbName)
+		p.writeTargets = append(p.writeTargets, dbName)
 	}
+
+	return nil
 }
 
-// mongoOutTargetDB reads the database a $out stage names. The stage value is
-// either a collection name (same database) or {db, coll}.
-func mongoOutTargetDB(val bson.RawValue) string {
+func (p *mongoPipelineScan) addReadTarget(dbName string, err error) error {
+	if err != nil {
+		return err
+	}
+
+	if dbName != "" {
+		p.readTargets = append(p.readTargets, dbName)
+	}
+
+	return nil
+}
+
+// mongoStageTargetDB reads the database a namespace-naming stage points at.
+//
+// Every one of them takes the same two shapes: a bare collection name (the
+// command's own $db) or a {db, coll} document. field names the sub-field the
+// namespace hides behind — "into" for $merge, "from" for $lookup, "coll" for
+// $unionWith — or "" when the stage value *is* the namespace ($out).
+func mongoStageTargetDB(val bson.RawValue, field string) (string, error) {
+	if field != "" {
+		doc, ok := val.DocumentOK()
+		if !ok {
+			// The string shorthand ($merge: "coll", $unionWith: "coll") names no
+			// database. A non-document, non-string value is malformed.
+			if _, isString := val.StringValueOK(); isString {
+				return "", nil
+			}
+
+			return "", ErrMongoPipelineNotCheckable
+		}
+
+		inner := doc.Lookup(field)
+		if inner.Type == bsonTypeAbsent {
+			// $lookup may legitimately omit `from` (a $documents sub-pipeline).
+			return "", nil
+		}
+
+		val = inner
+	}
+
+	if _, ok := val.StringValueOK(); ok {
+		return "", nil // same database
+	}
+
 	doc, ok := val.DocumentOK()
 	if !ok {
-		return ""
+		return "", ErrMongoPipelineNotCheckable
 	}
 
-	name, _ := doc.Lookup("db").StringValueOK()
+	name := doc.Lookup("db")
+	if name.Type == bsonTypeAbsent {
+		return "", nil // {coll: …} without a db is the command's own $db
+	}
 
-	return name
-}
-
-// mongoMergeTargetDB reads the database a $merge stage names. `into` is either
-// a collection name (same database) or {db, coll}; the shorthand
-// {$merge: "coll"} names no database either.
-func mongoMergeTargetDB(val bson.RawValue) string {
-	doc, ok := val.DocumentOK()
+	dbName, ok := name.StringValueOK()
 	if !ok {
-		return ""
+		return "", ErrMongoPipelineNotCheckable
 	}
 
-	into, ok := doc.Lookup("into").DocumentOK()
-	if !ok {
-		return ""
-	}
-
-	name, _ := into.Lookup("db").StringValueOK()
-
-	return name
-}
-
-// aggregatePipelineWrites reports whether an aggregate command's pipeline
-// contains a $out or $merge stage (which writes and must be grant-checked as a
-// write).
-func aggregatePipelineWrites(body bson.Raw) bool {
-	return scanMongoPipeline(body).writes
+	return dbName, nil
 }
 
 // ValidateMongoCommand enforces grant controls and the $db policy on a MongoDB
 // command (contract §2). It operates on the command name and the kind-0 body.
 // db is the session's resolved target database; grant carries the controls.
 func ValidateMongoCommand(cmd, dbName string, body bson.Raw, db *store.Server, grant *store.Grant) error {
-	class := classifyMongoCommand(cmd, body)
+	// The pipeline is scanned first and once. It decides the class (a pipeline
+	// that writes reclassifies a read command) *and* the databases the stages
+	// name, so a scan dbbat could not complete has to refuse here — before any
+	// grant control is consulted, because no grant can permit a command whose
+	// effect could not be established.
+	scan, err := scanMongoPipeline(body)
+	if err != nil {
+		return err
+	}
+
+	class := classifyMongoCommand(cmd, scan)
 
 	switch class {
 	case classBlocked:
@@ -794,19 +933,27 @@ func ValidateMongoCommand(cmd, dbName string, body bson.Raw, db *store.Server, g
 		return ErrMongoDatabaseBlocked
 	}
 
-	return validateMongoPipelineTargets(body, db)
+	return validateMongoPipelineTargets(scan, db)
 }
 
-// validateMongoPipelineTargets holds a pipeline's $out/$merge target database
-// to the same policy as the message's $db. Without it, a command whose $db is
-// the granted database can still write into another one — the stage carries its
-// own {db, coll}, which the $db check never sees. Independent of grant
-// controls: a full-write grant is permission to write *here*, not anywhere.
-func validateMongoPipelineTargets(body bson.Raw, db *store.Server) error {
-	for _, target := range scanMongoPipeline(body).targetDBs {
-		// classWrite: these stages write, so the diagnostics-only carve-out for
-		// admin must not apply to them.
+// validateMongoPipelineTargets holds every database a pipeline stage names to
+// the same policy as the message's $db. Without it, a command whose $db is the
+// granted database still reaches another one — the stage carries its own
+// {db, coll}, which the $db check never sees, whether it writes there ($out,
+// $merge) or reads from there ($lookup, $graphLookup, $unionWith). Independent
+// of grant controls: a full-write grant is permission to write *here*, not
+// anywhere, and read_only does not stop a cross-database read at all.
+func validateMongoPipelineTargets(scan mongoPipelineScan, db *store.Server) error {
+	// classWrite / classRead: neither is the diagnostics carve-out, so the
+	// `admin` exemption never applies to a stage's target.
+	for _, target := range scan.writeTargets {
 		if !mongoDatabaseAllowed(target, classWrite, db) {
+			return ErrMongoDatabaseBlocked
+		}
+	}
+
+	for _, target := range scan.readTargets {
+		if !mongoDatabaseAllowed(target, classRead, db) {
 			return ErrMongoDatabaseBlocked
 		}
 	}
