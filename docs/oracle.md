@@ -499,26 +499,62 @@ measured: every shape in the table above is raised before the first row, the
 divide-by-zero included, because the server sends the OER *instead of* the
 QueryResult.
 
-It has been measured now, and it does not hold.
-`testdata/{python_thin,go_ora}_midfetch_fail.pcapng` (regenerate with
+It has been measured now, on **four** clients, and it does not hold.
+`testdata/{python_thin,go_ora,jdbc_thin}_midfetch_fail.pcapng` and
+`testdata/sqlplus_midfetch_fail.pcapng` (regenerate with
 `go test -tags capture -run 'TestCapture_.*MidFetchFailure'`) record a
 `TO_NUMBER` over a 20 000-row table whose row 15 000 will not convert, no
 `ORDER BY` — a sort would materialize the set and raise before the first row,
-which is the shape already covered — at array size 100. Both clients fetch
-**14 900 rows** and then take an ORA-01722 that arrives, identically:
+which is the shape already covered — at array size 100. Every client fetches
+**14 900 rows** and then takes an ORA-01722 that arrives the same way:
 
-| | python-oracledb thin | go-ora |
-|---|---|---|
-| shape | standalone func `0x04` at byte 0 of a whole TNS Data packet | same |
-| `CallStatus` | `0x1` | `0x1` |
-| end-of-call bit | no | no |
-| `CurRowNumber` | 14999 | 14999 |
-| OER `cursorID` | 4 | 3 |
-| the cursor dbbat was streaming | 4 | 3 |
+| | python-oracledb thin | go-ora | JDBC thin | sqlplus (OCI) |
+|---|---|---|---|---|
+| shape | standalone func `0x04` at byte 0 of a whole TNS Data packet | same | same | same |
+| `CallStatus` | `0x1` | `0x1` | `0x1` | `0x1` |
+| end-of-call bit | no | no | no | no |
+| `CurRowNumber` | 14999 | 14999 | 14999 | 14999 |
+| OER `cursorID` | 4 | 3 | 4 | 5 |
+| the cursor dbbat was streaming | 4 | 3 | 4 | **never learned** |
+| summary object encoding | TTC compressed | TTC compressed | TTC compressed | **fixed-width** |
 
 So it is the same bit-less standalone shape as every other failure, only with the
 column definitions and dozens of fetch round trips behind it — and `decodeOERAt`
 dropped it exactly the way it dropped the other five.
+
+###### The OCI client is measured and still not covered
+
+The last two rows are the finding the fourth client added, and they are not a
+case of the anchor failing closed on a judgement call. sqlplus negotiates the
+**fixed-width** summary object (the encoding `encodeOERFixedWidth` already
+*writes* for it — see "Refusing a statement" below), so the seven leading fields
+are little-endian integers at constant offsets rather than TTC compressed ones.
+`decodeOERFieldsAt` reads compressed integers only and returns nil for the whole
+block, so `decodeErrorOER` refuses it, `handleOERStatus` never reaches either
+anchor, and the same blindness is why cursor-id learning holds no id for that
+fetch to compare against.
+
+Every field the two anchors want is on the wire. Read at
+`oerFixed32Layout`'s own offsets, the recorded ORA-01722 carries call status `1`
+(no end-of-call bit) at 1, ECID 166 at 5, error number 1722 at 11 and again as
+the RetCode at 66, cursor id **5** at 17, call number 169 at 45, the row count
+14999 compressed at 70, and the `ORA-01722` CLR right behind it.
+`TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndUnreadable` pins all of that
+*and* today's refusal, so a future fixed-width decoder has a measurement to land
+on and cannot land silently.
+
+The gap is **not** mid-fetch specific, which is why the anchor was not touched
+for it: the same recording opens with a `DROP TABLE` of a missing table, an
+ORA-00942 raised before the first row — the shape the rest of this section says
+already works — and dbbat records that as a success too
+(`TestDumpReplay_OCIFailuresAreNotRecordedAtAll`). An OCI client needs a
+fixed-width *decoder* before any of this applies to it; relaxing the mid-fetch
+anchor would buy it nothing. Filed as a follow-up in `specs/todos/`.
+
+`testdata/sqlplus_midfetch_fail.pcapng` is therefore deliberately **not** in
+`midFetchDumps()`. It stays in the false-positive corpus below — its 150
+mid-stream packets are counted like everyone else's — and contributes no
+acceptance.
 
 What the mid-stream path accepts now is byte-0 routing **plus** `decodeErrorOER`
 **plus** `midFetchOERNamesTheStreamingCursor`. The cost of the first two was
@@ -526,11 +562,12 @@ measured rather than argued, over the whole `testdata/` corpus replayed through 
 real session so `rowStreamActive()` is the session's own
 (`TestDumpReplay_MidStreamOERFalsePositiveRate`):
 
-- across **24** recordings, **342** server packets arrive mid-row-stream;
-- **2** of them begin with `0x04` — the two genuine ORA-01722s; 326 of the rest
+- across **26** recordings, **641** server packets arrive mid-row-stream;
+- **4** of them begin with `0x04` — the four genuine ORA-01722s; 623 of the rest
   begin with `0x06`;
-- `decodeErrorOER` accepts exactly those 2 and nothing else: **false-positive
-  rate 0**;
+- `decodeErrorOER` accepts exactly the **3** compressed ones and nothing else:
+  **false-positive rate 0**. The fourth is sqlplus's, refused for being
+  unreadable rather than for being row data — see above;
 - running the same predicate at *every* `0x04` offset **inside** all of those
   mid-stream packets accepts **0**. Nothing routes that way — `handleOERStatus`
   only ever sees byte 0 — so it is not a rate, it is how far real row data is
@@ -596,7 +633,9 @@ is derived from the captures in `testdata/` rather than copied from the
 production dump, which is not in the repository. The failures are replayed
 straight out of the two capture files in `failed_stmt_replay_test.go`, and
 driven through the whole proxy against a live Oracle in
-`failed_stmt_integration_test.go`.
+`failed_stmt_integration_test.go` — which covers the mid-fetch case too
+(`TestIntegration_MidFetchFailureRecordsItsORAError`), so the relaxation is not
+evidenced only by replayed bytes.
 
 A re-execution naming a cursor dbbat cannot resolve goes through
 `refuseUnknownCursor`, exactly like the SQL-less `OALL8`: refused under a grant
