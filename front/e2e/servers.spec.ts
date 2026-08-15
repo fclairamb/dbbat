@@ -340,4 +340,143 @@ test.describe("Servers Management", () => {
       await expect(marker).toHaveAttribute("title", new RegExp(service));
     }
   });
+
+  test("a database row can be renamed, with the connection-target warning", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const stamp = Date.now();
+    const before = `e2e_rename_before_${stamp}`;
+    const after = `e2e_rename_after_${stamp}`;
+
+    // A row to rename. Name is the only field that used to be immutable.
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(before);
+    await authenticatedPage.locator("#host").fill("localhost");
+    await authenticatedPage.locator("#databaseName").fill("postgres");
+    await authenticatedPage.locator("#username").fill("postgres");
+    await authenticatedPage.locator("#password").fill("postgres");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = authenticatedPage.locator("tr", { hasText: before }).first();
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    await row.locator('[data-testid^="database-rename-"]').click();
+
+    const dialog = authenticatedPage.getByTestId("database-rename-dialog");
+    await expect(dialog).toBeVisible();
+
+    // Untouched, there is nothing to warn about yet.
+    await expect(
+      authenticatedPage.getByTestId("server-rename-warning")
+    ).toHaveCount(0);
+
+    const input = authenticatedPage.getByTestId("database-rename-input");
+    await input.fill(after);
+
+    // Changing it says what a rename actually breaks: the connection target.
+    const warning = authenticatedPage.getByTestId("server-rename-warning");
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText(/connection target/i);
+
+    await authenticatedPage.getByTestId("database-rename-submit").click();
+
+    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+    await expect(
+      authenticatedPage.locator("tr", { hasText: after }).first()
+    ).toBeVisible({ timeout: 10000 });
+    await expect(
+      authenticatedPage.locator("tr", { hasText: before })
+    ).toHaveCount(0);
+  });
+
+  test("the rename dialog rejects a hyphenated name before it reaches the server", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const stamp = Date.now();
+    const name = `e2e_rename_slug_${stamp}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("localhost");
+    await authenticatedPage.locator("#databaseName").fill("postgres");
+    await authenticatedPage.locator("#username").fill("postgres");
+    await authenticatedPage.locator("#password").fill("postgres");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = authenticatedPage.locator("tr", { hasText: name }).first();
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    await row.locator('[data-testid^="database-rename-"]').click();
+    await expect(
+      authenticatedPage.getByTestId("database-rename-dialog")
+    ).toBeVisible();
+
+    const input = authenticatedPage.getByTestId("database-rename-input");
+    await input.fill(`${name}-renamed`);
+    await authenticatedPage.getByTestId("database-rename-submit").click();
+
+    // The slug gate the create dialog enforces applies to the rename too: the
+    // form's own pattern refuses to submit, so the dialog stays open.
+    const isValid = await input.evaluate((el: HTMLInputElement) =>
+      el.checkValidity()
+    );
+    expect(isValid).toBe(false);
+    await expect(
+      authenticatedPage.getByTestId("database-rename-dialog")
+    ).toBeVisible();
+    await expect(
+      authenticatedPage.locator("tr", { hasText: name }).first()
+    ).toBeVisible();
+  });
+
+  test("a tunnel row can be renamed from its edit dialog", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
+    await expect(sshSection).toBeVisible();
+
+    const stamp = Date.now();
+    const before = `e2e_bastion_rename_${stamp}`;
+    const after = `e2e_bastion_renamed_${stamp}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("protocol-select").click();
+    await authenticatedPage.getByTestId("protocol-option-ssh").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(before);
+    await authenticatedPage.locator("#host").fill("bastion.example.com");
+    await authenticatedPage.locator("#username").fill("bastion-user");
+    await authenticatedPage.locator("#password").fill("bastion-password");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = sshSection.locator("tr", { hasText: before });
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    await row.locator('[data-testid^="ssh-server-edit-"]').click();
+    const editDialog = authenticatedPage.getByTestId("ssh-server-edit-dialog");
+    await expect(editDialog).toBeVisible();
+
+    await authenticatedPage
+      .getByTestId("ssh-server-edit-name-input")
+      .fill(after);
+
+    // A tunnel row is dialed by id, not by name — the warning has to say so
+    // rather than repeat the database row's "this breaks every client" copy.
+    const warning = authenticatedPage.getByTestId("server-rename-warning");
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText(/reference it by id/i);
+
+    await authenticatedPage.getByTestId("ssh-server-edit-submit").click();
+
+    await expect(editDialog).not.toBeVisible({ timeout: 10000 });
+    await expect(sshSection.getByText(after)).toBeVisible({ timeout: 10000 });
+  });
 });

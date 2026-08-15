@@ -115,10 +115,77 @@ function NonSlugNameWarning({ uid, name }: { uid: string; name: string }) {
           servers must be lowercase letters, numbers, and underscores only —
           this is the name every client types as the database name in its
           connection string, so anything else costs reachability on some
-          protocol. Renaming it is not supported yet.
+          protocol. Rename it from the pencil action on this row; every client
+          config using the old name has to be updated to match.
         </p>
       </TooltipContent>
     </Tooltip>
+  );
+}
+
+// ServerRenameField is the name input as it appears in the two *edit* forms —
+// never in the create dialog, whose copy talks about choosing a name rather
+// than moving one. The warning is the point of the component: on a database row
+// the name is the connection target, so changing it invalidates every saved
+// connection string, and that has to be said at the moment of the edit.
+function ServerRenameField({
+  id,
+  testId,
+  value,
+  originalName,
+  isTunnel,
+  onChange,
+}: {
+  id: string;
+  testId: string;
+  value: string;
+  originalName: string;
+  isTunnel: boolean;
+  onChange: (next: string) => void;
+}) {
+  const changed = value !== originalName;
+
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>Name</Label>
+      <Input
+        id={id}
+        data-testid={testId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        maxLength={63}
+        pattern="^[a-z0-9_]{1,63}$"
+        title="Lowercase letters, numbers, and underscores only (no hyphens or spaces)"
+        required
+      />
+      <p className="text-xs text-muted-foreground">
+        Lowercase letters, numbers, and underscores only. Names are unique
+        across every server, deleted ones included.
+      </p>
+      {changed && (
+        <Alert data-testid="server-rename-warning">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription className="text-xs">
+            {isTunnel ? (
+              <>
+                Renaming a tunnel row is safe: the servers that dial through it
+                reference it by id, not by name. Only what you read in this UI
+                changes.
+              </>
+            ) : (
+              <>
+                <strong>This moves the connection target.</strong> "
+                {originalName}" is what every client sends as the database name
+                — the Oracle SERVICE_NAME included — so every saved connection
+                string, client config and script still using it stops resolving.
+                Sessions already authenticated keep running; new connects must
+                use "{value}".
+              </>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
   );
 }
 
@@ -189,6 +256,7 @@ function ServersPage() {
   const [detailDb, setDetailDb] = useState<DatabaseItem | null>(null);
   const [editSshServer, setEditSshServer] = useState<Database | null>(null);
   const [approversDb, setApproversDb] = useState<Database | null>(null);
+  const [renameDb, setRenameDb] = useState<DatabaseItem | null>(null);
 
   const canCreate = canCreateDatabase(user?.roles);
   const canDelete = canDeleteDatabase(user?.roles);
@@ -432,6 +500,23 @@ function ServersPage() {
               disabledReason={getDisabledReason("update-database", user?.roles)}
             />
           )}
+          {/* Renaming is the one edit a database row has always been missing:
+              the name is the connection target, and correcting a bad one used
+              to mean an UPDATE against the storage database. */}
+          <PermissionButton
+            data-testid={`database-rename-${db.uid}`}
+            variant="ghost"
+            size="icon"
+            disabled={!canUpdate}
+            disabledReason={getDisabledReason("update-database", user?.roles)}
+            enabledTooltip="Rename this server"
+            onClick={(e) => {
+              e.stopPropagation();
+              setRenameDb(db);
+            }}
+          >
+            <Pencil className="h-4 w-4" />
+          </PermissionButton>
           {canUpdate && isFullDatabase(db) && (
             <Button
               variant="ghost"
@@ -526,6 +611,10 @@ function ServersPage() {
       <EditServerApproversDialog
         server={approversDb}
         onClose={() => setApproversDb(null)}
+      />
+      <RenameServerDialog
+        server={renameDb}
+        onClose={() => setRenameDb(null)}
       />
     </div>
   );
@@ -1374,6 +1463,94 @@ function DeleteDatabaseDialog({
   );
 }
 
+/**
+ * Renaming one database row.
+ *
+ * A dialog of its own rather than a field in a general edit form, because
+ * database rows have no general edit form in this UI — and because a rename is
+ * not an edit like the others: it changes what clients type, so it deserves the
+ * warning to itself. Tunnel rows get the same field inside their existing edit
+ * form (EditSSHServerForm) instead.
+ */
+function RenameServerDialog({
+  server,
+  onClose,
+}: {
+  server: DatabaseItem | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={!!server} onOpenChange={() => onClose()}>
+      {/* Keyed on the UID so the input re-seeds from the row that was opened,
+          the same trick EditSSHServerDialog uses. */}
+      {server && (
+        <RenameServerForm key={server.uid} server={server} onClose={onClose} />
+      )}
+    </Dialog>
+  );
+}
+
+function RenameServerForm({
+  server,
+  onClose,
+}: {
+  server: DatabaseItem;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(server.name);
+
+  const renameServer = useUpdateDatabase(server.uid, {
+    onSuccess: () => {
+      toast.success(`Renamed to "${name}"`);
+      onClose();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    renameServer.mutate({ name });
+  };
+
+  return (
+    <DialogContent data-testid="database-rename-dialog" className="max-w-md">
+      <form onSubmit={handleSubmit}>
+        <DialogHeader>
+          <DialogTitle>Rename server</DialogTitle>
+          <DialogDescription>
+            "{server.name}" keeps its grants, history and query chains — only
+            the name clients connect with changes.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <ServerRenameField
+            id="rename-server-name"
+            testId="database-rename-input"
+            value={name}
+            originalName={server.name}
+            isTunnel={false}
+            onChange={setName}
+          />
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            data-testid="database-rename-submit"
+            disabled={renameServer.isPending || name === server.name}
+          >
+            Rename
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  );
+}
+
 function EditSSHServerDialog({
   server,
   onClose,
@@ -1400,6 +1577,7 @@ function EditSSHServerForm({
   server: Database;
   onClose: () => void;
 }) {
+  const [name, setName] = useState(server.name);
   const [description, setDescription] = useState(server.description || "");
   const [host, setHost] = useState(server.host || "");
   const [port, setPort] = useState(String(server.port ?? ""));
@@ -1433,8 +1611,13 @@ function EditSSHServerForm({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Only sent when actually changed: a PUT that repeats the current name
+    // would still be a rename as far as the uniqueness check is concerned, and
+    // it keeps the audit entry free of a "renamed to itself" line.
+    const renamed = name !== server.name ? name : undefined;
     if (isKubernetes) {
       updateServer.mutate({
+        name: renamed,
         description: description || undefined,
         host,
         port: parseInt(port, 10),
@@ -1453,6 +1636,7 @@ function EditSSHServerForm({
       return;
     }
     updateServer.mutate({
+      name: renamed,
       description: description || undefined,
       host,
       port: parseInt(port, 10),
@@ -1473,6 +1657,14 @@ function EditSSHServerForm({
           </DialogDescription>
         </DialogHeader>
           <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
+            <ServerRenameField
+              id="edit-ssh-name"
+              testId="ssh-server-edit-name-input"
+              value={name}
+              originalName={server.name}
+              isTunnel
+              onChange={setName}
+            />
             <div className="space-y-2">
               <Label htmlFor="edit-ssh-description">Description</Label>
               <Input
