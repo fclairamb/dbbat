@@ -758,6 +758,15 @@ func (c *collectingCompletionStore) awaitUpdate(t *testing.T, uid uuid.UUID) (co
 	}
 }
 
+// createdQueries returns every query record written down completeQuery's
+// create-now branch, in order.
+func (c *collectingCompletionStore) createdQueries() []*store.Query {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]*store.Query(nil), c.created...)
+}
+
 // createdErrorsFor returns the recorded error text of every query *created* at
 // completion whose SQL contains needle. Used as a negative: the statement under
 // test must not come back down this branch.
