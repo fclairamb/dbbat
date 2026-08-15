@@ -6,6 +6,13 @@ the **k8xp** k3s cluster, namespace `dbbat`, and serves two hostnames:
 `demo.dbbat.com` and `dbbat.k8xp.com`. The PostgreSQL proxy is published on
 `193.70.42.217:5434`.
 
+The release is named `dbbat` in namespace `dbbat` and is real: `helm list -n
+dbbat` shows it. Every object in the namespace belongs to it. Nothing there is
+hand-applied any more — the previously `kubectl apply`-ed objects were adopted
+into the release on **2026-08-15** (see
+[History: the adoption](#history-the-adoption-2026-08-15)), so `helm upgrade` is
+the only deployment path.
+
 It runs with `DBB_RUN_MODE=demo`, which **drops every table on startup** and
 reseeds the sample data. Never point these values at a store holding anything
 real.
@@ -21,7 +28,8 @@ helm upgrade --install dbbat charts/dbbat \
 That single command reproduces the whole demo — deployment, both services, all
 three ingresses and the Traefik middleware. There is no second `kubectl apply`
 step; if something about the demo cannot be expressed in the values file, it
-belongs in the chart, not in a hand-applied manifest.
+belongs in the chart, not in a hand-applied manifest. Follow it with the
+[post-upgrade smoke test](#post-upgrade-smoke-test).
 
 ### Bumping the version
 
@@ -82,17 +90,103 @@ helm template dbbat charts/dbbat -f charts/dbbat/values-demo.yaml -n dbbat
 # 3. What the cluster would actually change (server-side, read-only)
 helm template dbbat charts/dbbat -f charts/dbbat/values-demo.yaml -n dbbat \
   | kubectl --context k8xp -n dbbat diff -f -
+
+# 4. What Helm itself would do to the release (server-side dry run)
+helm upgrade --install dbbat charts/dbbat -f charts/dbbat/values-demo.yaml \
+  -n dbbat --kube-context k8xp --dry-run=server
 ```
 
-Until the adoption below has happened, step 3 aborts on the Deployment
-(`spec.selector: field is immutable`) and prints nothing else. Diff the other
-objects one at a time — split the rendered output per document — to see them.
+Steps 3 and 4 both work now that the namespace is a real release; before the
+adoption they aborted on the Deployment's immutable `spec.selector`.
 
-## Adopting the hand-applied objects (not done yet)
+## Post-upgrade smoke test
 
-Every object in the namespace predates this values file and was created with a
-plain `kubectl apply`, so **the cluster currently holds no Helm release**. A
-`helm upgrade --install` against it fails on the first existing object:
+Run this after every `helm upgrade`. It is the checklist the adoption was
+signed off against, and it catches the failure described in the next section —
+which a pod-Ready check alone does **not**.
+
+```bash
+# Release itself
+helm list -n dbbat --kube-context k8xp                 # dbbat, STATUS deployed
+
+# Pod: Ready, 0 restarts, expected image
+kubectl --context k8xp -n dbbat get pods -o wide
+kubectl --context k8xp -n dbbat get deploy dbbat \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+
+# Memory pairing actually landed (see "If you change the memory limit")
+kubectl --context k8xp -n dbbat get cm dbbat -o jsonpath='{.data.GOMEMLIMIT}{"\n"}'
+kubectl --context k8xp -n dbbat get deploy dbbat \
+  -o jsonpath='{.spec.template.spec.containers[0].resources}{"\n"}'
+
+# Endpoints — the one check that catches a broken selector
+kubectl --context k8xp -n dbbat get endpoints
+#   dbbat     ...:8080,...:5434
+#   dbbat-pg  ...:5434
+# Either of them showing <none> means no pod matches the Service selector.
+
+# Reachability
+curl -sS -o /dev/null -w '%{http_code}\n' http://demo.dbbat.com    # 301 -> https
+curl -sS -o /dev/null -w '%{http_code}\n' https://demo.dbbat.com   # 302
+curl -sS -o /dev/null -w '%{http_code}\n' https://dbbat.k8xp.com   # 302
+nc -z -w 5 193.70.42.217 5434 && echo "proxy port open"
+```
+
+Reference values from the 2026-08-15 upgrade: image
+`ghcr.io/fclairamb/dbbat:0.22.0`, `GOMEMLIMIT=768MiB`, limits
+`{cpu: 500m, memory: 1Gi}`, requests `{cpu: 50m, memory: 128Mi}`.
+
+## Gotcha: adopting an object leaves stale `spec.selector` keys behind
+
+**Read this before adopting any other hand-applied object into a chart.** It is
+what actually broke the demo during the 2026-08-15 adoption, and it is a nasty
+one to debug cold because every obvious signal looks healthy.
+
+**Symptom.** `helm upgrade` reports success, the release is `deployed`, the pod
+is **Ready with zero restarts** and its logs are clean — and yet
+`demo.dbbat.com` returns **503** and the proxy port on `193.70.42.217:5434` is
+**closed**. `kubectl -n dbbat get endpoints` shows both `dbbat` and `dbbat-pg`
+with **no endpoints at all**.
+
+**Cause.** Helm patches an adopted object with a strategic merge, and
+`spec.selector` on a Service is a plain map: a merge patch *adds* keys, it never
+removes one the chart no longer sets. The hand-applied Services selected
+`app: dbbat`; the chart selects the two `app.kubernetes.io/*` keys. The merge
+kept all three:
+
+```json
+{"app":"dbbat","app.kubernetes.io/instance":"dbbat","app.kubernetes.io/name":"dbbat"}
+```
+
+A Service selector is ANDed, and the pod Helm now owns carries only the
+`app.kubernetes.io/*` labels — no `app: dbbat` — so **neither Service matched
+any pod**. There was no useful `last-applied-configuration` to drive a removal
+either, because the objects were created by raw `kubectl apply` outside Helm.
+
+**Fix.** Delete the stale key explicitly with a JSON-merge `null`, once per
+Service:
+
+```bash
+for svc in dbbat dbbat-pg; do
+  kubectl --context k8xp -n dbbat patch svc "$svc" \
+    -p '{"spec":{"selector":{"app":null}}}'
+done
+```
+
+Endpoints populate immediately and the service recovers. Afterwards the
+selectors are exactly what the chart renders, so subsequent upgrades are clean.
+
+This is purely an artefact of **adoption**. A fresh `helm install` into an empty
+namespace has no stale key and never hits it, and the chart needs no change.
+
+## History: the adoption (2026-08-15)
+
+Kept as the record of why the objects carry Helm ownership metadata. **This is
+done** — do not re-run it.
+
+Before it, every object in the namespace had been created with a plain `kubectl
+apply` and the cluster held no Helm release at all, so `helm upgrade --install`
+failed on the first existing object:
 
 ```
 Unable to continue with install: Service "dbbat-pg" in namespace "dbbat" exists
@@ -100,11 +194,11 @@ and cannot be imported into the current release: invalid ownership metadata;
 label validation error: missing key "app.kubernetes.io/managed-by" ...
 ```
 
-Adoption is a live migration and is deliberately left for a separate, attended
-change. What it takes:
+The attended migration, run on 2026-08-15 with **12 seconds** of demo downtime:
 
-1. Stamp ownership on each object Helm must take over (`dbbat`, `dbbat-pg`
-   services, the three ingresses, the middleware):
+1. Stamp ownership on each object Helm had to take over — the `dbbat` and
+   `dbbat-pg` services, the `dbbat`, `dbbat-http` and `dbbat-k8xp` ingresses,
+   and the `redirect-https` Traefik middleware:
 
    ```bash
    kubectl --context k8xp -n dbbat annotate <kind>/<name> \
@@ -113,18 +207,22 @@ change. What it takes:
      app.kubernetes.io/managed-by=Helm
    ```
 
-2. Delete and let Helm recreate the **Deployment**. Its `spec.selector` is
-   immutable and the live one selects `app: dbbat`, where the chart selects the
-   `app.kubernetes.io/*` labels — a server-side dry run rejects the change
-   outright (`field is immutable`). This is the only step with downtime, a few
-   seconds on a single-replica demo.
+2. Delete the **Deployment** and let Helm recreate it. Its `spec.selector` is
+   immutable and the live one selected `app: dbbat`, where the chart selects the
+   `app.kubernetes.io/*` labels — a server-side dry run rejected the change
+   outright (`field is immutable`). This was the only step with downtime.
 
-3. Run the `helm upgrade --install` above and check the pod comes back.
+3. `helm upgrade --install dbbat charts/dbbat -f charts/dbbat/values-demo.yaml
+   -n dbbat --kube-context k8xp --wait`, producing release `dbbat` revision 1.
 
-### Deliberate differences from the hand-applied objects
+4. Clear the stale Service selector keys the merge left behind — see the gotcha
+   above. Without this the demo stays down at 503 despite a Ready pod.
 
-Verified object by object against a `kubectl diff` of the rendered output; these
-are the only differences that are not just added Helm labels:
+### Deliberate differences from the previously hand-applied objects
+
+What the adoption deliberately changed. Verified object by object against a
+`kubectl diff` of the rendered output beforehand; these were the only
+differences that were not just added Helm labels:
 
 - **Pod hardening.** The chart runs the container as non-root (65532) with a
   read-only root filesystem, dropped capabilities and a `RuntimeDefault`
@@ -137,12 +235,15 @@ are the only differences that are not just added Helm labels:
   application's own default.
 - **Probe timings** follow the chart's defaults (readiness every 5s, liveness
   every 10s) rather than the hand-applied 10s/30s.
-- **Service `targetPort`s are named, not numeric.** The live services target
+- **Service `targetPort`s are named, not numeric.** The old services targeted
   8080/5434 by number; the rendered ones target the container ports `http` and
   `postgres`, which are those same numbers. The service port *names* (`api`,
   `pg-proxy`) and numbers are unchanged — `service.api.portName` and
-  `service.proxy.portName` keep them matching the live objects, and
+  `service.proxy.portName` keep them matching what was there, and
   `service.api.includeProxyPort` keeps 5434 on the `dbbat` ClusterIP service
-  next to 8080, as the hand-applied object has it.
-- **NodePort is not pinned.** The live LoadBalancer landed on 31920 by
+  next to 8080, as the hand-applied object had it.
+- **NodePort is not pinned.** The LoadBalancer had landed on 31920 by
   allocation, not by request, so the chart does not fix it.
+
+Note that `spec.selector` is *not* in this list, and could not be: a merge patch
+cannot drop a key. That is the gotcha above, and it had to be fixed by hand.

@@ -83,8 +83,9 @@ service:
     port: 8080
     portName: api
     # The `dbbat` ClusterIP service has always carried the proxy port next to
-    # the API port. Nothing in the cluster is known to use it, but dropping it
-    # would make adopting these objects into the release a silent port removal.
+    # the API port. Nothing in the cluster is known to use it, but it was kept
+    # through the 2026-08-15 adoption rather than silently removed, and dropping
+    # it now would be that same removal one release later.
     includeProxyPort: true
   proxy:
     enabled: true
