@@ -333,7 +333,7 @@ func TestDisambiguateDatabase_RefusesWithAReadableORAError(t *testing.T) {
 	// exists for. Which of them the user can reach is what each subtest sets.
 	candidates := make([]store.Server, 0, 3)
 
-	for _, name := range []string{"mutu-a", "mutu-b", "mutu-c"} {
+	for _, name := range []string{"mutu_a", "mutu_b", "mutu_c"} {
 		service := mutualizedServiceName
 
 		db, err := dataStore.CreateServer(ctx, &store.Server{

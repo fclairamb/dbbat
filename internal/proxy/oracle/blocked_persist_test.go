@@ -456,7 +456,7 @@ func TestBlockedStatement_IsAnOrdinaryChainAppend(t *testing.T) {
 	}
 
 	db, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "blocked-oracle-db",
+		Name:         "blocked_oracle_db",
 		Host:         "localhost",
 		Port:         1521,
 		DatabaseName: "ORCL",
