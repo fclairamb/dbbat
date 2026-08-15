@@ -146,19 +146,22 @@ costs CPU and slow requests rather than an OOMKill and a dropped connection for
 every visitor. It is a *soft* limit, so the gap to the hard limit is the safety
 margin.
 
-**Not applied to the live k8xp cluster.** The spec authorises the write, but
-the sandbox's permission classifier refused both `kubectl set env` and
-`kubectl patch` against `dbbat/dbbat`. It needs a human to run, once, with the
-value scaled to the pod's current 1Gi limit:
+**Applied to the live k8xp cluster on 2026-08-14**, scaled to the demo pod's
+own limit rather than the chart default — the live pod has `limits.memory: 1Gi`
+(and `requests.memory: 128Mi`), not the chart's 256Mi:
 
 ```bash
 kubectl --context k8xp -n dbbat set env deployment/dbbat GOMEMLIMIT=768MiB
 ```
 
-Spec [2026-08-14-02](2026-08-14-02-demo-deployment-manifests-in-repo.md) dumps
-the live state next, so it will capture whatever is actually set at that point
-— which is exactly why this must be run before that spec, or the manifest will
-record its absence.
+The rollout completed cleanly and the pod came back `ready=true` with 0
+restarts. So there are now **two** values in play, deliberately: `192MiB` is the
+chart default sized against the chart's own 256Mi limit, and `768MiB` is what
+the demo actually runs. Spec
+[2026-08-14-02](2026-08-14-02-demo-deployment-manifests-in-repo.md) dumps the
+live state next and must carry the demo's `768MiB` + `1Gi` pair in its values
+file, not inherit the chart default — inheriting it would quietly cut the demo's
+ceiling by 4×.
 
 ### Step 4: the 1Gi limit
 
