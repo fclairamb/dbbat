@@ -25,16 +25,24 @@ func renameRouter(server *Server) *gin.Engine {
 	return router
 }
 
-func renameTestAdmin(t *testing.T) (*gin.Engine, string, *store.Store) {
+// renameTestAdmin returns the router, the acting admin's token, the store, and
+// the acting admin itself — the last one so an attribution assertion can name a
+// UID rather than settle for "somebody did it".
+//
+// A second admin exists and never acts. Without it, "the audit entry credits
+// the wrong user" is not a reachable state, and any assertion about the actor
+// passes for free.
+func renameTestAdmin(t *testing.T) (*gin.Engine, string, *store.Store, *store.User) {
 	t.Helper()
 
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 
-	createTestUser(t, dataStore, "rename-admin", "adminpass123", []string{store.RoleAdmin})
+	actor := createTestUser(t, dataStore, "rename-admin", "adminpass123", []string{store.RoleAdmin})
+	createTestUser(t, dataStore, "rename-bystander", "bystanderpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "rename-admin", "adminpass123")
 
-	return renameRouter(server), token, dataStore
+	return renameRouter(server), token, dataStore, actor
 }
 
 func renamePayload(name string) map[string]any {
@@ -70,7 +78,7 @@ func createRenameServer(t *testing.T, router *gin.Engine, token, name string) st
 func TestUpdateServerRenames(t *testing.T) {
 	t.Parallel()
 
-	router, token, _ := renameTestAdmin(t)
+	router, token, _, _ := renameTestAdmin(t)
 	uid := createRenameServer(t, router, token, "before_rename")
 
 	w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
@@ -88,7 +96,7 @@ func TestUpdateServerRenames(t *testing.T) {
 func TestUpdateServerRenameLeavesOtherFieldsAlone(t *testing.T) {
 	t.Parallel()
 
-	router, token, _ := renameTestAdmin(t)
+	router, token, _, _ := renameTestAdmin(t)
 	uid := createRenameServer(t, router, token, "rename_only")
 
 	w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
@@ -111,7 +119,7 @@ func TestUpdateServerRenameLeavesOtherFieldsAlone(t *testing.T) {
 func TestUpdateServerRenameRejectsNonSlug(t *testing.T) {
 	t.Parallel()
 
-	router, token, _ := renameTestAdmin(t)
+	router, token, _, _ := renameTestAdmin(t)
 	uid := createRenameServer(t, router, token, "slug_gate")
 
 	// Sequential rather than subtests: each attempt is asserted not to have
@@ -136,7 +144,7 @@ func TestUpdateServerRenameRejectsNonSlug(t *testing.T) {
 func TestUpdateServerRenameConflictIsA409(t *testing.T) {
 	t.Parallel()
 
-	router, token, _ := renameTestAdmin(t)
+	router, token, _, _ := renameTestAdmin(t)
 	uid := createRenameServer(t, router, token, "conflict_subject")
 
 	createRenameServer(t, router, token, "conflict_live")
@@ -165,7 +173,7 @@ func TestUpdateServerRenameConflictIsA409(t *testing.T) {
 func TestUpdateServerRenameIsAudited(t *testing.T) {
 	t.Parallel()
 
-	router, token, dataStore := renameTestAdmin(t)
+	router, token, dataStore, actor := renameTestAdmin(t)
 	uid := createRenameServer(t, router, token, "audited_before")
 
 	w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
@@ -192,6 +200,9 @@ func TestUpdateServerRenameIsAudited(t *testing.T) {
 	assert.Equal(t, uid, details.DatabaseUID)
 	require.NotNil(t, details.UpdatedFields.Name, "the rename is missing from the audit details")
 	assert.Equal(t, "audited_after", *details.UpdatedFields.Name)
-	// The performer is recorded, which is what makes the rename attributable.
-	assert.NotNil(t, events[0].PerformedBy)
+	// Attributable means *who*, not merely "someone": a second admin exists who
+	// did nothing, so crediting the wrong user is a state this can fail on.
+	require.NotNil(t, events[0].PerformedBy, "the rename was recorded with no actor")
+	assert.Equal(t, actor.UID, *events[0].PerformedBy,
+		"the rename must be credited to the admin who issued it")
 }
