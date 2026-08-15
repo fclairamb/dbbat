@@ -58,6 +58,35 @@ test.describe("Servers Management", () => {
     }
   });
 
+  test("create dialog rejects a hyphenated name before it reaches the server", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+
+    const nameInput = authenticatedPage.getByTestId("database-name-input");
+    await nameInput.fill("bad-name");
+    await authenticatedPage.locator("#host").fill("db.example.com");
+    await authenticatedPage.locator("#username").fill("postgres");
+    await authenticatedPage.locator("#password").fill("secret");
+
+    // The server name is a slug (^[a-z0-9_]{1,63}$) — no hyphens. The input's
+    // native HTML5 pattern must catch this before any request is made.
+    const isValid = await nameInput.evaluate((el: HTMLInputElement) =>
+      el.checkValidity()
+    );
+    expect(isValid).toBe(false);
+
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    // The browser blocks the submit, so the dialog stays open with the
+    // rejected value still in the field rather than a round-trip 400.
+    await expect(nameInput).toBeVisible();
+    await expect(nameInput).toHaveValue("bad-name");
+  });
+
   test("connection URL shows the {DBBAT_KEY} placeholder", async ({
     authenticatedPage,
   }) => {
