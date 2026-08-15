@@ -674,6 +674,15 @@ func authRejectFor(err error) (uint16, string) {
 		return ORA01045, "service name matches multiple dbbat databases; connect using the dbbat database name instead"
 	}
 
+	// A rejected key while the user also owns keys that could never work here
+	// keeps ORA-01017 — the credential really was refused — but says why the user
+	// may be looking at a key that is fine everywhere else. See
+	// keysWithoutVerifierError for why the message cannot name the key.
+	var noVerifier *keysWithoutVerifierError
+	if errors.As(err, &noVerifier) {
+		return ORA01017, keysWithoutVerifierMessage(noVerifier.count)
+	}
+
 	return ORA01017, "invalid username/password; logon denied"
 }
 
@@ -1075,9 +1084,10 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	// Load the O5LOGON verifier candidates for this user: all of the user's
 	// user-salt API keys (they share the user's salts, so any of them can
 	// answer the challenge), or the single first legacy per-key-salt key.
-	verifiers, err := s.loadO5LogonVerifiers(user.UID)
+	verifiers, keysWithoutVerifier, err := s.loadO5LogonVerifiers(user.UID)
 	if err != nil {
-		return fmt.Errorf("failed to load O5LOGON verifier: %w", err)
+		return fmt.Errorf("failed to load O5LOGON verifier: %w",
+			noteKeysWithoutVerifier(err, keysWithoutVerifier))
 	}
 
 	// Build the O5LOGON server from the primary (most recently created)
@@ -1160,7 +1170,9 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 
 	apiKey, err := s.resolveAPIKeyFromPhase2(o5, verifiers, clientSessKey, encPassword, encSessKey)
 	if err != nil {
-		return err
+		// The refusal the user most often meets: none of the candidates matched,
+		// because the key they typed never had a verifier to be a candidate with.
+		return noteKeysWithoutVerifier(err, keysWithoutVerifier)
 	}
 
 	if apiKey.UserID != user.UID {
@@ -1230,19 +1242,26 @@ type o5LogonVerifierData struct {
 // 18453 optional) with the dbbat master key. Returns nil when the key has no
 // usable 6949 verifier.
 func (s *session) decryptVerifierData(key *store.APIKey) *o5LogonVerifierData {
-	oracleData := key.OracleData()
-	if oracleData == nil || len(oracleData.O5LogonSalt6949) == 0 || len(oracleData.O5LogonVerifier6949) == 0 {
-		return nil
-	}
-
-	decrypted, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier6949, s.encryptionKey, key.KeyPrefix)
+	// The whole predicate — has material AND that material decrypts — is
+	// store.APIKey.DecryptedO5LogonVerifier6949, which is also what
+	// GET /api/v1/keys reports as `oracle_capable`. Calling it here rather than
+	// re-testing the columns is what keeps the listing honest: a key this returns
+	// nil for is a key the listing marks unusable, by construction.
+	decrypted, err := key.DecryptedO5LogonVerifier6949(s.encryptionKey)
 	if err != nil {
-		s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier",
-			slog.String("key_prefix", key.KeyPrefix),
-			slog.Any("error", err))
+		// No material at all is the ordinary case for a key minted before Oracle
+		// support — routine, and counted rather than logged per key (see
+		// loadO5LogonVerifiers). Material that refuses to decrypt is not routine.
+		if !errors.Is(err, store.ErrAPIKeyNoOracleVerifier) {
+			s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier",
+				slog.String("key_prefix", key.KeyPrefix),
+				slog.Any("error", err))
+		}
 
 		return nil
 	}
+
+	oracleData := key.OracleData()
 
 	data := &o5LogonVerifierData{
 		O5LogonSalt:       oracleData.O5LogonSalt6949,
@@ -1281,25 +1300,51 @@ func (s *session) decryptVerifierData(key *store.APIKey) *o5LogonVerifierData {
 // Otherwise (legacy keys only, with per-key random salts) the first
 // verifier-bearing key is the single candidate — the pre-user-salt behavior,
 // where only that specific key can authenticate.
-func (s *session) loadO5LogonVerifiers(userID uuid.UUID) ([]*o5LogonVerifierData, error) {
+//
+// The second return is how many of the user's live keys yielded no verifier at
+// all. Those keys authenticate against the REST API and every other protocol yet
+// can never answer an Oracle challenge, and O5LOGON gives the proxy no way to
+// see that one of them is what the client just typed — so the count is carried
+// out of here and onto the refusal (noteKeysWithoutVerifier). It is returned
+// even alongside an error, because the no-candidate case is exactly when it
+// matters most.
+func (s *session) loadO5LogonVerifiers(userID uuid.UUID) ([]*o5LogonVerifierData, int, error) {
 	keys, err := s.store.ListAPIKeys(s.ctx, store.APIKeyFilter{
 		UserID:  &userID,
 		KeyType: strPtr(store.KeyTypeAPI),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list API keys: %w", err)
+		return nil, 0, fmt.Errorf("failed to list API keys: %w", err)
 	}
 
 	all := make([]*o5LogonVerifierData, 0, len(keys))
+	unusable := 0
+
 	for i := range keys {
-		if data := s.decryptVerifierData(&keys[i]); data != nil {
-			all = append(all, data)
+		data := s.decryptVerifierData(&keys[i])
+		if data == nil {
+			// Same predicate GET /api/v1/keys reports as oracle_capable=false.
+			// Keys that DO decrypt but lose the candidate election below (a legacy
+			// per-key salt shadowed by newer user-salt keys, or a salt left behind
+			// by a rollback) are not counted here: they are a different, rarer
+			// story, and the message this feeds names the common one.
+			unusable++
+
+			continue
 		}
+
+		all = append(all, data)
+	}
+
+	if unusable > 0 {
+		s.logger.InfoContext(s.ctx, "API keys that cannot be used for Oracle login",
+			slog.Int("keys_without_verifier", unusable),
+			slog.Int("keys_total", len(keys)))
 	}
 
 	candidates := selectVerifierCandidates(all)
 	if len(candidates) == 0 {
-		return nil, ErrNoO5LogonVerifier
+		return nil, unusable, ErrNoO5LogonVerifier
 	}
 
 	primary := candidates[0]
@@ -1316,7 +1361,7 @@ func (s *session) loadO5LogonVerifiers(userID uuid.UUID) ([]*o5LogonVerifierData
 			slog.Bool("has_18453", len(primary.decryptedVerifier18453) > 0))
 	}
 
-	return candidates, nil
+	return candidates, unusable, nil
 }
 
 // selectVerifierCandidates picks the login candidates from a user's decrypted
