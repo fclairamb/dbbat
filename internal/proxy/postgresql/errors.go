@@ -29,6 +29,17 @@ var (
 	ErrUnknownStartupMagic      = errors.New("unknown length-8 startup magic")
 	ErrTooManyNegotiationRounds = errors.New("too many SSL/GSS negotiation rounds")
 
+	// ErrStartupMessageTooLarge / ErrPasswordMessageTooLarge reject a
+	// pre-auth frame whose declared length exceeds what the protocol allows.
+	// The length is four attacker-controlled bytes on an unauthenticated
+	// socket, so it has to be checked *before* it sizes an allocation.
+	ErrStartupMessageTooLarge  = errors.New("startup message exceeds the maximum length")
+	ErrPasswordMessageTooLarge = errors.New("password message exceeds the maximum length")
+	// ErrMalformedMessageLength rejects a declared length that cannot even
+	// cover its own 4-byte length field (including the negative values a
+	// high bit in the first byte would otherwise produce).
+	ErrMalformedMessageLength = errors.New("declared message length is malformed")
+
 	// ErrCancelRequestHandled ends a connection that carried a CancelRequest.
 	// Not a failure: a CancelRequest is a one-shot out-of-band signal on its
 	// own TCP connection, and PostgreSQL closes it without a reply.
