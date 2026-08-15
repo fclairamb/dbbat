@@ -256,6 +256,71 @@ parameter fails the suite instead of quietly reintroducing the connect-time
 refusal. SQL Developer over the OCI driver is expected to send the same shapes;
 that is inference, not measurement — it is not in the corpus.
 
+### Dynamic SQL, and how far the checks reach into it
+
+`BEGIN EXECUTE IMMEDIATE 'DELETE FROM t'; END;` is a write whose first keyword is
+`BEGIN`. The classification behind `read_only` and `block_ddl` (`IsWriteQuery` /
+`IsDDLQuery`) is **prefix**-shaped, so it read that statement as neither a write
+nor DDL and the payload was the statement nothing classified — the same shape as
+SQL Server's `EXEC('…')` and MySQL's `PREPARE … FROM '…'`, and it was measurably
+allowed under a grant carrying both controls.
+
+`shared.ValidateOracleQuery` therefore extracts the payload of the decidable forms
+and runs **the same checks over it that the outer statement got** — the grant
+controls *and* `oracleBlockedPatterns`. It lives in the shared validator rather
+than in this proxy because all five Oracle statement-carrying paths (`OALL8`, the
+v315+ piggyback exec, the JDBC `11 69` exec, cursor re-execution, and the
+statement gate in `session.go`) reach it, so one function covers all of them.
+
+| Form | Treatment |
+|------|-----------|
+| `EXECUTE IMMEDIATE '<literal>'`, at the top level or inside `BEGIN … END;` | statement text extracted, then classified and pattern-checked like an ordinary statement |
+| …`q'[…]'` / `nq'[…]'` quote-operator and `N'…'` spellings, `''` doubling, comments between the keywords | same |
+| …followed by `USING …` (bind values, not statement text) | same |
+| an all-literal concatenation — `EXECUTE IMMEDIATE 'DELETE ' \|\| 'FROM t'` | operands folded, then the joined text is checked |
+| `DBMS_SQL.PARSE(c, '<literal>', …)`, positional or `statement => …`, `SYS.`-qualified | same |
+| `EXECUTE IMMEDIATE v_stmt`, `'DELETE FROM ' \|\| v_tab`, `DBMS_SQL.PARSE(c, v_stmt, …)` | **refused under `read_only`/`block_ddl` only** (`shared.ErrDynamicSQLOpaque`) — see below |
+| dynamic SQL nested inside dynamic SQL, an unterminated literal, a `DBMS_SQL.PARSE` whose statement argument cannot be located | **refused** whatever the grant says (`shared.ErrDynamicSQLNotCheckable`) |
+| a **stored procedure or function body** that builds SQL | out of scope: dbbat sees the call, never the body |
+
+A benign payload stays allowed — `BEGIN EXECUTE IMMEDIATE 'SELECT 1 FROM DUAL';
+END;` runs under a read-only grant — because this is not a blanket refusal of
+dynamic SQL. Unwrapping stops at one level and stops loudly: a nested
+`EXECUTE IMMEDIATE` is refused, not unwrapped again, because stopping *silently*
+would leave a hole the exact shape of the one this closes.
+
+`ALTER SESSION SET CONTAINER=PDB2` inside a literal was already blocked before
+any of this, but only because `oracleBlockedPatterns` is a **substring** match and
+so reached inside the literal by accident of matching style rather than by design.
+It stays blocked, and is now blocked by design as well: the payload is extracted
+and the whole Oracle validator runs over it as a statement of its own.
+
+#### A payload dbbat cannot read: refused under `read_only`/`block_ddl` only
+
+`EXECUTE IMMEDIATE v_stmt` is assembled by PL/SQL from values dbbat never sees, so
+nothing about what it runs is statically decidable. dbbat **refuses** it when the
+active grant carries `read_only` **or** `block_ddl` — the two controls whose
+meaning a run-time-built statement defeats outright. Fail closed: "dbbat cannot
+tell what this runs" must not resolve to "allow" for a session that may not write
+or may not change schema. The refusal names its own cause
+(`shared.ErrDynamicSQLOpaque`), so an operator can tell it from an ordinary
+blocked write and knows the fix is a grant without those two controls.
+
+It is **not** refused for a grant carrying only `block_copy`, nor for a grant with
+no controls at all: dynamic SQL defeats neither, so refusing there would be blast
+radius bought for nothing — ORMs and migration tools build SQL at run time
+constantly, and the traffic a wider refusal breaks is well-behaved traffic. The
+rule is emphatically not "any control is set". The same policy runs on MySQL and
+SQL Server, from the same function (`shared.ValidateDynamicSQL`), and the three
+docs describe one behaviour.
+
+One cross-protocol scope note for completeness, since the SQL Server doc states
+it and the three must agree: SQL Server's `EXEC(…) AT <linked_server>` routes a
+statement to another server entirely and is **out of scope and unenforced**.
+Oracle's equivalent is a database link, and `CREATE DATABASE LINK` is already in
+`oracleBlockedPatterns`; a link that already exists is the same limitation —
+dbbat proxies one server row and cannot vouch for what another server runs.
+
 ### Cursor re-execution (what clients actually send)
 
 A client that has already parsed a statement re-runs it by naming its **cursor

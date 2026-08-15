@@ -206,34 +206,76 @@ not negotiate `CLIENT_MULTI_STATEMENTS`, so one `COM_QUERY` carries one
 statement. Anything trailing the target other than a `;` is refused rather than
 parsed.
 
-#### `PREPARE … FROM`, and how far the switch check reaches into it
+### Dynamic SQL, and how far the checks reach into it
 
-`PREPARE s FROM 'USE otherdb'` followed by `EXECUTE s` performs exactly that
-switch, one statement later, through text every check above steps over —
-`PREPARE` matches no write or DDL keyword and no blocked pattern. It is the MySQL
-spelling of SQL Server's `EXEC('<literal>')`, and it is closed the same way:
-`shared.MySQLPreparedText` extracts the literal (both quote characters, `''`
-doubling, backslash escapes, comments, case folding) and the extracted text goes
-through the same `handler.switchDatabase` decision as a direct `USE`. Unwrapping
-stops at one level — a nested `PREPARE` is refused
-(`ErrPreparedTextNotCheckable`), not unwrapped again, because stopping *silently*
-would leave a hole the exact shape of the one this closes. So is a literal dbbat
-cannot read whole, including `FROM 'USE ' 'otherdb'` (MySQL concatenates adjacent
-literals, so dbbat would only have half the statement).
+`PREPARE s FROM 'USE otherdb'` followed by `EXECUTE s` performs exactly the
+switch above, one statement later, through text every check around it steps over
+— `PREPARE` matches no write keyword, no DDL keyword and no blocked pattern. It
+is the MySQL spelling of SQL Server's `EXEC('<literal>')`, MariaDB spells a
+one-statement version of it `EXECUTE IMMEDIATE '<literal>'`, and all three are
+closed the same way.
 
-Two limits, stated plainly rather than implied away:
+`shared.MySQLPreparedStatement` (`internal/proxy/shared/dynamicsql.go`, the one
+static reader of dynamic SQL for all three protocols that have it) extracts the
+literal — both quote characters, `''` doubling, backslash escapes, comments, case
+folding — and the extracted text then goes through **the same checks the outer
+statement got**: `shared.ValidateMySQLQuery` (grant controls *and* the
+MySQL-specific blocked patterns) plus the `handler.switchDatabase` decision. A
+second, laxer rule set for dynamic SQL would turn every control into a
+suggestion.
 
-- **`PREPARE s FROM @sql` is not checked.** The text is assembled by the server
-  from values dbbat never sees, so nothing about it is statically decidable —
-  same for `CONCAT('USE ', @db)`. It is **not** refused either: a blanket refusal
-  of variable-built `PREPARE` would break ordinary application code. If that
-  boundary matters for a target, constrain the login dbbat connects with.
-- **Only the database-switch decision reaches inside the literal.** The grant's
-  controls still see the outer statement, so `PREPARE s FROM 'DELETE FROM t'`
-  is invisible to `read_only` and `PREPARE s FROM 'DROP TABLE t'` to `block_ddl`.
-  That is the broader "dynamic SQL is opaque to the grant controls" problem —
-  shared with Oracle's `BEGIN EXECUTE IMMEDIATE '…'; END;` — and it is tracked
-  as its own piece of work rather than half-solved here.
+| Form | Treatment |
+|------|-----------|
+| `PREPARE <name> FROM '<literal>'` / `"<literal>"` | statement text extracted, then classified and switch-checked like an ordinary statement |
+| `EXECUTE IMMEDIATE '<literal>'` (MariaDB), with or without `USING …` | same |
+| `EXECUTE <name>` whose `PREPARE` dbbat read and cleared | allowed |
+| `EXECUTE <name>` whose `PREPARE` dbbat could **not** vouch for | refused under `read_only`/`block_ddl` only — see below |
+| `PREPARE … FROM @sql`, `FROM CONCAT('USE ', @db)`, `EXECUTE IMMEDIATE @sql` | refused under `read_only`/`block_ddl` only, as `ErrDynamicSQLOpaque` |
+| a nested `PREPARE`/`EXECUTE`, an unterminated literal, `FROM 'USE ' 'otherdb'` | **refused** whatever the grant says (`ErrPreparedTextNotCheckable` on the switch path, `shared.ErrDynamicSQLNotCheckable` on the control path) |
+
+So `PREPARE s FROM 'DELETE FROM t'` is refused under `read_only` exactly as a
+direct `DELETE` is, and `PREPARE s FROM 'DROP TABLE t'` under `block_ddl`. A
+benign payload stays allowed: `PREPARE s FROM 'SELECT 1'` runs under a read-only
+grant, because this is not a blanket refusal of dynamic SQL.
+
+Unwrapping stops at one level, and stops loudly: a nested `PREPARE` is refused,
+not unwrapped again, because stopping *silently* would leave a hole the exact
+shape of the one this closes. So is a literal dbbat cannot read whole — MySQL
+concatenates adjacent literals, so `FROM 'USE ' 'otherdb'` would leave dbbat
+holding half a statement.
+
+#### A payload dbbat cannot read: refused under `read_only`/`block_ddl` only
+
+`PREPARE s FROM @sql` is assembled by the server from values dbbat never sees, so
+nothing about what it runs is statically decidable. dbbat **refuses** it when the
+active grant carries `read_only` **or** `block_ddl` — the two controls whose
+meaning a run-time-built statement defeats outright. Fail closed: "dbbat cannot
+tell what this runs" must not resolve to "allow" for a session that may not write
+or may not change schema. The refusal names its own cause
+(`shared.ErrDynamicSQLOpaque`), so an operator can tell it from an ordinary
+blocked write and knows the fix is a grant without those two controls.
+
+It is **not** refused for a grant carrying only `block_copy`, nor for a grant with
+no controls at all: dynamic SQL defeats neither, so refusing there would be blast
+radius bought for nothing — ORMs and migration tools build SQL at run time
+constantly, and the traffic a wider refusal breaks is well-behaved traffic. The
+rule is emphatically not "any control is set".
+
+The `EXECUTE <name>` half follows from the same rule. It carries no statement text
+at all, so it can only be answered from what the matching `PREPARE` said: the
+session remembers which prepared names dbbat read and cleared
+(`Session.checkedPrepares`), and under those two controls an `EXECUTE` of any
+other name is refused. Checking the `PREPARE` and letting every `EXECUTE` through
+would close nothing — a client would only have to build its text with
+`PREPARE s FROM @sql` and then run it. Re-preparing a name replaces what it
+stands for, so an opaque re-`PREPARE` clears the name rather than leaving a stale
+"checked" flag.
+
+What is still out of scope, stated plainly: a stored procedure or function whose
+*body* builds SQL is opaque to all of this — dbbat sees the `CALL`, not the body.
+A grant is scoped to a server row, and on MySQL that row's reach is whatever the
+**upstream credentials** can see; if that boundary matters, constrain the login
+dbbat connects with.
 
 ## Database Model
 
@@ -289,6 +331,7 @@ If the test fails after a `go.mod` upgrade: either pin go-mysql back, or extend 
 - **`COM_FIELD_LIST`** (deprecated since 5.7) is forwarded but not specially logged.
 - **MariaDB `STMT_BULK_EXECUTE`** is refused (clients need to disable batch rewriting).
 - **`mysql_native_password`** is intentionally not supported — all modern clients negotiate `caching_sha2_password` instead.
+- **A stored procedure or function body that builds SQL** is opaque: dbbat sees the `CALL`, never the body. See "Dynamic SQL, and how far the checks reach into it" for what *is* covered and for the `read_only`/`block_ddl` policy on a payload dbbat cannot read.
 
 ## Session Packet Dumps
 
