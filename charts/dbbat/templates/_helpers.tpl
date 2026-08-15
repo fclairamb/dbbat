@@ -78,6 +78,20 @@ Build the PostgreSQL DSN from components if not provided
 {{- end }}
 
 {{/*
+Extract the port number out of a listen address ("0.0.0.0:5433", ":5433", "5433").
+Used so the container port declaration follows config.listenPg instead of
+hard-coding 5433 — a deployment that listens elsewhere would otherwise expose a
+port nothing is bound to, and the proxy Service's targetPort would miss.
+*/}}
+{{- define "dbbat.listenPort" -}}
+{{- $port := . | toString | splitList ":" | last -}}
+{{- if not $port -}}
+{{- fail (printf "cannot determine a port from listen address %q" .) -}}
+{{- end -}}
+{{- $port -}}
+{{- end }}
+
+{{/*
 Get the secret name for database credentials
 */}}
 {{- define "dbbat.secretName" -}}

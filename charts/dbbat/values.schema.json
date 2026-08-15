@@ -130,7 +130,7 @@
         },
         "runMode": {
           "type": "string",
-          "enum": ["", "test"],
+          "enum": ["", "test", "demo"],
           "description": "Run mode"
         },
         "keyFile": {
@@ -183,6 +183,17 @@
             "nodePort": {
               "type": ["integer", "string"],
               "description": "Fixed NodePort"
+            },
+            "nameSuffix": {
+              "type": "string",
+              "description": "Suffix appended to the fullname for the proxy service"
+            },
+            "externalIPs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "External IPs bound to the proxy service"
             },
             "annotations": {
               "type": "object",
@@ -265,6 +276,79 @@
           "type": "array",
           "items": {
             "type": "object"
+          }
+        }
+      }
+    },
+    "extraIngresses": {
+      "type": "array",
+      "description": "Additional Ingress objects, each named <fullname>-<nameSuffix>",
+      "items": {
+        "type": "object",
+        "required": ["nameSuffix"],
+        "properties": {
+          "nameSuffix": {
+            "type": "string"
+          },
+          "className": {
+            "type": "string"
+          },
+          "annotations": {
+            "type": "object"
+          },
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "host": {
+                  "type": "string"
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "pathType": {
+                        "type": "string",
+                        "enum": ["Prefix", "Exact", "ImplementationSpecific"]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "tls": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "traefik": {
+      "type": "object",
+      "properties": {
+        "redirectHttpsMiddleware": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render the HTTP->HTTPS Middleware CRD"
+            },
+            "name": {
+              "type": "string",
+              "description": "Middleware object name"
+            },
+            "permanent": {
+              "type": "boolean",
+              "description": "Emit 301 rather than 302"
+            }
           }
         }
       }
@@ -355,6 +439,10 @@
     "resources": {
       "type": "object",
       "description": "Resource limits and requests"
+    },
+    "goMemLimit": {
+      "type": "string",
+      "description": "Soft memory ceiling for the Go runtime (GOMEMLIMIT); empty disables it"
     },
     "livenessProbe": {
       "type": "object",

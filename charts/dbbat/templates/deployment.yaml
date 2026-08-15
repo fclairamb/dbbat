@@ -41,7 +41,7 @@ spec:
               containerPort: 8080
               protocol: TCP
             - name: postgres
-              containerPort: 5433
+              containerPort: {{ include "dbbat.listenPort" .Values.config.listenPg | int }}
               protocol: TCP
             {{- if .Values.service.oracle.enabled }}
             - name: oracle
