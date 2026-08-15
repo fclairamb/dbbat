@@ -60,7 +60,7 @@ func TestOracleServiceNameConflict_SurfacedToAdmin(t *testing.T) {
 	agreeA := createTestOracleEntry(t, dataStore, "abyla_mutu03_a", "oracle-abymutualise03.db.stonal.io", agreeing)
 	createTestOracleEntry(t, dataStore, "abyla_mutu03_b", "oracle-abymutualise03.db.stonal.io", agreeing)
 	// A PostgreSQL row, which carries no service name at all.
-	pgDB := createTestDBEntry(t, dataStore, "pg-osnc", true)
+	pgDB := createTestDBEntry(t, dataStore, "pg_osnc", true)
 
 	router := gin.New()
 	router.Use(server.authMiddleware())

@@ -49,7 +49,7 @@ func kubernetesTestAdminWithStore(t *testing.T) (*gin.Engine, string, *store.Sto
 
 func validClusterPayload() map[string]any {
 	return map[string]any{
-		"name":          "prod-cluster",
+		"name":          "prod_cluster",
 		"host":          "https://api.cluster.example.com",
 		"port":          6443,
 		"username":      "dbbat",
@@ -287,7 +287,7 @@ func TestTargetMayReferenceAKubernetesCluster(t *testing.T) {
 	require.True(t, ok, cluster)
 
 	w, _ := doJSON(t, router, "POST", "/api/v1/servers", token, map[string]any{
-		"name": "pg-in-cluster", "host": "svc/postgres", "port": 5432,
+		"name": "pg_in_cluster", "host": "svc/postgres", "port": 5432,
 		"database_name": "app", "username": "app", "password": "pw",
 		"protocol": "postgresql", "via_uid": clusterUID,
 	})
@@ -300,7 +300,7 @@ func TestTargetMayReferenceAKubernetesCluster(t *testing.T) {
 
 		for _, entry := range listed {
 			row, ok := entry.(map[string]any)
-			if !ok || row["name"] != "pg-in-cluster" {
+			if !ok || row["name"] != "pg_in_cluster" {
 				continue
 			}
 			uid, ok := row["uid"].(string)
@@ -377,7 +377,7 @@ func TestUpdateValidatesTheProtocolItself(t *testing.T) {
 	router, token := kubernetesTestAdmin(t)
 
 	w, _ := doJSON(t, router, "POST", "/api/v1/servers", token, map[string]any{
-		"name": "plain-db", "host": "db.example.com", "port": 5432,
+		"name": "plain_db", "host": "db.example.com", "port": 5432,
 		"database_name": "app", "username": "app", "password": "pw",
 		"protocol": "postgresql",
 	})

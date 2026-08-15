@@ -46,8 +46,8 @@ func TestListDatabases_AdminSeesAll(t *testing.T) {
 	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin, store.RoleConnector})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	createTestDBEntry(t, dataStore, "listable-db-"+suffix, true)
-	createTestDBEntry(t, dataStore, "hidden-db-"+suffix, false)
+	createTestDBEntry(t, dataStore, "listable_db_"+suffix, true)
+	createTestDBEntry(t, dataStore, "hidden_db_"+suffix, false)
 
 	router := gin.New()
 	router.Use(server.authMiddleware())
@@ -79,8 +79,8 @@ func TestListDatabases_AdminSeesAll(t *testing.T) {
 			names = append(names, name)
 		}
 	}
-	assert.Contains(t, names, "listable-db-"+suffix)
-	assert.Contains(t, names, "hidden-db-"+suffix)
+	assert.Contains(t, names, "listable_db_"+suffix)
+	assert.Contains(t, names, "hidden_db_"+suffix)
 }
 
 // TestCreateDatabase_MongoDBProtocol exercises the HTTP handler
@@ -105,7 +105,7 @@ func TestCreateDatabase_MongoDBProtocol(t *testing.T) {
 	router.POST("/api/v1/databases", server.handleCreateDatabase)
 
 	body, _ := json.Marshal(map[string]any{
-		"name":          "mongo-db-" + suffix,
+		"name":          "mongo_db_" + suffix,
 		"host":          "mongo.example.com",
 		"port":          27017,
 		"database_name": "appdb",
@@ -132,7 +132,7 @@ func TestCreateDatabase_MongoDBProtocol(t *testing.T) {
 	require.NoError(t, err)
 	var found *store.Server
 	for i := range dbs {
-		if dbs[i].Name == "mongo-db-"+suffix {
+		if dbs[i].Name == "mongo_db_"+suffix {
 			found = &dbs[i]
 			break
 		}
@@ -148,8 +148,8 @@ func TestListDatabases_ConnectorSeesOnlyListable(t *testing.T) {
 	suffix := "ldc"
 
 	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin, store.RoleConnector})
-	createTestDBEntry(t, dataStore, "visible-db-"+suffix, true)
-	createTestDBEntry(t, dataStore, "invisible-db-"+suffix, false)
+	createTestDBEntry(t, dataStore, "visible_db_"+suffix, true)
+	createTestDBEntry(t, dataStore, "invisible_db_"+suffix, false)
 
 	// Connector user with no grants.
 	createTestUser(t, dataStore, "connector-"+suffix, "connpass123", []string{store.RoleConnector})
@@ -188,6 +188,6 @@ func TestListDatabases_ConnectorSeesOnlyListable(t *testing.T) {
 			names = append(names, name)
 		}
 	}
-	assert.Contains(t, names, "visible-db-"+suffix)
-	assert.NotContains(t, names, "invisible-db-"+suffix)
+	assert.Contains(t, names, "visible_db_"+suffix)
+	assert.NotContains(t, names, "invisible_db_"+suffix)
 }

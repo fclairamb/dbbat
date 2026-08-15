@@ -40,8 +40,8 @@ func TestServerGroupsCRUDEndpoints(t *testing.T) {
 	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
 	memberToken := loginUser(t, server, "member-"+suffix, "memberpass123")
 
-	dbA := createTestDBEntry(t, dataStore, "sg-db-a-"+suffix, true)
-	dbB := createTestDBEntry(t, dataStore, "sg-db-b-"+suffix, true)
+	dbA := createTestDBEntry(t, dataStore, "sg_db_a_"+suffix, true)
+	dbB := createTestDBEntry(t, dataStore, "sg_db_b_"+suffix, true)
 
 	router := serverGroupsRouter(server)
 
@@ -128,7 +128,7 @@ func TestServerGroupRejectsSSHMember(t *testing.T) {
 	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
 	bastion, err := dataStore.CreateServer(context.Background(), &store.Server{
-		Name:     "bastion-" + suffix,
+		Name:     "bastion_" + suffix,
 		Host:     "ssh.example.com",
 		Port:     22,
 		Username: "jump",

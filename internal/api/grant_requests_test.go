@@ -79,7 +79,7 @@ func TestCreateGrantRequest_AutoApproveYieldsActiveGrantInstantly(t *testing.T) 
 	requester := createTestUser(t, dataStore, "req-"+suffix, "reqpass123", []string{store.RoleConnector})
 	token := loginUser(t, server, "req-"+suffix, "reqpass123")
 
-	db := createTestDBEntry(t, dataStore, "auto-db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "auto_db_"+suffix, true)
 	def := createTestGrantDefinition(t, dataStore, *admin, "auto-def-"+suffix, true)
 
 	router := grantRequestsRouter(server)
@@ -136,7 +136,7 @@ func TestCreateGrantRequest_NonAutoApproveStaysPending(t *testing.T) {
 	createTestUser(t, dataStore, "req-"+suffix, "reqpass123", []string{store.RoleConnector})
 	token := loginUser(t, server, "req-"+suffix, "reqpass123")
 
-	db := createTestDBEntry(t, dataStore, "manual-db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "manual_db_"+suffix, true)
 	def := createTestGrantDefinition(t, dataStore, *admin, "manual-def-"+suffix, false)
 
 	router := grantRequestsRouter(server)
@@ -161,7 +161,7 @@ func TestCreateGrantRequest_AutoApproveRequiresJustification(t *testing.T) {
 	createTestUser(t, dataStore, "req-"+suffix, "reqpass123", []string{store.RoleConnector})
 	token := loginUser(t, server, "req-"+suffix, "reqpass123")
 
-	db := createTestDBEntry(t, dataStore, "auto-nojust-db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "auto_nojust_db_"+suffix, true)
 	def := createTestGrantDefinition(t, dataStore, *admin, "auto-nojust-def-"+suffix, true)
 
 	router := grantRequestsRouter(server)
@@ -192,7 +192,7 @@ func TestListGrantRequests_EmbedsLiveDefinition(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "live-db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "live_db_"+suffix, true)
 	def := createTestGrantDefinition(t, dataStore, *admin, "live-def-"+suffix, false)
 
 	_, err := dataStore.CreateGrantRequest(ctx, &store.GrantRequest{

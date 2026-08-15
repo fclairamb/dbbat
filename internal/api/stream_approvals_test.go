@@ -94,8 +94,8 @@ func newCrossGrantFixture(t *testing.T) *crossGrantFixture {
 		t.Fatalf("add approver to group A: %v", err)
 	}
 
-	dbA := mkServer("cg-db-a")
-	dbB := mkServer("cg-db-b")
+	dbA := mkServer("cg_db_a")
+	dbB := mkServer("cg_db_b")
 
 	mkGrant := func(owner *store.User, target *store.Server, group *store.UserGroup) {
 		t.Helper()

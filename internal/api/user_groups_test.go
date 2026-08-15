@@ -216,8 +216,8 @@ func TestCreateGrantRequest_RejectsOutOfScope(t *testing.T) {
 	requester := createTestUser(t, dataStore, "req-"+suffix, "reqpass1234", []string{store.RoleConnector})
 	token := loginUser(t, server, "req-"+suffix, "reqpass1234")
 
-	inScopeDB := createTestDBEntry(t, dataStore, "in-db-"+suffix, true)
-	otherDB := createTestDBEntry(t, dataStore, "other-db-"+suffix, true)
+	inScopeDB := createTestDBEntry(t, dataStore, "in_db_"+suffix, true)
+	otherDB := createTestDBEntry(t, dataStore, "other_db_"+suffix, true)
 
 	group, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "analysts-" + suffix})
 	require.NoError(t, err)
@@ -288,7 +288,7 @@ func TestApproveGrantRequest_ConflictsWhenScopeTightened(t *testing.T) {
 	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
 	reqToken := loginUser(t, server, "req-"+suffix, "reqpass1234")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	def := createTestGrantDefinition(t, dataStore, *admin, "unscoped-"+suffix, false)
 
 	router := scopedRouter(server)

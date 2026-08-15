@@ -44,7 +44,7 @@ func TestGetConnection_OwnerSeesOwnConnection(t *testing.T) {
 	owner := createTestUser(t, dataStore, "owner-"+suffix, "ownerpass123", []string{store.RoleConnector})
 	token := loginUser(t, server, "owner-"+suffix, "ownerpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), owner.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 
@@ -74,7 +74,7 @@ func TestGetConnection_NonOwnerConnectorGets404NotForbidden(t *testing.T) {
 	createTestUser(t, dataStore, "other-"+suffix, "otherpass123", []string{store.RoleConnector})
 	otherToken := loginUser(t, server, "other-"+suffix, "otherpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), owner.UID, db.UID, "10.1.1.2")
 	require.NoError(t, err)
 
@@ -98,7 +98,7 @@ func TestGetConnection_AdminAndViewerSeeAnyConnection(t *testing.T) {
 	createTestUser(t, dataStore, "viewer-"+suffix, "viewerpass123", []string{store.RoleViewer})
 	viewerToken := loginUser(t, server, "viewer-"+suffix, "viewerpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), owner.UID, db.UID, "10.1.1.3")
 	require.NoError(t, err)
 
@@ -164,7 +164,7 @@ func TestGetConnection_EmbedsGrantSummary(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 
 	now := time.Now()
 	grant := persistGrantWithShape(t, dataStore, store.GrantDefinition{
@@ -200,7 +200,7 @@ func TestGetConnection_GrantSummaryNilWhenUnstamped(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.10")
 	require.NoError(t, err)
 

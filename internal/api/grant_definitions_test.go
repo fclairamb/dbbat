@@ -180,7 +180,7 @@ func TestCreateGrantRequest_BySlug(t *testing.T) {
 	createTestUser(t, dataStore, "req-"+suffix, "reqpass1234", []string{store.RoleConnector})
 	token := loginUser(t, server, "req-"+suffix, "reqpass1234")
 
-	db := createTestDBEntry(t, dataStore, "slug-db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "slug_db_"+suffix, true)
 	def := createTestGrantDefinition(t, dataStore, *admin, "req-by-slug-"+suffix, false)
 
 	router := grantDefinitionsRouter(server)
@@ -355,7 +355,7 @@ func TestGetGrantDefinition_ArchivedVersion(t *testing.T) {
 	strangerToken := loginUser(t, server, "stranger-"+suffix, "strangerpass123")
 
 	database, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "archget-db-" + suffix,
+		Name:         "archget_db_" + suffix,
 		Host:         "127.0.0.1",
 		Port:         5432,
 		DatabaseName: "prod",
@@ -426,7 +426,7 @@ func TestDeactivateGrantDefinition_ReportsAndForbidsDeletion(t *testing.T) {
 	target := createTestUser(t, dataStore, "target-"+suffix, "targetpass123", []string{store.RoleConnector})
 
 	database, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "defdelete-db-" + suffix,
+		Name:         "defdelete_db_" + suffix,
 		Host:         "127.0.0.1",
 		Port:         5432,
 		DatabaseName: "prod",
@@ -516,9 +516,9 @@ func TestListGrantDefinitions_ScopedDatabaseUIDs(t *testing.T) {
 	createTestUser(t, dataStore, "req-"+suffix, "reqpass1234", []string{store.RoleConnector})
 	requesterToken := loginUser(t, server, "req-"+suffix, "reqpass1234")
 
-	dbA := createTestDBEntry(t, dataStore, "sdu-a-"+suffix, true)
-	dbB := createTestDBEntry(t, dataStore, "sdu-b-"+suffix, true)
-	createTestDBEntry(t, dataStore, "sdu-c-"+suffix, true) // in scope of nothing below
+	dbA := createTestDBEntry(t, dataStore, "sdu_a_"+suffix, true)
+	dbB := createTestDBEntry(t, dataStore, "sdu_b_"+suffix, true)
+	createTestDBEntry(t, dataStore, "sdu_c_"+suffix, true) // in scope of nothing below
 
 	// A distinctive, secret-looking group name. /server-groups is
 	// admin-only precisely because group identity and membership are

@@ -328,7 +328,7 @@ func createChainedSession(t *testing.T, dataStore *store.Store, suffix string, n
 	ctx := context.Background()
 
 	owner := createTestUser(t, dataStore, "owner-"+suffix, "ownerpass123", []string{store.RoleConnector})
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 
 	conn, err := dataStore.CreateConnection(ctx, owner.UID, db.UID, "10.9.9.9")
 	require.NoError(t, err)
@@ -601,7 +601,7 @@ func createCapturedSession(
 	ctx := context.Background()
 
 	owner := createTestUser(t, dataStore, "owner-"+suffix, "ownerpass123", []string{store.RoleConnector})
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 
 	conn, err := dataStore.CreateConnection(ctx, owner.UID, db.UID, "10.9.9.9")
 	require.NoError(t, err)

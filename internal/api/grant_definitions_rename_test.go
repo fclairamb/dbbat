@@ -86,7 +86,7 @@ func TestGrantDefinition_RetiredDatabaseUIDsRejected(t *testing.T) {
 	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "retired-db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "retired_db_"+suffix, true)
 
 	router := grantDefinitionsRouter(server)
 
@@ -129,8 +129,8 @@ func TestGrantDefinition_ServerGroupScopeIsLive(t *testing.T) {
 	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
 	target := createTestUser(t, dataStore, "target-"+suffix, "targetpass123", []string{store.RoleConnector})
 
-	inGroup := createTestDBEntry(t, dataStore, "live-in-"+suffix, true)
-	joinsLater := createTestDBEntry(t, dataStore, "live-later-"+suffix, true)
+	inGroup := createTestDBEntry(t, dataStore, "live_in_"+suffix, true)
+	joinsLater := createTestDBEntry(t, dataStore, "live_later_"+suffix, true)
 
 	group, err := dataStore.CreateServerGroup(ctx, &store.ServerGroup{Name: "live-" + suffix})
 	require.NoError(t, err)
