@@ -74,10 +74,25 @@ The `fixtures.ts` file provides an `authenticatedPage` fixture that automaticall
 import { test, expect } from "./fixtures";
 
 test("should display users", async ({ authenticatedPage }) => {
-  await authenticatedPage.goto("/users");
+  await authenticatedPage.goto("users");
   // Test is already authenticated
 });
 ```
+
+### Navigation paths are relative
+
+`playwright.config.ts` sets `baseURL` to `http://localhost:8080/app/`. Playwright
+resolves the argument of `goto()` against it the way a browser resolves an href:
+a **relative** path composes with the base (`goto("users")` →
+`/app/users`), an **absolute** one replaces the whole path (`goto("/users")` →
+`/users`, which the Go router answers with a bare `404 page not found`). The page
+then contains none of the app, so every locator times out and the failure reads
+as a broken feature rather than a stray leading slash.
+
+So: write `goto("users")`, or spell the base out as `goto("/app/users")`.
+`goto("/")` is fine too — the server redirects the root to the app base.
+`eslint.config.js` enforces this over `e2e/**` and `showcase/**`; a bad path is a
+lint error, not a mystery timeout.
 
 ### Taking Screenshots
 
@@ -111,7 +126,7 @@ await page.waitForLoadState("networkidle");
 
    test.describe("My Feature", () => {
      test("should do something", async ({ authenticatedPage }) => {
-       await authenticatedPage.goto("/my-feature");
+       await authenticatedPage.goto("my-feature");
        // Add assertions
      });
    });
