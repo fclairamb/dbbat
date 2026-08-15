@@ -255,10 +255,10 @@ func TestPreparedUseIsRefused(t *testing.T) {
 }
 
 // TestBenignPrepareStillRuns is the other half, and it matters as much: this
-// must not become a blanket refusal of PREPARE. Only the switch decision reaches
-// inside the literal — `PREPARE s FROM 'DELETE FROM t'` is still invisible to
-// read_only, which is the broader dynamic-SQL gap documented in docs/mysql.md
-// and filed separately, not something this test papers over.
+// must not become a blanket refusal of PREPARE. The session here carries a
+// full-write grant, which is also why the opaque forms below run: the
+// read_only/block_ddl policy over an unreadable payload is pinned separately in
+// dynamicsql_test.go.
 func TestBenignPrepareStillRuns(t *testing.T) {
 	t.Parallel()
 
