@@ -1471,6 +1471,61 @@ measured refusals carry (same builder, same shape decision, same summary tail),
 so what goes unmeasured is the *branch's* wiring, not the encoding — and that is
 what the unit test pins.
 
+##### Keys that cannot do Oracle, and the refusal that says so
+
+O5LOGON needs a verifier derived from the API key. Keys are Argon2id-hashed, so
+that verifier cannot be recovered afterwards: it exists only if it was derived at
+mint time. **Every key minted before Oracle support therefore authenticates
+against the REST API and every other protocol and can never be used for Oracle**
+— and until 0.25 nothing said so anywhere. The production sighting (2026-08-13, a
+key created 2026-07-12) is the shape of it:
+
+```
+O5LOGON verifiers loaded — any of these API keys works for Oracle login
+  candidates=3 primary_key_prefix=dbb_8kre has_18453=true
+AUTH Phase 2: candidate did not decrypt AUTH_PASSWORD  key_prefix=dbb_8kre …
+WARN client authentication failed  error="API key verification failed: no candidate key decrypted AUTH_PASSWORD (3 tried)"
+```
+
+The three candidates are the user's *other*, newer keys. The key actually being
+presented is not in the list at all — that is what makes it invisible — and the
+client saw `ORA-01017 invalid username/password`, indistinguishable from a typo.
+Minting a new key happens to fix it, which hides the cause and teaches nothing.
+
+**The listing.** `GET /api/v1/keys` (and the single-key fetch) now carry
+`oracle_capable`, shown in the UI's key list as a per-row badge plus a banner
+counting the live keys that cannot do Oracle. The predicate is a *decryption*,
+not a column test — `store.APIKey.DecryptedO5LogonVerifier6949`, which is the
+same call `decryptVerifierData` makes to build a challenge, so the listing and
+the proxy cannot disagree. Material that no longer decrypts under the running
+`DBB_KEY` is reported unusable for exactly the reason the proxy treats it as no
+candidate. The field is a `*bool`: absent when the process has no master key and
+therefore cannot tell, so "unknown" never reads as "unusable".
+
+**The refusal.** dbbat cannot say *which* key was presented. It challenges from
+the user's shared salts and learns only that no candidate decrypted
+`AUTH_PASSWORD`; the presented key left no trace, and in this failure it was
+never a candidate. What it can say — and now does — is the strictly weaker,
+still-actionable thing: when a login is refused and the user owns live keys with
+no usable verifier, the message counts them and says to mint a new one. The code
+stays **ORA-01017** (the credential really was refused) and "invalid
+username/password" stays the primary clause, because dbbat does not know the key
+just typed was one of them. It is one more case in `authRejectFor`, carried there
+by a typed error (`keysWithoutVerifierError`) so the sentinel callers classify by
+survives, and it rides the same OER frame as the refusals above. Counts and
+advice only: no prefixes, no names, nothing derived from the material — the
+precedent for naming an account-shaped fact to an unauthenticated client is
+`ErrNoActiveGrant`, on this same frame.
+
+**Backfill-on-use was considered and rejected.** A key presented over REST
+arrives in plaintext, so its verifier *could* be derived and written at that
+moment, silently healing every legacy key on first use. It is not implemented, and
+should not be: verifier material is encrypted rather than hashed — unlike the key
+hash itself — so writing it for every key that has ever been used widens what a
+stolen store yields, to save the user one key rotation. The store's
+"a leaked database yields no usable key" property is worth more than the
+convenience. Reporting the fact is the honest fix.
+
 ##### Refusals on Oracle 19c: what is covered, and what is still outstanding
 
 Everything above is measured against **Oracle 23ai Free**, because that is the

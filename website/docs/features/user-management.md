@@ -146,6 +146,25 @@ curl -H "Authorization: Bearer $DBBAT_API_KEY" \
 
 `?all_users=true` is admin-only.
 
+### Not every key works for Oracle
+
+Each listed key carries `oracle_capable`, and the UI's key list shows it as a
+badge. Oracle login uses O5LOGON, which needs a verifier derived from the key
+**when the key is created** — and since DBBat only keeps a hash of the key, that
+verifier can never be added later. A key created before Oracle support existed
+(or by a server that had no encryption key) therefore authenticates fine against
+the REST API and against PostgreSQL, MySQL, MongoDB and SQL Server, and is
+refused by the Oracle proxy with `ORA-01017 invalid username/password` — which
+reads exactly like a typo.
+
+There is no repair: **create a new key** and use that one for Oracle. The Oracle
+refusal itself now says so when you own such keys ("N of your dbbat API keys
+predate Oracle support…"), but it cannot tell you *which* key you just used —
+O5LOGON never reveals that — so the listing is the place to look.
+
+`oracle_capable` is omitted entirely when the server runs without an encryption
+key, because it then cannot tell.
+
 ### Restrictions
 
 API keys carry their owner's roles, but with two intentional restrictions:
