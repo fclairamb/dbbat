@@ -81,10 +81,16 @@ service:
   api:
     type: ClusterIP
     port: 8080
+    portName: api
+    # The `dbbat` ClusterIP service has always carried the proxy port next to
+    # the API port. Nothing in the cluster is known to use it, but dropping it
+    # would make adopting these objects into the release a silent port removal.
+    includeProxyPort: true
   proxy:
     enabled: true
     # -> service `dbbat-pg`
     nameSuffix: pg
+    portName: pg-proxy
     type: LoadBalancer
     port: 5434
     # k3s on bare metal: the proxy is published on the node's public IP.

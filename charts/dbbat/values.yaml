@@ -91,6 +91,12 @@ service:
     type: ClusterIP
     # -- API service port
     port: 8080
+    # -- Name of the API port on the service
+    portName: http
+    # -- Also expose the proxy port (taken from config.listenPg) on the API
+    # service, on top of the dedicated proxy service. Only needed where
+    # in-cluster clients already reach the proxy through the API service name.
+    includeProxyPort: false
     # -- API service annotations
     annotations: {}
 
@@ -106,6 +112,8 @@ service:
     # -- PostgreSQL proxy external port (maps to the container port taken from
     # config.listenPg)
     port: 5432
+    # -- Name of the PostgreSQL proxy port, on both services that carry it
+    portName: postgres
     # -- External IPs to attach to the proxy service. On bare-metal / k3s this is
     # how a fixed node IP is bound to a LoadBalancer service.
     externalIPs: []

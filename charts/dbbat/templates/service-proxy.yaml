@@ -20,7 +20,7 @@ spec:
     - port: {{ .Values.service.proxy.port }}
       targetPort: postgres
       protocol: TCP
-      name: postgres
+      name: {{ default "postgres" .Values.service.proxy.portName }}
     {{- if .Values.service.oracle.enabled }}
     - port: {{ .Values.service.oracle.port }}
       targetPort: oracle

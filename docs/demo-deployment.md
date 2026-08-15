@@ -137,10 +137,12 @@ are the only differences that are not just added Helm labels:
   application's own default.
 - **Probe timings** follow the chart's defaults (readiness every 5s, liveness
   every 10s) rather than the hand-applied 10s/30s.
-- **Port names.** `api`/`pg-proxy` become `http`/`postgres`, and the services
-  target them by name. Names only; the numbers are unchanged (8080, 5434).
-- **The `dbbat` ClusterIP service no longer exposes 5434.** The chart keeps the
-  API service and the proxy service separate, so in-cluster proxy traffic goes
-  to `dbbat-pg:5434`. Nothing in the cluster used `dbbat:5434`.
+- **Service `targetPort`s are named, not numeric.** The live services target
+  8080/5434 by number; the rendered ones target the container ports `http` and
+  `postgres`, which are those same numbers. The service port *names* (`api`,
+  `pg-proxy`) and numbers are unchanged — `service.api.portName` and
+  `service.proxy.portName` keep them matching the live objects, and
+  `service.api.includeProxyPort` keeps 5434 on the `dbbat` ClusterIP service
+  next to 8080, as the hand-applied object has it.
 - **NodePort is not pinned.** The live LoadBalancer landed on 31920 by
   allocation, not by request, so the chart does not fix it.

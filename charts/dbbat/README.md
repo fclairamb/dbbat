@@ -159,8 +159,14 @@ service:
   api:
     type: ClusterIP
     port: 8080
+    portName: http
+    includeProxyPort: false   # also expose config.listenPg's port here
     annotations: {}
 ```
+
+`includeProxyPort` is for deployments whose in-cluster clients reach the proxy
+through the API service name; the dedicated proxy service below is the normal
+route.
 
 #### PostgreSQL Proxy Service (TCP)
 
@@ -171,6 +177,7 @@ service:
     type: ClusterIP  # or NodePort, LoadBalancer
     port: 5433
     nameSuffix: proxy   # service name is "<fullname>-<nameSuffix>"
+    portName: postgres  # port name, on both services carrying it
     externalIPs: []     # bare-metal/k3s: pin the node IP the LB answers on
     annotations: {}
 ```
@@ -467,10 +474,13 @@ psql -h localhost -p 5433 -U <username> -d <database>
 | `secrets.existingSecret` | Use existing secret | `""` |
 | `service.api.type` | API service type | `ClusterIP` |
 | `service.api.port` | API service port | `8080` |
+| `service.api.portName` | Name of the API port | `http` |
+| `service.api.includeProxyPort` | Also expose the proxy port on the API service | `false` |
 | `service.proxy.enabled` | Enable proxy service | `true` |
 | `service.proxy.type` | Proxy service type | `ClusterIP` |
 | `service.proxy.port` | Proxy service port | `5433` |
 | `service.proxy.nameSuffix` | Suffix of the proxy service name | `proxy` |
+| `service.proxy.portName` | Name of the proxy port | `postgres` |
 | `service.proxy.externalIPs` | External IPs bound to the proxy service | `[]` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `ingress.className` | Ingress class name | `""` |

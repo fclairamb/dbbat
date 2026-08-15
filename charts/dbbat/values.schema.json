@@ -156,6 +156,14 @@
               "maximum": 65535,
               "description": "Service port"
             },
+            "portName": {
+              "type": "string",
+              "description": "Name of the API port on the service"
+            },
+            "includeProxyPort": {
+              "type": "boolean",
+              "description": "Also expose the proxy port on the API service"
+            },
             "annotations": {
               "type": "object",
               "description": "Service annotations"
@@ -187,6 +195,10 @@
             "nameSuffix": {
               "type": "string",
               "description": "Suffix appended to the fullname for the proxy service"
+            },
+            "portName": {
+              "type": "string",
+              "description": "Name of the PostgreSQL proxy port"
             },
             "externalIPs": {
               "type": "array",
