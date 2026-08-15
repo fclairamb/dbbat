@@ -34,6 +34,9 @@ var (
 	// ErrServerNameConflict is returned when creating or renaming a server to a
 	// name that is already taken (violates the servers_name_key unique constraint).
 	ErrServerNameConflict = errors.New("a server with this name already exists")
+	// ErrServerNameInvalid is returned when a server name does not match the
+	// required slug format (see IsValidServerName) — wrong charset or too long.
+	ErrServerNameInvalid = errors.New("server name must be a slug matching ^[a-z0-9_]{1,63}$")
 	// ErrUserNameConflict is returned when creating a user whose username is
 	// already taken by an active (non-soft-deleted) user (violates the
 	// users_username_active_uq unique index).

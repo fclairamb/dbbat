@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,10 +16,33 @@ import (
 	"github.com/fclairamb/dbbat/internal/crypto"
 )
 
+// serverNamePattern is the slug format every server name must match: it is the
+// client-facing selector on all five protocols (the "database name" typed in a
+// connection string), so a name with spaces, punctuation or uppercase costs
+// reachability on at least one protocol (Oracle EZ-Connect, unquoted MySQL/CLI
+// identifiers, URL percent-encoding). 63 bytes is PostgreSQL's identifier
+// limit, the tightest of the five. The charset is ASCII-only, so byte length
+// and rune count coincide.
+var serverNamePattern = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+
+// IsValidServerName reports whether name is a valid server slug
+// (^[a-z0-9_]{1,63}$). Exported so any future rename path can reuse the exact
+// same check CreateServer enforces, rather than re-deriving it.
+func IsValidServerName(name string) bool {
+	return serverNamePattern.MatchString(name)
+}
+
 // CreateServer creates a new database configuration.
 // It uses a transaction to ensure the password is encrypted with AAD bound to the database UID.
 // Returns ErrTargetMatchesStorage if the target database matches the DBBat storage database.
 func (s *Store) CreateServer(ctx context.Context, db *Server, encryptionKey []byte) (*Server, error) {
+	// Slug format is the client-facing selector on all five protocols — see
+	// IsValidServerName. Checked before anything else so a bad name never
+	// costs a round trip through the rest of validation.
+	if !IsValidServerName(db.Name) {
+		return nil, ErrServerNameInvalid
+	}
+
 	// Security check: prevent configuring the storage database as a target
 	if s.MatchesStorageDSN(db.Host, db.Port, db.DatabaseName) {
 		return nil, ErrTargetMatchesStorage

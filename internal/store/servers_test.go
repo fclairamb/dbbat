@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -833,5 +834,72 @@ func TestCreateServer_DuplicateName(t *testing.T) {
 	_, err := store.CreateServer(ctx, second, key)
 	if !errors.Is(err, ErrServerNameConflict) {
 		t.Fatalf("CreateServer(duplicate) error = %v, want ErrServerNameConflict", err)
+	}
+}
+
+// TestCreateServer_InvalidName verifies that CreateServer rejects any name
+// that is not a slug matching ^[a-z0-9_]{1,63}$ — the client-facing selector
+// used by all five protocols — with the typed ErrServerNameInvalid (mapped to
+// a 400 by the API), rather than persisting an unreachable name.
+func TestCreateServer_InvalidName(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	cases := []struct {
+		name    string
+		srvName string
+	}{
+		{"hyphen", "my-server"},
+		{"uppercase", "MyServer"},
+		{"space", "my server"},
+		{"dot", "my.server"},
+		{"empty", ""},
+		{"too long", strings.Repeat("a", 64)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := &Server{
+				Name:         tc.srvName,
+				Host:         "localhost",
+				Port:         5432,
+				DatabaseName: "mydb",
+				Username:     "dbuser",
+				Password:     "secret",
+				SSLMode:      "prefer",
+			}
+			_, err := store.CreateServer(ctx, db, key)
+			if !errors.Is(err, ErrServerNameInvalid) {
+				t.Fatalf("CreateServer(%q) error = %v, want ErrServerNameInvalid", tc.srvName, err)
+			}
+		})
+	}
+}
+
+// TestCreateServer_ValidNameBoundary verifies the 63-byte boundary is
+// inclusive: exactly 63 lowercase/digit/underscore bytes is accepted.
+func TestCreateServer_ValidNameBoundary(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	db := &Server{
+		Name:         strings.Repeat("a", 63),
+		Host:         "localhost",
+		Port:         5432,
+		DatabaseName: "mydb",
+		Username:     "dbuser",
+		Password:     "secret",
+		SSLMode:      "prefer",
+	}
+	if _, err := store.CreateServer(ctx, db, key); err != nil {
+		t.Fatalf("CreateServer(63-byte name) error = %v, want nil", err)
 	}
 }
