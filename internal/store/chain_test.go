@@ -587,7 +587,7 @@ func TestQueryChainStampsHeadOnClose(t *testing.T) {
 // that both seals the query chain — like CloseConnection — and lets the
 // caller supply a back-dated close instant, since the whole point of seeding
 // is to avoid time.Now(). It also pins the resolved open question from
-// specs/todos/2026-08-15-03-demo-seed-unsealed-query-chain.md: the
+// specs/done/2026/08/2026-08-15-03-demo-seed-unsealed-query-chain.md: the
 // connection.closed audit entry must carry that same staged instant, not
 // wall-clock time.
 func TestQueryChainCloseConnectionAtSealsWithStagedTimestamp(t *testing.T) {
@@ -663,7 +663,7 @@ func TestQueryChainCloseConnectionAtSealsWithStagedTimestamp(t *testing.T) {
 // insert time — disagreed with the row on connected_at. CreateConnectionAt
 // lets the caller supply the open instant directly, so the row and its
 // evidence entry agree by construction. See
-// specs/todos/2026-08-15-04-demo-seed-opened-entry-wallclock.md.
+// specs/done/2026/08/2026-08-15-04-demo-seed-opened-entry-wallclock.md.
 func TestQueryChainCreateConnectionAtStampsOpenedEvidenceWithStagedTimestamp(t *testing.T) {
 	t.Parallel()
 

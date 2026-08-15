@@ -1387,7 +1387,7 @@ func seedDemoHistory(
 		// Created through CreateConnectionAt rather than CreateConnection, so
 		// the row's connected_at and the connection.opened audit entry it
 		// writes both carry this staged instant instead of wall-clock time —
-		// see specs/todos/2026-08-15-04-demo-seed-opened-entry-wallclock.md.
+		// see specs/done/2026/08/2026-08-15-04-demo-seed-opened-entry-wallclock.md.
 		conn, err := dataStore.CreateConnectionAt(ctx, userID, databaseID, session.sourceIP, openedAt)
 		if err != nil {
 			return fmt.Errorf("failed to create demo connection: %w", err)
@@ -1421,7 +1421,7 @@ func seedDemoHistory(
 		// query chain gets sealed (query_chain_mac) like any real session
 		// close, and the connection.closed audit entry it writes carries this
 		// same staged instant instead of wall-clock time — see
-		// specs/todos/2026-08-15-03-demo-seed-unsealed-query-chain.md.
+		// specs/done/2026/08/2026-08-15-03-demo-seed-unsealed-query-chain.md.
 		disconnectedAt := lastActivityAt.Add(time.Minute)
 		if err := dataStore.CloseConnectionAt(ctx, conn.UID, disconnectedAt); err != nil {
 			return fmt.Errorf("failed to close demo connection: %w", err)
