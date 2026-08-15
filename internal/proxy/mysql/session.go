@@ -181,7 +181,16 @@ func (s *Session) Run() error {
 	// no-op until OnAuth actually registers (guarded on s.revocation != nil).
 	defer s.deregisterRevocation()
 
-	conn, err := s.server.gomysqlServer.NewCustomizedConn(s.clientConn, authHandler, commandHandler)
+	// The handshake runs behind a frame limiter: go-mysql sizes its read
+	// buffer from the packet header before any payload arrives, so an
+	// unauthenticated peer could otherwise buy a 16 MiB allocation with four
+	// bytes. It is disarmed the moment the handshake is over.
+	limited := newPreAuthLimitedConn(s.clientConn)
+
+	conn, err := s.server.gomysqlServer.NewCustomizedConn(limited, authHandler, commandHandler)
+
+	limited.disarm()
+
 	if err != nil {
 		return fmt.Errorf("MySQL handshake: %w", err)
 	}
