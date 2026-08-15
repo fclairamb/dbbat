@@ -189,7 +189,10 @@ Screenshots are saved to `test-results/screenshots/`.
 import { test, expect } from "./fixtures";
 
 test("should display users list", async ({ authenticatedPage }) => {
-  await authenticatedPage.goto("/users");
+  // Relative — it composes with the `baseURL` (http://localhost:8080/app/).
+  // An absolute "/users" would replace the whole path and hit the Go server's
+  // bare 404 instead of the app; `eslint.config.js` rejects that form.
+  await authenticatedPage.goto("users");
   await authenticatedPage.waitForLoadState("networkidle");
 
   // Take screenshot

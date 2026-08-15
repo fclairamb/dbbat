@@ -27,7 +27,9 @@ PR titles MUST follow the conventional commit format:
 | `ci` | CI configuration | None |
 | `chore` | Other changes (deps, tooling) | None |
 
-**Scopes** (optional): `api`, `auth`, `config`, `crypto`, `db`, `deps`, `docs`, `dump`, `grants`, `migrations`, `mongodb`, `mssql`, `mysql`, `oracle`, `postgresql`, `proxy`, `store`, `ui`, `release`, `ci`
+**Scopes** (optional): `api`, `auth`, `config`, `crypto`, `db`, `deploy`, `deps`, `docs`, `dump`, `grants`, `migrations`, `mongodb`, `mssql`, `mysql`, `oracle`, `postgresql`, `proxy`, `store`, `ui`, `release`, `ci`
+
+This list is enforced by the `scopes:` input of `.github/workflows/semantic-pr.yml` — same set, same order. Edit both or neither.
 
 **Breaking Changes:** Add `!` after type/scope or include `BREAKING CHANGE:` in body for major version bumps.
 
