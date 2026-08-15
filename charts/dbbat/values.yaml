@@ -217,6 +217,17 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+# -- Soft memory ceiling for the Go runtime (GOMEMLIMIT). Set it a little below
+# resources.limits.memory: past this the collector runs continuously instead of
+# letting the heap grow into the cgroup limit, so a burst costs CPU and slow
+# requests rather than an OOMKill and a dropped connection for every user.
+# It is a *soft* limit — Go will still exceed it rather than deadlock — so the
+# gap to the hard limit is the safety margin, not decoration. Empty disables it
+# (the Go default is no limit at all).
+# Keep it in sync by hand when you change resources.limits.memory; Helm cannot
+# do arithmetic on a quantity like "256Mi".
+goMemLimit: "192MiB"
+
 # =============================================================================
 # Probes
 # =============================================================================

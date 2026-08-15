@@ -20,3 +20,6 @@ data:
   {{- if .Values.config.keyFile }}
   DBB_KEYFILE: {{ .Values.config.keyFile | quote }}
   {{- end }}
+  {{- if .Values.goMemLimit }}
+  GOMEMLIMIT: {{ .Values.goMemLimit | quote }}
+  {{- end }}
