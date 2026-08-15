@@ -582,6 +582,120 @@ func TestQueryChainStampsHeadOnClose(t *testing.T) {
 	require.Nil(t, result.Break)
 }
 
+// TestQueryChainCloseConnectionAtSealsWithStagedTimestamp pins the fix for
+// the demo seeder's chain break: seedDemoHistory (main.go) needs a close path
+// that both seals the query chain — like CloseConnection — and lets the
+// caller supply a back-dated close instant, since the whole point of seeding
+// is to avoid time.Now(). It also pins the resolved open question from
+// specs/done/2026/08/2026-08-15-03-demo-seed-unsealed-query-chain.md: the
+// connection.closed audit entry must carry that same staged instant, not
+// wall-clock time.
+func TestQueryChainCloseConnectionAtSealsWithStagedTimestamp(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "seed_close_at", 3)
+
+	before := time.Now()
+	staged := before.Add(-48 * time.Hour).Truncate(time.Microsecond)
+
+	require.NoError(t, store.CloseConnectionAt(ctx, conn.UID, staged))
+
+	closed, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, closed.DisconnectedAt)
+	require.WithinDuration(t, staged, *closed.DisconnectedAt, time.Second,
+		"CloseConnectionAt must stamp the row with the caller's instant, not time.Now()")
+	require.True(t, closed.DisconnectedAt.Before(before),
+		"a demo seed must be able to close in the past")
+
+	// The chain must be sealed exactly like a normal CloseConnection: same
+	// stamp, same version, same head MAC — CloseConnectionAt is not a second
+	// implementation of the seal.
+	require.Equal(t, int64(3), closed.QueryChainLen)
+	require.Equal(t, queryChainStampKeyed, closed.QueryChainStampVersion)
+	require.Equal(t, store.queryChainStampMAC(conn.UID, queryChainStampKeyed, 3, queries[2].MAC),
+		closed.QueryChainMAC, "the session head must be sealed on close")
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "a session closed through CloseConnectionAt must verify clean: %v", result.Break)
+
+	// The connection.closed audit entry must agree with the row: the staged
+	// instant, not the time the call actually ran.
+	entries := sessionAuditEntries(t, ctx, store, AuditEventConnectionClosed, conn.UID)
+	require.Len(t, entries, 1)
+	require.Equal(t, auditTimestamp(staged), entries[0].DisconnectedAt,
+		"the close entry must carry the staged instant, not wall-clock time")
+
+	// Mirror seedDemoHistory's second step: a raw back-dating UPDATE of the
+	// unsealed columns, run after the seal, without touching disconnected_at
+	// again. It must not disturb the chain's verification.
+	openedAt := staged.Add(-time.Hour)
+	_, err = store.db.NewUpdate().
+		Model((*Connection)(nil)).
+		Where("uid = ?", conn.UID).
+		Set("connected_at = ?", openedAt).
+		Set("last_activity_at = ?", staged.Add(-time.Minute)).
+		Set("queries = ?", 3).
+		Set("bytes_transferred = ?", 1234).
+		Exec(ctx)
+	require.NoError(t, err)
+
+	result, err = store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break,
+		"re-dating the unsealed columns after the seal must not break verification: %v", result.Break)
+
+	restamped, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.WithinDuration(t, staged, *restamped.DisconnectedAt, time.Second,
+		"the back-dating pass must leave disconnected_at exactly as the seal wrote it")
+}
+
+// TestQueryChainCreateConnectionAtStampsOpenedEvidenceWithStagedTimestamp is
+// the open-side twin of TestQueryChainCloseConnectionAtSealsWithStagedTimestamp:
+// seedDemoHistory (main.go) used to create each session through
+// CreateConnection (time.Now()) and then back-date connected_at with a raw
+// UPDATE, so the connection.opened evidence entry — built from the row at
+// insert time — disagreed with the row on connected_at. CreateConnectionAt
+// lets the caller supply the open instant directly, so the row and its
+// evidence entry agree by construction. See
+// specs/done/2026/08/2026-08-15-04-demo-seed-opened-entry-wallclock.md.
+func TestQueryChainCreateConnectionAtStampsOpenedEvidenceWithStagedTimestamp(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "seed_create_at")
+
+	before := time.Now()
+	staged := before.Add(-8 * 24 * time.Hour).Truncate(time.Microsecond)
+
+	conn, err := store.CreateConnectionAt(ctx, user.UID, database.UID, "10.0.0.1", staged)
+	require.NoError(t, err, "CreateConnectionAt()")
+
+	require.WithinDuration(t, staged, conn.ConnectedAt, time.Second,
+		"CreateConnectionAt must stamp the row with the caller's instant, not time.Now()")
+	require.True(t, conn.ConnectedAt.Before(before),
+		"a demo seed must be able to open in the past")
+
+	stored, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.WithinDuration(t, staged, stored.ConnectedAt, time.Second,
+		"the stored row must carry the staged instant")
+
+	// The connection.opened audit entry must agree with the row: the staged
+	// instant, not the time the call actually ran.
+	entries := sessionAuditEntries(t, ctx, store, AuditEventConnectionOpened, conn.UID)
+	require.Len(t, entries, 1)
+	require.Equal(t, auditTimestamp(staged), entries[0].ConnectedAt,
+		"the open entry must carry the staged instant, not wall-clock time")
+}
+
 func TestQueryChainDetectsTrailingDeletion(t *testing.T) {
 	t.Parallel()
 
