@@ -89,6 +89,20 @@ type Session struct {
 	// otherwise. Read by the KILL QUERY path.
 	heldMu       sync.Mutex
 	heldQueryUID uuid.UUID
+
+	// checkedPrepares are the text-protocol prepared-statement names whose
+	// `PREPARE <name> FROM '<literal>'` dbbat read and ran the grant controls
+	// over, folded to lower case.
+	//
+	// It exists because `EXECUTE <name>` carries no statement text at all: the
+	// pair is one decision spread over two statements, so the decision has to be
+	// recorded when the text is visible. A name absent from here is a name whose
+	// PREPARE dbbat could not vouch for, which under `read_only`/`block_ddl` is
+	// refused — see handler.checkPreparedName.
+	//
+	// No mutex: go-mysql dispatches one command at a time per session, and this
+	// map is touched from the command path only.
+	checkedPrepares map[string]bool
 }
 
 // setHeldQuery records (or clears) the currently parked statement.

@@ -270,14 +270,14 @@ func TestDynamicSQLIsCheckedNotSteppedOver(t *testing.T) {
 			// must never come out of that.
 			"statement argument nowhere to be found",
 			"EXEC sp_executesql @params = N'@x int'",
-			nil, ErrDynamicSQLNotCheckable,
+			nil, shared.ErrDynamicSQLNotCheckable,
 		},
 		{
 			// One level is unwrapped; a second is refused rather than unwrapped
 			// further, because stopping silently would be the same hole again.
 			"nested dynamic SQL fails closed",
 			"EXEC('EXEC(''DROP TABLE t'')')",
-			nil, ErrDynamicSQLNotCheckable,
+			nil, shared.ErrDynamicSQLNotCheckable,
 		},
 	}
 
@@ -309,13 +309,10 @@ func TestBenignDynamicSQLStillRuns(t *testing.T) {
 		// through as text — this is not a blanket refusal of EXEC.
 		"EXEC dbo.some_proc",
 		"EXEC dbo.p @a = 1",
-		// Undecidable, and deliberately not refused: dbbat cannot read what a
-		// variable holds. See the limitation note in docs/mssql.md.
-		"EXEC(@sql)",
-		"EXEC('USE ' + @db)",
-		"EXEC sp_executesql @sql",
-		"EXEC sp_executesql @stmt = @sql",
-		"EXEC sp_executesql @stmt = N'USE ' + @db",
+		// An all-literal concatenation is decidable: the operands are written
+		// apart and the server runs them joined, so the fold reads the statement
+		// the server will run — and a benign one stays benign.
+		"EXEC('SELECT ' + '1')",
 	} {
 		t.Run(sql, func(t *testing.T) {
 			t.Parallel()
@@ -324,6 +321,102 @@ func TestBenignDynamicSQLStillRuns(t *testing.T) {
 			s.grant = grantWithControls(store.ControlReadOnly)
 
 			require.NoError(t, s.validate(statement{text: sql, enforce: []string{sql}}))
+		})
+	}
+}
+
+// opaqueDynamicSQL are the forms whose payload dbbat cannot read statically. The
+// text is assembled by the server from values dbbat never sees, so nothing about
+// what they run is decidable.
+var opaqueDynamicSQL = []string{
+	"EXEC(@sql)",
+	"EXEC('USE ' + @db)",
+	"EXEC sp_executesql @sql",
+	"EXEC sp_executesql @stmt = @sql",
+	"EXEC sp_executesql @stmt = N'USE ' + @db",
+	"EXEC sp_prepare @handle OUT, NULL, @sql, 1",
+}
+
+// TestOpaqueDynamicSQLIsRefusedUnderReadOnlyOrBlockDDL: "dbbat cannot tell what
+// this runs" must not resolve to "allow" for a grant that says the session may
+// not write or may not change schema. The refusal names its own cause, so an
+// operator can tell it from an ordinary blocked write.
+func TestOpaqueDynamicSQLIsRefusedUnderReadOnlyOrBlockDDL(t *testing.T) {
+	t.Parallel()
+
+	for _, control := range []string{store.ControlReadOnly, store.ControlBlockDDL} {
+		for _, sql := range opaqueDynamicSQL {
+			t.Run(control+" "+sql, func(t *testing.T) {
+				t.Parallel()
+
+				s := switchSession(t)
+				s.grant = grantWithControls(control)
+
+				require.ErrorIs(t,
+					s.validate(statement{text: sql, enforce: []string{sql}}),
+					shared.ErrDynamicSQLOpaque)
+			})
+		}
+	}
+}
+
+// TestOpaqueDynamicSQLRunsWithoutThoseTwoControls is the boundary the refusal
+// above is not allowed to cross. `block_copy` alone, and a grant with no controls
+// at all, are unaffected: dynamic SQL defeats neither, so refusing there would be
+// blast radius bought for nothing — ORMs and migration tools build SQL at run
+// time constantly.
+func TestOpaqueDynamicSQLRunsWithoutThoseTwoControls(t *testing.T) {
+	t.Parallel()
+
+	for _, controls := range [][]string{nil, {store.ControlBlockCopy}} {
+		label := "no controls"
+		if len(controls) > 0 {
+			label = controls[0]
+		}
+
+		for _, sql := range opaqueDynamicSQL {
+			t.Run(label+" "+sql, func(t *testing.T) {
+				t.Parallel()
+
+				s := switchSession(t)
+				s.grant = grantWithControls(controls...)
+
+				require.NoError(t, s.validate(statement{text: sql, enforce: []string{sql}}))
+			})
+		}
+	}
+}
+
+// TestDynamicSQLPayloadIsClassifiedLikeTheOuterStatement pins the table the spec
+// measured: every one of these was allowed under a grant carrying both
+// read_only and block_ddl, because the classification is prefix-shaped and the
+// prefix was EXEC.
+func TestDynamicSQLPayloadIsClassifiedLikeTheOuterStatement(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		sql  string
+		want error
+	}{
+		{"DELETE FROM t", shared.ErrReadOnlyViolation},
+		{"EXEC('DELETE FROM t')", shared.ErrReadOnlyViolation},
+		{"EXEC('DELETE ' + 'FROM t')", shared.ErrReadOnlyViolation},
+		{"EXEC(N'DELETE ' + N'FROM t')", shared.ErrReadOnlyViolation},
+		{"EXEC sp_prepare @handle OUT, NULL, N'DROP TABLE Foo', 1", shared.ErrReadOnlyViolation},
+		{"EXEC sp_prepexec @handle OUT, NULL, N'DELETE FROM t'", shared.ErrReadOnlyViolation},
+		{"EXEC sp_cursorprepare @handle OUT, NULL, N'DROP TABLE Foo', 1", shared.ErrReadOnlyViolation},
+		{"EXEC sp_cursoropen @cursor OUT, N'DELETE FROM t', 1, 1", shared.ErrReadOnlyViolation},
+		{"EXEC sp_cursorprepexec @h OUT, @c OUT, NULL, N'DROP TABLE Foo', 1", shared.ErrReadOnlyViolation},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.sql, func(t *testing.T) {
+			t.Parallel()
+
+			s := switchSession(t)
+			s.grant = grantWithControls(store.ControlReadOnly, store.ControlBlockDDL)
+
+			require.ErrorIs(t, s.validate(statement{text: tc.sql, enforce: []string{tc.sql}}), tc.want)
 		})
 	}
 }
