@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.25.0](https://github.com/fclairamb/dbbat/compare/v0.24.0...v0.25.0) (2026-08-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* land the accumulated local batch (oracle hardening, audit-chain stamps, pre-auth allocation caps, demo Helm deployment) ([#320](https://github.com/fclairamb/dbbat/issues/320))
+
+### Features
+
+* land the accumulated local batch (oracle hardening, audit-chain stamps, pre-auth allocation caps, demo Helm deployment) ([#320](https://github.com/fclairamb/dbbat/issues/320)) ([fab64ac](https://github.com/fclairamb/dbbat/commit/fab64acea9c390dc30a1387ac1355eba3b625fbe))
+
 ## [0.24.0](https://github.com/fclairamb/dbbat/compare/v0.23.2...v0.24.0) (2026-08-14)
 
 
