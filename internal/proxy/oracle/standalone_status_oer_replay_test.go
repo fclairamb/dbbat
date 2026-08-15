@@ -391,6 +391,14 @@ func TestDecodeFixedStatusOERAt_KeepsItsAnchors(t *testing.T) {
 	assert.Nil(t, decodeFixedStatusOERAt(thinOERShape(), recorded, 0),
 		"a session that learned the compressed encoding must not read a fixed-width block")
 
+	// Neither is a session that has learned nothing yet. This reading runs before
+	// decodeErrorOER, so the unlearned two-layout fallback would be a way for a
+	// bit-less *error* OER to be completed as a status and lose its ORA text.
+	unlearned := defaultOERShape()
+	require.False(t, unlearned.tailLearned)
+	assert.Nil(t, decodeFixedStatusOERAt(unlearned, recorded, 0),
+		"the shape must be learned; the unlearned fallback is not offered here")
+
 	tests := []struct {
 		name    string
 		payload []byte

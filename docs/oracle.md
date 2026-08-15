@@ -580,16 +580,46 @@ from. So:
   measurable: of the 641 mid-stream packets only 4 lead with `0x04` and all four
   are failures a status predicate rejects by their error code alone.
 
-One gap this did **not** close, measured and named here so it is not re-derived: an
-OCI DML's summary object arrives *embedded in a Response* rather than standalone
-(`sqlplus_midfetch_fail.pcapng` packet #31, the `INSERT ... SELECT` of 20 000
-rows), and that object is refused by the RetCode anchor — its populated rowid block
-puts the RetCode where neither `oerFixed32Layout` nor `oerFixed64Layout` looks. So
-that INSERT is still completed by the next statement's flush with
-`rows_affected` NULL. It is a third fixed-width layout, on `handleResponse`'s
-outside-a-row-stream path, not the standalone status reading described here;
-`TestIntegration_SuccessfulStatementCompletesOnItsOwnOEROCI` is what will surface
-it live.
+A third restriction is about *ordering* rather than row bytes: the session's shape
+must already be **learned**, so the unlearned two-layout fallback
+`decodeOERFixedFieldsAt` offers is not available here. `handleOERStatus` runs the
+status reading before `decodeErrorOER`, so on a session that had not yet learned
+its encoding, a bit-less *error* OER satisfying one of the two layouts' anchors
+could be completed as a status and lose its ORA text. It costs nothing —
+`readUpstreamAuthMessages` learns the shape off the AUTH exchange, before any
+statement runs, and every standalone status OER in both recordings arrives with it
+already learned.
+
+##### What is still NULL: an OCI DML's `rows_affected`
+
+**This is not fixed, and a green nightly does not mean otherwise.** An OCI DML's
+`rows_affected` is still NULL, and the reason is a **third** fixed-width layout,
+not the standalone status reading above.
+
+A DML's summary object does not arrive standalone. In
+`sqlplus_midfetch_fail.pcapng` the whole `DROP` / `CREATE` / `INSERT ... SELECT` /
+`COMMIT` sequence is answered by func `0x08` Responses — `ociStatusDumps()` pins
+that recording at exactly **one** standalone status OER, the login probe — so a
+DML's row count is `handleResponse`'s business. And there, packet #31 (the
+`INSERT ... SELECT` of 20 000 rows) carries a **populated logical-rowid DLC** that
+displaces the trailing RetCode, so `decodeOERFixedFieldsAt`'s anchor refuses it at
+both known layouts (`oerFixed32Layout` and `oerFixed64Layout`) and the fall-through
+reaches the legacy `decodeTTCResponse`, which misreads v315+ responses. The INSERT
+is therefore completed by the *next* statement's flush, with `rows_affected` NULL
+— the same symptom the status reading removed for SELECTs, one path over.
+
+That is **out of the scope** of this section's change, and it has no spec file: it
+is tracked by a waiting test instead.
+`TestIntegration_DMLRowCountLandsFromItsOwnOEROCI` is the assertion, **gated off by
+default** (`ORACLE_TEST_OCI_DML_ROWCOUNT=1` runs it) precisely so a real
+out-of-scope gap does not become a red nightly with no owner. Un-gating it means
+teaching `decodeOERFixedFieldsAt` — or `oerFixedWidthTailFieldsAt`, which walks the
+same prefix, and whose `skipOERFixedFields` is where the walk bails today — the
+layout in which the rowid DLC is populated, so packet #31 decodes and its
+`CurRowNumber` of 20 000 is readable. The live test that *is* expected to pass is
+`TestIntegration_SuccessfulSelectCompletesOnItsOwnOEROCI`, which asserts the
+observable this change delivers: a sqlplus `SELECT`'s `duration_ms` must not
+include the `HOST sleep` that follows it.
 
 ##### A failure raised mid-fetch
 
@@ -1923,7 +1953,7 @@ is the naming rule: server names are slugs
 - **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the two re-execution frames that are real (the SQL-less `OALL8` and the `03/0x4e|0x04` piggyback) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
-- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. That now includes a failure raised **mid-fetch**, once column definitions are decoded — measured at 14 900 rows into a 20 000-row fetch on **four** clients, and accepted there only when the OER also names the cursor whose rows are streaming; see "A failure raised mid-fetch". "Every client" includes the OCI ones (sqlplus, Instant Client, SQL*Developer over OCI) only since `decodeOERFieldsAtLayout`: they marshal the summary object fixed-width, dbbat read TTC compressed integers only, and until then *every* failing statement on those clients — mid-fetch or not — was recorded as a success. A **successful** OCI call is a separate reading again, added later still (`decodeFixedStatusOERAt`): the standalone summary object that ends every OCI fetch reports ORA-01403 with a bare `CallStatus 0x1`, so until it was read, an OCI statement was completed by the *next* one's `flushPendingQuery` — no `rows_affected`, and a `duration_ms` measuring the client's think time. See "a successful call on an OCI client" for the predicate and its measured bounds. What is still not covered is a mid-fetch failure whose OER names a *different* cursor (none has been observed; it fails closed to the old no-error behaviour and logs a DEBUG line), any mid-fetch failure on a client not captured, and an OCI DML whose summary object is *embedded in a Response* with a populated rowid block — a third fixed-width layout the RetCode anchor refuses, measured on `sqlplus_midfetch_fail.pcapng` packet #31. See `ttc_oer.go`.
+- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. That now includes a failure raised **mid-fetch**, once column definitions are decoded — measured at 14 900 rows into a 20 000-row fetch on **four** clients, and accepted there only when the OER also names the cursor whose rows are streaming; see "A failure raised mid-fetch". "Every client" includes the OCI ones (sqlplus, Instant Client, SQL*Developer over OCI) only since `decodeOERFieldsAtLayout`: they marshal the summary object fixed-width, dbbat read TTC compressed integers only, and until then *every* failing statement on those clients — mid-fetch or not — was recorded as a success. A **successful** OCI call is a separate reading again, added later still (`decodeFixedStatusOERAt`): the standalone summary object that ends every OCI fetch reports ORA-01403 with a bare `CallStatus 0x1`, so until it was read, an OCI statement was completed by the *next* one's `flushPendingQuery` — no `rows_affected`, and a `duration_ms` measuring the client's think time. See "a successful call on an OCI client" for the predicate and its measured bounds. What is still not covered is a mid-fetch failure whose OER names a *different* cursor (none has been observed; it fails closed to the old no-error behaviour and logs a DEBUG line), any mid-fetch failure on a client not captured, and — the one to know about — **an OCI DML's `rows_affected`, which is still NULL**: its summary object is *embedded in a Response* with a populated logical-rowid DLC, a third fixed-width layout the RetCode anchor refuses (`sqlplus_midfetch_fail.pcapng` packet #31), so the statement is closed by the next one's flush. That is out of scope of the status reading above and tracked by the gated `TestIntegration_DMLRowCountLandsFromItsOwnOEROCI`; see "What is still NULL: an OCI DML's `rows_affected`". See `ttc_oer.go`.
 - **Bind values (parameterized queries)**: Bind values are captured from both the legacy `OALL8` execute path (`decodeBindValues`) and the v315+ **piggyback exec** path that modern clients use (`extractPiggybackBinds`, func `0x03` sub `0x5e`). The piggyback binds sit length-prefixed at the tail of the message; they're located as the suffix that parses as exactly as many values as there are distinct bind placeholders in the SQL, and each is decoded by content via `decodeOracleRawValue` (so a NUMBER bind like `42` renders as `42`, not hex). Verified against `testdata/go_ora_binds.pcapng` (`TestDumpReplay_Binds`). Captured binds are now persisted to `queries.parameters` (`formatOracleBinds` wired into `persistQueryRecord` and `completeQuery`), so the API (`GET /api/v1/queries/:uid`) and the UI Parameters card report them. Not yet handled: binds over ~253 bytes (extended length encoding) and full type-aware decoding from the bind-definition records.
 - **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results, verified end-to-end against `testdata/go_ora_temporal.pcapng` (`TestDumpReplay_Temporal`). The tz form renders the local wall clock plus its numeric offset, honouring byte 11's `0x40` "time in zone" flag (prefix stored as local vs UTC). Named-region time zones fall back to the stored wall clock without an offset suffix.
 - **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.pcapng`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.

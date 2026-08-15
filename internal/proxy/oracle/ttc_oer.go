@@ -128,8 +128,19 @@ func decodeCompressedEndOfCallOERAt(payload []byte, offset int) *oerInfo {
 //     genuine mid-fetch ORA-01722 failures, and a status predicate accepts none
 //     of them — but the object above demonstrably travels inside the stream, so
 //     a packet boundary is all that separates it from byte 0.
+//
+// A third restriction is about *ordering* rather than row bytes: the shape must be
+// **learned**, so the unlearned two-layout fallback decodeOERFixedFieldsAt offers
+// is not available here. handleOERStatus runs this reading before decodeErrorOER,
+// and a status accepted early is a diagnostic never proven — so on a session that
+// has not yet learned its encoding, a bit-less *error* OER that happened to
+// satisfy one of the two layouts' anchors could be completed as a status, losing
+// its ORA text. It costs nothing: readUpstreamAuthMessages learns the shape off
+// the AUTH exchange, long before any statement runs, and in both OCI recordings
+// every standalone status OER arrives with the shape already learned
+// (TestDecodeFixedStatusOERAt_KeepsItsAnchors pins the refusal).
 func decodeFixedStatusOERAt(shape oerShape, payload []byte, offset int) *oerInfo {
-	if offset != 0 {
+	if offset != 0 || !shape.tailLearned || !shape.fixedWidth {
 		return nil
 	}
 
