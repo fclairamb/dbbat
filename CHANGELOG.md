@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.25.0](https://github.com/fclairamb/dbbat/compare/v0.24.0...v0.25.0) (2026-08-15)
+
+
+Everything below landed as one squashed batch ([#320](https://github.com/fclairamb/dbbat/issues/320)) ([fab64ac](https://github.com/fclairamb/dbbat/commit/fab64acea9c390dc30a1387ac1355eba3b625fbe)).
+
+### ⚠ BREAKING CHANGES
+
+* **api:** the pre-rename `group_uids` / `approver_group_uids` input shims are retired. Send `user_group_uids` / `approver_user_group_uids`; the old spellings are refused with a 400 naming their replacement rather than silently ignored, because dropping a scope restriction on the floor would fail open.
+* **api:** `legacy_stamps` is gone from `GET /audit/verify/queries`.
+* **store:** a pre-0.24 unkeyed query-chain head stamp is now reported as a **break**, not a weaker pass, with no opt-out on either the CLI or the REST surface. Only a store written by a pre-0.24 development build can hold one, and such a store stays unverifiable by design: tolerating it was a standing downgrade path, since replacing a sealed stamp with a raw head MAC needs no key.
+
+### Features
+
+* **proxy:** reach databases inside a Kubernetes cluster through a `pods/portforward` tunnel, with the API server's CA captured and pinned on first connect, a changed CA reported by the connectivity check, and cluster rows surfaced in the API and UI.
+* **auth:** a generic OIDC SSO provider — any issuer, verified ID tokens, PKCE — with dbbat roles resolved from the directory's groups claim on *every* login, per-provider auto-provisioning, and Entra's groups-overage claim detected and treated as *unknown* rather than empty so a login can never silently strip roles.
+* **grants:** grant definitions scope on **server groups** instead of enumerating databases, and grants bind to the group that covers the target. Membership resolves live, so adding a server to a group widens every grant bound to it with no edit — and, because definitions are immutably versioned, no new definition version. One quota budget is shared across the whole group.
+* **api:** access approvers and query approvers live on servers and server groups, resolved through a single fallback chain, so someone other than an admin can decide grant requests and release approval holds. Each pending item reports which hat the caller wears.
+* **api:** a governed MCP endpoint for AI agents that executes statements by dialing dbbat's *own* proxy listener over loopback — never a parallel internal path — so grants, quotas, logging and approval holds apply unchanged across all five protocols.
+* **store:** captured result rows are HMAC-chained, one chain per capture, sealed at the flush barrier; open sessions get their chain stamp swept forward and a crash orphan is sealed by the reconcile. Verification is exposed over the REST API alongside the audit and query chains.
+* **oracle:** the synthetic AUTH fallback now covers wide/OCI clients, the fixed-width OCI summary object is read as well as written, and service names claimed by two upstream spellings are detected and flagged.
+* **ui:** server groups, Kubernetes clusters, per-provider login buttons, directory-managed role badges, server rename, audit-chain verification, Oracle-capability on API keys, and a request dialog narrowed to what the requester can actually ask for.
+* **deploy:** the `demo.dbbat.com` deployment is reproducible from `charts/dbbat` with a committed values file — extra ingresses, the Traefik redirect middleware, and a `GOMEMLIMIT` ceiling included.
+
+### Bug Fixes
+
+* **security (postgresql, mysql, mongodb):** cap length-prefixed reads *before* they size an allocation on the unauthenticated path. A PostgreSQL startup packet declaring `0xffffffff` asked the runtime for ~4 GiB from four bytes on a listener open to the internet — an instant OOM from a single connection that never authenticates. MySQL and MongoDB carried the same shape as amplification (16 MiB per connection from a 4-byte header; 48 MB pre-sized from a 16-byte header). SQL Server and Oracle are bounded by field width and now have tests pinning that.
+* **proxy:** close several cross-protocol ways a statement could leave its granted database — a text `USE`, a `USE` hidden in `PREPARE ... FROM '<literal>'`, `EXEC('...')` and `sp_executesql` dynamic SQL, and a MongoDB `$out`/`$merge` target — plus `read_only` and `block_ddl` now reaching inside dynamic SQL, and validators matching a comment-stripped copy so an executable comment cannot smuggle one past.
+* **proxy:** every detached store write and session goroutine on all five protocols is panic-guarded, and a recovered watchdog panic ends the session instead of quietly killing one goroutine.
+* **store:** grant windows and short-lived TTLs are stamped from the database clock rather than the process clock, a chain append retries when a peer replica moves the cached head, and a later writer can never lower a chain stamp.
+* **grants:** a group-bound grant covers its group, not its group *plus* its anchor database.
+* **ui:** the create dialogs on the servers and API-keys pages render only while open. A closed Radix dialog keeps its full-viewport overlay in the DOM through its exit animation, so a second click landed on the dying overlay and toggled the dialog back shut — and, left mounted, the form reopened pre-filled with the previously created server's credentials, password included.
+* **mongodb:** legacy wire opcodes are refused after authentication, and relay teardown no longer races the peer pump.
+
 ## [0.24.0](https://github.com/fclairamb/dbbat/compare/v0.23.2...v0.24.0) (2026-08-14)
 
 
