@@ -307,6 +307,29 @@ func (s *Server) writeCreateServerError(c *gin.Context, err error) {
 	}
 }
 
+// writeUpdateServerError maps an UpdateServer store error to the appropriate
+// HTTP status/error code, falling back to a generic 500. The create path's twin
+// is writeCreateServerError; the two agree on the name errors deliberately —
+// a rename is validated exactly like a creation.
+func (s *Server) writeUpdateServerError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, store.ErrTargetMatchesStorage):
+		writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
+	case errors.Is(err, store.ErrServerNotFound):
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
+	case errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle):
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+	case errors.Is(err, store.ErrServerNameInvalid):
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+	// servers_name_key spans soft-deleted rows, so the name of a deleted server
+	// is still taken — a 409 naming the reason, never a 500.
+	case errors.Is(err, store.ErrServerNameConflict):
+		writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+	default:
+		writeInternalError(c, s.logger, err, "failed to update database")
+	}
+}
+
 // handleListDatabases lists databases based on user role.
 // Admins receive all databases (including non-listable) with full details.
 // All other authenticated users receive only listable databases with limited details.
@@ -518,29 +541,8 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	}
 
 	if err := s.store.UpdateServer(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
-		if errors.Is(err, store.ErrTargetMatchesStorage) {
-			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
-			return
-		}
-		if errors.Is(err, store.ErrServerNotFound) {
-			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
-			return
-		}
-		if errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle) {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
-			return
-		}
-		if errors.Is(err, store.ErrServerNameInvalid) {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
-			return
-		}
-		// servers_name_key spans soft-deleted rows, so the name of a deleted
-		// server is still taken — a 409 with the reason, never a 500.
-		if errors.Is(err, store.ErrServerNameConflict) {
-			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
-			return
-		}
-		writeInternalError(c, s.logger, err, "failed to update database")
+		s.writeUpdateServerError(c, err)
+
 		return
 	}
 

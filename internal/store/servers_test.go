@@ -1030,15 +1030,14 @@ func TestUpdateServer_RenameInvalidName(t *testing.T) {
 		{"too long", strings.Repeat("a", 64)},
 	}
 
+	// Sequential rather than parallel subtests: the row is asserted unchanged
+	// once every attempt has been made, and a parallel subtest would not have
+	// run yet at that point.
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := store.UpdateServer(ctx, created.UID, ServerUpdate{Name: &tc.srvName}, key)
-			if !errors.Is(err, ErrServerNameInvalid) {
-				t.Fatalf("UpdateServer(rename to %q) error = %v, want ErrServerNameInvalid", tc.srvName, err)
-			}
-		})
+		srvName := tc.srvName
+		if err := store.UpdateServer(ctx, created.UID, ServerUpdate{Name: &srvName}, key); !errors.Is(err, ErrServerNameInvalid) {
+			t.Fatalf("UpdateServer(%s: rename to %q) error = %v, want ErrServerNameInvalid", tc.name, srvName, err)
+		}
 	}
 
 	// The rejected renames must not have touched the row.
@@ -1091,14 +1090,13 @@ func TestUpdateServer_RenameConflict(t *testing.T) {
 		t.Fatalf("DeleteServer() error = %v", err)
 	}
 
+	// Sequential rather than subtests: the row is asserted unchanged afterwards,
+	// which only holds if every attempt has already been made.
 	for _, taken := range []string{"rename_taken_live", "rename_taken_deleted"} {
 		name := taken
-		t.Run(name, func(t *testing.T) {
-			err := store.UpdateServer(ctx, subject.UID, ServerUpdate{Name: &name}, key)
-			if !errors.Is(err, ErrServerNameConflict) {
-				t.Fatalf("UpdateServer(rename to %q) error = %v, want ErrServerNameConflict", name, err)
-			}
-		})
+		if err := store.UpdateServer(ctx, subject.UID, ServerUpdate{Name: &name}, key); !errors.Is(err, ErrServerNameConflict) {
+			t.Fatalf("UpdateServer(rename to %q) error = %v, want ErrServerNameConflict", name, err)
+		}
 	}
 
 	reloaded, err := store.GetServerByUID(ctx, subject.UID)

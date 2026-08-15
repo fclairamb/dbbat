@@ -100,7 +100,7 @@ func TestUpdateServerRenameLeavesOtherFieldsAlone(t *testing.T) {
 	require.Equal(t, 200, w.Code, w.Body.String())
 	assert.Equal(t, "rename_only_now", data["name"])
 	assert.Equal(t, "127.0.0.1", data["host"])
-	assert.Equal(t, float64(5432), data["port"])
+	assert.InDelta(t, 5432, data["port"], 0)
 	assert.Equal(t, "prod", data["database_name"])
 	assert.Equal(t, "pg", data["username"])
 }
@@ -114,15 +114,14 @@ func TestUpdateServerRenameRejectsNonSlug(t *testing.T) {
 	router, token, _ := renameTestAdmin(t)
 	uid := createRenameServer(t, router, token, "slug_gate")
 
+	// Sequential rather than subtests: each attempt is asserted not to have
+	// touched the row, which only means anything before the next one runs.
 	for _, bad := range []string{"my-server", "MyServer", "abyla_abypocs (R/O)", "my.server"} {
-		name := bad
-		t.Run(name, func(t *testing.T) {
-			w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
-				"name": name,
-			})
-			require.Equal(t, 400, w.Code, w.Body.String())
-			assert.Contains(t, w.Body.String(), "slug")
+		w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+			"name": bad,
 		})
+		require.Equal(t, 400, w.Code, "rename to %q: %s", bad, w.Body.String())
+		assert.Contains(t, w.Body.String(), "slug", "rename to %q", bad)
 	}
 
 	w, data := doJSON(t, router, "GET", "/api/v1/servers/"+uid, token, nil)
@@ -147,14 +146,11 @@ func TestUpdateServerRenameConflictIsA409(t *testing.T) {
 	require.Equal(t, 200, w.Code, w.Body.String())
 
 	for _, taken := range []string{"conflict_live", "conflict_deleted"} {
-		name := taken
-		t.Run(name, func(t *testing.T) {
-			w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
-				"name": name,
-			})
-			require.Equal(t, 409, w.Code, w.Body.String())
-			assert.Contains(t, w.Body.String(), "already exists")
+		w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+			"name": taken,
 		})
+		require.Equal(t, 409, w.Code, "rename to %q: %s", taken, w.Body.String())
+		assert.Contains(t, w.Body.String(), "already exists", "rename to %q", taken)
 	}
 
 	w, data := doJSON(t, router, "GET", "/api/v1/servers/"+uid, token, nil)
