@@ -1,0 +1,150 @@
+# =============================================================================
+# demo.dbbat.com — the public demo deployment
+# =============================================================================
+# The live objects of the public demo, as a values file for this chart. Deployed
+# with:
+#
+#   helm upgrade --install dbbat charts/dbbat \
+#     -f charts/dbbat/values-demo.yaml \
+#     -n dbbat --kube-context k8xp
+#
+# See docs/demo-deployment.md for the full procedure, the secret it expects, and
+# how the image tag is bumped.
+#
+# The demo runs on the k8xp k3s cluster, namespace `dbbat`. It is a *demo*:
+# `DBB_RUN_MODE=demo` drops every table on startup and reseeds sample data, so
+# this file must never be pointed at a store holding anything real.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/fclairamb/dbbat
+  pullPolicy: IfNotPresent
+  # Bumped by hand — the demo does not auto-follow releases. See
+  # docs/demo-deployment.md.
+  tag: "0.22.0"
+
+# Object names are pinned rather than derived from the release name, so the
+# rendered names match the ones the cluster (and its DNS/TLS secrets) already use.
+fullnameOverride: dbbat
+
+# =============================================================================
+# Secrets — referenced, never templated
+# =============================================================================
+# `dbbat-secret` is created out of band and holds `dsn`, `encryption-key` and
+# `demo-target-db`. Nothing in this repository carries its contents.
+secrets:
+  existingSecret: dbbat-secret
+  keys:
+    encryptionKey: encryption-key
+    dsn: dsn
+
+config:
+  runMode: "demo"
+  listenApi: ":8080"
+  # 5434, not the chart default 5433: it is what the live deployment listens on
+  # and what the LoadBalancer below publishes.
+  listenPg: ":5434"
+  baseUrl: "/app"
+
+# DBB_DEMO_TARGET_DB is the demo's sample upstream; it lives in the same
+# out-of-band secret.
+extraEnv:
+  - name: DBB_DEMO_TARGET_DB
+    valueFrom:
+      secretKeyRef:
+        name: dbbat-secret
+        key: demo-target-db
+
+# =============================================================================
+# Resources
+# =============================================================================
+# 1Gi (up from 512Mi) after the OOM investigation in
+# specs/done/2026/08/2026-08-14-01-demo-pod-oom-root-cause.md.
+resources:
+  limits:
+    cpu: 500m
+    memory: 1Gi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+# Sized against the 1Gi limit above, NOT the chart's 256Mi default — inheriting
+# the chart's 192MiB default here would cut the demo's ceiling by four. Keep the
+# two in step by hand whenever the limit moves.
+goMemLimit: "768MiB"
+
+# =============================================================================
+# Services
+# =============================================================================
+service:
+  api:
+    type: ClusterIP
+    port: 8080
+  proxy:
+    enabled: true
+    # -> service `dbbat-pg`
+    nameSuffix: pg
+    type: LoadBalancer
+    port: 5434
+    # k3s on bare metal: the proxy is published on the node's public IP.
+    externalIPs:
+      - 193.70.42.217
+
+# =============================================================================
+# Ingress
+# =============================================================================
+# HTTPS for demo.dbbat.com, certificate issued by cert-manager.
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+  hosts:
+    - host: demo.dbbat.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: dbbat-tls
+      hosts:
+        - demo.dbbat.com
+
+extraIngresses:
+  # Plain HTTP for demo.dbbat.com. Without it Traefik has no router on the `web`
+  # entrypoint for this host and answers a bare `http://demo.dbbat.com` with its
+  # default 404 — which is exactly what the site did from 2026-01-11 to
+  # 2026-08-14. It serves nothing itself: the middleware below redirects to HTTPS.
+  - nameSuffix: http
+    className: traefik
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: web
+      # <namespace>-<middleware name>@kubernetescrd
+      traefik.ingress.kubernetes.io/router.middlewares: dbbat-redirect-https@kubernetescrd
+    hosts:
+      - host: demo.dbbat.com
+        paths:
+          - path: /
+            pathType: Prefix
+  # Second hostname on the cluster's own domain, HTTPS only.
+  - nameSuffix: k8xp
+    className: traefik
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    hosts:
+      - host: dbbat.k8xp.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: dbbat-k8xp-tls
+        hosts:
+          - dbbat.k8xp.com
+
+traefik:
+  redirectHttpsMiddleware:
+    enabled: true
+    name: redirect-https
+    permanent: true
