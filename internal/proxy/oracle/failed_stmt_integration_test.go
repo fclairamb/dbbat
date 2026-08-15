@@ -388,3 +388,151 @@ func TestIntegration_FailingStatementsRecordTheirORAErrorOCI(t *testing.T) {
 		})
 	}
 }
+
+// The *successful* OCI call, live — the other half of the standalone summary
+// object, and the one that stayed broken a release longer than the failures did.
+//
+// An OCI client ends a call with a fixed-width summary object that carries no
+// end-of-call bit (measured: CallStatus 0x1 on every standalone one in
+// testdata/), and decodeOERAt demanded the bit. So a successful statement was
+// completed by the *next* statement's flushPendingQuery, which knows nothing
+// about it: no rows_affected, and a duration_ms measuring however long the client
+// sat idle in between. See decodeFixedStatusOERAt and
+// standalone_status_oer_replay_test.go, which pin both halves off the recordings.
+//
+// This is the live version. Both observables are asserted on one statement,
+// which is what makes the script's `HOST sleep` load-bearing rather than
+// decoration: the gap sits between the UPDATE and the COMMIT, so a statement
+// still pending when the COMMIT arrives is charged the whole of it. If HOST is
+// unavailable the duration assertion simply stops being able to fail — it never
+// turns into a false one.
+//
+// One measured caveat, because it is what this test is most likely to catch. The
+// only OCI DML in testdata/ (the INSERT ... SELECT of
+// sqlplus_midfetch_fail.pcapng, packet #31) has its summary object *embedded in a
+// Response* rather than standalone, and that object is refused by
+// decodeOERFixedFieldsAt's RetCode anchor — its populated rowid block puts the
+// RetCode somewhere oerFixed32Layout does not look. If this test fails on
+// rows_affected, that third layout is the gap, not the status reading added here:
+// the statement will have been completed by the COMMIT's flush, and duration_ms
+// will show it.
+const ociDMLScript = `SET PAGESIZE 0
+SET FEEDBACK OFF
+SELECT 'oci-dml-ready=' || 1 FROM dual;
+UPDATE dbbat_dml_oci SET n = n + 1;
+HOST sleep 4
+COMMIT;
+SELECT 'oci-dml-done=' || 42 FROM dual;
+EXIT
+`
+
+// The table the DML above runs against, and the statement text sqlplus puts on
+// the wire for it — without the trailing semicolon, exactly as
+// ociFailedStatements spells its own.
+const (
+	ociDMLCreate = "CREATE TABLE dbbat_dml_oci (id NUMBER PRIMARY KEY, n NUMBER)"
+	ociDMLDrop   = "DROP TABLE dbbat_dml_oci"
+	ociDMLUpdate = "UPDATE dbbat_dml_oci SET n = n + 1"
+
+	// ociDMLRows is how many rows the UPDATE must report having touched. Seeded
+	// through the fixture's own go-ora connection, so nothing in the sqlplus
+	// script has to succeed for the count to be what it is.
+	ociDMLRows = 7
+
+	// ociDMLIdle is the `HOST sleep` in the script, in milliseconds. A statement
+	// completed by its own OER cannot be charged it.
+	ociDMLIdle = 4000
+)
+
+// TestIntegration_SuccessfulStatementCompletesOnItsOwnOEROCI drives a DML through
+// sqlplus and requires the query row to carry the count the server reported and a
+// duration that stops at the OER.
+func TestIntegration_SuccessfulStatementCompletesOnItsOwnOEROCI(t *testing.T) {
+	ociAuthModeNote(t)
+
+	env := startOracleThroughProxyForOCI(t, nil)
+	oci := requireOCIClient(t, env)
+
+	ctx := context.Background()
+
+	_, _ = env.db.ExecContext(ctx, ociDMLDrop) // ORA-00942 on a clean database
+
+	_, err := env.db.ExecContext(ctx, ociDMLCreate)
+	require.NoError(t, err)
+
+	defer func() { _, _ = env.db.ExecContext(context.Background(), ociDMLDrop) }()
+
+	for i := 1; i <= ociDMLRows; i++ {
+		_, err = env.db.ExecContext(ctx,
+			fmt.Sprintf("INSERT INTO dbbat_dml_oci VALUES (%d, %d)", i, i))
+		require.NoError(t, err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, failingStatementDeadline+ociDMLIdle*time.Millisecond)
+	defer cancel()
+
+	output, err := oci.run(t, runCtx, ociDMLScript)
+	require.NoErrorf(t, err, "%s never came back:\n%s", oci.label, output)
+
+	assertNoOCIAuthMalformation(t, output)
+
+	assert.Contains(t, output, "oci-dml-ready=1", "the OCI session must work before the DML:\n%s", output)
+	assert.Contains(t, output, "oci-dml-done=42", "and must outlive it:\n%s", output)
+
+	env.assertSucceededQueryLogged(t, ociDMLUpdate, ociDMLRows, ociDMLIdle)
+}
+
+// assertSucceededQueryLogged is the positive counterpart of
+// assertFailedQueryLogged: the statement is in `queries` with no error, with the
+// row count the server reported, and with a duration that ends where the call
+// did rather than where the client's next statement began.
+func (e *oracleThroughProxy) assertSucceededQueryLogged(
+	t *testing.T,
+	wantSQL string,
+	wantRows int64,
+	maxDurationMs float64,
+) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	var match *store.Query
+
+	require.Eventuallyf(t, func() bool {
+		queries, err := e.store.ListQueries(ctx, store.QueryFilter{Limit: 500})
+		if err != nil {
+			return false
+		}
+
+		match = nil
+
+		for i := range queries {
+			if queries[i].SQLText == wantSQL {
+				match = &queries[i]
+			}
+		}
+
+		return match != nil && match.DurationMs != nil
+	}, failingStatementDeadline, 250*time.Millisecond,
+		"the statement %q was never logged as complete", wantSQL)
+
+	assert.Nilf(t, match.Error, "%q succeeded; queries.error must be empty", wantSQL)
+
+	require.NotNilf(t, match.RowsAffected,
+		"%q must carry the row count its own OER reported — a NULL here means the statement was "+
+			"closed by the next one's flushPendingQuery instead", wantSQL)
+	assert.Equal(t, wantRows, *match.RowsAffected)
+
+	require.NotNil(t, match.DurationMs)
+	assert.Lessf(t, *match.DurationMs, maxDurationMs,
+		"%q was logged at %.0fms: a statement completed by its own OER cannot be charged the idle "+
+			"time that follows it", wantSQL, *match.DurationMs)
+
+	conn, err := e.store.GetConnectionByUID(ctx, match.ConnectionID)
+	require.NoError(t, err)
+	assert.Equal(t, e.user.UID, conn.UserID, "a success row joins to its user like any other query")
+
+	result, err := e.store.VerifyQueryChain(ctx, match.ConnectionID)
+	require.NoError(t, err)
+	assert.Nil(t, result.Break, "a success row must be a valid link in the connection's query chain")
+}
