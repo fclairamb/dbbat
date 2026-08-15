@@ -12,7 +12,9 @@ import (
 // length, sequence id, payload.
 func mysqlPacket(seq byte, payload []byte) []byte {
 	n := len(payload)
-	out := []byte{byte(n), byte(n >> 8), byte(n >> 16), seq}
+
+	out := make([]byte, 0, mysqlPacketHeaderLen+n)
+	out = append(out, byte(n), byte(n>>8), byte(n>>16), seq)
 
 	return append(out, payload...)
 }

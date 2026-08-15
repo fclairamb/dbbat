@@ -91,7 +91,8 @@ func TestReadExtendedConnectData_LengthIsStructurallyBounded(t *testing.T) {
 	payload[18] = 0xff
 	payload[19] = 0xff
 
-	raw := []byte{0x00, byte(tnsHeaderSize + len(payload)), 0x00, 0x00, byte(TNSPacketTypeConnect), 0, 0, 0}
+	raw := make([]byte, 0, tnsHeaderSize+len(payload)+2)
+	raw = append(raw, 0x00, byte(tnsHeaderSize+len(payload)), 0x00, 0x00, byte(TNSPacketTypeConnect), 0, 0, 0)
 	raw = append(raw, payload...)
 	// The extended-data size prefix, at its uint16 maximum.
 	raw = append(raw, 0xff, 0xff)
