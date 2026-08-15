@@ -72,3 +72,48 @@ The seeding path must produce a `connection.closed` audit entry whose
 timestamp matches the back-dated session, so the demo's audit trail is
 self-consistent. Do not skip the entry — its absence is the other half of the
 current inconsistency.
+
+## Implementation Plan
+
+1. **`internal/store/connections.go`** — extract the body of `CloseConnection`
+   into an unexported `closeConnection(ctx, uid, closedAt time.Time) error`
+   that takes the close instant as a parameter instead of calling
+   `time.Now()` internally. `CloseConnection` becomes a one-line wrapper
+   (`closeConnection(ctx, uid, time.Now())`). Add an exported
+   `CloseConnectionAt(ctx, uid uuid.UUID, closedAt time.Time) error` — the same
+   wrapper with the caller-supplied instant — for the demo seeder. Both share
+   the exact chain-sealing SQL and `recordConnectionClosed` call; no second MAC
+   implementation. `recordConnectionClosed`/`connectionClosedEvent` already
+   read `DisconnectedAt` off the row `RETURNING` gave back, so passing a
+   back-dated `closedAt` automatically makes the `connection.closed` audit
+   entry carry that same staged instant — satisfies the resolved open
+   question with no change to `connection_audit.go`.
+2. **`main.go` (`seedDemoHistory`)** — after the `CreateQuery` loop, call
+   `dataStore.CloseConnectionAt(ctx, conn.UID, disconnectedAt)` (the existing
+   `disconnectedAt := lastActivityAt.Add(time.Minute)` value) instead of
+   leaving the row open for the raw UPDATE to close. Then keep the raw UPDATE
+   for back-dating, but drop its `disconnected_at` `Set(...)` — the close call
+   already wrote the correct staged value onto the row and its audit entry;
+   overwriting it again afterward would race the two writes and could leave
+   the audit entry's timestamp (captured at close time) disagreeing with the
+   row (rewritten after). Keep `connected_at`, `last_activity_at`, `queries`,
+   `bytes_transferred` in the UPDATE — chain sealing does not depend on any of
+   those columns, so rewriting them post-seal is safe, per the spec's premise.
+   Check the `connection.opened` entry's `ConnectedAt`: `CreateConnection`
+   stamps it from `time.Now()` before the seeder back-dates the row, so the
+   open entry will carry wall-clock time while the row's `connected_at` is
+   back-dated — note this as a pre-existing, separate inconsistency (open
+   entry is not in this spec's stated scope, which is the chain break and the
+   *close* entry) rather than silently "fixing" it by guessing at an
+   unrequested API change to `CreateConnection`.
+3. **Tests** (`internal/store`) — add a store-level test seeding a connection
+   the same shape as `seedDemoHistory` (create → queries → `CloseConnectionAt`
+   with a back-dated instant → back-date the row) and assert:
+   - `VerifyQueryChain` reports no break (the core bug).
+   - the `connection.closed` audit entry's `DisconnectedAt` equals the staged
+     instant, not wall-clock.
+4. **Verification** — `go build ./...`, targeted `go test ./internal/store -run
+   ...`, then the full gate (`make build-binary`, `make lint`, `make test`).
+   Optionally a throwaway `DBB_RUN_MODE=demo` boot on scratch ports to visually
+   confirm `/app/audit`, per the spec — not required if the unit test covers
+   the same assertion.
