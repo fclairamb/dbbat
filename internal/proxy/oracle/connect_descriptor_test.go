@@ -166,3 +166,51 @@ func TestRewriteServiceName_PadsShorterName(t *testing.T) {
 	assert.Len(t, result.Payload, len(pkt.Payload))
 	assert.Len(t, result.Raw, len(pkt.Raw))
 }
+
+// TestParseServiceName_NamesEZConnectCannotExpress measures how far the full
+// connect descriptor goes as an escape hatch for a dbbat server name that
+// EZ-Connect cannot carry (`isEZConnectSafeName`, internal/api/connection_url.go,
+// rejects spaces and parentheses).
+//
+// The answer, pinned here rather than assumed:
+//
+//   - an **unquoted** name with spaces round-trips, so a descriptor is a real
+//     escape hatch for `my db`;
+//   - **quotes are not syntax** to this parser — they come back as part of the
+//     value, so `(SERVICE_NAME="my db")` looks up a name that literally starts
+//     with a quote and matches nothing;
+//   - **parentheses cannot be expressed at all**, quoted or not: the value
+//     regex stops at the first `)`, so ` (R/O)` is truncated mid-name. That is
+//     the incident's name, and it is why such a client falls through to the raw
+//     upstream service name and the shared-service candidate list.
+//
+// Fixing the last two means teaching rewriteServiceName the same quoting, since
+// it locates the value in the live packet by the parsed text; until then the
+// documented escape hatch is spaces-unquoted only (docs/oracle.md).
+func TestParseServiceName_NamesEZConnectCannotExpress(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		descriptor string
+		want       string
+	}{
+		"unquoted spaces round-trip": {
+			`(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=abyla mutu ro)))`, "abyla mutu ro",
+		},
+		"quotes are kept as part of the value": {
+			`(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME="abyla mutu ro")))`, `"abyla mutu ro"`,
+		},
+		"a parenthesis truncates the name": {
+			`(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=abyla_abymutualise02 (R/O))))`, "abyla_abymutualise02 (R/O",
+		},
+		"quoting does not rescue a parenthesis": {
+			`(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME="abyla_abymutualise02 (R/O)")))`, `"abyla_abymutualise02 (R/O`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, parseServiceName(tc.descriptor))
+		})
+	}
+}

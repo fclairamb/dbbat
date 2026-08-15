@@ -1619,6 +1619,66 @@ dbbat logical name in the EZ-Connect string whenever it is EZ-Connect-safe
 (letters, digits, `_`, `.`, `-`), falling back to the raw upstream service name
 for names containing spaces or parentheses.
 
+#### The upstream comparison is textual, and the conflict is reported instead
+
+The "all candidates must share the same upstream `host:port`" check compares the
+addresses **as strings**. A CNAME in one row and the A-record of the same machine
+in another therefore read as two upstreams, and the connect is refused ORA-12514
+even though every candidate points at one database. That happened in production:
+three rows carried `oracle_service_name = MUTU02` under
+`oracle-abymutualise02.db.stonal.io` and
+`abymutualise02.cusruf0cguz3.eu-west-3.rds.amazonaws.com`.
+
+The compare stays textual on purpose. Resolving each candidate's host would put
+a DNS lookup on the connect path and could answer differently between two
+connects of the same DSN, turning a deterministic refusal into an intermittent
+one. So the *misconfiguration* is surfaced rather than worked around:
+
+- `store.OracleServiceNameConflictFor` is the single definition of "these rows
+  disagree", shared by the proxy and by the two fleet queries
+  (`ListOracleServiceNameConflicts`, `GetOracleServiceNameConflict`) — a second,
+  SQL-shaped implementation would be exactly the drift that lets the UI call a
+  configuration healthy while the proxy refuses it;
+- the admin server listing, the per-row `GET /api/v1/databases/{uid}` and the
+  create response carry `oracle_service_name_conflict`, and the servers page
+  renders an amber marker on the service name naming every row and address
+  involved;
+- the connectivity check reports it as an advisory `warnings` entry
+  (`oracle_service_name_conflict`) — the check itself still passes, because the
+  row *is* reachable; what is unreachable is the shared service name;
+- the refusal names the service name, the number of claiming rows and the number
+  of upstreams, and logs the full conflict (row names included) at WARN. The row
+  names deliberately stay out of the wire message: `resolveDatabase` runs before
+  authentication, and the same reasoning that keeps ORA-01017 generic applies.
+
+Soft-deleted rows and non-Oracle rows never raise a conflict, and only the
+dedicated `oracle_service_name` column counts — never the database-name fallback
+`oracleServiceName` uses for probes — because that column is what the candidate
+lookup keys off.
+
+#### The full connect descriptor as an escape hatch: spaces yes, parentheses no
+
+When a dbbat server name is not EZ-Connect-safe, the connection endpoint falls
+back to the raw upstream service name, which is what lands a client in the
+shared-candidate path above. A client *can* sidestep EZ-Connect by sending a full
+connect descriptor, but only so far — measured in
+`TestParseServiceName_NamesEZConnectCannotExpress`:
+
+| Client sends | `parseConnectDescriptor` yields | Usable? |
+|---|---|---|
+| `(CONNECT_DATA=(SERVICE_NAME=abyla mutu ro))` | `abyla mutu ro` | **yes** — spaces round-trip |
+| `(CONNECT_DATA=(SERVICE_NAME="abyla mutu ro"))` | `"abyla mutu ro"` | no — the quotes stay in the value |
+| `(CONNECT_DATA=(SERVICE_NAME=abyla_x (R/O)))` | `abyla_x (R/O` | no — truncated at the first `)` |
+| `(CONNECT_DATA=(SERVICE_NAME="abyla_x (R/O)"))` | `"abyla_x (R/O` | no — quoting does not rescue it |
+
+So the descriptor is a genuine escape hatch for a name containing **spaces**, and
+nothing else: quotes are not syntax to this parser, and `serviceNameRe`'s value
+class (`[^)]+`) cannot carry a parenthesis at all. Teaching it to would also mean
+teaching `rewriteServiceName` the same quoting — it locates the value in the live
+packet from the parsed text — so it is not a parser-only change. The durable fix
+is the naming rule: server names are slugs
+(`specs/todos/2026-08-13-23-server-names-must-be-slugs.md`).
+
 ## Known Limitations
 
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
