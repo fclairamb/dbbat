@@ -94,6 +94,15 @@ function APIKeysPage() {
   const getUserName = (uid: string) =>
     users?.find((u) => u.uid === uid)?.username ?? uid;
 
+  // Only live keys are worth warning about: a revoked or expired key is already
+  // unusable for every protocol, so counting it here would just be noise.
+  const oracleUnsupportedCount = (keys ?? []).filter(
+    (k) =>
+      k.oracle_capable === false &&
+      !k.revoked_at &&
+      !(k.expires_at && new Date(k.expires_at) < new Date()),
+  ).length;
+
   const getStatus = (key: APIKey) => {
     if (key.revoked_at) return "revoked";
     if (key.expires_at && new Date(key.expires_at) < new Date())
@@ -137,6 +146,32 @@ function APIKeysPage() {
         };
         return <Badge variant={variants[status]}>{status}</Badge>;
       },
+    },
+    // Oracle login needs a verifier derived from the key when it was minted, and
+    // API keys are hashed, so it can never be added afterwards: a key created
+    // before Oracle support works everywhere except Oracle, where it fails as
+    // "invalid username/password". This column is the only place that says so.
+    // `undefined` means the server has no encryption key and cannot tell — shown
+    // as nothing rather than as a scary "No".
+    {
+      key: "oracle_capable",
+      header: "Oracle",
+      cell: (k) =>
+        k.oracle_capable === undefined ? (
+          <span className="text-muted-foreground">—</span>
+        ) : k.oracle_capable ? (
+          <Badge variant="outline" data-testid={`oracle-ok-${k.key_prefix}`}>
+            Ready
+          </Badge>
+        ) : (
+          <Badge
+            variant="secondary"
+            data-testid={`oracle-unsupported-${k.key_prefix}`}
+            title="This key predates Oracle support and cannot be used as an Oracle password. Create a new key to connect to Oracle databases."
+          >
+            Unsupported
+          </Badge>
+        ),
     },
     {
       key: "expires_at",
@@ -248,6 +283,23 @@ function APIKeysPage() {
           </div>
         }
       />
+
+      {oracleUnsupportedCount > 0 && (
+        <Alert data-testid="oracle-unsupported-alert">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>
+            {oracleUnsupportedCount === 1
+              ? "1 key cannot be used for Oracle"
+              : `${oracleUnsupportedCount} keys cannot be used for Oracle`}
+          </AlertTitle>
+          <AlertDescription>
+            Oracle login needs a verifier derived from the key when it is
+            created, and keys are stored hashed — so it cannot be added
+            afterwards. These keys keep working for the API and for PostgreSQL,
+            MySQL, MongoDB and SQL Server; for Oracle, create a new key.
+          </AlertDescription>
+        </Alert>
+      )}
 
       <DataTable
         columns={columns}

@@ -3290,6 +3290,8 @@ export interface components {
              * @description User who revoked the key
              */
             revoked_by?: string | null;
+            /** @description Whether this key can be used as the password for an Oracle (O5LOGON) login. Oracle authentication needs a verifier derived from the key at mint time — API keys are Argon2id-hashed, so it cannot be recovered later. A key minted before Oracle support, or one whose verifier no longer decrypts under the server's current encryption key, authenticates fine against this REST API and every other protocol but is refused by the Oracle proxy; minting a new key is the only fix. Omitted when the server has no encryption key and therefore cannot tell. */
+            oracle_capable?: boolean;
         };
         CreateAPIKeyRequest: {
             /** @description Key name */
