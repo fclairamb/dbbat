@@ -1360,9 +1360,14 @@ var errUnknownDemoUser = errors.New("demo history references an unknown user")
 // seedDemoHistory records demoSessions as closed connections carrying their
 // statements, all dated from the epoch.
 //
-// It writes the connection's timestamps and counters itself rather than going
-// through CreateConnection/CloseConnection: those stamp time.Now(), which is
-// the whole thing this seeding is trying to avoid.
+// It uses CreateConnection/CreateQuery/CloseConnectionAt to build the row and
+// seal its query chain exactly like a real session, then re-dates
+// connected_at/last_activity_at/queries/bytes_transferred with a raw UPDATE:
+// those four columns are deliberately unsealed (see docs/audit-chain.md), but
+// disconnected_at is not — it is written once, by CloseConnectionAt, with the
+// staged instant, so the seeded session's query chain verifies clean and its
+// connection.closed audit entry agrees with the row instead of reading
+// wall-clock time.
 func seedDemoHistory(
 	ctx context.Context,
 	dataStore *store.Store,
@@ -1405,13 +1410,28 @@ func seedDemoHistory(
 
 		// Closed a minute after the last statement: an idle session left open
 		// forever would show up as "active" on a demo nobody is connected to.
+		//
+		// Closed through CloseConnectionAt rather than a raw UPDATE, so the
+		// query chain gets sealed (query_chain_mac) like any real session
+		// close, and the connection.closed audit entry it writes carries this
+		// same staged instant instead of wall-clock time — see
+		// specs/todos/2026-08-15-03-demo-seed-unsealed-query-chain.md.
 		disconnectedAt := lastActivityAt.Add(time.Minute)
+		if err := dataStore.CloseConnectionAt(ctx, conn.UID, disconnectedAt); err != nil {
+			return fmt.Errorf("failed to close demo connection: %w", err)
+		}
+
+		// The close call already wrote the correct disconnected_at, both on
+		// the row and into the audit entry it built from the RETURNING row —
+		// so this back-dating pass must not touch that column again.
+		// connected_at/last_activity_at/queries/bytes_transferred are
+		// deliberately unsealed (see docs/audit-chain.md), so rewriting them
+		// after the seal is safe.
 		if _, err := dataStore.DB().NewUpdate().
 			Model((*store.Connection)(nil)).
 			Where("uid = ?", conn.UID).
 			Set("connected_at = ?", openedAt).
 			Set("last_activity_at = ?", lastActivityAt).
-			Set("disconnected_at = ?", disconnectedAt).
 			Set("queries = ?", len(session.queries)).
 			Set("bytes_transferred = ?", session.bytes).
 			Exec(ctx); err != nil {

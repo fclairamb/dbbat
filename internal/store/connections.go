@@ -89,13 +89,26 @@ func (s *Store) CreateConnection(
 // tail of a session could simply recopy it; sealing means correcting the stamp
 // after a deletion needs the chain key, exactly like forging a statement.
 func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
-	now := time.Now()
+	return s.closeConnection(ctx, uid, time.Now())
+}
 
+// CloseConnectionAt is CloseConnection with the close instant supplied by the
+// caller instead of taken from time.Now(). It exists for seeding a
+// back-dated demo/fixture session: the row's disconnected_at and the
+// connection.closed audit entry built from it must both carry the staged
+// historical instant, not wall-clock time, and this is the same
+// seal-from-stored-statements routine CloseConnection uses — never a second
+// MAC implementation.
+func (s *Store) CloseConnectionAt(ctx context.Context, uid uuid.UUID, closedAt time.Time) error {
+	return s.closeConnection(ctx, uid, closedAt)
+}
+
+func (s *Store) closeConnection(ctx context.Context, uid uuid.UUID, closedAt time.Time) error {
 	q := s.db.NewUpdate().
 		Model((*Connection)(nil)).
 		Where("uid = ?", uid).
 		Where("disconnected_at IS NULL").
-		Set("disconnected_at = ?", now)
+		Set("disconnected_at = ?", closedAt)
 
 	if s.ChainEnabled() {
 		seq, mac, err := s.queryChainHead(ctx, uid)
