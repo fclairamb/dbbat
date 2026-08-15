@@ -655,6 +655,47 @@ func TestQueryChainCloseConnectionAtSealsWithStagedTimestamp(t *testing.T) {
 		"the back-dating pass must leave disconnected_at exactly as the seal wrote it")
 }
 
+// TestQueryChainCreateConnectionAtStampsOpenedEvidenceWithStagedTimestamp is
+// the open-side twin of TestQueryChainCloseConnectionAtSealsWithStagedTimestamp:
+// seedDemoHistory (main.go) used to create each session through
+// CreateConnection (time.Now()) and then back-date connected_at with a raw
+// UPDATE, so the connection.opened evidence entry — built from the row at
+// insert time — disagreed with the row on connected_at. CreateConnectionAt
+// lets the caller supply the open instant directly, so the row and its
+// evidence entry agree by construction. See
+// specs/todos/2026-08-15-04-demo-seed-opened-entry-wallclock.md.
+func TestQueryChainCreateConnectionAtStampsOpenedEvidenceWithStagedTimestamp(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "seed_create_at")
+
+	before := time.Now()
+	staged := before.Add(-8 * 24 * time.Hour).Truncate(time.Microsecond)
+
+	conn, err := store.CreateConnectionAt(ctx, user.UID, database.UID, "10.0.0.1", staged)
+	require.NoError(t, err, "CreateConnectionAt()")
+
+	require.WithinDuration(t, staged, conn.ConnectedAt, time.Second,
+		"CreateConnectionAt must stamp the row with the caller's instant, not time.Now()")
+	require.True(t, conn.ConnectedAt.Before(before),
+		"a demo seed must be able to open in the past")
+
+	stored, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.WithinDuration(t, staged, stored.ConnectedAt, time.Second,
+		"the stored row must carry the staged instant")
+
+	// The connection.opened audit entry must agree with the row: the staged
+	// instant, not the time the call actually ran.
+	entries := sessionAuditEntries(t, ctx, store, AuditEventConnectionOpened, conn.UID)
+	require.Len(t, entries, 1)
+	require.Equal(t, auditTimestamp(staged), entries[0].ConnectedAt,
+		"the open entry must carry the staged instant, not wall-clock time")
+}
+
 func TestQueryChainDetectsTrailingDeletion(t *testing.T) {
 	t.Parallel()
 
