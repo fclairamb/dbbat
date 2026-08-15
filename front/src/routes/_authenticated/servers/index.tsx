@@ -568,7 +568,15 @@ function ServersPage() {
                 Add Server
               </PermissionButton>
             </DialogTrigger>
-            <CreateDatabaseDialog onClose={() => setIsCreateOpen(false)} />
+            {/* Mounted only while open, like the assign dialog on /grants.
+                Left mounted, the closed DialogContent keeps its form state —
+                reopening it after a create showed the previous server's host,
+                username and password — and its overlay stays in the DOM for the
+                whole fade-out, a `fixed inset-0 z-50` sheet that swallows a
+                click on this very trigger. */}
+            {isCreateOpen && (
+              <CreateDatabaseDialog onClose={() => setIsCreateOpen(false)} />
+            )}
           </Dialog>
         }
       />

@@ -341,6 +341,41 @@ test.describe("Servers Management", () => {
     }
   });
 
+  test("the create dialog reopens clean, with nothing left over from the last one", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const stamp = Date.now();
+    const name = `e2e_reopen_${stamp}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("reopen.example.com");
+    await authenticatedPage.locator("#databaseName").fill("postgres");
+    await authenticatedPage.locator("#username").fill("reopen_user");
+    await authenticatedPage.locator("#password").fill("reopen-secret");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+    await expect(
+      authenticatedPage.locator("tr", { hasText: name }).first()
+    ).toBeVisible({ timeout: 10000 });
+
+    // Reopening immediately is the interesting moment: while the dialog was
+    // left mounted, its overlay stayed in the DOM for the whole fade-out — a
+    // `fixed inset-0 z-50` sheet over the trigger — so this click could be
+    // swallowed and the retry would toggle the dialog straight back shut.
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await expect(authenticatedPage.getByTestId("protocol-select")).toBeVisible();
+
+    // And it comes back blank rather than pre-filled with the server just
+    // created, password included.
+    await expect(authenticatedPage.getByTestId("database-name-input")).toHaveValue("");
+    await expect(authenticatedPage.locator("#host")).toHaveValue("");
+    await expect(authenticatedPage.locator("#username")).toHaveValue("");
+    await expect(authenticatedPage.locator("#password")).toHaveValue("");
+  });
+
   test("a database row can be renamed, with the connection-target warning", async ({
     authenticatedPage,
   }) => {

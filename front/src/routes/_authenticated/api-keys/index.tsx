@@ -275,10 +275,16 @@ function APIKeysPage() {
                   Create Key
                 </PermissionButton>
               </DialogTrigger>
-              <CreateKeyDialog
-                onClose={() => setIsCreateOpen(false)}
-                onCreated={setNewKey}
-              />
+              {/* Same reason as /servers and /grants: a DialogContent left
+                  mounted keeps its form state across opens and holds its
+                  full-viewport overlay in the DOM for the whole fade-out,
+                  where it can swallow a click on this trigger. */}
+              {isCreateOpen && (
+                <CreateKeyDialog
+                  onClose={() => setIsCreateOpen(false)}
+                  onCreated={setNewKey}
+                />
+              )}
             </Dialog>
           </div>
         }
