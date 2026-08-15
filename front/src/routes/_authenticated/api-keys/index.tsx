@@ -500,7 +500,12 @@ function ShowKeyDialog({
           </div>
         </div>
         <DialogFooter>
-          <Button onClick={onClose}>Close</Button>
+          {/* Test id rather than the label: DialogContent ships its own corner
+              dismiss button whose accessible name is also "Close", so a
+              by-role lookup is ambiguous. */}
+          <Button data-testid="api-key-created-close" onClick={onClose}>
+            Close
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

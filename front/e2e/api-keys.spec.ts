@@ -14,7 +14,10 @@ test.describe("API keys — Oracle capability", () => {
   test("marks a key that cannot be used for Oracle", async ({
     authenticatedPage: page,
   }) => {
-    await page.goto("/api-keys");
+    // Relative, like every other spec: `baseURL` is `http://localhost:8080/app/`
+    // and a leading slash would drop the `/app/` base, landing on the Go
+    // server's own 404 instead of the SPA.
+    await page.goto("api-keys");
     await page.waitForLoadState("networkidle");
 
     // `dbb_legacy_admin_key` truncates to this prefix (first 8 chars), which is
@@ -38,7 +41,7 @@ test.describe("API keys — Oracle capability", () => {
   test("a freshly created key is Oracle-ready", async ({
     authenticatedPage: page,
   }) => {
-    await page.goto("/api-keys");
+    await page.goto("api-keys");
     await page.waitForLoadState("networkidle");
 
     await page.getByRole("button", { name: "Create Key" }).click();
@@ -46,7 +49,7 @@ test.describe("API keys — Oracle capability", () => {
     await page.getByRole("button", { name: "Create", exact: true }).click();
 
     // Close the "here is your key" dialog and read the row back off the list.
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByTestId("api-key-created-close").click();
     await page.waitForLoadState("networkidle");
 
     const row = page
