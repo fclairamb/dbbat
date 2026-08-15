@@ -277,6 +277,13 @@ A grant is scoped to a server row, and on MySQL that row's reach is whatever the
 **upstream credentials** can see; if that boundary matters, constrain the login
 dbbat connects with.
 
+One cross-protocol scope note, since the three protocol docs describe one
+behaviour and must agree: SQL Server's `EXEC(…) AT <linked_server>` routes a
+statement to another server entirely and is **out of scope and unenforced** (see
+docs/mssql.md). MySQL's nearest equivalent is a `FEDERATED` table, and it is the
+same limitation for the same reason — dbbat proxies one server row and cannot
+vouch for what another server runs.
+
 ## Database Model
 
 No new MySQL-specific columns. The existing `servers` table fields are sufficient:
