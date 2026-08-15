@@ -11,6 +11,7 @@ import {
   type ConnectionTestResult,
   type Database,
   type DatabaseLimited,
+  type OracleServiceNameConflict,
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -59,9 +60,15 @@ import {
   Pencil,
   ShieldCheck,
   AlertCircle,
+  AlertTriangle,
   PlugZap,
   Loader2,
 } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { CopyableField } from "@/components/shared/CopyableField";
 import { ApproverGroupPickers } from "@/components/shared/ApproverGroupPickers";
@@ -328,10 +335,23 @@ function ServersPage() {
       header: "Database",
       cell: (db) =>
         isFullDatabase(db) ? (
-          <span className="font-mono text-sm">
-            {db.protocol === "oracle"
-              ? db.oracle_service_name || db.database_name
-              : db.database_name}
+          <span className="inline-flex items-center gap-1.5">
+            <span className="font-mono text-sm">
+              {db.protocol === "oracle"
+                ? db.oracle_service_name || db.database_name
+                : db.database_name}
+            </span>
+            {/*
+              The conflict is a property of this very value — the shared Oracle
+              service name — so the warning belongs next to it rather than in a
+              column of its own.
+            */}
+            {db.oracle_service_name_conflict && (
+              <OracleServiceConflictWarning
+                uid={db.uid}
+                conflict={db.oracle_service_name_conflict}
+              />
+            )}
           </span>
         ) : (
           <span className="text-muted-foreground">-</span>
@@ -582,6 +602,58 @@ function describeTestResult(result: ConnectionTestResult): string {
   return stage ? `${stage}: ${result.message}` : (result.message ?? "");
 }
 
+// reportTestWarnings surfaces the advisory half of a check. It is reported
+// whether the check passed or failed: a warning is about how the row sits next
+// to its siblings, so a green check can perfectly well carry one.
+function reportTestWarnings(result: ConnectionTestResult) {
+  for (const warning of result.warnings ?? []) {
+    toast.warning(warning.message);
+  }
+}
+
+// OracleServiceConflictWarning marks an Oracle row whose upstream service name
+// is also claimed by rows pointing at a different host:port.
+//
+// The row itself is fine. What is broken is connecting with the *shared service
+// name* rather than the dbbat server name: the proxy compares candidate
+// upstreams as text, so a CNAME here and the A-record there read as two
+// machines and the connect is refused ORA-12514. Showing it here is what makes
+// that visible before a user hits it — the whole reason the textual compare can
+// stay as it is.
+function OracleServiceConflictWarning({
+  uid,
+  conflict,
+}: {
+  uid: string;
+  conflict: OracleServiceNameConflict;
+}) {
+  return (
+    <Tooltip delayDuration={100}>
+      <TooltipTrigger asChild>
+        <span
+          data-testid={`database-oracle-conflict-${uid}`}
+          title={conflict.message}
+          className="inline-flex cursor-help text-amber-600"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span className="sr-only">Conflicting Oracle service name</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm space-y-1">
+        <p className="font-medium">Shared Oracle service name</p>
+        <p>{conflict.message}</p>
+        <ul className="font-mono text-xs">
+          {conflict.servers?.map((srv) => (
+            <li key={srv.uid}>
+              {srv.name} → {srv.host}:{srv.port}
+            </li>
+          ))}
+        </ul>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 // TestConnectionButton dials the server for real and reports the staged
 // outcome. Rendered per row, so each button owns its own mutation state.
 function TestConnectionButton({
@@ -609,6 +681,7 @@ function TestConnectionButton({
         e.stopPropagation();
         testConnection.mutate(undefined, {
           onSuccess: (result) => {
+            reportTestWarnings(result);
             if (result.ok) {
               toast.success(
                 result.host_key_pinned
@@ -773,7 +846,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="postgresql">PostgreSQL</SelectItem>
-                <SelectItem value="oracle">Oracle</SelectItem>
+                <SelectItem value="oracle" data-testid="protocol-option-oracle">Oracle</SelectItem>
                 <SelectItem value="mysql">MySQL</SelectItem>
                 <SelectItem value="mariadb">MariaDB</SelectItem>
                 <SelectItem value="mongodb">MongoDB</SelectItem>

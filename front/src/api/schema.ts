@@ -2392,6 +2392,8 @@ export interface components {
             query_approver_user_group_uids: string[];
             /** @description Present only when the create/update request set `test_connection: true` */
             connection_test?: components["schemas"]["ConnectionTestResult"];
+            /** @description Present only on an Oracle row whose `oracle_service_name` is also claimed by rows pointing at a **different** `host:port`. Nothing is wrong with the row itself — it dials and logs in fine — but a client connecting with the shared service name instead of the dbbat server name is refused ORA-12514, because the proxy compares candidate upstreams as text and two spellings of one machine read as two machines. */
+            oracle_service_name_conflict?: components["schemas"]["OracleServiceNameConflict"];
         };
         /**
          * @description Staged outcome of a connectivity check. Carries no secret material: only the stage
@@ -2431,11 +2433,51 @@ export interface components {
             k8s_ca_pinned?: boolean;
             /** @description The cluster's TOFU-learned CA bundle after the check (kubernetes servers only); empty when the row supplied its own, which wins */
             k8s_learned_ca_cert?: string;
+            /** @description Advisory findings that did **not** fail the check. A green check can still carry one: today the only warning is `oracle_service_name_conflict`, where the row itself is reachable but its upstream service name is claimed by rows spelling their host differently, so connecting by shared service name fails ORA-12514. */
+            warnings?: components["schemas"]["ConnectionTestWarning"][];
             /**
              * Format: int64
              * @description How long the check took, in milliseconds
              */
             duration_ms: number;
+        };
+        /** @description One advisory finding of a connectivity check. The code is the stable part a client keys off; the message is what it displays. */
+        ConnectionTestWarning: {
+            /**
+             * @description Machine-readable classification of the warning
+             * @enum {string}
+             */
+            code: "oracle_service_name_conflict";
+            /** @description Human-readable explanation, safe to display to an admin */
+            message: string;
+        };
+        /**
+         * @description One upstream Oracle service name claimed by several dbbat server rows that
+         *     disagree on the upstream address.
+         *
+         *     The Oracle proxy resolves a shared `oracle_service_name` by comparing the
+         *     candidate rows' `host:port` **as text** — deliberately, since resolving
+         *     DNS on the connect path could answer differently between two connects of
+         *     one DSN. The cost is that a CNAME in one row and the A-record in another
+         *     read as two upstreams, and every connect arriving with the shared service
+         *     name is refused ORA-12514. Reconcile the spellings, or have clients
+         *     connect by dbbat server name.
+         */
+        OracleServiceNameConflict: {
+            /** @description The shared upstream `oracle_service_name` */
+            service_name: string;
+            /** @description The distinct `host:port` spellings in play, sorted */
+            upstreams: string[];
+            /** @description The rows claiming the service name, ordered by name */
+            servers: {
+                /** Format: uuid */
+                uid: string;
+                name: string;
+                host: string;
+                port: number;
+            }[];
+            /** @description Ready-made operator-facing sentence, identical to the one the connectivity check and the proxy log report */
+            message: string;
         };
         /** @description Limited database info for non-admin users */
         DatabaseLimited: {
@@ -4099,6 +4141,8 @@ export type CreateServerGroupRequest = components['schemas']['CreateServerGroupR
 export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
 export type Database = components['schemas']['Database'];
 export type ConnectionTestResult = components['schemas']['ConnectionTestResult'];
+export type ConnectionTestWarning = components['schemas']['ConnectionTestWarning'];
+export type OracleServiceNameConflict = components['schemas']['OracleServiceNameConflict'];
 export type DatabaseLimited = components['schemas']['DatabaseLimited'];
 export type CreateDatabaseRequest = components['schemas']['CreateDatabaseRequest'];
 export type UpdateDatabaseRequest = components['schemas']['UpdateDatabaseRequest'];

@@ -256,4 +256,59 @@ test.describe("Servers Management", () => {
     // The stored credentials must never come back out.
     expect(JSON.stringify(body)).not.toContain("bastion-password");
   });
+
+  test("two Oracle rows spelling one host two ways are flagged on the service name", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // The reported incident, reproduced: one upstream service name claimed by
+    // two rows that spell the host differently. Each row is fine on its own;
+    // a client connecting with the shared service name is refused ORA-12514,
+    // because the proxy compares candidate upstreams as text. The admin must
+    // see that before a user hits it.
+    const stamp = Date.now();
+    const service = `E2EMUTU${stamp}`;
+    const first = `e2e-oracle-cname-${stamp}`;
+    const second = `e2e-oracle-arecord-${stamp}`;
+
+    const createOracleRow = async (name: string, host: string) => {
+      await authenticatedPage.getByTestId("add-database-button").click();
+      await authenticatedPage.getByTestId("protocol-select").click();
+      await authenticatedPage.getByTestId("protocol-option-oracle").click();
+      await authenticatedPage.getByTestId("database-name-input").fill(name);
+      await authenticatedPage.locator("#host").fill(host);
+      await authenticatedPage.locator("#oracleServiceName").fill(service);
+      await authenticatedPage.locator("#username").fill("system");
+      await authenticatedPage.locator("#password").fill("oracle-password");
+      await authenticatedPage.getByTestId("database-create-submit").click();
+      await expect(
+        authenticatedPage.locator("tr", { hasText: name }).first()
+      ).toBeVisible({ timeout: 10000 });
+    };
+
+    await createOracleRow(first, `oracle-${stamp}.db.example.com`);
+    // Before the second row exists there is nothing to disagree with.
+    const firstRow = authenticatedPage.locator("tr", { hasText: first }).first();
+    await expect(
+      firstRow.locator('[data-testid^="database-oracle-conflict-"]')
+    ).toHaveCount(0);
+
+    await createOracleRow(second, `${stamp}.eu-west-3.rds.amazonaws.com`);
+
+    // Both rows now carry the warning, and it names the conflict.
+    await authenticatedPage.reload();
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    for (const name of [first, second]) {
+      const row = authenticatedPage.locator("tr", { hasText: name }).first();
+      const marker = row
+        .locator('[data-testid^="database-oracle-conflict-"]')
+        .first();
+      await expect(marker).toBeVisible({ timeout: 10000 });
+      await expect(marker).toHaveAttribute("title", /ORA-12514/);
+      await expect(marker).toHaveAttribute("title", new RegExp(service));
+    }
+  });
 });
