@@ -58,6 +58,14 @@ export type CreateAPIKeyResponse =
 export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
 export type ConnectionTestResult =
   components["schemas"]["ConnectionTestResult"];
+/**
+ * The warning an Oracle row carries when its upstream `oracle_service_name` is
+ * also claimed by rows pointing at a different `host:port`. Each such row works
+ * on its own; a client connecting with the shared service name is refused
+ * ORA-12514, because the proxy compares candidate upstreams as text.
+ */
+export type OracleServiceNameConflict =
+  components["schemas"]["OracleServiceNameConflict"];
 export type DeviceConsentInfo = components["schemas"]["DeviceConsentInfo"];
 export type ChainBreak = components["schemas"]["ChainBreak"];
 export type AuditChainVerification =

@@ -159,8 +159,14 @@ service:
   api:
     type: ClusterIP
     port: 8080
+    portName: http
+    includeProxyPort: false   # also expose config.listenPg's port here
     annotations: {}
 ```
+
+`includeProxyPort` is for deployments whose in-cluster clients reach the proxy
+through the API service name; the dedicated proxy service below is the normal
+route.
 
 #### PostgreSQL Proxy Service (TCP)
 
@@ -170,8 +176,14 @@ service:
     enabled: true
     type: ClusterIP  # or NodePort, LoadBalancer
     port: 5433
+    nameSuffix: proxy   # service name is "<fullname>-<nameSuffix>"
+    portName: postgres  # port name, on both services carrying it
+    externalIPs: []     # bare-metal/k3s: pin the node IP the LB answers on
     annotations: {}
 ```
+
+The service targets the container port taken from `config.listenPg`, so moving
+the proxy to another port is a single value change.
 
 For AWS Network Load Balancer:
 
@@ -202,6 +214,45 @@ ingress:
       hosts:
         - dbbat.example.com
 ```
+
+#### Additional Ingresses
+
+`extraIngresses` renders any number of further Ingress objects pointing at the
+same API service, each named `<fullname>-<nameSuffix>`. It exists for routers
+the primary ingress cannot express — a second hostname, or a plain-HTTP
+entrypoint whose only job is to redirect:
+
+```yaml
+extraIngresses:
+  - nameSuffix: http          # -> Ingress "<release>-http"
+    className: traefik
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: web
+      traefik.ingress.kubernetes.io/router.middlewares: dbbat-redirect-https@kubernetescrd
+    hosts:
+      - host: dbbat.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+```
+
+#### Traefik HTTP → HTTPS redirect
+
+An `ingress` bound to Traefik's `websecure` entrypoint answers HTTPS only, and a
+browser typing a bare hostname sends plain HTTP — which Traefik then 404s. Pair
+the HTTP ingress above with the `redirectScheme` middleware:
+
+```yaml
+traefik:
+  redirectHttpsMiddleware:
+    enabled: true             # off by default: needs Traefik's CRDs installed
+    name: redirect-https
+    permanent: true
+```
+
+The middleware object is **not** prefixed with the release name, because the
+ingress annotation referencing it (`<namespace>-<name>@kubernetescrd`) is
+written by hand.
 
 ### HTTPRoute Configuration (Gateway API)
 
@@ -423,11 +474,19 @@ psql -h localhost -p 5433 -U <username> -d <database>
 | `secrets.existingSecret` | Use existing secret | `""` |
 | `service.api.type` | API service type | `ClusterIP` |
 | `service.api.port` | API service port | `8080` |
+| `service.api.portName` | Name of the API port | `http` |
+| `service.api.includeProxyPort` | Also expose the proxy port on the API service | `false` |
 | `service.proxy.enabled` | Enable proxy service | `true` |
 | `service.proxy.type` | Proxy service type | `ClusterIP` |
 | `service.proxy.port` | Proxy service port | `5433` |
+| `service.proxy.nameSuffix` | Suffix of the proxy service name | `proxy` |
+| `service.proxy.portName` | Name of the proxy port | `postgres` |
+| `service.proxy.externalIPs` | External IPs bound to the proxy service | `[]` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `ingress.className` | Ingress class name | `""` |
+| `extraIngresses` | Additional Ingress objects (`<fullname>-<nameSuffix>`) | `[]` |
+| `traefik.redirectHttpsMiddleware.enabled` | Render the Traefik HTTP→HTTPS `Middleware` CRD | `false` |
+| `goMemLimit` | `GOMEMLIMIT` for the Go runtime (keep below `resources.limits.memory`) | `192MiB` |
 | `httpRoute.enabled` | Enable HTTPRoute (Gateway API) | `false` |
 | `httpRoute.hostnames` | Hostnames the route matches | `["dbbat.example.com"]` |
 | `httpRoute.parentRefs` | Parent Gateway references | example placeholder |
@@ -440,6 +499,10 @@ psql -h localhost -p 5433 -U <username> -d <database>
 | `networkPolicy.enabled` | Enable network policy | `false` |
 
 For a complete list of parameters, see [values.yaml](values.yaml).
+
+A worked, real deployment lives in [values-demo.yaml](values-demo.yaml) — the
+values behind `demo.dbbat.com`, documented in
+[docs/demo-deployment.md](../../docs/demo-deployment.md).
 
 ## Monitoring
 

@@ -457,7 +457,7 @@ func TestRevokeGrant(t *testing.T) {
 	activeGrant := func(t *testing.T, suffix string) (*Grant, *User, *Server, uuid.UUID) {
 		t.Helper()
 
-		user, database := createTestUserAndDatabase(t, ctx, store, "revoke-"+suffix)
+		user, database := createTestUserAndDatabase(t, ctx, store, "revoke_"+suffix)
 
 		admin, err := store.CreateUser(ctx, "revokeadmin-"+suffix, "hash", []string{RoleAdmin, RoleConnector})
 		if err != nil {
@@ -881,8 +881,8 @@ func TestListGrants_PopulatesCountersForEach(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	user, db1 := createTestUserAndDatabase(t, ctx, store, "listcountersA")
-	_, db2 := createTestUserAndDatabase(t, ctx, store, "listcountersB")
+	user, db1 := createTestUserAndDatabase(t, ctx, store, "listcounters_a")
+	_, db2 := createTestUserAndDatabase(t, ctx, store, "listcounters_b")
 	admin, _ := store.CreateUser(ctx, "listcountersadmin", "hash", []string{RoleAdmin, RoleConnector})
 
 	now := time.Now()

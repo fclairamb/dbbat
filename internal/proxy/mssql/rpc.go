@@ -334,20 +334,25 @@ func (r rpcRequest) intParam(i int) (int64, bool) {
 	return v, ok
 }
 
-// statementParamIndex is where each SQL-carrying RPC form puts its statement.
+// statementParamIndex is where the SQL-carrying form this request names puts its
+// statement, and whether it is one of them at all.
 //
-// These are the documented parameter orders of the well-known procedures
-// (MS-TDS 3.2.5.4 and the sp_* reference). Every entry here is a form that
-// really does carry a statement dbbat can enforce a grant on; forms that carry
-// only a handle are handled by handleParamIndex instead.
-var statementParamIndex = map[uint16]int{
-	spExecuteSQL:     0, // @stmt, @params, values…
-	spPrepare:        2, // @handle OUT, @params, @stmt, @options
-	spPrepExec:       2, // @handle OUT, @params, @stmt, values…
-	spCursorPrepare:  2, // @handle OUT, @params, @stmt, @options, …
-	spCursorOpen:     1, // @cursor OUT, @stmt, @scrollopt, …
-	spCursorPrepExec: 3, // @handle OUT, @cursor OUT, @params, @stmt, …
-	spPrepExecRPC:    1, // @handle OUT, @rpccall
+// The table itself is shared.MSSQLStatementParamIndex, keyed by procedure name —
+// deliberately not a second copy keyed by procedure id. **Two** paths need it:
+// this one, from a decoded parameter list, and the batch-text scanner, from
+// `EXEC sp_prepare @h OUT, NULL, N'DROP TABLE Foo', 1` written out in a T-SQL
+// batch. For a while only this one implemented positional indexing at all, so
+// that exact batch was unchecked while the RPC spelling of it was refused —
+// the same drift the shared parameter-*name* list was introduced to end.
+//
+// Forms that carry only a handle are handled by handleParamIndex instead.
+func (r rpcRequest) statementParamIndex() (int, bool) {
+	name, ok := wellKnownProcNames[r.procID]
+	if !ok {
+		return 0, false
+	}
+
+	return shared.MSSQLStatementParamIndex(name)
 }
 
 // handleParamIndex is where the forms that execute something prepared earlier
@@ -404,7 +409,7 @@ func (r rpcRequest) statementTexts() []string {
 		return nil
 	}
 
-	idx, ok := statementParamIndex[r.procID]
+	idx, ok := r.statementParamIndex()
 	if !ok {
 		return nil
 	}

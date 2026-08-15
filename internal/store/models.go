@@ -356,6 +356,15 @@ func (db *Server) KubernetesNamespaceOrDefault() string {
 
 // ServerUpdate represents fields that can be updated
 type ServerUpdate struct {
+	// Name renames the server. It is the client-facing selector on all five
+	// protocols (the "database name" a client types in its connection string),
+	// so a rename is a breaking change for every saved connection string —
+	// which is exactly why it has to be doable through the API rather than by
+	// hand against the storage database. Validated against IsValidServerName,
+	// the same check CreateServer applies, and a collision with an existing
+	// name — soft-deleted rows included, since servers_name_key is global —
+	// comes back as ErrServerNameConflict.
+	Name              *string
 	Description       *string
 	Host              *string
 	Port              *int
@@ -1269,6 +1278,18 @@ type APIKey struct {
 	// etc.) in a single jsonb column rather than dedicated per-protocol columns.
 	// nil when the key has no protocol-specific data.
 	ProtocolData *ProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
+
+	// OracleCapable answers "can this key be used as the Oracle password?" —
+	// computed, never stored (`bun:"-"`), and only by the handlers that mean to
+	// say it. A key minted before Oracle support carries no O5LOGON verifier and
+	// can never authenticate against an Oracle database, while working perfectly
+	// against the REST API and every other protocol; without this field the two
+	// are indistinguishable and the failure reads as a wrong password.
+	//
+	// A pointer, so "not computed" and "computed as false" stay distinguishable:
+	// omitempty drops it from responses that did not evaluate it rather than
+	// asserting `false` about a key nobody asked about.
+	OracleCapable *bool `bun:"-" json:"oracle_capable,omitempty"`
 }
 
 // ProtocolData is the per-protocol material attached to an API key, stored as a

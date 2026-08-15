@@ -314,7 +314,7 @@ func tappedOERs(t *testing.T, stream []byte) []tappedOER {
 		// leading fields, which decode under a much weaker assumption — a frame
 		// nobody can read is itself a finding, and dropping it silently would
 		// make it look like nothing was sent.
-		if info := decodeOERAt(payload, 0); info != nil {
+		if info := decodeOERAt(defaultOERShape(), payload, 0); info != nil {
 			out = append(out, tappedOER{errorCode: info.ErrorCode, message: info.ErrorMessage})
 		}
 	}

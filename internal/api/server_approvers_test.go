@@ -39,7 +39,7 @@ func newServerApproverFixture(t *testing.T, suffix string) *serverApproverFixtur
 	ctx := context.Background()
 
 	target, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "target-" + suffix,
+		Name:         "target_" + suffix,
 		Host:         "127.0.0.1",
 		Port:         5432,
 		DatabaseName: "prod",
@@ -160,7 +160,7 @@ func (f *serverApproverFixture) decide(t *testing.T, user *store.User, req *stor
 func TestGrantRequestDecision_ServerAccessApprover(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "gr-access")
+	f := newServerApproverFixture(t, "gr_access")
 
 	// Nothing configured: the pre-existing world, where only admins decide.
 	req := f.newGrantRequest(t, "gr-access-1", f.requester)
@@ -195,7 +195,7 @@ func TestGrantRequestDecision_ServerAccessApprover(t *testing.T) {
 func TestGrantRequestDecision_SelfApprovalRefusedForApprover(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "gr-self")
+	f := newServerApproverFixture(t, "gr_self")
 	f.setServerApprovers(t, store.ApproverKindAccess, f.group.UID)
 
 	// The approver files the request themselves.
@@ -222,7 +222,7 @@ func TestGrantRequestDecision_SelfApprovalRefusedForApprover(t *testing.T) {
 func TestGrantRequestDecision_ServerGroupFallbackAndUnion(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "gr-group")
+	f := newServerApproverFixture(t, "gr_group")
 
 	secondGroup, err := f.dataStore.CreateUserGroup(f.ctx, &store.UserGroup{Name: "leads-gr-group"})
 	if err != nil {
@@ -320,7 +320,7 @@ func (f *serverApproverFixture) resolveHold(t *testing.T, user *store.User, quer
 func TestQueryHold_ServerQueryApproverFallback(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "qh-fallback")
+	f := newServerApproverFixture(t, "qh_fallback")
 
 	// Nothing configured: fail closed, exactly as before this feature.
 	held := f.queryHoldFor(t, f.requester)
@@ -349,7 +349,7 @@ func TestQueryHold_ServerQueryApproverFallback(t *testing.T) {
 func TestQueryHold_ServerGroupFallback(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "qh-group")
+	f := newServerApproverFixture(t, "qh_group")
 	f.putTargetInGroupWithApprovers(t, "sg-qh-group", store.ApproverKindQuery, f.group.UID)
 
 	held := f.queryHoldFor(t, f.requester)
@@ -369,7 +369,7 @@ func TestQueryHold_ServerGroupFallback(t *testing.T) {
 func TestQueryHold_SelfApprovalRefusedForServerApprover(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "qh-self")
+	f := newServerApproverFixture(t, "qh_self")
 	f.setServerApprovers(t, store.ApproverKindQuery, f.group.UID)
 
 	// The approver's own statement is held.
@@ -528,8 +528,8 @@ func (f *serverApproverFixture) listRequestsAs(t *testing.T, user *store.User) m
 func TestListGrantRequests_NonAdminScoping(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "list-scope")
-	elsewhere := f.newTargetServer(t, "elsewhere-list-scope")
+	f := newServerApproverFixture(t, "list_scope")
+	elsewhere := f.newTargetServer(t, "elsewhere_list_scope")
 
 	mine := f.newGrantRequestFor(t, "list-scope-mine", f.approver, elsewhere.UID)
 	pendingHere := f.newGrantRequestFor(t, "list-scope-here", f.requester, f.target.UID)
@@ -599,7 +599,7 @@ func TestListGrantRequests_NonAdminScoping(t *testing.T) {
 func TestSlackMayDecideRequest(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "slack-gate")
+	f := newServerApproverFixture(t, "slack_gate")
 
 	req := f.newGrantRequest(t, "slack-gate-1", f.requester)
 	own := f.newGrantRequest(t, "slack-gate-2", f.approver)
@@ -657,7 +657,7 @@ func TestSlackMayDecideRequest(t *testing.T) {
 func TestQueryHold_DefinitionApproversWinOverServerChain(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "qh-prec")
+	f := newServerApproverFixture(t, "qh_prec")
 
 	// The server names the ops group as its query approvers…
 	f.setServerApprovers(t, store.ApproverKindQuery, f.group.UID)
@@ -806,10 +806,10 @@ func (f *serverApproverFixture) perRowPending(t *testing.T, user *store.User) ma
 func TestListPendingApprovals_BatchedMatchesPerRow(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "pending-batch")
+	f := newServerApproverFixture(t, "pending_batch")
 
-	grouped := f.newTargetServer(t, "grouped-pending-batch")
-	bare := f.newTargetServer(t, "bare-pending-batch")
+	grouped := f.newTargetServer(t, "grouped_pending_batch")
+	bare := f.newTargetServer(t, "bare_pending_batch")
 
 	// Level 1: the target names the ops group directly.
 	f.setServerApprovers(t, store.ApproverKindQuery, f.group.UID)
@@ -897,10 +897,10 @@ func TestListPendingApprovals_BatchedMatchesPerRow(t *testing.T) {
 func TestListGrantRequests_BatchedMatchesPerRow(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "gr-batch")
+	f := newServerApproverFixture(t, "gr_batch")
 
-	grouped := f.newTargetServer(t, "grouped-gr-batch")
-	bare := f.newTargetServer(t, "bare-gr-batch")
+	grouped := f.newTargetServer(t, "grouped_gr_batch")
+	bare := f.newTargetServer(t, "bare_gr_batch")
 
 	f.setServerApprovers(t, store.ApproverKindAccess, f.group.UID)
 
@@ -994,7 +994,7 @@ func (f *serverApproverFixture) newTargetServersInGroup(
 	servers := make([]*store.Server, 0, n)
 
 	for i := range n {
-		srv := f.newTargetServer(t, fmt.Sprintf("%s-%d", prefix, i))
+		srv := f.newTargetServer(t, fmt.Sprintf("%s_%d", prefix, i))
 
 		if err := f.dataStore.AddServerToGroup(f.ctx, created.UID, srv.UID); err != nil {
 			t.Fatalf("AddServerToGroup(): %v", err)
@@ -1039,9 +1039,9 @@ const approverResolutionQueries = 2
 func TestListPendingApprovals_ApproverResolutionIsFlat(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "pending-flat")
+	f := newServerApproverFixture(t, "pending_flat")
 
-	servers := f.newTargetServersInGroup(t, "pending-flat", 6, store.ApproverKindQuery, f.group.UID)
+	servers := f.newTargetServersInGroup(t, "pending_flat", 6, store.ApproverKindQuery, f.group.UID)
 
 	// A small page first.
 	for _, srv := range servers[:2] {
@@ -1087,9 +1087,9 @@ func TestListPendingApprovals_ApproverResolutionIsFlat(t *testing.T) {
 func TestListGrantRequests_ApproverResolutionIsFlat(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "gr-flat")
+	f := newServerApproverFixture(t, "gr_flat")
 
-	servers := f.newTargetServersInGroup(t, "gr-flat", 6, store.ApproverKindAccess, f.group.UID)
+	servers := f.newTargetServersInGroup(t, "gr_flat", 6, store.ApproverKindAccess, f.group.UID)
 
 	for i, srv := range servers[:2] {
 		f.newGrantRequestFor(t, fmt.Sprintf("gr-flat-small-%d", i), f.requester, srv.UID)
@@ -1213,9 +1213,9 @@ func (f *serverApproverFixture) queryHoldUnder(
 func TestListPendingApprovals_GrantBatchingMatchesPerRow(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "grant-batch")
+	f := newServerApproverFixture(t, "grant_batch")
 
-	bare := f.newTargetServer(t, "bare-grant-batch")
+	bare := f.newTargetServer(t, "bare_grant_batch")
 
 	// The target names the ops group as its query approvers; `bare` names
 	// nobody, so it stays admin-only.
@@ -1325,9 +1325,9 @@ func (f *serverApproverFixture) grantResolutionQueryHooks() (*apiQueryCountHook,
 func TestListPendingApprovals_GrantResolutionIsFlat(t *testing.T) {
 	t.Parallel()
 
-	f := newServerApproverFixture(t, "grant-flat")
+	f := newServerApproverFixture(t, "grant_flat")
 
-	servers := f.newTargetServersInGroup(t, "grant-flat", 6, store.ApproverKindQuery, f.group.UID)
+	servers := f.newTargetServersInGroup(t, "grant_flat", 6, store.ApproverKindQuery, f.group.UID)
 
 	// A distinct grant per hold, on a distinct database — the worst case for a
 	// batched read, and the one a per-row implementation is indistinguishable

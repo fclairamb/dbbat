@@ -104,12 +104,22 @@ func buildOERNamingCursor(curRowNumber, errNum, cursorID int) []byte {
 // session considered a row stream active* — the routing condition and the
 // session state together, which is what the relaxation turns on.
 type midStreamOER struct {
-	dump     string
-	index    int
-	payload  []byte
-	fields   *oerInfo
-	relaxed  *oerInfo
-	strict   bool
+	dump    string
+	index   int
+	payload []byte
+	fields  *oerInfo
+	relaxed *oerInfo
+
+	// strict is what handleOERStatus's first branch makes of the packet: the
+	// end-of-call-bit reading of the compressed encoding, plus (since
+	// decodeFixedStatusOERAt) the fixed-width *status* object at byte 0. Both
+	// halves must refuse a mid-stream packet.
+	strict bool
+
+	// embedded is what handleResponse's mid-row-stream branch makes of it —
+	// findOERInResponse, scanning every offset. It must find nothing here.
+	embedded *oerInfo
+
 	streamed uint16 // the cursor whose rows were on the wire at that moment
 }
 
@@ -182,7 +192,8 @@ func walkMidStreamOERs(t *testing.T, name string) (midStreamWalk, int) {
 					payload:  ttc,
 					fields:   fields,
 					relaxed:  decodeErrorOER(shape, ttc),
-					strict:   decodeOERAt(ttc, 0) != nil,
+					strict:   decodeOERAt(shape, ttc, 0) != nil,
+					embedded: findOERInResponse(shape, ttc),
 					streamed: streaming,
 				})
 			}
@@ -460,6 +471,25 @@ func midStreamCorpus(t *testing.T) []string {
 // mid-stream packets. Nothing routes that way — handleOERStatus only ever sees
 // byte 0 — so it is not a rate, it is a measure of how much real row data would
 // have to be misread before the predicate is the weak link.
+//
+// Three more figures were added when decodeOERAt learned to read the fixed-width
+// *status* object, because that predicate has no diagnostic to prove itself with
+// and the same corpus is what bounds it:
+//
+//   - `statusAccepted`: what decodeOERAt now accepts at byte 0 of a mid-stream
+//     packet. It must be nothing, and it is: only four mid-stream packets in the
+//     corpus lead with 0x04 at all, and all four are the genuine ORA-01722
+//     failures, which a *status* predicate refuses by their error code alone.
+//   - `respAccepted`: what findOERInResponse accepts on those same packets — the
+//     mid-row-stream branch of handleResponse. Also nothing.
+//   - `bitlessScan`: the counterfactual that decides both of the restrictions on
+//     decodeFixedStatusOERAt. It is the fixed-width status predicate run at every
+//     *non-zero* 0x04 offset inside those packets, and it is emphatically **not**
+//     zero — an OCI fetch response carries a genuine summary object of exactly
+//     this shape inside every continuation packet, naming the streaming cursor and
+//     reporting the fetch's running row count. Accepting one ends the call
+//     mid-fetch, which is why the reading is offered at offset 0 only and only
+//     outside a row stream.
 func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 	t.Parallel()
 
@@ -470,7 +500,7 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 
 	corpus := midStreamCorpus(t)
 
-	var midStreamPackets, accepted, stress int
+	var midStreamPackets, accepted, stress, statusAccepted, respAccepted, bitlessScan int
 
 	lead := map[byte]int{}
 
@@ -483,6 +513,21 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 		}
 
 		for _, got := range found.oers {
+			if got.strict {
+				statusAccepted++
+
+				assert.Failf(t, "mid-stream acceptance at byte 0",
+					"%s packet #%d: decodeOERAt accepted a mid-row-stream packet", name, got.index)
+			}
+
+			if got.embedded != nil {
+				respAccepted++
+
+				assert.Failf(t, "mid-stream acceptance by the Response locator",
+					"%s packet #%d: findOERInResponse accepted row-stream bytes as ORA-%05d",
+					name, got.index, got.embedded.ErrorCode)
+			}
+
 			if got.relaxed == nil {
 				continue
 			}
@@ -497,16 +542,20 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 
 	for _, name := range corpus {
 		stress += midStreamStressAcceptances(t, name)
+		bitlessScan += midStreamBitlessStatusAcceptances(t, name)
 	}
 
 	// Every figure quoted in docs/oracle.md is printed here, so the numbers in
 	// the prose are reproducible from the tree rather than remembered. Only the
-	// two load-bearing ones are asserted: pinning a distribution would turn
+	// load-bearing ones are asserted: pinning a distribution would turn
 	// "somebody re-recorded a fixture" into a failure (same reasoning as
 	// sql_extraction_survey_test.go).
 	t.Logf("corpus: %d recordings; mid-row-stream server packets: %d; leading with 0x04: %d; "+
-		"accepted as diagnostics: %d; stress acceptances at non-zero offsets: %d",
-		len(corpus), midStreamPackets, lead[byte(TTCFuncOERR)], accepted, stress)
+		"accepted as diagnostics: %d; stress acceptances at non-zero offsets: %d; "+
+		"accepted at byte 0 by decodeOERAt: %d; accepted by findOERInResponse: %d; "+
+		"a bit-less fixed-width status scan would accept: %d",
+		len(corpus), midStreamPackets, lead[byte(TTCFuncOERR)], accepted, stress,
+		statusAccepted, respAccepted, bitlessScan)
 
 	for _, b := range sortedLeadingBytes(lead) {
 		t.Logf("  mid-row-stream packets leading with %#02x: %d", b, lead[b])
@@ -516,6 +565,60 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 	assert.Equal(t, len(genuine), accepted, "only the genuine mid-fetch failures may be accepted")
 	assert.Zero(t, stress,
 		"real row bytes must never satisfy the diagnostic proof, at any offset")
+	assert.Zero(t, statusAccepted, "the fixed-width status reading must not fire mid-row-stream")
+	assert.Zero(t, respAccepted, "nor may the Response locator, which is why it kept the bit")
+	assert.Positive(t, bitlessScan,
+		"this is the measurement decodeFixedStatusOERAt's two restrictions exist for — if it ever "+
+			"reaches zero the corpus stopped containing an OCI fetch, not the risk stopped existing")
+}
+
+// midStreamBitlessStatusAcceptances is the counterfactual behind
+// decodeFixedStatusOERAt's offset restriction: the fixed-width status predicate
+// with that restriction lifted, run at every non-zero 0x04 offset inside every
+// mid-row-stream packet of one recording. See the test above.
+func midStreamBitlessStatusAcceptances(t *testing.T, name string) int {
+	t.Helper()
+
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+	s.clientConn = drainedPipe(t)
+
+	acceptances := 0
+
+	for _, pkt := range loadTestDump(t, name).Packets {
+		tns, err := parseTNSFromDumpPacket(pkt.Data)
+		if err != nil || tns.Type != TNSPacketTypeData {
+			continue
+		}
+
+		if pkt.Direction == dump.DirClientToServer {
+			s.interceptClientMessage(tns)
+
+			continue
+		}
+
+		s.trackerMu.Lock()
+		active := s.rowStreamActive()
+		s.trackerMu.Unlock()
+
+		if active {
+			ttc := extractTTCPayload(tns.Payload)
+			shape := s.oerShapeSnapshot()
+
+			for off := 1; off < len(ttc); off++ {
+				if ttc[off] != 0x04 {
+					continue
+				}
+
+				if info, _ := decodeOERFixedFieldsAt(shape, ttc, off); plausibleStatusOER(info) {
+					acceptances++
+				}
+			}
+		}
+
+		s.interceptUpstreamMessage(tns)
+	}
+
+	return acceptances
 }
 
 // sortedLeadingBytes orders a leading-byte histogram so the report is stable
@@ -653,6 +756,15 @@ func (c *collectingCompletionStore) awaitUpdate(t *testing.T, uid uuid.UUID) (co
 
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// createdQueries returns every query record written down completeQuery's
+// create-now branch, in order.
+func (c *collectingCompletionStore) createdQueries() []*store.Query {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]*store.Query(nil), c.created...)
 }
 
 // createdErrorsFor returns the recorded error text of every query *created* at

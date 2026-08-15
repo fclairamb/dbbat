@@ -54,7 +54,7 @@ func thinOERShape() oerShape {
 func TestDecodeOERAt_RowCount(t *testing.T) {
 	t.Parallel()
 
-	info := decodeOERAt(buildOER(oerEndOfCallBit, 5, 3, 0), 0)
+	info := decodeOERAt(thinOERShape(), buildOER(oerEndOfCallBit, 5, 3, 0), 0)
 	require.NotNil(t, info)
 	assert.Equal(t, 3, info.CurRowNumber)
 	assert.Equal(t, 0, info.ErrorCode)
@@ -66,7 +66,7 @@ func TestDecodeOERAt_Error(t *testing.T) {
 
 	oer := append(buildOER(oerEndOfCallBit, 1, 0, 942), []byte("\x00\x42ORA-00942: table or view does not exist\n")...)
 
-	info := decodeOERAt(oer, 0)
+	info := decodeOERAt(thinOERShape(), oer, 0)
 	require.NotNil(t, info)
 	assert.Equal(t, 942, info.ErrorCode)
 	assert.Equal(t, "ORA-00942: table or view does not exist", info.ErrorMessage)
@@ -76,14 +76,14 @@ func TestDecodeOERAt_Invalid(t *testing.T) {
 	t.Parallel()
 
 	// Not a 0x04 marker.
-	assert.Nil(t, decodeOERAt([]byte{0x08, 0x01}, 0))
+	assert.Nil(t, decodeOERAt(thinOERShape(), []byte{0x08, 0x01}, 0))
 	// Truncated right after the marker.
-	assert.Nil(t, decodeOERAt([]byte{0x04}, 0))
+	assert.Nil(t, decodeOERAt(thinOERShape(), []byte{0x04}, 0))
 	// Offset past end.
-	assert.Nil(t, decodeOERAt([]byte{0x04}, 5))
+	assert.Nil(t, decodeOERAt(thinOERShape(), []byte{0x04}, 5))
 	// Decodes cleanly but end-of-call bit is clear (callStatus = 2) — rejected
 	// so byte runs inside the return-parameter block aren't mistaken for OERs.
-	assert.Nil(t, decodeOERAt(buildOER(2, 0, 0, 0), 0))
+	assert.Nil(t, decodeOERAt(thinOERShape(), buildOER(2, 0, 0, 0), 0))
 }
 
 func TestFindOERInResponse_SkipsDecoy(t *testing.T) {
@@ -96,7 +96,7 @@ func TestFindOERInResponse_SkipsDecoy(t *testing.T) {
 	payload = append(payload, 0x08, 0x01, 0x06, 0x04, 0x02, 0x01, 0x00)
 	payload = append(payload, realOER...)
 
-	info := findOERInResponse(payload)
+	info := findOERInResponse(thinOERShape(), payload)
 	require.NotNil(t, info)
 	assert.Equal(t, 2, info.CurRowNumber, "must skip the decoy 0x04 and find the real OER")
 }
@@ -187,9 +187,9 @@ func TestDumpReplay_DMLRowCounts(t *testing.T) {
 
 		switch funcCode { //nolint:exhaustive // only DML completion codes are relevant here
 		case TTCFuncResponse:
-			info = findOERInResponse(ttcPayload)
+			info = findOERInResponse(thinOERShape(), ttcPayload)
 		case TTCFuncOERR:
-			info = decodeOERAt(ttcPayload, 0)
+			info = decodeOERAt(thinOERShape(), ttcPayload, 0)
 		default:
 			continue
 		}

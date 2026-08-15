@@ -931,6 +931,17 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 		logger.InfoContext(ctx, "Created test API key", slog.String("user", tk.user.Username), slog.String("key", tk.key))
 	}
 
+	// 7b. One key with NO O5LOGON verifier — created without the encryption key,
+	// which is what every key minted before Oracle support looks like. It
+	// authenticates against the API like any other and can never be used for an
+	// Oracle login, so the API-keys page needs such a row to have anything to
+	// report: this is the fixture behind `oracle_capable=false`.
+	if _, err := dataStore.CreateAPIKeyWithValue(ctx, adminUser.UID,
+		"admin-legacy-key", "dbb_legacy_admin_key", nil); err != nil {
+		return fmt.Errorf("failed to create verifier-less test API key: %w", err)
+	}
+	logger.InfoContext(ctx, "Created test API key with no Oracle verifier", slog.String("key", "dbb_legacy_admin_key"))
+
 	// 8. Record a directory role sync against the viewer, so the users page
 	// has a "last synced from SSO" row to show. Only an OIDC login writes this
 	// event in production, and E2E has no identity provider to log in through.

@@ -19,6 +19,39 @@ var (
 	ErrMySQLPatternBlocked   = errors.New("blocked: this MySQL operation is not permitted through the proxy")
 )
 
+// Dynamic-SQL refusals. Both are about a statement whose real payload is a
+// string, and they are deliberately two errors rather than one: an operator
+// reading a log has to be able to tell "dbbat could not read this at all" from
+// "dbbat read it and your grant says no" from "dbbat cannot tell what this runs,
+// and your grant is one of the two whose meaning that defeats".
+var (
+	// ErrDynamicSQLNotCheckable — a dynamic-SQL form dbbat could not read all
+	// the way down: dynamic SQL nested inside dynamic SQL
+	// (`EXEC('EXEC(''…'')')`, `PREPARE s FROM 'PREPARE …'`), a quoted run left
+	// open, or a statement argument dbbat could not locate at all. One level is
+	// unwrapped and checked; a second is refused rather than unwrapped further,
+	// because stopping silently would leave a hole the exact shape of the one the
+	// unwrapping closed. Refused whatever the grant says.
+	ErrDynamicSQLNotCheckable = errors.New(
+		"dbbat: dbbat cannot check dynamic SQL that is itself built from dynamic SQL: " +
+			"run the inner statement directly")
+	// ErrDynamicSQLOpaque — the statement runs SQL built at run time
+	// (`EXEC(@sql)`, `PREPARE … FROM @v`, `EXECUTE IMMEDIATE v_stmt`), so what it
+	// would do is not statically decidable, under a grant carrying `read_only` or
+	// `block_ddl` — the two controls a run-time-built statement defeats outright.
+	// Fail closed: "dbbat cannot tell what this runs" must not resolve to "allow"
+	// for a session that may not write or may not change schema.
+	//
+	// It names its own cause rather than borrowing ErrReadOnlyViolation, so an
+	// operator can tell this class of refusal from an ordinary blocked write and
+	// knows the fix is a grant without those two controls (a `block_copy`-only
+	// grant, and a grant with no controls at all, are unaffected).
+	ErrDynamicSQLOpaque = errors.New(
+		"dbbat: this statement builds its SQL at run time, so dbbat cannot tell what it " +
+			"would run; your access grant is read-only or blocks DDL, which is exactly what " +
+			"that defeats — send the statement literally, or use a grant without those controls")
+)
+
 // Mongo-specific validation errors (contract §7 surfaces these as the errmsg
 // of an Unauthorized (13) reply).
 var (
@@ -502,13 +535,90 @@ func validateQuery(sql string, grant *store.Grant) error {
 	return nil
 }
 
-// ValidateOracleQuery runs shared validation plus Oracle-specific blocked patterns.
+// RefusesOpaqueDynamicSQL reports whether grant carries a control whose meaning
+// a run-time-built statement defeats, and which therefore refuses one dbbat
+// cannot read.
+//
+// `read_only` and `block_ddl` only. A `block_copy`-only grant and a grant with no
+// controls at all are deliberately unaffected: dynamic SQL defeats neither, so
+// refusing there would be blast radius bought for nothing — ORMs and migration
+// tools build SQL at run time constantly, and the traffic that breaks is
+// well-behaved traffic. A grant with no definition attached reports every
+// control (store.AccessGrant.Controls) and so refuses, which is the same
+// fail-closed backstop every other control has.
+func RefusesOpaqueDynamicSQL(grant *store.Grant) bool {
+	return grant.IsReadOnly() || grant.ShouldBlockDDL()
+}
+
+// ValidateDynamicSQL applies a grant to the dynamic SQL a statement carries, and
+// is the single implementation of that policy for all three protocols that have
+// dynamic SQL.
+//
+// check is the caller's own per-statement classification — the **same** one the
+// outer statement went through, never a laxer one, since a second rule set for
+// inner statements is what turns a control into a suggestion.
+//
+// The three answers, in order:
+//
+//   - a form dbbat could not read at all, or one that nests a second level:
+//     refused whatever the grant says (fail closed);
+//   - a payload dbbat did read: checked exactly like the outer statement, so
+//     `EXEC('SELECT 1')` and `PREPARE s FROM 'SELECT 1'` stay allowed under a
+//     read_only grant and `EXEC('DELETE FROM t')` does not;
+//   - a payload built at run time: refused only under read_only/block_ddl, and
+//     named as its own cause. See RefusesOpaqueDynamicSQL.
+func ValidateDynamicSQL(
+	dyn DynamicSQL,
+	readable bool,
+	grant *store.Grant,
+	check func(string) error,
+) error {
+	if !readable {
+		return ErrDynamicSQLNotCheckable
+	}
+
+	for _, text := range dyn.Payloads {
+		if err := check(text); err != nil {
+			return err
+		}
+	}
+
+	if dyn.Opaque && RefusesOpaqueDynamicSQL(grant) {
+		return ErrDynamicSQLOpaque
+	}
+
+	return nil
+}
+
+// ValidateOracleQuery runs shared validation plus Oracle-specific blocked
+// patterns, over the statement *and* over whatever it would run dynamically.
+//
+// The dynamic half is what makes the controls reach inside
+// `BEGIN EXECUTE IMMEDIATE 'DELETE FROM t'; END;` — a statement whose first
+// keyword is BEGIN, which the prefix-shaped classifiers read as neither a write
+// nor DDL. Every one of the five Oracle statement-carrying paths goes through
+// this function, which is why the check lives here and not in the proxy.
 func ValidateOracleQuery(sql string, grant *store.Grant) error {
-	// One normalisation, shared by the grant controls and the pattern list —
-	// every entry below is multi-keyword and would otherwise be walked through
-	// with an inline `/**/`.
+	// One normalisation, shared by the grant controls, the pattern list and the
+	// dynamic-SQL scan — every pattern entry is multi-keyword and would otherwise
+	// be walked through with an inline `/**/`.
 	matchable := matchableSQL(sql, syntaxStandard)
 
+	if err := validateOracleStatement(matchable, grant); err != nil {
+		return err
+	}
+
+	dyn, readable := oracleDynamicSQLAt(matchable)
+
+	return ValidateDynamicSQL(dyn, readable, grant, func(text string) error {
+		return validateOracleStatement(matchableSQL(text, syntaxStandard), grant)
+	})
+}
+
+// validateOracleStatement is the controls and the pattern list over one
+// already-normalised statement, with no unwrapping — applied to the statement a
+// client sent and, unchanged, to the statement that statement would execute.
+func validateOracleStatement(matchable string, grant *store.Grant) error {
 	if err := validateQuery(matchable, grant); err != nil {
 		return err
 	}
@@ -522,12 +632,32 @@ func ValidateOracleQuery(sql string, grant *store.Grant) error {
 	return nil
 }
 
-// ValidateMySQLQuery runs shared validation plus MySQL-specific blocked patterns.
+// ValidateMySQLQuery runs shared validation plus MySQL-specific blocked
+// patterns, over the statement *and* over the text a `PREPARE <name> FROM
+// '<literal>'` (or MariaDB's `EXECUTE IMMEDIATE '<literal>'`) would run.
+//
+// The `EXECUTE <name>` half of the pair carries no text at all and so cannot be
+// answered here: it is session state, and lives in the MySQL proxy. See
+// docs/mysql.md.
 func ValidateMySQLQuery(sql string, grant *store.Grant) error {
 	// syntaxMySQL rather than syntaxStandard: `#` is a comment, `--` needs a
 	// space behind it, and `/*! … */` is executed rather than ignored.
 	matchable := matchableSQL(sql, syntaxMySQL)
 
+	if err := validateMySQLStatement(matchable, grant); err != nil {
+		return err
+	}
+
+	prepared, readable := mysqlPreparedStatement(matchable)
+
+	return ValidateDynamicSQL(prepared.Dynamic, readable, grant, func(text string) error {
+		return validateMySQLStatement(matchableSQL(text, syntaxMySQL), grant)
+	})
+}
+
+// validateMySQLStatement is the controls and the pattern list over one
+// already-normalised statement, with no unwrapping.
+func validateMySQLStatement(matchable string, grant *store.Grant) error {
 	if err := validateQuery(matchable, grant); err != nil {
 		return err
 	}

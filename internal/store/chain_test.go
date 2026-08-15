@@ -717,7 +717,7 @@ func TestQueryChainDowngradeToRawStampIsABreak(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "downgrade-raw", 3)
+	conn, queries := createChainTestConnection(t, ctx, store, "downgrade_raw", 3)
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
@@ -833,7 +833,7 @@ func TestQueryChainStampSurvivesRetentionTruncatingThePrefix(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "stamp-truncated", 4)
+	conn, queries := createChainTestConnection(t, ctx, store, "stamp_truncated", 4)
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
@@ -960,7 +960,7 @@ func TestQueryChainDetectsWipedOpenSession(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, _ := createChainTestConnection(t, ctx, store, "wiped-open", 3)
+	conn, _ := createChainTestConnection(t, ctx, store, "wiped_open", 3)
 
 	stamped, err := store.RefreshOpenChainStamps(ctx)
 	require.NoError(t, err)
@@ -985,7 +985,7 @@ func TestQueryChainClearedStampOnAClosedSessionIsABreak(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "cleared-stamp", 3)
+	conn, queries := createChainTestConnection(t, ctx, store, "cleared_stamp", 3)
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
@@ -1019,7 +1019,7 @@ func TestQueryChainClearedStampMACKeepsItsLength(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, _ := createChainTestConnection(t, ctx, store, "cleared-mac", 3)
+	conn, _ := createChainTestConnection(t, ctx, store, "cleared_mac", 3)
 
 	stamped, err := store.RefreshOpenChainStamps(ctx)
 	require.NoError(t, err)
@@ -1071,7 +1071,7 @@ func TestQueryChainOpenSessionWithoutAStampIsNotABreak(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, _ := createChainTestConnection(t, ctx, store, "unswept-open", 3)
+	conn, _ := createChainTestConnection(t, ctx, store, "unswept_open", 3)
 
 	row, err := store.GetConnectionByUID(ctx, conn.UID)
 	require.NoError(t, err)
@@ -1096,7 +1096,7 @@ func TestQueryChainRetentionNeverClearsTheStamp(t *testing.T) {
 
 	store.queryRetention = 24 * time.Hour
 
-	conn, _ := createChainTestConnection(t, ctx, store, "retention-keeps-stamp", 3)
+	conn, _ := createChainTestConnection(t, ctx, store, "retention_keeps_stamp", 3)
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
@@ -1161,7 +1161,7 @@ func TestQueryChainRetentionEmptyingASessionIsNotABreak(t *testing.T) {
 	// judges an emptied session against.
 	store.queryRetention = 24 * time.Hour
 
-	conn, _ := createChainTestConnection(t, ctx, store, "retention-emptied", 3)
+	conn, _ := createChainTestConnection(t, ctx, store, "retention_emptied", 3)
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
@@ -1202,7 +1202,7 @@ func TestQueryChainWipeInsideTheRetentionWindowIsABreak(t *testing.T) {
 
 	store.queryRetention = 30 * 24 * time.Hour
 
-	conn, _ := createChainTestConnection(t, ctx, store, "retention-window", 2)
+	conn, _ := createChainTestConnection(t, ctx, store, "retention_window", 2)
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
@@ -1228,7 +1228,7 @@ func TestQueryChainWipedUnkeyedSessionBreaksForItsStamp(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "wiped-legacy", 3)
+	conn, queries := createChainTestConnection(t, ctx, store, "wiped_legacy", 3)
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
@@ -1488,7 +1488,7 @@ func TestRowChainVerifiesClean(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-clean")
+	query := captureQuery(t, ctx, store, "rows_clean")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1520,7 +1520,7 @@ func TestRowChainStampsHeadOnSeal(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-stamp")
+	query := captureQuery(t, ctx, store, "rows_stamp")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
 
 	// Not stamped until the capture reaches its barrier.
@@ -1550,7 +1550,7 @@ func TestRowChainDetectsModifiedRow(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-modified")
+	query := captureQuery(t, ctx, store, "rows_modified")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1574,7 +1574,7 @@ func TestRowChainDetectsDeletedRow(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-deleted")
+	query := captureQuery(t, ctx, store, "rows_deleted")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3, 4)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1597,7 +1597,7 @@ func TestRowChainDetectsDeletedFirstRow(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-first")
+	query := captureQuery(t, ctx, store, "rows_first")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1622,7 +1622,7 @@ func TestRowChainDetectsTrailingDeletion(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-trailing")
+	query := captureQuery(t, ctx, store, "rows_trailing")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1649,7 +1649,7 @@ func TestRowChainDetectsRestampedTrailingDeletion(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-restamped")
+	query := captureQuery(t, ctx, store, "rows_restamped")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1680,7 +1680,7 @@ func TestRowChainDetectsAnEditedStampLength(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-stamplen")
+	query := captureQuery(t, ctx, store, "rows_stamplen")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1703,7 +1703,7 @@ func TestRowChainDetectsWipedCapture(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-wiped")
+	query := captureQuery(t, ctx, store, "rows_wiped")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1726,7 +1726,7 @@ func TestRowChainGapsAreNotABreak(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-gaps")
+	query := captureQuery(t, ctx, store, "rows_gaps")
 	storeChainedRows(t, ctx, store, query.UID, 1, 4, 9)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1750,7 +1750,7 @@ func TestRowChainBatchSpansSeveralQueries(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	_, queries := createChainTestConnection(t, ctx, store, "rows-batch", 2)
+	_, queries := createChainTestConnection(t, ctx, store, "rows_batch", 2)
 	first, second := queries[0], queries[1]
 
 	data := func(n int) json.RawMessage { return json.RawMessage(fmt.Sprintf(`{"n":%d}`, n)) }
@@ -1798,8 +1798,8 @@ func TestRowChainRetentionCascadeIsNotABreak(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	oldConn, oldQueries := createChainTestConnection(t, ctx, store, "rows-reaped", 1)
-	keptConn, keptQueries := createChainTestConnection(t, ctx, store, "rows-kept", 1)
+	oldConn, oldQueries := createChainTestConnection(t, ctx, store, "rows_reaped", 1)
+	keptConn, keptQueries := createChainTestConnection(t, ctx, store, "rows_kept", 1)
 
 	storeChainedRows(t, ctx, store, oldQueries[0].UID, 1, 2, 3)
 	storeChainedRows(t, ctx, store, keptQueries[0].UID, 1, 2, 3)
@@ -1834,7 +1834,7 @@ func TestRowChainOutcomeFlagsAreNotSealed(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-outcome")
+	query := captureQuery(t, ctx, store, "rows_outcome")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2)
 	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
 
@@ -1851,8 +1851,8 @@ func TestVerifyRowChainsScopedToOneConnection(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	connA, queriesA := createChainTestConnection(t, ctx, store, "rows-scope-a", 1)
-	_, queriesB := createChainTestConnection(t, ctx, store, "rows-scope-b", 1)
+	connA, queriesA := createChainTestConnection(t, ctx, store, "rows_scope_a", 1)
+	_, queriesB := createChainTestConnection(t, ctx, store, "rows_scope_b", 1)
 
 	storeChainedRows(t, ctx, store, queriesA[0].UID, 1, 2)
 	storeChainedRows(t, ctx, store, queriesB[0].UID, 1, 2, 3)
@@ -1870,7 +1870,7 @@ func TestRowChainDisabledWithoutKey(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-unkeyed")
+	query := captureQuery(t, ctx, store, "rows_unkeyed")
 
 	unkeyed := &Store{db: store.db, queryChains: newQueryChains(), rowChains: newQueryChains()}
 
@@ -1903,7 +1903,7 @@ func TestRowChainResumesFromTheStoredHead(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	query := captureQuery(t, ctx, store, "rows-resume")
+	query := captureQuery(t, ctx, store, "rows_resume")
 	storeChainedRows(t, ctx, store, query.UID, 1, 2)
 
 	peer := &Store{
@@ -2267,7 +2267,7 @@ func TestQueryChainRefreshStampsAnOpenSession(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "refresh-open", 3)
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh_open", 3)
 
 	before, err := store.GetConnectionByUID(ctx, conn.UID)
 	require.NoError(t, err)
@@ -2304,7 +2304,7 @@ func TestQueryChainOpenSessionMayLagBehindItsStamp(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, _ := createChainTestConnection(t, ctx, store, "refresh-lag", 3)
+	conn, _ := createChainTestConnection(t, ctx, store, "refresh_lag", 3)
 
 	_, err := store.RefreshOpenChainStamps(ctx)
 	require.NoError(t, err)
@@ -2350,7 +2350,7 @@ func TestQueryChainClosedSessionStampStaysExact(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, _ := createChainTestConnection(t, ctx, store, "refresh-closed-exact", 3)
+	conn, _ := createChainTestConnection(t, ctx, store, "refresh_closed_exact", 3)
 
 	_, err := store.RefreshOpenChainStamps(ctx)
 	require.NoError(t, err)
@@ -2379,7 +2379,7 @@ func TestQueryChainRefreshGuardSkipsAClosedSession(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "refresh-guard", 3)
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh_guard", 3)
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
@@ -2408,7 +2408,7 @@ func TestQueryChainRefreshDetectsTrailingDeletionOnAnOpenSession(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "refresh-trailing", 5)
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh_trailing", 5)
 
 	_, err := store.RefreshOpenChainStamps(ctx)
 	require.NoError(t, err)
@@ -2433,7 +2433,7 @@ func TestQueryChainRefreshDetectsARestampedOpenSession(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "refresh-restamp", 5)
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh_restamp", 5)
 
 	_, err := store.RefreshOpenChainStamps(ctx)
 	require.NoError(t, err)
@@ -2465,7 +2465,7 @@ func TestQueryChainRefreshSurvivesRetentionReapingTheStampedStatement(t *testing
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "refresh-reaped", 2)
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh_reaped", 2)
 
 	_, err := store.RefreshOpenChainStamps(ctx)
 	require.NoError(t, err)
@@ -2672,10 +2672,10 @@ func TestQueryChainStampNeverMovesBackwards(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createOrphanedChainConnection(t, ctx, store, "no-regress", 5)
+	conn, queries := createOrphanedChainConnection(t, ctx, store, "no_regress", 5)
 
 	// The sweep that stamped it ran as the process that owned the session.
-	asRun(t, store, "dead-instance-no-regress", "dead-run-no-regress", func() {
+	asRun(t, store, "dead-instance-no_regress", "dead-run-no_regress", func() {
 		stamped, err := store.RefreshOpenChainStamps(ctx)
 		require.NoError(t, err)
 		require.Equal(t, int64(1), stamped)
@@ -2723,7 +2723,7 @@ func TestQueryChainCloseDoesNotLowerASweptStamp(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn, queries := createChainTestConnection(t, ctx, store, "close-no-regress", 5)
+	conn, queries := createChainTestConnection(t, ctx, store, "close_no_regress", 5)
 
 	_, err := store.RefreshOpenChainStamps(ctx)
 	require.NoError(t, err)

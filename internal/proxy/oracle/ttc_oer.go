@@ -29,10 +29,16 @@ type oerInfo struct {
 // Byte runs inside a row stream that happen to start with 0x04 don't carry it
 // either, which is what makes it worth keeping as the discriminator wherever
 // row bytes are what a false positive would be made of and nothing else stands
-// in for it: a standalone func=0x04 that reports no error has no text to prove
-// itself with, and anything scanned at an arbitrary offset inside a Response
-// mid-fetch is data. Outside those, see findPlausibleOERInResponse,
-// decodeErrorOER and midFetchOERNamesTheStreamingCursor.
+// in for it: anything scanned at an arbitrary offset inside a Response mid-fetch
+// is data. Outside those, see findPlausibleOERInResponse, decodeErrorOER and
+// midFetchOERNamesTheStreamingCursor.
+//
+// The fixed-width OCI encoding has no equivalent of it to demand — measured,
+// *every* standalone summary object in the OCI recordings reports its status
+// with a bare CallStatus 0x1 — so a standalone func=0x04 reporting success or
+// ORA-01403 is read there under the layout anchors and the cursor bounds
+// instead, and only at byte 0 of a packet that no row stream is open on. See
+// decodeFixedStatusOERAt.
 const oerEndOfCallBit = 0x010000
 
 // oraNoDataFound is ORA-01403, the normal end-of-data status — not an error.
@@ -51,7 +57,23 @@ var oerFieldMaxSizes = [...]int{4, 2, 8, 4, 2, 2, 4}
 //
 // Returns nil when the bytes do not validate as an OER (decode failure,
 // oversized field, or missing end-of-call bit).
-func decodeOERAt(payload []byte, offset int) *oerInfo {
+//
+// It has a second half, for the fixed-width OCI encoding, and that half is
+// offered **only at offset 0** — see decodeFixedStatusOERAt for the measurement
+// that draws the line there. The bit stays the whole discriminator on the
+// compressed reading, at every offset, unchanged.
+func decodeOERAt(shape oerShape, payload []byte, offset int) *oerInfo {
+	if info := decodeCompressedEndOfCallOERAt(payload, offset); info != nil {
+		return info
+	}
+
+	return decodeFixedStatusOERAt(shape, payload, offset)
+}
+
+// decodeCompressedEndOfCallOERAt is the reading decodeOERAt has always had: the
+// seven leading fields as TTC compressed integers, accepted only when the call
+// status carries the end-of-call bit.
+func decodeCompressedEndOfCallOERAt(payload []byte, offset int) *oerInfo {
 	info, rest := decodeOERFieldsAt(payload, offset)
 	if info == nil || info.CallStatus&oerEndOfCallBit == 0 {
 		return nil
@@ -59,6 +81,72 @@ func decodeOERAt(payload []byte, offset int) *oerInfo {
 
 	if info.ErrorCode != 0 {
 		info.ErrorMessage = extractORAMessage(payload[rest:])
+	}
+
+	return info
+}
+
+// decodeFixedStatusOERAt reads a **fixed-width** summary object reporting
+// success or ORA-01403 — the status OER that ends a call on an OCI client — and
+// is decodeOERAt's answer to the end-of-call bit not existing for it.
+//
+// Demanding the bit here was the conservative option, and it was measured to be
+// worth nothing: replayed through a real session, *every* standalone summary
+// object in the two OCI recordings carries CallStatus `0x1`. The five
+// `SELECT 1 AS n FROM dual` re-executions of sqlplus_cursor_reexec.pcapng and
+// the `SELECT DECODE(USER, …)` login probe both recordings open with report
+// ORA-01403 with a bare `0x1`; the only OCI call status with the bit in the
+// corpus is the ORA-00942 of a failed DROP (`0x10001`), which decodeErrorOER
+// already reads. A bit-demanding fixed-width reading would therefore complete
+// exactly nothing — the very frames this exists for would stay pending until the
+// next statement's flushPendingQuery closed them, which is the symptom.
+//
+// What replaces the bit is the bound set findPlausibleOERInResponse already
+// trusts on this very object, on top of decodeOERFixedFieldsAt's own RetCode
+// anchor: the code must be success or end-of-data, the ECID sequence must fit
+// its 16-bit field, and the cursor id must be a plausible one. A *failure*
+// reported fixed-width is deliberately not accepted here — decodeErrorOER holds
+// it to the stronger proof of a diagnostic naming its own code.
+//
+// Two restrictions keep that from widening what row bytes can be mistaken for,
+// and both are measured rather than argued:
+//
+//   - **offset 0 only.** Across all 26 recordings in testdata/, 641 server
+//     packets arrive while a row stream is active; run at every 0x04 offset
+//     *inside* them, this predicate accepts 149 — and they are not junk. An OCI
+//     fetch response carries a real summary object of exactly this shape at a
+//     constant offset in *every* continuation packet, naming the streaming
+//     cursor and reporting the running row count (13001, 13101, … 14901 in
+//     sqlplus_midfetch_fail.pcapng), and two of them even carry the end-of-call
+//     bit. Accepting one ends the call in the middle of the fetch. So a 0x04
+//     that a scan *found* is never read this way; only one that was the packet's
+//     own leading byte, which is what the router already believed. That is what
+//     leaves findOERInResponse's mid-row-stream scan exactly as strict as it was.
+//   - **outside a row stream only**, which is the caller's half of the same
+//     bound: see session.statusOERMayEndTheCall. At offset 0 the corpus is clean
+//     — of those 641 mid-stream packets only 4 lead with 0x04, all four the
+//     genuine mid-fetch ORA-01722 failures, and a status predicate accepts none
+//     of them — but the object above demonstrably travels inside the stream, so
+//     a packet boundary is all that separates it from byte 0.
+//
+// A third restriction is about *ordering* rather than row bytes: the shape must be
+// **learned**, so the unlearned two-layout fallback decodeOERFixedFieldsAt offers
+// is not available here. handleOERStatus runs this reading before decodeErrorOER,
+// and a status accepted early is a diagnostic never proven — so on a session that
+// has not yet learned its encoding, a bit-less *error* OER that happened to
+// satisfy one of the two layouts' anchors could be completed as a status, losing
+// its ORA text. It costs nothing: readUpstreamAuthMessages learns the shape off
+// the AUTH exchange, long before any statement runs, and in both OCI recordings
+// every standalone status OER arrives with the shape already learned
+// (TestDecodeFixedStatusOERAt_KeepsItsAnchors pins the refusal).
+func decodeFixedStatusOERAt(shape oerShape, payload []byte, offset int) *oerInfo {
+	if offset != 0 || !shape.tailLearned || !shape.fixedWidth {
+		return nil
+	}
+
+	info, _ := decodeOERFixedFieldsAt(shape, payload, offset)
+	if !plausibleStatusOER(info) {
+		return nil
 	}
 
 	return info
@@ -439,13 +527,30 @@ func findCursorIDInResponse(shape oerShape, payload []byte) (uint16, bool) {
 // findOERInResponse scans a Response (func=0x08) payload for the embedded OER
 // message that follows the return-parameter block. payload starts at the
 // function code byte. Returns nil when no valid OER is found.
-func findOERInResponse(payload []byte) *oerInfo {
+//
+// It takes the session's summary-object shape because decodeOERAt does, but the
+// scan starts at offset 1 and decodeOERAt's fixed-width half is offered at
+// offset 0 only — so this locator is, by construction, the same end-of-call-bit
+// reading it has always been. That is a **measured** refusal rather than an
+// omission: an OCI fetch response carries a genuine fixed-width summary object
+// at a constant offset inside every continuation packet, naming the streaming
+// cursor and reporting the fetch's running row count, and a bit-less scan of the
+// corpus's 641 mid-row-stream packets accepts 149 of them (2 even carry the bit).
+// Mid-fetch, this scan runs on exactly those bytes, and the first acceptance
+// would end the call at row 13001 of 20000 — silently truncating capture,
+// stopping quota enforcement mid-stream and mis-charging the rest of the fetch,
+// which is the production incident handleResponse's row-stream guard descends
+// from. Outside a row stream nothing is lost by refusing: the
+// findPlausibleOERInResponse fall-through right behind it reads the fixed-width
+// encoding under the cursor bounds. See decodeFixedStatusOERAt and
+// docs/oracle.md, "the OER end-of-call bit is not universal".
+func findOERInResponse(shape oerShape, payload []byte) *oerInfo {
 	for i := 1; i < len(payload); i++ {
 		if payload[i] != 0x04 {
 			continue
 		}
 
-		if info := decodeOERAt(payload, i); info != nil {
+		if info := decodeOERAt(shape, payload, i); info != nil {
 			return info
 		}
 	}

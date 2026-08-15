@@ -125,7 +125,22 @@ const (
 	CodeK8sCAPinMismatch Code = "k8s_ca_pin_mismatch"
 	// CodeInternal is an unclassified failure.
 	CodeInternal Code = "internal_error"
+	// CodeOracleServiceNameConflict is a *warning* code, not a failure: this
+	// Oracle row's upstream service name is also claimed by rows spelling their
+	// host differently, so a client connecting with the shared service name is
+	// refused ORA-12514 even though this row itself checks out.
+	CodeOracleServiceNameConflict Code = "oracle_service_name_conflict"
 )
+
+// Warning is a non-fatal configuration problem noticed while checking a row.
+// The check itself can pass — the row is reachable and its credentials work —
+// while something about how it sits next to its neighbors will bite a client
+// later. Structured like a failure (a stable code plus text) so the UI keys off
+// the code rather than the wording.
+type Warning struct {
+	Code    Code   `json:"code"`
+	Message string `json:"message"`
+}
 
 // Result is the structured outcome of a connectivity check. It carries no
 // secret material: only the stage reached, a machine-readable code, a
@@ -153,6 +168,10 @@ type Result struct {
 	// Public challenge material, like the host key; empty when the row supplied
 	// its own bundle, which always wins.
 	LearnedCACert string `json:"k8s_learned_ca_cert,omitempty"`
+	// Warnings are problems that do not make the check fail but that an admin
+	// needs to know about. They are reported whatever OK says: a row can be
+	// perfectly reachable and still be unreachable *by service name*.
+	Warnings []Warning `json:"warnings,omitempty"`
 	// DurationMs is how long the whole check took.
 	DurationMs int64 `json:"duration_ms"`
 }
@@ -197,9 +216,58 @@ func (c *Checker) Check(ctx context.Context, srv *store.Server) Result {
 	defer dialer.Close()
 
 	res := c.check(ctx, dialer, srv)
+	res.Warnings = append(res.Warnings, c.oracleServiceNameWarnings(ctx, srv)...)
 	res.DurationMs = time.Since(start).Milliseconds()
 
 	return res
+}
+
+// oracleServiceNameLister is the optional half of the resolver: a store can tell
+// the checker which other rows claim this row's upstream Oracle service name.
+//
+// Optional, rather than a method on shared.ServerResolver, because every proxy's
+// dial fake implements that interface and none of them needs a fleet query — the
+// checker asks for the extra method and simply says nothing when the resolver
+// cannot answer.
+type oracleServiceNameLister interface {
+	GetOracleServiceNameConflict(
+		ctx context.Context,
+		serviceName string,
+	) (*store.OracleServiceNameConflict, bool, error)
+}
+
+// oracleServiceNameWarnings reports an Oracle row whose upstream service name is
+// also claimed by rows pointing at a different `host:port`.
+//
+// This is the visible half of a dormant trap: the proxy compares candidate
+// upstreams textually (internal/proxy/oracle/session.go, resolveDatabase), so
+// two spellings of one machine — a CNAME here, the A-record there — make every
+// connect that arrives with the shared service name fail ORA-12514, while each
+// row on its own dials and logs in fine. Nothing about *this* row is broken,
+// which is exactly why it needs saying out loud.
+//
+// Only the dedicated service-name column counts, matching what the proxy's
+// candidate lookup keys off.
+func (c *Checker) oracleServiceNameWarnings(ctx context.Context, srv *store.Server) []Warning {
+	if srv == nil || srv.Protocol != store.ProtocolOracle {
+		return nil
+	}
+
+	if srv.OracleServiceName == nil || *srv.OracleServiceName == "" {
+		return nil
+	}
+
+	lister, ok := c.resolver.(oracleServiceNameLister)
+	if !ok {
+		return nil
+	}
+
+	conflict, found, err := lister.GetOracleServiceNameConflict(ctx, *srv.OracleServiceName)
+	if err != nil || !found {
+		return nil
+	}
+
+	return []Warning{{Code: CodeOracleServiceNameConflict, Message: conflict.Describe()}}
 }
 
 // check runs the protocol-appropriate check body against a caller-owned dialer.

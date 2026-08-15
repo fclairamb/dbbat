@@ -131,7 +131,7 @@ func TestDumpReplay_FailuresArriveAsBitLessStandaloneOERs(t *testing.T) {
 						got.index, got.fields.CallStatus)
 
 					// The strict decoder is what dbbat used before this fix.
-					assert.Equal(t, want[i].hasBit, decodeOERAt(got.payload, 0) != nil,
+					assert.Equal(t, want[i].hasBit, decodeOERAt(thinOERShape(), got.payload, 0) != nil,
 						"packet #%d: the strict decoder tracks the bit exactly", got.index)
 
 					// And the relaxed decoder reads all of them, because every

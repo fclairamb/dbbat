@@ -51,7 +51,7 @@ func TestTestServerConnection_UnreachableTarget(t *testing.T) {
 
 	host, port := closedTCPPort(t)
 	created, err := dataStore.CreateServer(context.Background(), &store.Server{
-		Name: "unreachable-tsc1", Host: host, Port: port,
+		Name: "unreachable_tsc1", Host: host, Port: port,
 		DatabaseName: "app", Username: "app", Password: "s3cr3t-pg-password",
 		SSLMode: "disable", Protocol: store.ProtocolPostgreSQL, Listable: true,
 	}, dbTestEncryptionKey)
@@ -87,7 +87,7 @@ func TestTestServerConnection_UnreachableBastion(t *testing.T) {
 
 	host, port := closedTCPPort(t)
 	created, err := dataStore.CreateServer(context.Background(), &store.Server{
-		Name: "bastion-tsc2", Host: host, Port: port,
+		Name: "bastion_tsc2", Host: host, Port: port,
 		Username: "www-data", Protocol: store.ProtocolSSH, Listable: false,
 		ProtocolData: &store.ServerProtocolData{SSH: &store.SSHServerData{
 			PrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----\n",
@@ -151,7 +151,7 @@ func TestTestServerConnection_NonAdminForbidden(t *testing.T) {
 	createTestUser(t, dataStore, "viewer-tsc4", "viewerpass123", []string{store.RoleViewer})
 	token := loginUser(t, server, "viewer-tsc4", "viewerpass123")
 
-	db := createTestDBEntry(t, dataStore, "target-tsc4", true)
+	db := createTestDBEntry(t, dataStore, "target_tsc4", true)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/"+db.UID.String()+"/test", nil)
 	req.Header.Set("Authorization", "Bearer "+token)

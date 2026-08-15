@@ -115,7 +115,7 @@ func TestAssignGrant_Priority(t *testing.T) {
 	target := createTestUser(t, dataStore, "target-"+suffix, "targetpass123", []string{store.RoleConnector})
 
 	database, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "prio-db-" + suffix,
+		Name:         "prio_db_" + suffix,
 		Host:         "127.0.0.1",
 		Port:         5432,
 		DatabaseName: "prod",
@@ -201,7 +201,7 @@ func TestAssignGrant(t *testing.T) {
 	target := createTestUser(t, dataStore, "target-"+suffix, "targetpass123", []string{store.RoleConnector})
 
 	database, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "assign-db-" + suffix,
+		Name:         "assign_db_" + suffix,
 		Host:         "127.0.0.1",
 		Port:         5432,
 		DatabaseName: "prod",
@@ -213,7 +213,7 @@ func TestAssignGrant(t *testing.T) {
 	require.NoError(t, err)
 
 	other, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "assign-other-db-" + suffix,
+		Name:         "assign_other_db_" + suffix,
 		Host:         "127.0.0.1",
 		Port:         5432,
 		DatabaseName: "other",

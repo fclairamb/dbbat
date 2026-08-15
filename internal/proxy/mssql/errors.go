@@ -107,15 +107,6 @@ var (
 	ErrDatabaseSwitchBlocked = errors.New(
 		"dbbat: switching database is not permitted through dbbat: your grant covers " +
 			"this database only, so connect again naming the other dbbat entry")
-	// ErrDynamicSQLNotCheckable — the batch carries dynamic SQL whose statement
-	// text dbbat could not read all the way down: dynamic SQL nested inside
-	// dynamic SQL (`EXEC('EXEC(''…'')')`), or a quoted run left open. One level
-	// of `EXEC('…')` is unwrapped and checked; a second is refused rather than
-	// unwrapped further, because stopping silently would leave a hole the exact
-	// shape of the one the unwrapping closed.
-	ErrDynamicSQLNotCheckable = errors.New(
-		"dbbat: dbbat cannot check dynamic SQL that is itself built from dynamic SQL: " +
-			"run the inner statement directly")
 	// ErrMalformedRequest — a SQLBatch or RPC message could not be parsed.
 	// Refused rather than relayed: an unparseable request is one dbbat cannot
 	// enforce a grant on.

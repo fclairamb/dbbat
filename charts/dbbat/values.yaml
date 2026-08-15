@@ -75,7 +75,8 @@ config:
   listenApi: ":8080"
   # -- Base URL for frontend (default: /app)
   baseUrl: "/app"
-  # -- Run mode: "" (default) or "test" (for testing only!)
+  # -- Run mode: "" (default), "test" (for testing only!) or "demo" (drops every
+  # table on startup and reseeds the sample data — never point it at real data)
   runMode: ""
   # -- Path to encryption key file (alternative to secrets.encryptionKey)
   # Mount a secret as a volume and reference the path here
@@ -90,6 +91,12 @@ service:
     type: ClusterIP
     # -- API service port
     port: 8080
+    # -- Name of the API port on the service
+    portName: http
+    # -- Also expose the proxy port (taken from config.listenPg) on the API
+    # service, on top of the dedicated proxy service. Only needed where
+    # in-cluster clients already reach the proxy through the API service name.
+    includeProxyPort: false
     # -- API service annotations
     annotations: {}
 
@@ -98,8 +105,18 @@ service:
     enabled: true
     # -- Proxy service type (ClusterIP, NodePort, LoadBalancer)
     type: ClusterIP
-    # -- PostgreSQL proxy external port (maps to container port 5433 via DBB_LISTEN_PG)
+    # -- Suffix appended to the release fullname for the proxy service
+    # (`<fullname>-<nameSuffix>`). Only worth changing to match a service name
+    # that already exists in the cluster.
+    nameSuffix: proxy
+    # -- PostgreSQL proxy external port (maps to the container port taken from
+    # config.listenPg)
     port: 5432
+    # -- Name of the PostgreSQL proxy port, on both services that carry it
+    portName: postgres
+    # -- External IPs to attach to the proxy service. On bare-metal / k3s this is
+    # how a fixed node IP is bound to a LoadBalancer service.
+    externalIPs: []
     # -- Proxy service annotations (e.g., cloud LB configuration, external-dns)
     annotations: {}
     # Example for AWS NLB with external-dns:
@@ -146,6 +163,43 @@ ingress:
   #  - secretName: dbbat-tls
   #    hosts:
   #      - dbbat.example.com
+
+# =============================================================================
+# Extra Ingresses
+# =============================================================================
+# -- Additional Ingress objects beyond `ingress` above, each named
+# `<fullname>-<nameSuffix>` and pointing at the same API service. Use it when one
+# hostname needs a router the primary ingress cannot express — a second
+# hostname, or a plain-HTTP entrypoint that only redirects to HTTPS.
+extraIngresses: []
+  # - nameSuffix: http
+  #   className: traefik
+  #   annotations:
+  #     traefik.ingress.kubernetes.io/router.entrypoints: web
+  #     traefik.ingress.kubernetes.io/router.middlewares: dbbat-redirect-https@kubernetescrd
+  #   hosts:
+  #     - host: dbbat.example.com
+  #       paths:
+  #         - path: /
+  #           pathType: Prefix
+  #   tls: []
+
+# =============================================================================
+# Traefik CRDs
+# =============================================================================
+traefik:
+  # HTTP -> HTTPS redirect middleware. An Ingress bound to the plain-HTTP
+  # entrypoint references it through
+  # `traefik.ingress.kubernetes.io/router.middlewares: <namespace>-<name>@kubernetescrd`.
+  redirectHttpsMiddleware:
+    # -- Render the Middleware CRD object. Off by default: a cluster without
+    # Traefik's CRDs installed would reject it.
+    enabled: false
+    # -- Middleware name (not prefixed by the release fullname, because the
+    # annotation referencing it is written by hand)
+    name: redirect-https
+    # -- Emit 301 (true) rather than 302
+    permanent: true
 
 # =============================================================================
 # HTTPRoute (Gateway API - alternative to Ingress, for API and Web UI)
@@ -216,6 +270,17 @@ resources:
   requests:
     cpu: 100m
     memory: 128Mi
+
+# -- Soft memory ceiling for the Go runtime (GOMEMLIMIT). Set it a little below
+# resources.limits.memory: past this the collector runs continuously instead of
+# letting the heap grow into the cgroup limit, so a burst costs CPU and slow
+# requests rather than an OOMKill and a dropped connection for every user.
+# It is a *soft* limit — Go will still exceed it rather than deadlock — so the
+# gap to the hard limit is the safety margin, not decoration. Empty disables it
+# (the Go default is no limit at all).
+# Keep it in sync by hand when you change resources.limits.memory; Helm cannot
+# do arithmetic on a quantity like "256Mi".
+goMemLimit: "192MiB"
 
 # =============================================================================
 # Probes

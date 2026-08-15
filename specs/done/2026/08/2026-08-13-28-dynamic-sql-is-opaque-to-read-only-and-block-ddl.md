@@ -109,4 +109,36 @@ applications that legitimately build SQL at runtime — ORMs and migration tools
 do this constantly, so the blast radius of refusing is real and is felt by
 well-behaved traffic, not just by an attacker.
 
-**This needs a decision before implementation.**
+## Resolved open questions
+
+> Should an *undecidable* dynamic statement (`EXEC(@sql)`,
+> `PREPARE … FROM @var`, `EXECUTE IMMEDIATE v_stmt`) be refused when the grant
+> carries `read_only` or `block_ddl`?
+
+**Decision: refuse it, but only under those two controls.** Implement it as
+follows:
+
+- A dynamic statement whose payload cannot be extracted statically is refused
+  when the active grant carries `read_only` **or** `block_ddl` — the two
+  controls whose meaning the wrapper defeats. Fail closed: "dbbat cannot tell
+  what this runs" must not resolve to "allow" for a grant that says the session
+  may not write or may not change schema.
+- It is **not** refused for a grant carrying only `block_copy`, nor for a grant
+  with no controls at all (full write). Dynamic SQL defeats neither, so
+  refusing there would be blast radius bought for nothing. Do not extend the
+  refusal to "any control is set".
+- The refusal must name its cause — the statement was refused because its
+  payload is not statically decidable under a `read_only`/`block_ddl` grant, not
+  a generic "write not permitted" — so an operator can tell this class of
+  refusal from an ordinary blocked write and knows the fix is a grant without
+  those controls.
+- This applies to the undecidable forms only. A statically decidable payload is
+  extracted and classified as the Implementation section describes, so a benign
+  `EXEC('SELECT 1')` / `PREPARE s FROM 'SELECT 1'` stays allowed under a
+  `read_only` grant. Pin that in the tests alongside the refusal table.
+- The MySQL `EXECUTE <name>` half follows from the same rule: refuse the
+  `EXECUTE` of a prepared name whose `PREPARE` was not checkable, under those
+  two controls only.
+- Document the resulting behaviour in `docs/mysql.md`, `docs/oracle.md` and
+  `docs/mssql.md`, which must agree; state explicitly that
+  `EXEC(…) AT <linked_server>` is out of scope and unenforced.

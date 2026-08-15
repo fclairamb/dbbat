@@ -388,3 +388,236 @@ func TestIntegration_FailingStatementsRecordTheirORAErrorOCI(t *testing.T) {
 		})
 	}
 }
+
+// The *successful* OCI call, live — the other half of the standalone summary
+// object, and the one that stayed broken a release longer than the failures did.
+//
+// An OCI client ends a call with a fixed-width summary object that carries no
+// end-of-call bit (measured: CallStatus 0x1 on every standalone one in
+// testdata/), and decodeOERAt demanded the bit. So a successful statement was
+// completed by the *next* statement's flushPendingQuery, which knows nothing
+// about it: no rows_affected, and a duration_ms measuring however long the client
+// sat idle in between. See decodeFixedStatusOERAt and
+// standalone_status_oer_replay_test.go, which pin both halves off the recordings.
+//
+// **Two tests, because the two observables live on two different paths, and only
+// one of them is what this fix reaches.** A `SELECT` is the shape that ends on a
+// *standalone* status OER — measured: `sqlplus_cursor_reexec.pcapng` is five of
+// them, one per statement — so its `duration_ms` is a live assertion of the fix
+// and is expected to pass. A DML is not: every DML in `sqlplus_midfetch_fail.pcapng`
+// completed through `handleResponse` instead, and its row count is refused by a
+// *third* fixed-width layout. That assertion is therefore gated — see
+// TestIntegration_DMLRowCountLandsFromItsOwnOEROCI.
+//
+// What makes the `HOST sleep` load-bearing rather than decoration: the gap sits
+// between the statement under test and the next one, so a statement still pending
+// when the next one arrives is charged the whole of it. If `HOST` is unavailable
+// the duration assertion simply stops being able to fail — it never turns into a
+// false one.
+const ociSelectScript = `SET PAGESIZE 0
+SET FEEDBACK OFF
+SELECT 'oci-sel-ready=' || 1 FROM dual;
+SELECT 1 AS n FROM dual;
+HOST sleep 4
+SELECT 'oci-sel-done=' || 42 FROM dual;
+EXIT
+`
+
+const (
+	// ociSelectStatement is the statement text sqlplus puts on the wire for the
+	// second line of the script — without the trailing semicolon, exactly as
+	// ociFailedStatements spells its own. It is the same SQL
+	// sqlplus_cursor_reexec.pcapng runs four times, whose standalone ORA-01403
+	// status OER TestDumpReplay_OCIStatusOERsCompleteTheirOwnStatement pins.
+	ociSelectStatement = "SELECT 1 AS n FROM dual"
+
+	// ociIdleMs is the `HOST sleep` in the scripts, in milliseconds. A statement
+	// completed by its own OER cannot be charged it.
+	ociIdleMs = 4000
+)
+
+// TestIntegration_SuccessfulSelectCompletesOnItsOwnOEROCI is the live assertion
+// of what this fix does: a sqlplus SELECT is completed by its own standalone
+// status OER, so the idle time that follows it is not charged to it.
+//
+// Before the fix the statement stayed pending across the `HOST sleep` and was
+// closed by the *next* statement's flushPendingQuery, which is exactly the 74 s
+// UPDATE the python-oracledb half of this story was found by.
+func TestIntegration_SuccessfulSelectCompletesOnItsOwnOEROCI(t *testing.T) {
+	ociAuthModeNote(t)
+
+	env := startOracleThroughProxyForOCI(t, nil)
+	oci := requireOCIClient(t, env)
+
+	runCtx, cancel := context.WithTimeout(context.Background(),
+		failingStatementDeadline+ociIdleMs*time.Millisecond)
+	defer cancel()
+
+	output, err := oci.run(t, runCtx, ociSelectScript)
+	require.NoErrorf(t, err, "%s never came back:\n%s", oci.label, output)
+
+	assertNoOCIAuthMalformation(t, output)
+
+	assert.Contains(t, output, "oci-sel-ready=1", "the OCI session must work before the SELECT:\n%s", output)
+	assert.Contains(t, output, "oci-sel-done=42", "and must outlive it:\n%s", output)
+
+	env.assertQueryCompletedWithin(t, ociSelectStatement, ociIdleMs)
+}
+
+// ociDMLRowCountEnv un-gates the test below. It is an env var rather than a plain
+// t.Skip because the assertion is meant to be *runnable* by whoever fixes the
+// third fixed-width layout, not read and re-derived.
+const ociDMLRowCountEnv = "ORACLE_TEST_OCI_DML_ROWCOUNT"
+
+// The DML script. Same shape as ociSelectScript, with the idle gap between the
+// UPDATE and the COMMIT that would flush it.
+const ociDMLScript = `SET PAGESIZE 0
+SET FEEDBACK OFF
+SELECT 'oci-dml-ready=' || 1 FROM dual;
+UPDATE dbbat_dml_oci SET n = n + 1;
+HOST sleep 4
+COMMIT;
+SELECT 'oci-dml-done=' || 42 FROM dual;
+EXIT
+`
+
+// The table the DML above runs against, and the statement text sqlplus puts on
+// the wire for it.
+const (
+	ociDMLCreate = "CREATE TABLE dbbat_dml_oci (id NUMBER PRIMARY KEY, n NUMBER)"
+	ociDMLDrop   = "DROP TABLE dbbat_dml_oci"
+	ociDMLUpdate = "UPDATE dbbat_dml_oci SET n = n + 1"
+
+	// ociDMLRows is how many rows the UPDATE must report having touched. Seeded
+	// through the fixture's own go-ora connection, so nothing in the sqlplus
+	// script has to succeed for the count to be what it is.
+	ociDMLRows = 7
+)
+
+// TestIntegration_DMLRowCountLandsFromItsOwnOEROCI is a **known-gap test, gated
+// off by default**. It is the assertion an OCI DML's `rows_affected` deserves, on
+// a path the standalone status reading does not reach.
+//
+// Why it is gated rather than expected to pass, measured rather than guessed. An
+// OCI DML's summary object does not arrive standalone: in
+// `sqlplus_midfetch_fail.pcapng` the whole `DROP` / `CREATE` /
+// `INSERT ... SELECT` / `COMMIT` sequence is answered by func `0x08` Responses,
+// and `ociStatusDumps()` pins that recording at exactly **one** standalone status
+// OER — the login probe. So a DML's row count is `handleResponse`'s business, and
+// there it depends on a **third** fixed-width layout dbbat cannot read: packet #31
+// of that recording (the `INSERT ... SELECT` of 20 000 rows) carries a populated
+// logical-rowid DLC that displaces the trailing RetCode, so
+// decodeOERFixedFieldsAt's anchor refuses it at both known layouts
+// (oerFixed32Layout and oerFixed64Layout) and the fall-through reaches the legacy
+// decodeTTCResponse, which misreads v315+ responses. Nothing makes a seven-row
+// UPDATE's rowid block less likely to be populated than a 20 000-row INSERT's.
+//
+// **What un-gates it:** teaching decodeOERFixedFieldsAt (or
+// oerFixedWidthTailFieldsAt, which walks the same prefix) the layout in which the
+// rowid DLC is populated, so packet #31's summary object decodes and its
+// CurRowNumber of 20 000 is readable. `skipOERFixedFields` is where that walk
+// bails today. Then run with ORACLE_TEST_OCI_DML_ROWCOUNT=1 and delete this gate.
+// Left un-gated it would turn a real, out-of-scope gap into a red nightly with no
+// owner — and a green nightly must not be read as "OCI DML row counts are
+// verified", which is the other half of why the gate says so out loud.
+//
+// See docs/oracle.md, "a successful call on an OCI client".
+func TestIntegration_DMLRowCountLandsFromItsOwnOEROCI(t *testing.T) {
+	if os.Getenv(ociDMLRowCountEnv) == "" {
+		t.Skipf("gated: an OCI DML's summary object arrives embedded in a Response with a populated "+
+			"logical-rowid DLC that displaces the trailing RetCode (sqlplus_midfetch_fail.pcapng "+
+			"packet #31), so decodeOERFixedFieldsAt refuses it at both known layouts and "+
+			"rows_affected stays NULL. That third layout is out of the scope of the standalone "+
+			"status reading this file's SELECT test covers. Teach the decoder that layout, then "+
+			"set %s=1 and remove this gate", ociDMLRowCountEnv)
+	}
+
+	ociAuthModeNote(t)
+
+	env := startOracleThroughProxyForOCI(t, nil)
+	oci := requireOCIClient(t, env)
+
+	ctx := context.Background()
+
+	_, _ = env.db.ExecContext(ctx, ociDMLDrop) // ORA-00942 on a clean database
+
+	_, err := env.db.ExecContext(ctx, ociDMLCreate)
+	require.NoError(t, err)
+
+	defer func() { _, _ = env.db.ExecContext(context.Background(), ociDMLDrop) }()
+
+	for i := 1; i <= ociDMLRows; i++ {
+		_, err = env.db.ExecContext(ctx,
+			fmt.Sprintf("INSERT INTO dbbat_dml_oci VALUES (%d, %d)", i, i))
+		require.NoError(t, err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, failingStatementDeadline+ociIdleMs*time.Millisecond)
+	defer cancel()
+
+	output, err := oci.run(t, runCtx, ociDMLScript)
+	require.NoErrorf(t, err, "%s never came back:\n%s", oci.label, output)
+
+	assertNoOCIAuthMalformation(t, output)
+
+	assert.Contains(t, output, "oci-dml-ready=1", "the OCI session must work before the DML:\n%s", output)
+	assert.Contains(t, output, "oci-dml-done=42", "and must outlive it:\n%s", output)
+
+	match := env.assertQueryCompletedWithin(t, ociDMLUpdate, ociIdleMs)
+
+	require.NotNilf(t, match.RowsAffected,
+		"%q must carry the row count its own OER reported — a NULL here means the statement was "+
+			"closed by the next one's flushPendingQuery instead", ociDMLUpdate)
+	assert.Equal(t, int64(ociDMLRows), *match.RowsAffected)
+}
+
+// assertQueryCompletedWithin is the positive counterpart of
+// assertFailedQueryLogged: the statement is in `queries` with no error and with a
+// duration that ends where the call did rather than where the client's next
+// statement began. It returns the row so a caller can assert more of it.
+func (e *oracleThroughProxy) assertQueryCompletedWithin(
+	t *testing.T,
+	wantSQL string,
+	maxDurationMs float64,
+) *store.Query {
+	t.Helper()
+
+	ctx := context.Background()
+
+	var match *store.Query
+
+	require.Eventuallyf(t, func() bool {
+		queries, err := e.store.ListQueries(ctx, store.QueryFilter{Limit: 500})
+		if err != nil {
+			return false
+		}
+
+		match = nil
+
+		for i := range queries {
+			if queries[i].SQLText == wantSQL {
+				match = &queries[i]
+			}
+		}
+
+		return match != nil && match.DurationMs != nil
+	}, failingStatementDeadline, 250*time.Millisecond,
+		"the statement %q was never logged as complete", wantSQL)
+
+	assert.Nilf(t, match.Error, "%q succeeded; queries.error must be empty", wantSQL)
+
+	require.NotNil(t, match.DurationMs)
+	assert.Lessf(t, *match.DurationMs, maxDurationMs,
+		"%q was logged at %.0fms: a statement completed by its own OER cannot be charged the idle "+
+			"time that follows it", wantSQL, *match.DurationMs)
+
+	conn, err := e.store.GetConnectionByUID(ctx, match.ConnectionID)
+	require.NoError(t, err)
+	assert.Equal(t, e.user.UID, conn.UserID, "a success row joins to its user like any other query")
+
+	result, err := e.store.VerifyQueryChain(ctx, match.ConnectionID)
+	require.NoError(t, err)
+	assert.Nil(t, result.Break, "a success row must be a valid link in the connection's query chain")
+
+	return match
+}

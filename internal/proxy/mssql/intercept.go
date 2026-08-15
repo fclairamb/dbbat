@@ -348,26 +348,18 @@ func (s *session) validate(st statement) error {
 // classifiers saw no write, and the USE scan steps over string literals on the
 // (otherwise sound) assumption that no statement begins inside one.
 //
-// Only the decidable form is covered. `EXEC(@sql)` is assembled at runtime and
-// yields nothing to check — see the limitation note in docs/mssql.md rather
-// than any pretense of coverage here.
+// A payload dbbat cannot read statically — `EXEC(@sql)` — is refused when the
+// grant carries `read_only` or `block_ddl` and allowed otherwise, which is
+// shared.ValidateDynamicSQL's call rather than this function's: the same policy
+// runs on MySQL and Oracle. See docs/mssql.md.
 func (s *session) validateStatement(sql string) error {
 	if err := s.checkStatement(sql); err != nil {
 		return err
 	}
 
 	inner, readable := shared.MSSQLDynamicSQL(sql)
-	if !readable {
-		return ErrDynamicSQLNotCheckable
-	}
 
-	for _, text := range inner {
-		if err := s.checkStatement(text); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return shared.ValidateDynamicSQL(inner, readable, s.grant, s.checkStatement)
 }
 
 // checkStatement is the static controls over one statement's own text, with no

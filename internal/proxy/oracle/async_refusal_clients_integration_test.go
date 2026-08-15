@@ -4,6 +4,7 @@ package oracle
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -283,6 +284,196 @@ func TestIntegration_AsyncRefusalAgainstOCIAndPythonThin(t *testing.T) {
 		assert.NotContains(t, output, "after 42",
 			"a held refusal ends the session; the connection must not answer another statement")
 		assert.Contains(t, output, "done", "the probe must finish rather than throw")
+	})
+}
+
+// pythonAuthScript is the AUTH-phase probe: one connect that is going to be
+// refused, reported off the driver's own exception *object* rather than its text.
+//
+// The object is the whole point. The failure this measures rendered as
+// `DPY-5002: internal error: read integer of length 39 when expecting integer of
+// no more than length 4` — an InternalError about dbbat's own message length,
+// with no ORA code anywhere in it — so a probe that only grepped the text could
+// not tell "the driver parsed the refusal" from "the driver could not parse the
+// frame at all". `class` and `full_code` can.
+const pythonAuthScript = `
+import sys
+import oracledb
+
+host, port, service, user, password = sys.argv[1:6]
+
+try:
+    conn = oracledb.connect(user=user, password=password,
+                            dsn=oracledb.makedsn(host, int(port), service_name=service))
+    print("CONNECTED-UNEXPECTEDLY", flush=True)
+    conn.close()
+except Exception as e:
+    err = e.args[0] if e.args else None
+    print("auth: class=%s code=%s full_code=%s msg=%s"
+          % (type(e).__name__, getattr(err, "code", None),
+             getattr(err, "full_code", None), str(e).strip().splitlines()[0]), flush=True)
+
+print("done", flush=True)
+`
+
+// sqlplusAuthScript is the same for sqlplus. sqlplus prints the ORA error of a
+// failed login and exits, so the script body only has to be something it would
+// have run had the login worked.
+const sqlplusAuthScript = `SET PAGESIZE 0
+SET FEEDBACK OFF
+SET HEADING OFF
+SELECT 'connected=' || 1 FROM dual;
+EXIT
+`
+
+// TestIntegration_AuthRefusalAcrossClients measures the refusal a client meets at
+// AUTH Phase 2 — the one dbbat writes before the session exists at all — against
+// the three clients whose parsers differ.
+//
+// Nothing covered it before this: every refusal test in the suite runs against an
+// authenticated session, and the AUTH-phase frame was left on a three-part
+// invention of dbbat's own (`0x08`, a compressed ORA code, a CLR) that no client
+// parses as an error. python-oracledb thin turned all three refusals into
+// DPY-5002 and reported the length of dbbat's message as an integer width, which
+// read as a driver bug rather than as "you have no grant"; see
+// specs/todos/2026-08-13-21-*.md.
+//
+// The fixture is deliberately the whole chain rather than a socket pair: what a
+// unit test cannot check is that these clients *accept* the frame, and the two
+// halves that decide it — the summary's trailing field count and the OCI dialect
+// — are chosen from the live negotiation.
+//
+// One fixture, three clients, one revoked grant: an Oracle container start costs
+// minutes, and every subtest here wants the same store state (a user with a valid
+// API key and no grant on the target), so nothing has to be swapped between them.
+func TestIntegration_AuthRefusalAcrossClients(t *testing.T) {
+	env := startOracleThroughProxyForOCI(t, nil)
+	ctx := context.Background()
+
+	// Every subtest below opens its own connection, and a session resolves its
+	// grant at authentication — so revoking once here is what makes all of them
+	// refusals. The fixture's own connection was authenticated before this and is
+	// unaffected, which is also why nothing here uses it.
+	env.revokeAllGrants(t)
+
+	t.Run("python-oracledb thin reads the ORA code out of the refusal", func(t *testing.T) {
+		script := requirePythonOracleDB(t, "auth.py", pythonAuthScript)
+
+		runCtx, cancel := context.WithTimeout(ctx, refusalDeadline)
+		defer cancel()
+
+		out, runErr := exec.CommandContext(runCtx, "python3", script,
+			env.host, strconv.Itoa(env.port), env.service, env.username, env.apiKey).CombinedOutput()
+		output := string(out)
+
+		t.Logf("python-oracledb exit: %v\n%s", runErr, outputTail(output))
+
+		require.NoError(t, runCtx.Err(), "python-oracledb never came back from the AUTH refusal")
+		require.NotContains(t, output, "CONNECTED-UNEXPECTEDLY",
+			"the user holds no grant; the login must be refused")
+
+		assert.Contains(t, output, "full_code=ORA-01045",
+			"the refusal must arrive as the ORA code dbbat chose:\n%s", outputTail(output))
+		assert.Contains(t, output, "class=DatabaseError",
+			"an ORA error the driver parsed is a DatabaseError; an InternalError means it could "+
+				"not read the frame at all — which is the whole defect:\n%s", outputTail(output))
+		assert.Contains(t, output, "no active grant",
+			"the actionable text is the reason this frame exists: the user has to be told to "+
+				"request access:\n%s", outputTail(output))
+		assert.NotContains(t, output, "DPY-5002",
+			"DPY-5002 is the defect verbatim: the driver read dbbat's message length as an "+
+				"integer width because the frame was not an error structure:\n%s", outputTail(output))
+		assert.Contains(t, output, "done", "the probe must finish rather than throw")
+	})
+
+	t.Run("go-ora reads the ORA code out of the refusal", func(t *testing.T) {
+		client, err := sql.Open("oracle", env.dsn)
+		require.NoError(t, err)
+
+		t.Cleanup(func() { _ = client.Close() })
+
+		pingCtx, cancel := context.WithTimeout(ctx, refusalDeadline)
+		defer cancel()
+
+		err = client.PingContext(pingCtx)
+		require.Error(t, err, "the user holds no grant; the login must be refused")
+		require.NoError(t, pingCtx.Err(), "go-ora never came back from the AUTH refusal")
+
+		t.Logf("go-ora reported: %v", err)
+
+		// The claim is the ORA code, not the wording, and that is a measurement
+		// rather than caution: go-ora reports `ORA-1045 error occur at position:
+		// 0` — its own rendering of the code, with dbbat's sentence lost. Its
+		// summary parser reads the message CLR straight after the wide RetCode
+		// pair, and go-ora negotiates customHash like a modern client, so it finds
+		// dbbat's two trailing 20c fields there and reads the first as an empty
+		// message. The two layouts are mutually exclusive; see
+		// authRefusalOERShape for why the tail is chosen for the client that
+		// *crashes* without it over the one that loses a sentence.
+		assert.Contains(t, err.Error(), "1045",
+			"go-ora must surface the refusal's ORA code rather than a dead socket")
+		assert.NotContains(t, err.Error(), "ORA-03113",
+			"ORA-03113 (end-of-file on communication channel) is what a client reports when the "+
+				"refusal frame was unreadable and the socket simply closed")
+		assert.NotContains(t, err.Error(), "ORA-12566",
+			"ORA-12566 is what a legacy-framed reject reads as")
+	})
+
+	t.Run("sqlplus reads the ORA code out of the refusal", func(t *testing.T) {
+		oci := requireOCIClient(t, env)
+		ociAuthModeNote(t)
+
+		runCtx, cancel := context.WithTimeout(ctx, refusalDeadline)
+		defer cancel()
+
+		output, runErr := oci.run(t, runCtx, sqlplusAuthScript)
+
+		t.Logf("%s exit: %v\n%s", oci.label, runErr, outputTail(output))
+
+		require.NoError(t, runCtx.Err(),
+			"sqlplus never came back — an OCI client handed a frame in the wrong dialect waits "+
+				"for the rest of a response that has already arrived:\n%s", outputTail(output))
+		require.NotContains(t, output, "connected=1", "the user holds no grant; the login must be refused")
+
+		assertNoOCIAuthMalformation(t, output)
+
+		assert.Contains(t, output, "ORA-01045",
+			"sqlplus prints the ORA text unchanged, so this is the end-to-end evidence that the "+
+				"AUTH refusal is readable in the OCI encoding too:\n%s", outputTail(output))
+	})
+
+	// Last, because it is the one case that needs a grant: the refusal it
+	// measures happens *after* the challenge, and a user with no grant is turned
+	// away before their key is ever looked at (authenticateClient checks the
+	// grant first, which is why every subtest above reports ORA-01045 whatever
+	// password it sends).
+	t.Run("python-oracledb thin reads a refused key the same way", func(t *testing.T) {
+		script := requirePythonOracleDB(t, "auth_badkey.py", pythonAuthScript)
+
+		env.replaceGrant(t, nil)
+
+		runCtx, cancel := context.WithTimeout(ctx, refusalDeadline)
+		defer cancel()
+
+		out, runErr := exec.CommandContext(runCtx, "python3", script,
+			env.host, strconv.Itoa(env.port), env.service, env.username, "dbb_not-a-real-key").CombinedOutput()
+		output := string(out)
+
+		t.Logf("python-oracledb exit: %v\n%s", runErr, outputTail(output))
+
+		require.NoError(t, runCtx.Err(), "python-oracledb never came back from the AUTH refusal")
+		require.NotContains(t, output, "CONNECTED-UNEXPECTEDLY", "a bogus key must be refused")
+
+		// The other half of the summary-shape decision: the challenge has gone out
+		// by now, so the tail follows the verifier it was built with rather than
+		// the negotiation (authChallengeIsModern). It is also the 39-byte message
+		// whose length DPY-5002 used to report as an integer width.
+		assert.Contains(t, output, "full_code=ORA-01017",
+			"a refused key is the generic credentials error, and it has to arrive as one:\n%s", outputTail(output))
+		assert.Contains(t, output, "class=DatabaseError", outputTail(output))
+		assert.Contains(t, output, "invalid username/password",
+			"the 39-byte message whose length DPY-5002 reported:\n%s", outputTail(output))
+		assert.NotContains(t, output, "DPY-5002", outputTail(output))
 	})
 }
 

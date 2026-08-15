@@ -14,6 +14,9 @@ Full documentation is available at **[dbbat.com](https://dbbat.com)**:
 - [Tamper-Evident Audit Log](https://dbbat.com/docs/features/audit-chain)
 - [Compliance](https://dbbat.com/docs/compliance)
 
+Deploying with Kubernetes: the [Helm chart](charts/dbbat/README.md), and
+[how the public demo is deployed and upgraded](docs/demo-deployment.md).
+
 ## Why DBBat?
 
 **The Problem:**

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,10 +16,33 @@ import (
 	"github.com/fclairamb/dbbat/internal/crypto"
 )
 
+// serverNamePattern is the slug format every server name must match: it is the
+// client-facing selector on all five protocols (the "database name" typed in a
+// connection string), so a name with spaces, punctuation or uppercase costs
+// reachability on at least one protocol (Oracle EZ-Connect, unquoted MySQL/CLI
+// identifiers, URL percent-encoding). 63 bytes is PostgreSQL's identifier
+// limit, the tightest of the five. The charset is ASCII-only, so byte length
+// and rune count coincide.
+var serverNamePattern = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+
+// IsValidServerName reports whether name is a valid server slug
+// (^[a-z0-9_]{1,63}$). Exported so any future rename path can reuse the exact
+// same check CreateServer enforces, rather than re-deriving it.
+func IsValidServerName(name string) bool {
+	return serverNamePattern.MatchString(name)
+}
+
 // CreateServer creates a new database configuration.
 // It uses a transaction to ensure the password is encrypted with AAD bound to the database UID.
 // Returns ErrTargetMatchesStorage if the target database matches the DBBat storage database.
 func (s *Store) CreateServer(ctx context.Context, db *Server, encryptionKey []byte) (*Server, error) {
+	// Slug format is the client-facing selector on all five protocols — see
+	// IsValidServerName. Checked before anything else so a bad name never
+	// costs a round trip through the rest of validation.
+	if !IsValidServerName(db.Name) {
+		return nil, ErrServerNameInvalid
+	}
+
 	// Security check: prevent configuring the storage database as a target
 	if s.MatchesStorageDSN(db.Host, db.Port, db.DatabaseName) {
 		return nil, ErrTargetMatchesStorage
@@ -448,8 +472,17 @@ func valueOrDefaultInt(ptr *int, def int) int {
 }
 
 // UpdateServer updates a database.
-// Returns ErrTargetMatchesStorage if the update would cause the target to match the DBBat storage database.
+// Returns ErrTargetMatchesStorage if the update would cause the target to match the DBBat storage database,
+// ErrServerNameInvalid if a rename does not match the slug format, and ErrServerNameConflict if the new
+// name is already taken (by a live *or* soft-deleted row — servers_name_key is global).
 func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerUpdate, encryptionKey []byte) error {
+	// A rename goes through the exact check CreateServer applies — enforced
+	// here rather than only in the handler so every caller of the store is
+	// covered, and checked first so a bad name costs no round trip.
+	if updates.Name != nil && !IsValidServerName(*updates.Name) {
+		return ErrServerNameInvalid
+	}
+
 	// Security check: if host, port, or database name are being updated,
 	// verify the resulting configuration doesn't match the storage DSN
 	if err := s.checkStorageDSNConflict(ctx, uid, updates); err != nil {
@@ -491,6 +524,13 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 
 	result, err := q.Exec(ctx)
 	if err != nil {
+		// servers_name_key is a *global* unique constraint: it covers
+		// soft-deleted rows too, so a name freed by a delete is still taken.
+		// Typed rather than wrapped so the API answers 409 instead of 500.
+		if isUniqueViolation(err, "servers_name_key") {
+			return ErrServerNameConflict
+		}
+
 		return fmt.Errorf("failed to update database: %w", err)
 	}
 
@@ -510,6 +550,9 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 // update query. Password and SSH-secret columns are handled by the caller,
 // which needs the encryption key.
 func applyServerColumnUpdates(q *bun.UpdateQuery, updates ServerUpdate) *bun.UpdateQuery {
+	if updates.Name != nil {
+		q = q.Set("name = ?", *updates.Name)
+	}
 	if updates.Description != nil {
 		q = q.Set("description = ?", *updates.Description)
 	}

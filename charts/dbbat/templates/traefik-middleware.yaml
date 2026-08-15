@@ -1,0 +1,19 @@
+{{- if .Values.traefik.redirectHttpsMiddleware.enabled }}
+{{/*
+Traefik CRD, rendered only when asked for: a plain `helm install` on a cluster
+with no Traefik CRDs must not fail. An HTTP-only Ingress references it with
+  traefik.ingress.kubernetes.io/router.middlewares: <namespace>-<name>@kubernetescrd
+so the name is not prefixed with the release fullname — that reference is
+written by hand in the ingress annotations and has to stay predictable.
+*/}}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ .Values.traefik.redirectHttpsMiddleware.name }}
+  labels:
+    {{- include "dbbat.labels" . | nindent 4 }}
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: {{ .Values.traefik.redirectHttpsMiddleware.permanent }}
+{{- end }}

@@ -466,14 +466,12 @@ func TestIntegration_PreparedStatement_BinaryRowCapture(t *testing.T) {
 		"captured row should include the string literal")
 }
 
-// TestIntegration_ReadOnlyGrant_BlocksWrite verifies that a grant with
-// read_only control rejects an INSERT statement at the proxy layer.
-func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {
-	ctx := context.Background()
+// replaceGrantWithControls revokes every active grant on the fixture and issues
+// one carrying exactly the named controls, so a test can drive the proxy under a
+// specific control set.
+func replaceGrantWithControls(ctx context.Context, t *testing.T, f *fixture, controls ...string) {
+	t.Helper()
 
-	f := setupFixture(ctx, t, mysqlImage(), store.ProtocolMySQL)
-
-	// Replace the existing grant with a read-only one.
 	grants, err := f.store.ListGrants(ctx, store.GrantFilter{ActiveOnly: true})
 	require.NoError(t, err)
 	require.NotEmpty(t, grants)
@@ -489,15 +487,74 @@ func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, databases)
 
-	_, err = testsupport.CreateGrantWithControls(ctx, t, f.store, user.UID, databases[0].UID,
-		[]string{store.ControlReadOnly})
+	_, err = testsupport.CreateGrantWithControls(ctx, t, f.store, user.UID, databases[0].UID, controls)
 	require.NoError(t, err)
+}
+
+// TestIntegration_ReadOnlyGrant_BlocksWrite verifies that a grant with
+// read_only control rejects an INSERT statement at the proxy layer.
+func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {
+	ctx := context.Background()
+
+	f := setupFixture(ctx, t, mysqlImage(), store.ProtocolMySQL)
+
+	replaceGrantWithControls(ctx, t, f, store.ControlReadOnly)
 
 	db := f.dialTLS()
 	defer db.Close()
 
-	_, err = db.ExecContext(ctx, "CREATE TABLE if not exists t (x int)")
+	_, err := db.ExecContext(ctx, "CREATE TABLE if not exists t (x int)")
 	require.Error(t, err, "DDL must be refused under read-only grant")
+}
+
+// TestIntegration_ReadOnlyGrant_BlocksPreparedWrite is the live half of the
+// dynamic-SQL escape: `PREPARE s FROM 'DELETE FROM t'` is a write whose first
+// keyword is PREPARE, so the prefix-shaped classification behind read_only saw
+// nothing and the DELETE ran a statement later, on the real server.
+//
+// It runs against a live MySQL rather than only against the validator because the
+// property under test is that dbbat's static read agrees with what the *server*
+// would have executed: the row count after the attempt is what proves it.
+func TestIntegration_ReadOnlyGrant_BlocksPreparedWrite(t *testing.T) {
+	ctx := context.Background()
+
+	f := setupFixture(ctx, t, mysqlImage(), store.ProtocolMySQL)
+
+	// A table with one row, created while the grant is still full-write.
+	direct := f.dialTLS()
+	_, err := direct.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS prep_t (x int)")
+	require.NoError(t, err)
+	_, err = direct.ExecContext(ctx, "INSERT INTO prep_t VALUES (1)")
+	require.NoError(t, err)
+	require.NoError(t, direct.Close())
+
+	replaceGrantWithControls(ctx, t, f, store.ControlReadOnly, store.ControlBlockDDL)
+
+	db := f.dialTLS()
+	defer db.Close()
+
+	// The wrapper is refused, and so is the EXECUTE of a name that never got
+	// prepared — the half of the pair that carries no statement text at all.
+	_, err = db.ExecContext(ctx, "PREPARE s FROM 'DELETE FROM prep_t'")
+	require.Error(t, err, "a prepared write must be refused under read_only")
+
+	_, err = db.ExecContext(ctx, "EXECUTE s")
+	require.Error(t, err, "and so must executing a name dbbat could not vouch for")
+
+	// A payload dbbat cannot read statically is refused under these two controls.
+	_, err = db.ExecContext(ctx, "SET @sql = 'DELETE FROM prep_t'")
+	require.NoError(t, err, "setting a session variable is not a write")
+
+	_, err = db.ExecContext(ctx, "PREPARE s FROM @sql")
+	require.Error(t, err, "a payload dbbat cannot read must be refused under read_only")
+
+	// A benign payload still runs: this is not a blanket refusal of PREPARE.
+	_, err = db.ExecContext(ctx, "PREPARE ok FROM 'SELECT COUNT(*) FROM prep_t'")
+	require.NoError(t, err, "a prepared read must still be allowed")
+
+	var rows int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM prep_t").Scan(&rows))
+	require.Equal(t, 1, rows, "the row must still be there: nothing deleted it")
 }
 
 // TestIntegration_LoadDataInfile_Blocked verifies LOAD DATA INFILE is

@@ -3,6 +3,7 @@ package mysql
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
@@ -220,12 +221,26 @@ func (h *handler) runIntercepted(
 		return nil, err
 	}
 
+	// The `EXECUTE <name>` half of the prepared-statement pair, which carries no
+	// text for ValidateMySQLQuery to classify. Ahead of it rather than after, so
+	// an EXECUTE dbbat cannot vouch for never reaches the upstream.
+	if err := h.checkPreparedName(sql); err != nil {
+		errStr := err.Error()
+		h.recordQuery(sql, params, time.Now(), &errStr)
+
+		return nil, err
+	}
+
 	if err := shared.ValidateMySQLQuery(sql, s.grant); err != nil {
 		errStr := err.Error()
 		h.recordQuery(sql, params, time.Now(), &errStr)
 
 		return nil, err
 	}
+
+	// Only now, with the payload cleared by the same controls the outer statement
+	// went through, is the prepared name worth remembering.
+	h.rememberPreparedName(sql)
 
 	// A KILL aimed at another connection may be releasing a statement parked
 	// on a human. Handle that before running the statement upstream; the KILL
@@ -282,13 +297,13 @@ func (h *handler) runIntercepted(
 // pattern, and the switch scan reads the outer statement, not the literal. It is
 // the MySQL spelling of SQL Server's `EXEC('…')`.
 //
-// Scope is deliberately narrow: **only** the switch decision reaches inside the
-// literal. `PREPARE s FROM 'DELETE FROM t'` is still invisible to read_only,
-// which is the broader "dynamic SQL is opaque to the grant controls" problem —
-// shared with Oracle's `EXECUTE IMMEDIATE` — and is filed separately rather than
-// half-solved here. docs/mysql.md says so plainly.
+// The grant's own controls reach inside the same literal, through
+// shared.ValidateMySQLQuery — so `PREPARE s FROM 'DELETE FROM t'` is refused
+// under `read_only` exactly as a direct `DELETE` is. The switch decision stays
+// here rather than there because it is not a grant control: no combination of
+// read_only, block_ddl and block_copy makes another database in scope.
 func (h *handler) checkPreparedSwitch(sql string, params *store.QueryParameters) error {
-	prepared, readable := shared.MySQLPreparedText(sql)
+	prepared, readable := shared.MySQLDynamicSQL(sql)
 	if !readable {
 		errStr := ErrPreparedTextNotCheckable.Error()
 		h.recordQuery(sql, params, time.Now(), &errStr)
@@ -296,7 +311,7 @@ func (h *handler) checkPreparedSwitch(sql string, params *store.QueryParameters)
 		return ErrPreparedTextNotCheckable
 	}
 
-	target, isUse := shared.MySQLUseTarget(prepared)
+	target, isUse := h.preparedSwitchTarget(prepared)
 	if !isUse {
 		return nil
 	}
@@ -317,6 +332,85 @@ func (h *handler) checkPreparedSwitch(sql string, params *store.QueryParameters)
 	// A foreign database is switchDatabase's call, so it earns the same error
 	// and the same audit row a direct `USE otherdb` does.
 	return h.switchDatabase(sql, target)
+}
+
+// preparedSwitchTarget reports the database a prepared statement's text would
+// switch to. There is at most one payload — the client leg carries one statement
+// per COM_QUERY — but it is read as a list so no shape goes unexamined.
+func (h *handler) preparedSwitchTarget(prepared shared.DynamicSQL) (string, bool) {
+	for _, text := range prepared.Payloads {
+		if target, isUse := shared.MySQLUseTarget(text); isUse {
+			return target, true
+		}
+	}
+
+	return "", false
+}
+
+// checkPreparedName refuses an `EXECUTE <name>` whose `PREPARE` dbbat could not
+// read, under a grant carrying `read_only` or `block_ddl`.
+//
+// The pair is one decision spread over two statements: `EXECUTE s` carries no
+// statement text, so nothing about it can be classified on its own. Checking the
+// PREPARE and then letting any EXECUTE through would close nothing — the client
+// would only have to build its text with `PREPARE s FROM @sql`, which dbbat
+// cannot read, and then run it. So the two halves are held to the same rule:
+// what dbbat could not vouch for at PREPARE time is what it refuses to execute.
+//
+// Under those two controls only, exactly like the opaque forms
+// (shared.RefusesOpaqueDynamicSQL): a `block_copy`-only grant and a grant with no
+// controls are unaffected, because dynamic SQL defeats neither.
+//
+// An unreadable PREPARE never reaches the map: it is refused outright by
+// checkPreparedSwitch, and an opaque one is refused by ValidateMySQLQuery under
+// these same two controls — so a name is missing here only when its PREPARE was
+// refused, never happened, or happened under a grant that has since changed.
+func (h *handler) checkPreparedName(sql string) error {
+	prepared, readable := shared.MySQLPreparedStatement(sql)
+	if !readable {
+		return ErrPreparedTextNotCheckable
+	}
+
+	if prepared.Kind != shared.MySQLPrepareExecute {
+		return nil
+	}
+
+	if !shared.RefusesOpaqueDynamicSQL(h.session.grant) {
+		return nil
+	}
+
+	if h.session.checkedPrepares[preparedNameKey(prepared.Name)] {
+		return nil
+	}
+
+	return shared.ErrDynamicSQLOpaque
+}
+
+// rememberPreparedName records the outcome of a `PREPARE <name> FROM …` that has
+// just passed every control, so the matching `EXECUTE <name>` can be answered.
+//
+// A PREPARE whose text dbbat could not read statically clears the name rather
+// than leaving whatever was there: re-preparing a name replaces the statement it
+// stands for, so a stale "checked" flag would be the bypass this bookkeeping
+// exists to close.
+func (h *handler) rememberPreparedName(sql string) {
+	prepared, readable := shared.MySQLPreparedStatement(sql)
+	if !readable || prepared.Kind != shared.MySQLPrepareDefine {
+		return
+	}
+
+	if h.session.checkedPrepares == nil {
+		h.session.checkedPrepares = make(map[string]bool)
+	}
+
+	h.session.checkedPrepares[preparedNameKey(prepared.Name)] = len(prepared.Dynamic.Payloads) > 0
+}
+
+// preparedNameKey folds a prepared-statement name for lookup. MySQL treats these
+// names case-insensitively, so `EXECUTE S` runs what `PREPARE s` prepared and the
+// map must agree.
+func preparedNameKey(name string) string {
+	return strings.ToLower(name)
 }
 
 // holdIfNeeded runs the approval gate for one MySQL statement.

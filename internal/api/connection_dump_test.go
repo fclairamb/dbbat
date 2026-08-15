@@ -121,7 +121,7 @@ func TestGetConnectionDump_FallsBackToBlobStorage(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 
@@ -148,7 +148,7 @@ func TestGetConnectionDump_PrefersTheLocalSpool(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 
@@ -174,7 +174,7 @@ func TestGetConnectionDump_NotFoundWithoutACapture(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 
@@ -202,7 +202,7 @@ func TestDeleteConnectionDump_RemovesTheUploadedObject(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 
@@ -236,7 +236,7 @@ func TestConnectionDumpKeyIsNotAPISurface(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 
@@ -268,7 +268,7 @@ func TestGetConnection_DumpMetadata_Disabled(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 
@@ -293,7 +293,7 @@ func TestGetConnection_DumpMetadata_LocalCapture(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 
@@ -324,7 +324,7 @@ func TestGetConnection_DumpMetadata_RemoteCapture(t *testing.T) {
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 
@@ -355,7 +355,7 @@ func TestGetConnectionDump_ViewerTokenForbidden(t *testing.T) {
 	createTestUser(t, dataStore, "viewer-"+suffix, "viewerpass123", []string{store.RoleViewer})
 	viewerToken := loginUser(t, server, "viewer-"+suffix, "viewerpass123")
 
-	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
 	require.NoError(t, err)
 

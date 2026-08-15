@@ -1114,7 +1114,10 @@ paths:
       tags:
         - Databases
       summary: Update database
-      description: Updates a database configuration. Requires admin role.
+      description: >-
+        Updates a database configuration, `name` included — a rename moves the
+        selector every client types, so see the field's own description.
+        Requires admin role.
       operationId: updateDatabase
       requestBody:
         required: true
@@ -1135,6 +1138,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -4263,7 +4270,12 @@ components:
           description: Unique identifier
         name:
           type: string
-          description: Database configuration name
+          description: >-
+            Database configuration name. Creation enforces the slug format
+            `^[a-z0-9_]{1,63}$` (see `CreateDatabaseRequest.name`), but rows
+            created before that gate existed are grandfathered and may not
+            conform — the admin UI flags a non-conforming name so it gets
+            renamed deliberately rather than silently.
         description:
           type: string
           description: Description
@@ -4364,6 +4376,17 @@ components:
             - $ref: '#/components/schemas/ConnectionTestResult'
           description: >-
             Present only when the create/update request set `test_connection: true`
+        oracle_service_name_conflict:
+          allOf:
+            - $ref: '#/components/schemas/OracleServiceNameConflict'
+          description: >-
+            Present only on an Oracle row whose `oracle_service_name` is also
+            claimed by rows pointing at a **different** `host:port`. Nothing is
+            wrong with the row itself — it dials and logs in fine — but a client
+            connecting with the shared service name instead of the dbbat server
+            name is refused ORA-12514, because the proxy compares candidate
+            upstreams as text and two spellings of one machine read as two
+            machines.
       required:
         - uid
         - name
@@ -4447,6 +4470,16 @@ components:
           description: >-
             The cluster's TOFU-learned CA bundle after the check (kubernetes
             servers only); empty when the row supplied its own, which wins
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectionTestWarning'
+          description: >-
+            Advisory findings that did **not** fail the check. A green check can
+            still carry one: today the only warning is
+            `oracle_service_name_conflict`, where the row itself is reachable but
+            its upstream service name is claimed by rows spelling their host
+            differently, so connecting by shared service name fails ORA-12514.
         duration_ms:
           type: integer
           format: int64
@@ -4457,6 +4490,77 @@ components:
         - code
         - message
         - duration_ms
+
+    ConnectionTestWarning:
+      type: object
+      description: >-
+        One advisory finding of a connectivity check. The code is the stable part
+        a client keys off; the message is what it displays.
+      properties:
+        code:
+          type: string
+          enum:
+            - oracle_service_name_conflict
+          description: Machine-readable classification of the warning
+        message:
+          type: string
+          description: Human-readable explanation, safe to display to an admin
+      required:
+        - code
+        - message
+
+    OracleServiceNameConflict:
+      type: object
+      description: |
+        One upstream Oracle service name claimed by several dbbat server rows that
+        disagree on the upstream address.
+
+        The Oracle proxy resolves a shared `oracle_service_name` by comparing the
+        candidate rows' `host:port` **as text** — deliberately, since resolving
+        DNS on the connect path could answer differently between two connects of
+        one DSN. The cost is that a CNAME in one row and the A-record in another
+        read as two upstreams, and every connect arriving with the shared service
+        name is refused ORA-12514. Reconcile the spellings, or have clients
+        connect by dbbat server name.
+      properties:
+        service_name:
+          type: string
+          description: The shared upstream `oracle_service_name`
+        upstreams:
+          type: array
+          items:
+            type: string
+          description: The distinct `host:port` spellings in play, sorted
+        servers:
+          type: array
+          items:
+            type: object
+            properties:
+              uid:
+                type: string
+                format: uuid
+              name:
+                type: string
+              host:
+                type: string
+              port:
+                type: integer
+            required:
+              - uid
+              - name
+              - host
+              - port
+          description: The rows claiming the service name, ordered by name
+        message:
+          type: string
+          description: >-
+            Ready-made operator-facing sentence, identical to the one the
+            connectivity check and the proxy log report
+      required:
+        - service_name
+        - upstreams
+        - servers
+        - message
 
     DatabaseLimited:
       type: object
@@ -4481,7 +4585,18 @@ components:
       properties:
         name:
           type: string
-          description: Unique name for this database configuration
+          maxLength: 63
+          pattern: '^[a-z0-9_]{1,63}$'
+          description: >-
+            Unique name for this database configuration. Must be a slug
+            (lowercase letters, digits, underscores only — no hyphens, spaces
+            or punctuation), capped at 63 bytes (PostgreSQL's identifier
+            limit). This is the client-facing selector on every protocol — the
+            "database name" typed in a connection string — so anything outside
+            this charset costs reachability on at least one of the five
+            (Oracle EZ-Connect, unquoted MySQL/CLI identifiers, URL
+            percent-encoding). Existing non-conforming rows are grandfathered;
+            only creation is gated. Rejected with a 400.
         description:
           type: string
           description: Description
@@ -4600,6 +4715,21 @@ components:
     UpdateDatabaseRequest:
       type: object
       properties:
+        name:
+          type: string
+          maxLength: 63
+          pattern: '^[a-z0-9_]{1,63}$'
+          description: >-
+            Renames the server. Same slug rule as creation (lowercase letters,
+            digits and underscores, capped at 63 bytes); a name outside it is
+            rejected with a 400. The name is the client-facing selector on every
+            protocol — the "database name" a client types in its connection
+            string, and the Oracle SERVICE_NAME — so a rename breaks every saved
+            connection string and client config still using the old one.
+            Sessions already authenticated are unaffected; new connects must use
+            the new name. Names are globally unique across live *and*
+            soft-deleted rows, so reusing the name of a deleted server is a 409.
+            Omit to leave the name unchanged.
         description:
           type: string
           description: Description
@@ -5596,6 +5726,18 @@ components:
           format: uuid
           nullable: true
           description: User who revoked the key
+        oracle_capable:
+          type: boolean
+          description: >-
+            Whether this key can be used as the password for an Oracle
+            (O5LOGON) login. Oracle authentication needs a verifier derived
+            from the key at mint time — API keys are Argon2id-hashed, so it
+            cannot be recovered later. A key minted before Oracle support, or
+            one whose verifier no longer decrypts under the server's current
+            encryption key, authenticates fine against this REST API and every
+            other protocol but is refused by the Oracle proxy; minting a new
+            key is the only fix. Omitted when the server has no encryption key
+            and therefore cannot tell.
       required:
         - id
         - user_id

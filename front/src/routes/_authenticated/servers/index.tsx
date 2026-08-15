@@ -11,6 +11,7 @@ import {
   type ConnectionTestResult,
   type Database,
   type DatabaseLimited,
+  type OracleServiceNameConflict,
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -59,9 +60,15 @@ import {
   Pencil,
   ShieldCheck,
   AlertCircle,
+  AlertTriangle,
   PlugZap,
   Loader2,
 } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { CopyableField } from "@/components/shared/CopyableField";
 import { ApproverGroupPickers } from "@/components/shared/ApproverGroupPickers";
@@ -75,6 +82,111 @@ type DatabaseItem = Database | DatabaseLimited;
 
 function isFullDatabase(db: DatabaseItem): db is Database {
   return "host" in db;
+}
+
+// SERVER_NAME_PATTERN mirrors the store-level slug check
+// (internal/store.IsValidServerName): creation is gated on it, but rows
+// created before that gate existed are grandfathered — this is what lets the
+// admin UI flag those rows instead of hiding the drift.
+const SERVER_NAME_PATTERN = /^[a-z0-9_]{1,63}$/;
+
+// NonSlugNameWarning flags a server row whose name predates the slug gate
+// (or was created directly against the store/API). The row itself works, but
+// the name is the client-facing selector on every protocol, so a stray space,
+// hyphen or uppercase letter costs reachability somewhere down the line —
+// see OracleServiceConflictWarning below, whose shape this mirrors.
+function NonSlugNameWarning({ uid, name }: { uid: string; name: string }) {
+  return (
+    <Tooltip delayDuration={100}>
+      <TooltipTrigger asChild>
+        <span
+          data-testid={`database-name-warning-${uid}`}
+          title="Not a valid slug"
+          className="inline-flex cursor-help text-amber-600"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span className="sr-only">Name is not a slug</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm space-y-1">
+        <p className="font-medium">Not a valid slug</p>
+        <p>
+          "{name}" predates the naming rule and was grandfathered in. New
+          servers must be lowercase letters, numbers, and underscores only —
+          this is the name every client types as the database name in its
+          connection string, so anything else costs reachability on some
+          protocol. Rename it from the pencil action on this row; every client
+          config using the old name has to be updated to match.
+        </p>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+// ServerRenameField is the name input as it appears in the two *edit* forms —
+// never in the create dialog, whose copy talks about choosing a name rather
+// than moving one. The warning is the point of the component: on a database row
+// the name is the connection target, so changing it invalidates every saved
+// connection string, and that has to be said at the moment of the edit.
+function ServerRenameField({
+  id,
+  testId,
+  value,
+  originalName,
+  isTunnel,
+  onChange,
+}: {
+  id: string;
+  testId: string;
+  value: string;
+  originalName: string;
+  isTunnel: boolean;
+  onChange: (next: string) => void;
+}) {
+  const changed = value !== originalName;
+
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>Name</Label>
+      <Input
+        id={id}
+        data-testid={testId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        maxLength={63}
+        pattern="^[a-z0-9_]{1,63}$"
+        title="Lowercase letters, numbers, and underscores only (no hyphens or spaces)"
+        required
+      />
+      <p className="text-xs text-muted-foreground">
+        Lowercase letters, numbers, and underscores only. Names are unique
+        across every server, deleted ones included.
+      </p>
+      {changed && (
+        <Alert data-testid="server-rename-warning">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription className="text-xs">
+            {isTunnel ? (
+              <>
+                Renaming a tunnel row is safe: the servers that dial through it
+                reference it by id, not by name. Only what you read in this UI
+                changes.
+              </>
+            ) : (
+              <>
+                <strong>This moves the connection target.</strong> "
+                {originalName}" is what every client sends as the database name
+                — the Oracle SERVICE_NAME included — so every saved connection
+                string, client config and script still using it stops resolving.
+                Sessions already authenticated keep running; new connects must
+                use "{value}".
+              </>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
+  );
 }
 
 type Protocol =
@@ -144,6 +256,7 @@ function ServersPage() {
   const [detailDb, setDetailDb] = useState<DatabaseItem | null>(null);
   const [editSshServer, setEditSshServer] = useState<Database | null>(null);
   const [approversDb, setApproversDb] = useState<Database | null>(null);
+  const [renameDb, setRenameDb] = useState<DatabaseItem | null>(null);
 
   const canCreate = canCreateDatabase(user?.roles);
   const canDelete = canDeleteDatabase(user?.roles);
@@ -158,7 +271,14 @@ function ServersPage() {
     {
       key: "name",
       header: "Name",
-      cell: (srv) => <span className="font-medium">{srv.name}</span>,
+      cell: (srv) => (
+        <span className="inline-flex items-center gap-1.5">
+          <span className="font-medium">{srv.name}</span>
+          {!SERVER_NAME_PATTERN.test(srv.name) && (
+            <NonSlugNameWarning uid={srv.uid} name={srv.name} />
+          )}
+        </span>
+      ),
     },
     {
       key: "protocol",
@@ -281,7 +401,14 @@ function ServersPage() {
     {
       key: "name",
       header: "Name",
-      cell: (db) => <span className="font-medium">{db.name}</span>,
+      cell: (db) => (
+        <span className="inline-flex items-center gap-1.5">
+          <span className="font-medium">{db.name}</span>
+          {!SERVER_NAME_PATTERN.test(db.name) && (
+            <NonSlugNameWarning uid={db.uid} name={db.name} />
+          )}
+        </span>
+      ),
     },
     {
       key: "protocol",
@@ -328,10 +455,23 @@ function ServersPage() {
       header: "Database",
       cell: (db) =>
         isFullDatabase(db) ? (
-          <span className="font-mono text-sm">
-            {db.protocol === "oracle"
-              ? db.oracle_service_name || db.database_name
-              : db.database_name}
+          <span className="inline-flex items-center gap-1.5">
+            <span className="font-mono text-sm">
+              {db.protocol === "oracle"
+                ? db.oracle_service_name || db.database_name
+                : db.database_name}
+            </span>
+            {/*
+              The conflict is a property of this very value — the shared Oracle
+              service name — so the warning belongs next to it rather than in a
+              column of its own.
+            */}
+            {db.oracle_service_name_conflict && (
+              <OracleServiceConflictWarning
+                uid={db.uid}
+                conflict={db.oracle_service_name_conflict}
+              />
+            )}
           </span>
         ) : (
           <span className="text-muted-foreground">-</span>
@@ -360,6 +500,23 @@ function ServersPage() {
               disabledReason={getDisabledReason("update-database", user?.roles)}
             />
           )}
+          {/* Renaming is the one edit a database row has always been missing:
+              the name is the connection target, and correcting a bad one used
+              to mean an UPDATE against the storage database. */}
+          <PermissionButton
+            data-testid={`database-rename-${db.uid}`}
+            variant="ghost"
+            size="icon"
+            disabled={!canUpdate}
+            disabledReason={getDisabledReason("update-database", user?.roles)}
+            enabledTooltip="Rename this server"
+            onClick={(e) => {
+              e.stopPropagation();
+              setRenameDb(db);
+            }}
+          >
+            <Pencil className="h-4 w-4" />
+          </PermissionButton>
           {canUpdate && isFullDatabase(db) && (
             <Button
               variant="ghost"
@@ -411,7 +568,15 @@ function ServersPage() {
                 Add Server
               </PermissionButton>
             </DialogTrigger>
-            <CreateDatabaseDialog onClose={() => setIsCreateOpen(false)} />
+            {/* Mounted only while open, like the assign dialog on /grants.
+                Left mounted, the closed DialogContent keeps its form state —
+                reopening it after a create showed the previous server's host,
+                username and password — and its overlay stays in the DOM for the
+                whole fade-out, a `fixed inset-0 z-50` sheet that swallows a
+                click on this very trigger. */}
+            {isCreateOpen && (
+              <CreateDatabaseDialog onClose={() => setIsCreateOpen(false)} />
+            )}
           </Dialog>
         }
       />
@@ -454,6 +619,10 @@ function ServersPage() {
       <EditServerApproversDialog
         server={approversDb}
         onClose={() => setApproversDb(null)}
+      />
+      <RenameServerDialog
+        server={renameDb}
+        onClose={() => setRenameDb(null)}
       />
     </div>
   );
@@ -582,6 +751,58 @@ function describeTestResult(result: ConnectionTestResult): string {
   return stage ? `${stage}: ${result.message}` : (result.message ?? "");
 }
 
+// reportTestWarnings surfaces the advisory half of a check. It is reported
+// whether the check passed or failed: a warning is about how the row sits next
+// to its siblings, so a green check can perfectly well carry one.
+function reportTestWarnings(result: ConnectionTestResult) {
+  for (const warning of result.warnings ?? []) {
+    toast.warning(warning.message);
+  }
+}
+
+// OracleServiceConflictWarning marks an Oracle row whose upstream service name
+// is also claimed by rows pointing at a different host:port.
+//
+// The row itself is fine. What is broken is connecting with the *shared service
+// name* rather than the dbbat server name: the proxy compares candidate
+// upstreams as text, so a CNAME here and the A-record there read as two
+// machines and the connect is refused ORA-12514. Showing it here is what makes
+// that visible before a user hits it — the whole reason the textual compare can
+// stay as it is.
+function OracleServiceConflictWarning({
+  uid,
+  conflict,
+}: {
+  uid: string;
+  conflict: OracleServiceNameConflict;
+}) {
+  return (
+    <Tooltip delayDuration={100}>
+      <TooltipTrigger asChild>
+        <span
+          data-testid={`database-oracle-conflict-${uid}`}
+          title={conflict.message}
+          className="inline-flex cursor-help text-amber-600"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span className="sr-only">Conflicting Oracle service name</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm space-y-1">
+        <p className="font-medium">Shared Oracle service name</p>
+        <p>{conflict.message}</p>
+        <ul className="font-mono text-xs">
+          {conflict.servers?.map((srv) => (
+            <li key={srv.uid}>
+              {srv.name} → {srv.host}:{srv.port}
+            </li>
+          ))}
+        </ul>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 // TestConnectionButton dials the server for real and reports the staged
 // outcome. Rendered per row, so each button owns its own mutation state.
 function TestConnectionButton({
@@ -609,6 +830,7 @@ function TestConnectionButton({
         e.stopPropagation();
         testConnection.mutate(undefined, {
           onSuccess: (result) => {
+            reportTestWarnings(result);
             if (result.ok) {
               toast.success(
                 result.host_key_pinned
@@ -773,7 +995,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="postgresql">PostgreSQL</SelectItem>
-                <SelectItem value="oracle">Oracle</SelectItem>
+                <SelectItem value="oracle" data-testid="protocol-option-oracle">Oracle</SelectItem>
                 <SelectItem value="mysql">MySQL</SelectItem>
                 <SelectItem value="mariadb">MariaDB</SelectItem>
                 <SelectItem value="mongodb">MongoDB</SelectItem>
@@ -806,9 +1028,17 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               data-testid="database-name-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="production-db"
+              placeholder="production_db"
+              maxLength={63}
+              pattern="^[a-z0-9_]{1,63}$"
+              title="Lowercase letters, numbers, and underscores only (no hyphens or spaces)"
               required
             />
+            <p className="text-xs text-muted-foreground">
+              This is the client-facing selector every protocol uses — the
+              "database name" typed in a connection string — so it must be a
+              slug: lowercase letters, numbers, and underscores only.
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="description">Description</Label>
@@ -1241,6 +1471,94 @@ function DeleteDatabaseDialog({
   );
 }
 
+/**
+ * Renaming one database row.
+ *
+ * A dialog of its own rather than a field in a general edit form, because
+ * database rows have no general edit form in this UI — and because a rename is
+ * not an edit like the others: it changes what clients type, so it deserves the
+ * warning to itself. Tunnel rows get the same field inside their existing edit
+ * form (EditSSHServerForm) instead.
+ */
+function RenameServerDialog({
+  server,
+  onClose,
+}: {
+  server: DatabaseItem | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={!!server} onOpenChange={() => onClose()}>
+      {/* Keyed on the UID so the input re-seeds from the row that was opened,
+          the same trick EditSSHServerDialog uses. */}
+      {server && (
+        <RenameServerForm key={server.uid} server={server} onClose={onClose} />
+      )}
+    </Dialog>
+  );
+}
+
+function RenameServerForm({
+  server,
+  onClose,
+}: {
+  server: DatabaseItem;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(server.name);
+
+  const renameServer = useUpdateDatabase(server.uid, {
+    onSuccess: () => {
+      toast.success(`Renamed to "${name}"`);
+      onClose();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    renameServer.mutate({ name });
+  };
+
+  return (
+    <DialogContent data-testid="database-rename-dialog" className="max-w-md">
+      <form onSubmit={handleSubmit}>
+        <DialogHeader>
+          <DialogTitle>Rename server</DialogTitle>
+          <DialogDescription>
+            "{server.name}" keeps its grants, history and query chains — only
+            the name clients connect with changes.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <ServerRenameField
+            id="rename-server-name"
+            testId="database-rename-input"
+            value={name}
+            originalName={server.name}
+            isTunnel={false}
+            onChange={setName}
+          />
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            data-testid="database-rename-submit"
+            disabled={renameServer.isPending || name === server.name}
+          >
+            Rename
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  );
+}
+
 function EditSSHServerDialog({
   server,
   onClose,
@@ -1267,6 +1585,7 @@ function EditSSHServerForm({
   server: Database;
   onClose: () => void;
 }) {
+  const [name, setName] = useState(server.name);
   const [description, setDescription] = useState(server.description || "");
   const [host, setHost] = useState(server.host || "");
   const [port, setPort] = useState(String(server.port ?? ""));
@@ -1300,8 +1619,13 @@ function EditSSHServerForm({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Only sent when actually changed: a PUT that repeats the current name
+    // would still be a rename as far as the uniqueness check is concerned, and
+    // it keeps the audit entry free of a "renamed to itself" line.
+    const renamed = name !== server.name ? name : undefined;
     if (isKubernetes) {
       updateServer.mutate({
+        name: renamed,
         description: description || undefined,
         host,
         port: parseInt(port, 10),
@@ -1320,6 +1644,7 @@ function EditSSHServerForm({
       return;
     }
     updateServer.mutate({
+      name: renamed,
       description: description || undefined,
       host,
       port: parseInt(port, 10),
@@ -1340,6 +1665,14 @@ function EditSSHServerForm({
           </DialogDescription>
         </DialogHeader>
           <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
+            <ServerRenameField
+              id="edit-ssh-name"
+              testId="ssh-server-edit-name-input"
+              value={name}
+              originalName={server.name}
+              isTunnel
+              onChange={setName}
+            />
             <div className="space-y-2">
               <Label htmlFor="edit-ssh-description">Description</Label>
               <Input

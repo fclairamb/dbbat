@@ -120,7 +120,32 @@ func (s *Server) handleListAPIKeys(c *gin.Context) {
 		return
 	}
 
+	s.annotateOracleCapability(keys)
+
 	successResponse(c, gin.H{"keys": keys})
+}
+
+// annotateOracleCapability fills in each key's oracle_capable, the one place a
+// user can find out that a key which authenticates here will nonetheless be
+// refused by the Oracle proxy (it predates O5LOGON verifiers, or its verifier no
+// longer decrypts under the current DBB_KEY).
+//
+// Evaluated per row rather than in SQL because the predicate is a decryption,
+// not a column test — see APIKey.OracleLoginCapable, which the Oracle proxy
+// calls for the same decision. It is one AES-GCM open per key and none for a key
+// with no material, so the loop stays far below the cost of the query above even
+// with `all_users=true`.
+func (s *Server) annotateOracleCapability(keys []store.APIKey) {
+	if len(s.encryptionKey) == 0 {
+		// Nothing can be decrypted, so the honest answer is "unknown": leave the
+		// field absent rather than telling every user their keys are broken.
+		return
+	}
+
+	for i := range keys {
+		capable := keys[i].OracleLoginCapable(s.encryptionKey)
+		keys[i].OracleCapable = &capable
+	}
 }
 
 // handleGetAPIKey retrieves a specific API key
@@ -144,7 +169,12 @@ func (s *Server) handleGetAPIKey(c *gin.Context) {
 		return
 	}
 
-	successResponse(c, apiKey)
+	// Same annotation as the listing: a single-key fetch has to answer the
+	// Oracle question too, or the UI's detail view contradicts its own list.
+	one := []store.APIKey{*apiKey}
+	s.annotateOracleCapability(one)
+
+	successResponse(c, one[0])
 }
 
 // handleRevokeAPIKey revokes an API key

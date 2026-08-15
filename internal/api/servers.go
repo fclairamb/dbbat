@@ -59,6 +59,13 @@ type CreateDatabaseRequest struct {
 
 // UpdateDatabaseRequest represents the request to update a database
 type UpdateDatabaseRequest struct {
+	// Name renames the server, subject to the same slug rule creation enforces
+	// (store.IsValidServerName). It is the one field clients actually type —
+	// the PostgreSQL/MySQL/MongoDB database name, the Oracle SERVICE_NAME — so
+	// a rename breaks every saved connection string using the old one, while
+	// leaving already-authenticated sessions alone. Omitted (null) leaves it
+	// unchanged; a name already taken, soft-deleted rows included, is a 409.
+	Name              *string    `json:"name"`
 	Description       *string    `json:"description"`
 	Host              *string    `json:"host"`
 	Port              *int       `json:"port"`
@@ -136,6 +143,11 @@ type DatabaseResponse struct {
 	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
 	// ConnectionTest is present only when the request set test_connection.
 	ConnectionTest *ConnectionTestResponse `json:"connection_test,omitempty"`
+	// OracleServiceNameConflict is present only on an Oracle row whose upstream
+	// service name is also claimed by rows pointing at a different host:port —
+	// a configuration that makes every connect arriving with the shared service
+	// name fail ORA-12514 while each row on its own checks out.
+	OracleServiceNameConflict *OracleServiceNameConflictResponse `json:"oracle_service_name_conflict,omitempty"`
 }
 
 // DatabaseLimitedResponse represents a database with limited info (non-admin)
@@ -271,6 +283,9 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	resp := toDatabaseResponse(result)
 	resp.ConnectionTest = s.maybeInlineConnectionTest(c, req.TestConnection, result.UID)
+	// Creating the *second* spelling of one host behind a shared Oracle service
+	// name is the moment the trap is laid, so it is also the moment to say so.
+	s.attachOracleServiceNameConflict(c.Request.Context(), &resp)
 
 	successResponse(c, resp)
 }
@@ -285,8 +300,33 @@ func (s *Server) writeCreateServerError(c *gin.Context, err error) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
 	case errors.Is(err, store.ErrServerNameConflict):
 		writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+	case errors.Is(err, store.ErrServerNameInvalid):
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
 	default:
 		writeInternalError(c, s.logger, err, "failed to create database")
+	}
+}
+
+// writeUpdateServerError maps an UpdateServer store error to the appropriate
+// HTTP status/error code, falling back to a generic 500. The create path's twin
+// is writeCreateServerError; the two agree on the name errors deliberately —
+// a rename is validated exactly like a creation.
+func (s *Server) writeUpdateServerError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, store.ErrTargetMatchesStorage):
+		writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
+	case errors.Is(err, store.ErrServerNotFound):
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
+	case errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle):
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+	case errors.Is(err, store.ErrServerNameInvalid):
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+	// servers_name_key spans soft-deleted rows, so the name of a deleted server
+	// is still taken — a 409 naming the reason, never a 500.
+	case errors.Is(err, store.ErrServerNameConflict):
+		writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+	default:
+		writeInternalError(c, s.logger, err, "failed to update database")
 	}
 }
 
@@ -307,6 +347,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 		for i, db := range databases {
 			response[i] = toDatabaseResponse(&db)
 		}
+		s.attachOracleServiceNameConflicts(c.Request.Context(), response)
 		successResponse(c, gin.H{"databases": response})
 		return
 	}
@@ -342,7 +383,10 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 
 	// Admin sees full details
 	if currentUser.IsAdmin() {
-		successResponse(c, toDatabaseResponse(db))
+		resp := toDatabaseResponse(db)
+		s.attachOracleServiceNameConflict(c.Request.Context(), &resp)
+		successResponse(c, resp)
+
 		return
 	}
 
@@ -470,6 +514,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	}
 
 	updates := store.ServerUpdate{
+		Name:              req.Name,
 		Description:       req.Description,
 		Host:              req.Host,
 		Port:              req.Port,
@@ -496,19 +541,8 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	}
 
 	if err := s.store.UpdateServer(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
-		if errors.Is(err, store.ErrTargetMatchesStorage) {
-			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
-			return
-		}
-		if errors.Is(err, store.ErrServerNotFound) {
-			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
-			return
-		}
-		if errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle) {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
-			return
-		}
-		writeInternalError(c, s.logger, err, "failed to update database")
+		s.writeUpdateServerError(c, err)
+
 		return
 	}
 
@@ -814,6 +848,10 @@ func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
 		}
 	}
 
+	// A rename is the most consequential non-secret edit on the row — it moves
+	// the connection target every client types — so the new name is recorded in
+	// full. It is a public identifier, not a credential.
+	addPtr("name", req.Name, req.Name != nil)
 	addPtr("description", req.Description, req.Description != nil)
 	addPtr("host", req.Host, req.Host != nil)
 	addPtr("port", req.Port, req.Port != nil)

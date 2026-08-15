@@ -613,7 +613,7 @@ export interface paths {
         get: operations["getDatabase"];
         /**
          * Update database
-         * @description Updates a database configuration. Requires admin role.
+         * @description Updates a database configuration, `name` included — a rename moves the selector every client types, so see the field's own description. Requires admin role.
          */
         put: operations["updateDatabase"];
         post?: never;
@@ -2338,7 +2338,7 @@ export interface components {
              * @description Unique identifier
              */
             uid: string;
-            /** @description Database configuration name */
+            /** @description Database configuration name. Creation enforces the slug format `^[a-z0-9_]{1,63}$` (see `CreateDatabaseRequest.name`), but rows created before that gate existed are grandfathered and may not conform — the admin UI flags a non-conforming name so it gets renamed deliberately rather than silently. */
             name: string;
             /** @description Description */
             description?: string;
@@ -2392,6 +2392,8 @@ export interface components {
             query_approver_user_group_uids: string[];
             /** @description Present only when the create/update request set `test_connection: true` */
             connection_test?: components["schemas"]["ConnectionTestResult"];
+            /** @description Present only on an Oracle row whose `oracle_service_name` is also claimed by rows pointing at a **different** `host:port`. Nothing is wrong with the row itself — it dials and logs in fine — but a client connecting with the shared service name instead of the dbbat server name is refused ORA-12514, because the proxy compares candidate upstreams as text and two spellings of one machine read as two machines. */
+            oracle_service_name_conflict?: components["schemas"]["OracleServiceNameConflict"];
         };
         /**
          * @description Staged outcome of a connectivity check. Carries no secret material: only the stage
@@ -2431,11 +2433,51 @@ export interface components {
             k8s_ca_pinned?: boolean;
             /** @description The cluster's TOFU-learned CA bundle after the check (kubernetes servers only); empty when the row supplied its own, which wins */
             k8s_learned_ca_cert?: string;
+            /** @description Advisory findings that did **not** fail the check. A green check can still carry one: today the only warning is `oracle_service_name_conflict`, where the row itself is reachable but its upstream service name is claimed by rows spelling their host differently, so connecting by shared service name fails ORA-12514. */
+            warnings?: components["schemas"]["ConnectionTestWarning"][];
             /**
              * Format: int64
              * @description How long the check took, in milliseconds
              */
             duration_ms: number;
+        };
+        /** @description One advisory finding of a connectivity check. The code is the stable part a client keys off; the message is what it displays. */
+        ConnectionTestWarning: {
+            /**
+             * @description Machine-readable classification of the warning
+             * @enum {string}
+             */
+            code: "oracle_service_name_conflict";
+            /** @description Human-readable explanation, safe to display to an admin */
+            message: string;
+        };
+        /**
+         * @description One upstream Oracle service name claimed by several dbbat server rows that
+         *     disagree on the upstream address.
+         *
+         *     The Oracle proxy resolves a shared `oracle_service_name` by comparing the
+         *     candidate rows' `host:port` **as text** — deliberately, since resolving
+         *     DNS on the connect path could answer differently between two connects of
+         *     one DSN. The cost is that a CNAME in one row and the A-record in another
+         *     read as two upstreams, and every connect arriving with the shared service
+         *     name is refused ORA-12514. Reconcile the spellings, or have clients
+         *     connect by dbbat server name.
+         */
+        OracleServiceNameConflict: {
+            /** @description The shared upstream `oracle_service_name` */
+            service_name: string;
+            /** @description The distinct `host:port` spellings in play, sorted */
+            upstreams: string[];
+            /** @description The rows claiming the service name, ordered by name */
+            servers: {
+                /** Format: uuid */
+                uid: string;
+                name: string;
+                host: string;
+                port: number;
+            }[];
+            /** @description Ready-made operator-facing sentence, identical to the one the connectivity check and the proxy log report */
+            message: string;
         };
         /** @description Limited database info for non-admin users */
         DatabaseLimited: {
@@ -2450,7 +2492,7 @@ export interface components {
             description?: string;
         };
         CreateDatabaseRequest: {
-            /** @description Unique name for this database configuration */
+            /** @description Unique name for this database configuration. Must be a slug (lowercase letters, digits, underscores only — no hyphens, spaces or punctuation), capped at 63 bytes (PostgreSQL's identifier limit). This is the client-facing selector on every protocol — the "database name" typed in a connection string — so anything outside this charset costs reachability on at least one of the five (Oracle EZ-Connect, unquoted MySQL/CLI identifiers, URL percent-encoding). Existing non-conforming rows are grandfathered; only creation is gated. Rejected with a 400. */
             name: string;
             /** @description Description */
             description?: string;
@@ -2529,6 +2571,8 @@ export interface components {
             test_connection?: boolean;
         };
         UpdateDatabaseRequest: {
+            /** @description Renames the server. Same slug rule as creation (lowercase letters, digits and underscores, capped at 63 bytes); a name outside it is rejected with a 400. The name is the client-facing selector on every protocol — the "database name" a client types in its connection string, and the Oracle SERVICE_NAME — so a rename breaks every saved connection string and client config still using the old one. Sessions already authenticated are unaffected; new connects must use the new name. Names are globally unique across live *and* soft-deleted rows, so reusing the name of a deleted server is a 409. Omit to leave the name unchanged. */
+            name?: string;
             /** @description Description */
             description?: string;
             /** @description Target database host */
@@ -3246,6 +3290,8 @@ export interface components {
              * @description User who revoked the key
              */
             revoked_by?: string | null;
+            /** @description Whether this key can be used as the password for an Oracle (O5LOGON) login. Oracle authentication needs a verifier derived from the key at mint time — API keys are Argon2id-hashed, so it cannot be recovered later. A key minted before Oracle support, or one whose verifier no longer decrypts under the server's current encryption key, authenticates fine against this REST API and every other protocol but is refused by the Oracle proxy; minting a new key is the only fix. Omitted when the server has no encryption key and therefore cannot tell. */
+            oracle_capable?: boolean;
         };
         CreateAPIKeyRequest: {
             /** @description Key name */
@@ -4099,6 +4145,8 @@ export type CreateServerGroupRequest = components['schemas']['CreateServerGroupR
 export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
 export type Database = components['schemas']['Database'];
 export type ConnectionTestResult = components['schemas']['ConnectionTestResult'];
+export type ConnectionTestWarning = components['schemas']['ConnectionTestWarning'];
+export type OracleServiceNameConflict = components['schemas']['OracleServiceNameConflict'];
 export type DatabaseLimited = components['schemas']['DatabaseLimited'];
 export type CreateDatabaseRequest = components['schemas']['CreateDatabaseRequest'];
 export type UpdateDatabaseRequest = components['schemas']['UpdateDatabaseRequest'];
@@ -5075,6 +5123,8 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalError"];
         };
     };

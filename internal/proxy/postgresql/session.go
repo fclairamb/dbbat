@@ -1118,6 +1118,21 @@ const (
 // the bound where a misbehaving or malicious client gets cut off.
 const maxStartupNegotiationRounds = 3
 
+// maxStartupPacketLength / maxAuthMessageLength bound the two frames a client
+// may send before it has authenticated. Both mirror PostgreSQL's own server
+// limits — MAX_STARTUP_PACKET_LENGTH and PQ_SMALL_MESSAGE_LIMIT, both 10000 in
+// src/include/libpq/pqcomm.h — so nothing a real client sends is refused.
+//
+// They exist because the declared length is four bytes off an *unauthenticated*
+// socket that used to size a `make([]byte, length)` directly: a scanner sending
+// `\xff\xff\xff\xff` and nothing else made the proxy ask for 4 GiB, which on a
+// memory-limited container is an instant OOM kill. The check has to happen
+// before the allocation, not after the read.
+const (
+	maxStartupPacketLength = 10000
+	maxAuthMessageLength   = 10000
+)
+
 // negotiateSSL handles any optional SSL/GSS encryption probes a PG client
 // sends before the real StartupMessage. The upgrade has to happen here — once
 // pgproto3.NewBackend captures the conn, wrapping clientConn would leave the
@@ -1229,6 +1244,15 @@ func (s *Session) receiveStartupMessage() (pgproto3.FrontendMessage, error) {
 
 	length := int(lengthBuf[0])<<24 | int(lengthBuf[1])<<16 | int(lengthBuf[2])<<8 | int(lengthBuf[3])
 
+	// Validate before allocating: length is four unauthenticated bytes.
+	if length < 4 {
+		return nil, fmt.Errorf("%w: %d", ErrMalformedMessageLength, length)
+	}
+
+	if length > maxStartupPacketLength {
+		return nil, fmt.Errorf("%w: %d > %d", ErrStartupMessageTooLarge, length, maxStartupPacketLength)
+	}
+
 	msgBuf := make([]byte, length)
 	copy(msgBuf, lengthBuf)
 
@@ -1275,6 +1299,17 @@ func (s *Session) receivePasswordMessage() (*pgproto3.PasswordMessage, error) {
 	}
 
 	length := int(lengthBuf[0])<<24 | int(lengthBuf[1])<<16 | int(lengthBuf[2])<<8 | int(lengthBuf[3])
+
+	// Validate before allocating. length <= 4 would size the make() at zero or
+	// negative — the latter panics — and an unbounded length is a pre-auth
+	// memory bomb; 5 is the shortest well-formed frame (the NUL alone).
+	if length < 5 {
+		return nil, fmt.Errorf("%w: %d", ErrMalformedMessageLength, length)
+	}
+
+	if length > maxAuthMessageLength {
+		return nil, fmt.Errorf("%w: %d > %d", ErrPasswordMessageTooLarge, length, maxAuthMessageLength)
+	}
 
 	dataBuf := make([]byte, length-4)
 	if _, err := io.ReadFull(s.clientReader, dataBuf); err != nil {

@@ -83,6 +83,14 @@ type session struct {
 	// "Two OCI encodings, not one".
 	clientWide64Encoding bool
 
+	// clientVerifierType is the O5LOGON verifier the challenge dbbat issued this
+	// client was built with (VerifierType6949 or VerifierType18453), or 0 before
+	// the challenge exists. Read by authChallengeIsModern, which shapes the tail
+	// of an AUTH-phase refusal's summary object off the same line: the two
+	// end-of-call summaries buildAuthChallengeEndMarker returns for these two
+	// verifiers differ by exactly that tail.
+	clientVerifierType int
+
 	// clientBigClrChunks records whether the upstream advertised
 	// ServerCompileTimeCaps[37]&0x20 (UseBigClrChunks) during the pre-auth relay.
 	// When set, clients encode long CLR values with compressed-int chunk lengths
@@ -366,6 +374,13 @@ func (s *session) run() error {
 	s.upstreamConn = upstreamConn
 	s.clientAuthPhase1Pkt = phase1Pkt
 
+	// Read the client's OCI dialect flags off AUTH Phase 1 before anything can
+	// refuse it. They shape the challenge (step 4b/5) but also every refusal
+	// frame — an OCI client handed a thin-dialect one waits for the rest of a
+	// response that has already arrived — and the first refusal below (step 4a)
+	// happens before the challenge exists.
+	s.observeClientAuthEncoding(phase1Pkt.Payload)
+
 	// Step 4a: If the connect string's service name matched several dbbat
 	// databases (mutualized upstream), pick the real one now that AUTH Phase 1
 	// has revealed the username — the user's active grants decide. This MUST
@@ -387,9 +402,8 @@ func (s *session) run() error {
 	// leaves unread bytes in the OCI client's TTC buffer, and the client aborts
 	// the AUTH call with a break/reset marker exchange — the "sqlplus stalls
 	// before AUTH Phase 2" failure. Thin clients keep the proven hand-built
-	// summaries and the original ordering.
-	s.observeClientAuthEncoding(phase1Pkt.Payload)
-
+	// summaries and the original ordering. (The dialect itself was read off
+	// Phase 1 above, before step 4a could refuse anything.)
 	if s.clientWideEncoding {
 		if err := s.beginUpstreamAuth(); err != nil {
 			return fmt.Errorf("upstream auth failed: %w", err)
@@ -508,21 +522,140 @@ func encodeV315DataPacket(payload []byte) []byte {
 	return buf
 }
 
-// sendAuthFailed sends an ORA error TTC AUTH-reject frame to the client before
-// the socket is closed, so the client renders a real ORA code instead of a
+// sendAuthFailed sends an ORA error to a client refused at AUTH — no active
+// grant, an ambiguous service name, a bad key — before the socket is closed, so
+// the client renders the real ORA code and the actionable text instead of a
 // generic ORA-12566 / ORA-03113 protocol error.
 //
-// The frame MUST use v315+ framing (4-byte length header, the 2-byte length
-// field left 0x0000) — the same as the AUTH challenge (encodeV315DataPacket).
-// After the TNS Accept, modern clients read the packet length as a 4-byte field;
-// a legacy 2-byte-framed reject (the old writeTNSPacket path) is misread as an
-// oversized/malformed packet and surfaces as ORA-12566 with no useful reason.
+// It is the same OER (message type 0x04) a real server ends a rejected login
+// with, built by the same encoder the mid-session refusal uses. It used to be a
+// three-part frame of its own making — a TTC Response (0x08), a compressed ORA
+// code and a CLR — and python-oracledb thin turned every refusal into
+// `DPY-5002: internal error: read integer of length N …`, N being the length of
+// dbbat's own message; see encodeOERPacket.
 func (s *session) sendAuthFailed(oraCode uint16, message string) {
-	frame := encodeV315DataPacket(buildAuthFailed(int(oraCode), message))
+	s.observeAuthCallNumber()
+
+	shape, seq, callNumber := s.authRefusalOERShape()
+
+	s.logger.DebugContext(s.ctx, "sending AUTH reject",
+		slog.Int("ora_code", int(oraCode)),
+		slog.Int("extra_tail_fields", shape.extraTailFields),
+		slog.Bool("tail_learned", shape.tailLearned),
+		slog.Bool("fixed_width", shape.fixedWidth),
+		slog.Bool("fixed_width_64", shape.fixedWidth64),
+		slog.Int("call_number", int(callNumber)))
+
+	frame := encodeOERPacket(shape, oerSummary{
+		CallStatus:   1,
+		SeqNumber:    seq,
+		ErrorCode:    int(oraCode),
+		ErrorMessage: oerErrorText(int(oraCode), message),
+		CallNumber:   callNumber,
+	})
+
 	if _, err := s.clientConn.Write(frame); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to send auth failed", slog.Any("error", err))
 	}
 }
+
+// observeAuthCallNumber stamps the session's call number from the AUTH call the
+// client is parked in, which during authentication is the only call there is:
+// observeClientCallNumber runs on every message of the *proxy* loop, and a
+// session refused at AUTH never reaches it, so the refusal would otherwise end
+// call zero.
+//
+// The newest AUTH packet is the one to name. A client refused before the
+// challenge (no grant, ambiguous service name) is waiting on Phase 1; one
+// refused on its key is waiting on Phase 2. Both are ordinary TTC ops
+// (`03 76 <seq> …` / `03 73 <seq> …`), so clientCallNumber reads the sequence at
+// its usual offset, 64-bit OCI headers included (usesWide64OpHeader keys off the
+// very same byte).
+func (s *session) observeAuthCallNumber() {
+	pkt := s.clientAuthPhase2Pkt
+	if pkt == nil {
+		pkt = s.clientAuthPhase1Pkt
+	}
+
+	if pkt == nil {
+		return
+	}
+
+	s.observeClientCallNumber(extractTTCPayload(pkt.Payload))
+}
+
+// authRefusalOERShape is nextOERFrame for the AUTH phase: the same layout, with
+// the one field the AUTH phase cannot afford to leave at its default filled in
+// from what this session knows about the client.
+//
+// That field is the tail count. Mid-session a wrong one costs the message text
+// and nothing else, which is why nextOERFrame leaves it at zero until an
+// upstream OER teaches it better. At AUTH the text *is* the fix — "no active
+// grant; request access via dbbat" is what the user has to read — and a client
+// that expects the two "fields added in Oracle Database 20c" and does not find
+// them reads the message's own length byte as the first of them, which is how
+// DPY-5002 reports "length 39" for a 39-byte message. The tail therefore has to
+// be right before anything has been learned.
+//
+// The discriminator is customHash, and it is measured rather than reasoned:
+//
+//   - go-ora negotiates no customHash, takes the legacy 6949 challenge, and a
+//     real 23ai server ends its AUTH response with a summary carrying **no**
+//     extra fields (oerFixtureGoOraOK).
+//   - python-oracledb thin negotiates customHash, takes the 12c/18453
+//     challenge, and the same server ends its AUTH response with **two**
+//     (oerFixturePythonOK).
+//   - the 153-byte OCI capture buildAuthChallengeEndMarker returns for a wide
+//     client decodes as the 64-bit summary with two extra fields as well.
+//
+// So the two end-of-call summaries dbbat already sends at challenge time — and
+// which each of those clients demonstrably accepts — differ by exactly this
+// count, and along exactly this line. It is not the negotiated TTC field
+// version: go-ora's is the *higher* of the two (docs/oracle.md, "The AUTH
+// function header is negotiated, not fixed"), so a version rule would get both
+// clients backwards.
+//
+// A shape learned off a real upstream OER always wins, and for an OCI client
+// there is one: beginUpstreamAuth runs before the client is challenged and
+// learnOERTail reads the upstream's own AUTH summary out of it.
+func (s *session) authRefusalOERShape() (oerShape, int, byte) {
+	shape, seq, callNumber := s.nextOERFrame()
+	if shape.tailLearned {
+		return shape, seq, callNumber
+	}
+
+	if s.authChallengeIsModern() {
+		shape.extraTailFields = oerModernExtraTailFields
+	}
+
+	return shape, seq, callNumber
+}
+
+// authChallengeIsModern reports whether this session's O5LOGON challenge is the
+// 12c/18453 one rather than the legacy 6949 — the "modern client" line
+// authRefusalOERShape keys the summary tail off.
+//
+// It reads the verifier the challenge was actually built with when there is one,
+// and falls back to the negotiation for the two refusals that happen *before*
+// the challenge (an ambiguous service name, resolved from the username in Phase
+// 1; a missing grant, checked before the verifiers are even loaded). The
+// fallback is the same condition authenticateClient applies, minus the API key's
+// own verifier inventory: a key with no 18453 verifier is answered with the
+// legacy challenge whatever the server offered, which is why the recorded type
+// takes precedence once it exists.
+func (s *session) authChallengeIsModern() bool {
+	if s.clientVerifierType != 0 {
+		return s.clientVerifierType == VerifierType18453
+	}
+
+	return s.upstreamCustomHash
+}
+
+// oerModernExtraTailFields is the tail a modern client's summary object carries:
+// the two "fields added in Oracle Database 20c" (a SQL type and a server
+// checksum) that python-oracledb thin's error parser reads and go-ora's does
+// not.
+const oerModernExtraTailFields = 2
 
 // authRejectFor maps a client-authentication failure to the ORA code and message
 // dbbat surfaces to the client. A missing grant is actionable — the user simply
@@ -539,6 +672,15 @@ func authRejectFor(err error) (uint16, string) {
 	// explicitly by connecting with the dbbat database name.
 	if errors.Is(err, ErrAmbiguousServiceName) {
 		return ORA01045, "service name matches multiple dbbat databases; connect using the dbbat database name instead"
+	}
+
+	// A rejected key while the user also owns keys that could never work here
+	// keeps ORA-01017 — the credential really was refused — but says why the user
+	// may be looking at a key that is fine everywhere else. See
+	// keysWithoutVerifierError for why the message cannot name the key.
+	var noVerifier *keysWithoutVerifierError
+	if errors.As(err, &noVerifier) {
+		return ORA01017, keysWithoutVerifierMessage(noVerifier.count)
 	}
 
 	return ORA01017, "invalid username/password; logon denied"
@@ -599,15 +741,32 @@ func (s *session) resolveDatabase(connectPayload []byte) error {
 	// ambiguous name is only workable when every candidate shares the same
 	// upstream address (the mutualized-instance case). Otherwise refuse now —
 	// there is no address to relay to.
-	firstAddr := net.JoinHostPort(candidates[0].Host, fmt.Sprintf("%d", candidates[0].Port))
-	for i := 1; i < len(candidates); i++ {
-		addr := net.JoinHostPort(candidates[i].Host, fmt.Sprintf("%d", candidates[i].Port))
-		if addr != firstAddr {
-			s.sendRefuse(ORA12514,
-				"service name matches multiple dbbat databases with different upstreams; connect using the dbbat database name")
+	//
+	// The comparison is textual, deliberately: it never surprises, whereas
+	// resolving each candidate's host here would put a DNS lookup on the connect
+	// path and could answer differently between two connects of one DSN. The
+	// cost is that two spellings of one machine read as two upstreams, which is
+	// a configuration mistake rather than an ambiguity — so it is *reported*
+	// (store.OracleServiceNameConflict, surfaced on the server row and by the
+	// connectivity check) instead of guessed at, and named here in the log.
+	if conflict := store.OracleServiceNameConflictFor(s.serviceName, candidates); conflict != nil {
+		s.logger.WarnContext(s.ctx, "refusing an ambiguous Oracle service name",
+			slog.Int("candidates", len(conflict.Servers)),
+			slog.Int("upstreams", len(conflict.Upstreams)),
+			slog.String("conflict", conflict.Describe()))
 
-			return fmt.Errorf("%w: %s: candidates have different upstream addresses", ErrAmbiguousServiceName, s.serviceName)
-		}
+		// The client is told the shape of the problem and what to do about it,
+		// but not which rows are involved: this runs before authentication, and
+		// the same reasoning that keeps ORA-01017 generic keeps dbbat server
+		// names out of a pre-auth refusal. The names live in the WARN above and
+		// on the server row in the UI, which is where the operator looks.
+		s.sendRefuse(ORA12514, fmt.Sprintf(
+			"service name %s is registered by %d dbbat databases on %d different upstreams; "+
+				"connect using the dbbat database name",
+			s.serviceName, len(conflict.Servers), len(conflict.Upstreams)))
+
+		return fmt.Errorf("%w: %s: candidates have different upstream addresses (%s)",
+			ErrAmbiguousServiceName, s.serviceName, strings.Join(conflict.Upstreams, ", "))
 	}
 
 	s.logger.InfoContext(s.ctx, "service name matches multiple dbbat databases; deferring selection to AUTH Phase 1",
@@ -925,9 +1084,10 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	// Load the O5LOGON verifier candidates for this user: all of the user's
 	// user-salt API keys (they share the user's salts, so any of them can
 	// answer the challenge), or the single first legacy per-key-salt key.
-	verifiers, err := s.loadO5LogonVerifiers(user.UID)
+	verifiers, keysWithoutVerifier, err := s.loadO5LogonVerifiers(user.UID)
 	if err != nil {
-		return fmt.Errorf("failed to load O5LOGON verifier: %w", err)
+		return fmt.Errorf("failed to load O5LOGON verifier: %w",
+			noteKeysWithoutVerifier(err, keysWithoutVerifier))
 	}
 
 	// Build the O5LOGON server from the primary (most recently created)
@@ -948,6 +1108,11 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	if err != nil {
 		return fmt.Errorf("failed to generate O5LOGON challenge: %w", err)
 	}
+
+	// Recorded before the challenge goes out, so a refusal on the key that comes
+	// back (ORA-01017) is framed for the summary shape this client was just
+	// handed. See authChallengeIsModern.
+	s.clientVerifierType = o5.VerifierType()
 
 	// OCI clients (sqlplus / instant client) negotiate fixed 4-byte little-endian
 	// key/value lengths in the AUTH messages, whereas thin clients use the
@@ -1005,7 +1170,9 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 
 	apiKey, err := s.resolveAPIKeyFromPhase2(o5, verifiers, clientSessKey, encPassword, encSessKey)
 	if err != nil {
-		return err
+		// The refusal the user most often meets: none of the candidates matched,
+		// because the key they typed never had a verifier to be a candidate with.
+		return noteKeysWithoutVerifier(err, keysWithoutVerifier)
 	}
 
 	if apiKey.UserID != user.UID {
@@ -1075,19 +1242,26 @@ type o5LogonVerifierData struct {
 // 18453 optional) with the dbbat master key. Returns nil when the key has no
 // usable 6949 verifier.
 func (s *session) decryptVerifierData(key *store.APIKey) *o5LogonVerifierData {
-	oracleData := key.OracleData()
-	if oracleData == nil || len(oracleData.O5LogonSalt6949) == 0 || len(oracleData.O5LogonVerifier6949) == 0 {
-		return nil
-	}
-
-	decrypted, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier6949, s.encryptionKey, key.KeyPrefix)
+	// The whole predicate — has material AND that material decrypts — is
+	// store.APIKey.DecryptedO5LogonVerifier6949, which is also what
+	// GET /api/v1/keys reports as `oracle_capable`. Calling it here rather than
+	// re-testing the columns is what keeps the listing honest: a key this returns
+	// nil for is a key the listing marks unusable, by construction.
+	decrypted, err := key.DecryptedO5LogonVerifier6949(s.encryptionKey)
 	if err != nil {
-		s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier",
-			slog.String("key_prefix", key.KeyPrefix),
-			slog.Any("error", err))
+		// No material at all is the ordinary case for a key minted before Oracle
+		// support — routine, and counted rather than logged per key (see
+		// loadO5LogonVerifiers). Material that refuses to decrypt is not routine.
+		if !errors.Is(err, store.ErrAPIKeyNoOracleVerifier) {
+			s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier",
+				slog.String("key_prefix", key.KeyPrefix),
+				slog.Any("error", err))
+		}
 
 		return nil
 	}
+
+	oracleData := key.OracleData()
 
 	data := &o5LogonVerifierData{
 		O5LogonSalt:       oracleData.O5LogonSalt6949,
@@ -1126,25 +1300,51 @@ func (s *session) decryptVerifierData(key *store.APIKey) *o5LogonVerifierData {
 // Otherwise (legacy keys only, with per-key random salts) the first
 // verifier-bearing key is the single candidate — the pre-user-salt behavior,
 // where only that specific key can authenticate.
-func (s *session) loadO5LogonVerifiers(userID uuid.UUID) ([]*o5LogonVerifierData, error) {
+//
+// The second return is how many of the user's live keys yielded no verifier at
+// all. Those keys authenticate against the REST API and every other protocol yet
+// can never answer an Oracle challenge, and O5LOGON gives the proxy no way to
+// see that one of them is what the client just typed — so the count is carried
+// out of here and onto the refusal (noteKeysWithoutVerifier). It is returned
+// even alongside an error, because the no-candidate case is exactly when it
+// matters most.
+func (s *session) loadO5LogonVerifiers(userID uuid.UUID) ([]*o5LogonVerifierData, int, error) {
 	keys, err := s.store.ListAPIKeys(s.ctx, store.APIKeyFilter{
 		UserID:  &userID,
 		KeyType: strPtr(store.KeyTypeAPI),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list API keys: %w", err)
+		return nil, 0, fmt.Errorf("failed to list API keys: %w", err)
 	}
 
 	all := make([]*o5LogonVerifierData, 0, len(keys))
+	unusable := 0
+
 	for i := range keys {
-		if data := s.decryptVerifierData(&keys[i]); data != nil {
-			all = append(all, data)
+		data := s.decryptVerifierData(&keys[i])
+		if data == nil {
+			// Same predicate GET /api/v1/keys reports as oracle_capable=false.
+			// Keys that DO decrypt but lose the candidate election below (a legacy
+			// per-key salt shadowed by newer user-salt keys, or a salt left behind
+			// by a rollback) are not counted here: they are a different, rarer
+			// story, and the message this feeds names the common one.
+			unusable++
+
+			continue
 		}
+
+		all = append(all, data)
+	}
+
+	if unusable > 0 {
+		s.logger.InfoContext(s.ctx, "API keys that cannot be used for Oracle login",
+			slog.Int("keys_without_verifier", unusable),
+			slog.Int("keys_total", len(keys)))
 	}
 
 	candidates := selectVerifierCandidates(all)
 	if len(candidates) == 0 {
-		return nil, ErrNoO5LogonVerifier
+		return nil, unusable, ErrNoO5LogonVerifier
 	}
 
 	primary := candidates[0]
@@ -1161,7 +1361,7 @@ func (s *session) loadO5LogonVerifiers(userID uuid.UUID) ([]*o5LogonVerifierData
 			slog.Bool("has_18453", len(primary.decryptedVerifier18453) > 0))
 	}
 
-	return candidates, nil
+	return candidates, unusable, nil
 }
 
 // selectVerifierCandidates picks the login candidates from a user's decrypted
@@ -2740,9 +2940,19 @@ func (s *session) observeOERClientVersion(ttcBody []byte) {
 // dropped outright — see midFetchOERNamesTheStreamingCursor for what replaced
 // that, and why the bar is higher on this side of the boundary.
 //
+// A *success* or ORA-01403 status was lost here too, and for longer: on an OCI
+// client the whole summary object is marshaled fixed-width, so the first branch
+// read nothing at all and the statement stayed pending until the next one's
+// flushPendingQuery closed it — recording no rows_affected and a duration_ms
+// measuring the client's think time, the same symptom the bit-less relaxation
+// removed for python-oracledb thin. decodeFixedStatusOERAt is what reads it now,
+// and statusOERMayEndTheCall is where its mid-stream half is refused.
+//
 // Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleOERStatus(ttcPayload []byte) {
-	if info := decodeOERAt(ttcPayload, 0); info != nil {
+	shape := s.oerShapeSnapshot()
+
+	if info := decodeOERAt(shape, ttcPayload, 0); info != nil && s.statusOERMayEndTheCall(info) {
 		s.completeQueryFromOER(info)
 
 		return
@@ -2752,7 +2962,7 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 		return
 	}
 
-	info := decodeErrorOER(s.oerShapeSnapshot(), ttcPayload)
+	info := decodeErrorOER(shape, ttcPayload)
 	if info == nil {
 		return
 	}
@@ -2762,6 +2972,37 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 	}
 
 	s.completeQueryFromOER(info)
+}
+
+// statusOERMayEndTheCall gates decodeOERAt's bit-less half — the fixed-width
+// status object an OCI client's calls end with — on the session not being in the
+// middle of a row stream.
+//
+// An OER that carries the end-of-call bit is unaffected: the bit is the protocol
+// saying the call is over, and that reading is what it always was.
+//
+// The bit-less half needs the bound because an OCI fetch response demonstrably
+// carries a summary object of exactly this shape *inside* the row stream — one
+// per fetch round trip, at a constant offset, naming the streaming cursor and
+// reporting the running row count — so naming the cursor proves nothing here and
+// only a packet boundary separates such an object from byte 0. Refusing costs
+// nothing measurable: across testdata/, of the 641 server packets that arrive
+// mid-row-stream only 4 lead with 0x04, and all four are the genuine mid-fetch
+// ORA-01722 failures that decodeErrorOER completes below. See
+// decodeFixedStatusOERAt for both figures.
+//
+// Callers hold trackerMu.
+func (s *session) statusOERMayEndTheCall(info *oerInfo) bool {
+	if info.CallStatus&oerEndOfCallBit != 0 || !s.rowStreamActive() {
+		return true
+	}
+
+	s.logger.DebugContext(s.ctx, "bit-less status OER arrived mid-row-stream; leaving the call open",
+		slog.Int("oer_call_status", info.CallStatus),
+		slog.Int("oer_cursor_id", info.CursorID),
+		slog.Int("ora_code", info.ErrorCode))
+
+	return false
 }
 
 // midFetchOERNamesTheStreamingCursor is the extra anchor a proven diagnostic has
@@ -2903,6 +3144,8 @@ func (s *session) rowStreamActive() bool {
 //
 // Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleResponse(ttcPayload []byte) {
+	shape := s.oerShapeSnapshot()
+
 	// Mid-fetch, a leading 0x08 is NOT a fresh Response: it is row-stream
 	// content — an 8-byte first column value's length prefix, or the
 	// 0x08 0x01 0x06 end-of-rows footer — that happened to land at the start
@@ -2915,8 +3158,14 @@ func (s *session) handleResponse(ttcPayload []byte) {
 	// Query.Error, and cleared pendingQuery — which silently truncated row
 	// capture, stopped mid-stream quota enforcement, and mis-charged the rest
 	// of the stream's bytes for the remainder of the fetch.
+	//
+	// The bit stays the whole discriminator here, and that is measured, not
+	// inherited: an OCI fetch response carries a genuine fixed-width summary
+	// object inside every continuation packet, so a bit-less scan accepts 149 of
+	// the corpus's 641 mid-row-stream packets — each one ending the call
+	// mid-fetch. See findOERInResponse and decodeFixedStatusOERAt.
 	if s.rowStreamActive() {
-		if oer := findOERInResponse(ttcPayload); oer != nil {
+		if oer := findOERInResponse(shape, ttcPayload); oer != nil {
 			s.completeQueryFromOER(oer)
 			return
 		}
@@ -2930,7 +3179,7 @@ func (s *session) handleResponse(ttcPayload []byte) {
 	// affected-row count (INSERT/UPDATE/DELETE) or the ORA error. This is the
 	// reliable source — the legacy fixed-offset layout below misreads v315+
 	// responses, so prefer the OER whenever one is present.
-	if oer := findOERInResponse(ttcPayload); oer != nil {
+	if oer := findOERInResponse(shape, ttcPayload); oer != nil {
 		s.completeQueryFromOER(oer)
 		return
 	}
@@ -2959,7 +3208,7 @@ func (s *session) handleResponse(ttcPayload []byte) {
 	// these exact OERs while refusing to read the row count out of the same
 	// seven fields.
 	if s.tracker.pendingQuery != nil {
-		if oer := findPlausibleOERInResponse(s.oerShapeSnapshot(), ttcPayload); oer != nil {
+		if oer := findPlausibleOERInResponse(shape, ttcPayload); oer != nil {
 			s.completeQueryFromOER(oer)
 			return
 		}

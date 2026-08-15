@@ -111,7 +111,7 @@ func TestPythonThinDMLResponse_FixtureShape(t *testing.T) {
 	assert.Equal(t, 4, info.CursorID)
 
 	assert.Zero(t, info.CallStatus&oerEndOfCallBit, "this client's OERs carry no end-of-call bit")
-	assert.Nil(t, findOERInResponse(payload), "which is why the strict locator finds nothing here")
+	assert.Nil(t, findOERInResponse(thinOERShape(), payload), "which is why the strict locator finds nothing here")
 
 	// Nothing earlier in the envelope may be mistaken for the OER — first match
 	// wins, so a decoy in the return-parameter block would make the tests below

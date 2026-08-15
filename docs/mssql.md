@@ -561,42 +561,82 @@ laxer rule set for dynamic SQL would turn every control into a suggestion:
 | Form | Treatment |
 |------|-----------|
 | `EXEC('…')`, `EXECUTE('…')`, incl. `N'…'`, `EXEC (` with a space, `''` doubling | statement text extracted and checked |
+| an all-literal concatenation — `EXEC('DELETE ' + 'FROM t')`, `@stmt = N'DROP ' + N'TABLE Foo'` | operands folded, then the joined text is checked |
 | `sp_executesql` sent as **batch text** (`EXEC [sys.]sp_executesql …`), statement passed **positionally** — `N'…'` first | same |
 | …statement passed **by name** — `@stmt` / `@statement` / `@tsql` / `@rpccall`, in any argument order | same |
-| `sp_executesql` sent as an **RPC** | already enforced, unchanged — see "RPC is enforced, not log-only" |
-| dynamic SQL nested inside dynamic SQL | **refused** (`ErrDynamicSQLNotCheckable`) rather than unwrapped further |
-| `sp_executesql` whose statement argument cannot be located at all | **refused**, same error |
-| `EXEC(@sql)`, `EXEC sp_executesql @sql`, `@stmt = @sql`, `EXEC('USE ' + @db)` | **not checked** — see below |
+| the rest of the SQL-carrying family as batch text — `sp_prepare`, `sp_prepexec`, `sp_cursorprepare`, `sp_cursoropen`, `sp_cursorprepexec`, `sp_prepexecrpc` — whose statement sits at a **positional index** rather than first | same |
+| `sp_executesql` and the family sent as an **RPC** | already enforced, unchanged — see "RPC is enforced, not log-only" |
+| dynamic SQL nested inside dynamic SQL | **refused** (`shared.ErrDynamicSQLNotCheckable`) rather than unwrapped further |
+| a statement argument that cannot be located at all | **refused**, same error |
+| `EXEC(@sql)`, `EXEC sp_executesql @sql`, `@stmt = @sql`, `EXEC('USE ' + @db)`, `EXEC sp_prepare @h OUT, NULL, @sql, 1` | **refused under `read_only`/`block_ddl` only** (`shared.ErrDynamicSQLOpaque`) — see below |
 | `EXEC dbo.some_proc`, `EXEC dbo.p @a = 1` | an ordinary procedure call, not dynamic SQL: opaque, and already failed closed under a restrictive grant on the RPC path |
+| `EXEC(…) AT <linked_server>` | **out of scope and unenforced** — see below |
 
 Which parameter names can carry the statement is **one list**
-(`shared.IsMSSQLStatementParamName`), shared with the RPC path. It was briefly
-two, and the copy that did not know the aliases was a bypass: T-SQL passes any
-procedure's arguments by name in any order, so
-`EXEC sp_executesql @params = N'@x int', @stmt = N'DROP TABLE Foo'` is the same
-call as the positional one, and the batch scanner walked past it as an inert
-string literal. Two lists of "what names the statement" is the same drift hazard
-as two implementations of "may this session change database".
+(`shared.IsMSSQLStatementParamName`), shared with the RPC path, and *where* a
+positional call puts it is **one table** (`shared.MSSQLStatementParamIndex`),
+likewise. Both were briefly per-path, and both times the copy that did not know
+something was a bypass:
+
+- T-SQL passes any procedure's arguments by name in any order, so
+  `EXEC sp_executesql @params = N'@x int', @stmt = N'DROP TABLE Foo'` is the same
+  call as the positional one, and the batch scanner walked past it as an inert
+  string literal.
+- The `sp_prepare` family carries its statement at position 1, 2 or 3 rather than
+  0. The RPC path indexed positionally; the batch-text scanner did not implement
+  positional indexing at all, so
+  `EXEC sp_prepare @handle OUT, NULL, N'DROP TABLE Foo', 1` was measurably
+  unchecked while the RPC spelling of the same call was refused. Narrow — drivers
+  send these as RPC — but "no legitimate client spells it this way" is not a
+  defence against someone who is choosing how to spell it.
+
+Two lists of "what names the statement", or two answers to "where is it", is the
+same drift hazard as two implementations of "may this session change database".
 
 Not finding the statement argument is treated as **refused**, never as "nothing
 to check". The keyword says a statement is being run; failing to find it means
 dbbat is looking in the wrong place, which is exactly the condition a bypass
 hides in.
 
-**dbbat validates dynamic SQL only when the statement text is a literal.** The
-extraction is a static read of the batch, so it can only see what is written in
-the batch. `EXEC(@sql)` — and any concatenation that builds the text at runtime —
-is assembled by the server from values dbbat never sees, so **it reaches the
-database unvalidated**: no `read_only`, no `block_ddl`, no `block_copy`, no
-database-switch refusal. That is a real gap, stated plainly rather than papered
-over; closing it would need dbbat to evaluate T-SQL, which it does not do. It is
-not refused outright either, because a blanket refusal of variable-built dynamic
-SQL would break ordinary application code. If that boundary matters for a target,
-constrain the login dbbat connects with.
+**dbbat validates dynamic SQL only when the statement text is decidable** — a
+literal, or a concatenation of nothing but literals. The extraction is a static
+read of the batch, so it can only see what is written in the batch. `EXEC(@sql)`,
+and any concatenation with a non-literal operand, is assembled by the server from
+values dbbat never sees, so nothing about what it runs is statically decidable.
+Closing that properly would need dbbat to evaluate T-SQL, which it does not do.
+
+#### A payload dbbat cannot read: refused under `read_only`/`block_ddl` only
+
+dbbat **refuses** such a statement when the active grant carries `read_only`
+**or** `block_ddl` — the two controls whose meaning a run-time-built statement
+defeats outright. Fail closed: "dbbat cannot tell what this runs" must not resolve
+to "allow" for a session that may not write or may not change schema. The refusal
+names its own cause (`shared.ErrDynamicSQLOpaque`), so an operator can tell it
+from an ordinary blocked write and knows the fix is a grant without those two
+controls.
+
+It is **not** refused for a grant carrying only `block_copy`, nor for a grant with
+no controls at all: dynamic SQL defeats neither, so refusing there would be blast
+radius bought for nothing — ORMs and migration tools build SQL at run time
+constantly, and the traffic a wider refusal breaks is well-behaved traffic. The
+rule is emphatically not "any control is set". The same policy runs on MySQL and
+Oracle, from the same function (`shared.ValidateDynamicSQL`).
+
+A decidable payload is still just checked, so this is not a blanket refusal of
+dynamic SQL: `EXEC('SELECT 1')` runs under a read-only grant.
 
 Unwrapping stops at one level. A `EXEC('EXEC(''…'')')` is refused, not unwrapped
 again: recursion has to stop somewhere, and stopping *silently* would leave a
 hole the exact shape of the one the unwrapping closed.
+
+**`EXEC(…) AT <linked_server>` is out of scope and unenforced.** The `AT` clause
+routes the statement to another server entirely, which dbbat neither proxies nor
+audits: the grant it was issued under, the quotas, the query log and the approval
+patterns all describe *this* server row, and nothing about them applies to what
+the linked server runs. dbbat does not refuse it either — that would be an
+enforcement claim it cannot make good on. Linked servers are the same limitation
+as four-part names and `OPENQUERY` below: if that boundary matters, do not grant
+the login dbbat connects with access to a linked server.
 
 **Three-part names are out of scope, deliberately.**
 `SELECT * FROM otherdb.dbo.t` reaches another database with no switch to

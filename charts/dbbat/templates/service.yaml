@@ -15,6 +15,17 @@ spec:
     - port: {{ .Values.service.api.port }}
       targetPort: http
       protocol: TCP
-      name: http
+      name: {{ default "http" .Values.service.api.portName }}
+    {{- /*
+    In-cluster access to the proxy on the API service, for a deployment where
+    that is how clients already reach it. The port follows config.listenPg, the
+    same address the container binds.
+    */ -}}
+    {{- if .Values.service.api.includeProxyPort }}
+    - port: {{ include "dbbat.listenPort" .Values.config.listenPg | int }}
+      targetPort: postgres
+      protocol: TCP
+      name: {{ default "postgres" .Values.service.proxy.portName }}
+    {{- end }}
   selector:
     {{- include "dbbat.selectorLabels" . | nindent 4 }}

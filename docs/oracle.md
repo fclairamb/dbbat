@@ -256,6 +256,71 @@ parameter fails the suite instead of quietly reintroducing the connect-time
 refusal. SQL Developer over the OCI driver is expected to send the same shapes;
 that is inference, not measurement — it is not in the corpus.
 
+### Dynamic SQL, and how far the checks reach into it
+
+`BEGIN EXECUTE IMMEDIATE 'DELETE FROM t'; END;` is a write whose first keyword is
+`BEGIN`. The classification behind `read_only` and `block_ddl` (`IsWriteQuery` /
+`IsDDLQuery`) is **prefix**-shaped, so it read that statement as neither a write
+nor DDL and the payload was the statement nothing classified — the same shape as
+SQL Server's `EXEC('…')` and MySQL's `PREPARE … FROM '…'`, and it was measurably
+allowed under a grant carrying both controls.
+
+`shared.ValidateOracleQuery` therefore extracts the payload of the decidable forms
+and runs **the same checks over it that the outer statement got** — the grant
+controls *and* `oracleBlockedPatterns`. It lives in the shared validator rather
+than in this proxy because all five Oracle statement-carrying paths (`OALL8`, the
+v315+ piggyback exec, the JDBC `11 69` exec, cursor re-execution, and the
+statement gate in `session.go`) reach it, so one function covers all of them.
+
+| Form | Treatment |
+|------|-----------|
+| `EXECUTE IMMEDIATE '<literal>'`, at the top level or inside `BEGIN … END;` | statement text extracted, then classified and pattern-checked like an ordinary statement |
+| …`q'[…]'` / `nq'[…]'` quote-operator and `N'…'` spellings, `''` doubling, comments between the keywords | same |
+| …followed by `USING …` (bind values, not statement text) | same |
+| an all-literal concatenation — `EXECUTE IMMEDIATE 'DELETE ' \|\| 'FROM t'` | operands folded, then the joined text is checked |
+| `DBMS_SQL.PARSE(c, '<literal>', …)`, positional or `statement => …`, `SYS.`-qualified | same |
+| `EXECUTE IMMEDIATE v_stmt`, `'DELETE FROM ' \|\| v_tab`, `DBMS_SQL.PARSE(c, v_stmt, …)` | **refused under `read_only`/`block_ddl` only** (`shared.ErrDynamicSQLOpaque`) — see below |
+| dynamic SQL nested inside dynamic SQL, an unterminated literal, a `DBMS_SQL.PARSE` whose statement argument cannot be located | **refused** whatever the grant says (`shared.ErrDynamicSQLNotCheckable`) |
+| a **stored procedure or function body** that builds SQL | out of scope: dbbat sees the call, never the body |
+
+A benign payload stays allowed — `BEGIN EXECUTE IMMEDIATE 'SELECT 1 FROM DUAL';
+END;` runs under a read-only grant — because this is not a blanket refusal of
+dynamic SQL. Unwrapping stops at one level and stops loudly: a nested
+`EXECUTE IMMEDIATE` is refused, not unwrapped again, because stopping *silently*
+would leave a hole the exact shape of the one this closes.
+
+`ALTER SESSION SET CONTAINER=PDB2` inside a literal was already blocked before
+any of this, but only because `oracleBlockedPatterns` is a **substring** match and
+so reached inside the literal by accident of matching style rather than by design.
+It stays blocked, and is now blocked by design as well: the payload is extracted
+and the whole Oracle validator runs over it as a statement of its own.
+
+#### A payload dbbat cannot read: refused under `read_only`/`block_ddl` only
+
+`EXECUTE IMMEDIATE v_stmt` is assembled by PL/SQL from values dbbat never sees, so
+nothing about what it runs is statically decidable. dbbat **refuses** it when the
+active grant carries `read_only` **or** `block_ddl` — the two controls whose
+meaning a run-time-built statement defeats outright. Fail closed: "dbbat cannot
+tell what this runs" must not resolve to "allow" for a session that may not write
+or may not change schema. The refusal names its own cause
+(`shared.ErrDynamicSQLOpaque`), so an operator can tell it from an ordinary
+blocked write and knows the fix is a grant without those two controls.
+
+It is **not** refused for a grant carrying only `block_copy`, nor for a grant with
+no controls at all: dynamic SQL defeats neither, so refusing there would be blast
+radius bought for nothing — ORMs and migration tools build SQL at run time
+constantly, and the traffic a wider refusal breaks is well-behaved traffic. The
+rule is emphatically not "any control is set". The same policy runs on MySQL and
+SQL Server, from the same function (`shared.ValidateDynamicSQL`), and the three
+docs describe one behaviour.
+
+One cross-protocol scope note for completeness, since the SQL Server doc states
+it and the three must agree: SQL Server's `EXEC(…) AT <linked_server>` routes a
+statement to another server entirely and is **out of scope and unenforced**.
+Oracle's equivalent is a database link, and `CREATE DATABASE LINK` is already in
+`oracleBlockedPatterns`; a link that already exists is the same limitation —
+dbbat proxies one server row and cannot vouch for what another server runs.
+
 ### Cursor re-execution (what clients actually send)
 
 A client that has already parsed a statement re-runs it by naming its **cursor
@@ -484,9 +549,11 @@ code inside Oracle's range, a printable `ORA-`/`PLS-`/`TNS-` diagnostic in the
 tail, and that diagnostic **naming the very code the fields reported**
 (`ORA-00942` for 942, `ORA-06550` for 6550). A run of row bytes that decoded as
 seven ints would also have to be followed by the ASCII spelling of the number
-its fourth field landed on. It is errors-only: a bit-less standalone OER
-reporting success or ORA-01403 still completes nothing, because nothing proves
-those bytes.
+its fourth field landed on. It is errors-only — a bit-less standalone OER
+reporting success or ORA-01403 has no diagnostic to prove itself with, so
+`decodeErrorOER` will not touch it. For the fixed-width OCI encoding that gap is
+closed separately, by `decodeFixedStatusOERAt`; see "a successful call on an OCI
+client" below.
 
 Cursor-id learning never required the bit. Query completion did, and that cost
 real data: for a full release every INSERT/UPDATE/DELETE run by a
@@ -504,11 +571,120 @@ bytes:
 
 | Path | Bit required? | Why |
 |------|---------------|-----|
-| `handleOERStatus` (standalone func `0x04`), **reporting success or ORA-01403** | **yes** | routed on byte 0 alone, so any row-value length prefix of `0x04` arrives claiming to be an OER, and a status carries no text to prove itself with |
+| `handleOERStatus` (standalone func `0x04`), **reporting success or ORA-01403**, compressed encoding | **yes** | routed on byte 0 alone, so any row-value length prefix of `0x04` arrives claiming to be an OER, and a status carries no text to prove itself with |
+| `handleOERStatus`, same, **fixed-width (OCI) encoding**, outside a row stream | no — there is no bit to demand | measured: *every* standalone OCI summary object carries `CallStatus 0x1`. `decodeFixedStatusOERAt` reads it under the RetCode anchor plus `findPlausibleOERInResponse`'s cursor bounds — see "a successful call on an OCI client" below |
+| `handleOERStatus`, same, **fixed-width**, mid-row-stream | **refused outright** | an OCI fetch response carries a real object of this very shape inside every continuation packet; naming the cursor proves nothing, so only a proven diagnostic may end a call there (`statusOERMayEndTheCall`) |
 | `handleOERStatus`, **reporting a failure**, mid-row-stream | no, but the OER must **name the streaming cursor** | still possibly row bytes, so the diagnostic proof gets a second anchor — see "a failure raised mid-fetch" below |
 | `handleOERStatus`, **reporting a failure**, outside a row stream | no | `decodeErrorOER` proves the tail is a diagnostic naming the code the fields reported — see the table above |
-| `handleResponse`, mid-row-stream | **yes** | the payload *is* row bytes; a `0x04` run inside it is data |
+| `handleResponse`, mid-row-stream | **yes**, both encodings | the payload *is* row bytes; a `0x04` run inside it is data. `findOERInResponse` keeps the bit *deliberately* — see the 149 below |
 | `handleResponse`, outside a row stream | no | the payload is a return-parameter block, and the anchors above are what stands in for the bit |
+
+##### A successful call on an OCI client
+
+The first row of that table used to have no qualifier, and on an OCI client it
+cost the same data the python-oracledb fix above recovered. `decodeOERFieldsAtLayout`
+taught the decoder to read the fixed-width summary object and routed it into
+`decodeErrorOER` and `findPlausibleOERInResponse`, which is what stopped an OCI
+client's *failures* reading as successes. The **standalone** object was left on
+the compressed-only reading, and it is the one that ends a fetch: every SELECT an
+OCI client runs finishes on a bare `func 0x04` reporting ORA-01403. `decodeOERAt`
+returned nil for all of them, so the statement stayed pending until the next
+one's `flushPendingQuery` closed it — no `rows_affected`, and a `duration_ms`
+measuring the client's think time.
+
+**Demanding the bit in the fixed-width call status was the conservative option,
+and measurement killed it.** The fixed-width call status *does* carry the bit when
+the call sets it (`0x10001` on the ORA-00942 of a failed `DROP`), so demanding it
+was available — but replayed through a real session, every *standalone* summary
+object in both OCI recordings carries a bare `CallStatus 0x1`: the
+`SELECT DECODE(USER, …) FROM SYS.DUAL` login probe both open with, and the five
+`SELECT 1 AS n FROM dual` calls of `sqlplus_cursor_reexec.pcapng`. A
+bit-demanding reading would have completed **nothing**. What stands in for the bit
+instead is `decodeOERFixedFieldsAt`'s RetCode anchor plus the bound set
+`findPlausibleOERInResponse` already trusts on this very object — success or
+end-of-data, a 16-bit ECID sequence, a plausible cursor id. A fixed-width
+*failure* is deliberately still `decodeErrorOER`'s business, held to the stronger
+diagnostic proof.
+
+Two restrictions bound it, and both are measured (`TestDumpReplay_MidStreamOERFalsePositiveRate`
+prints every figure; `TestDumpReplay_OCIStatusOERsCompleteTheirOwnStatement` and
+`TestDumpReplay_OCIStatusOERDoesNotChargeTheClientsThinkTime` pin the two
+observables):
+
+| Figure | Value |
+|---|---|
+| recordings in `testdata/` | 26 |
+| server packets arriving mid-row-stream | 641 |
+| …of those, leading with `0x04` at byte 0 | 4 — all four the genuine mid-fetch ORA-01722 failures |
+| accepted at byte 0 by `decodeOERAt` mid-stream | **0** |
+| accepted mid-stream by `findOERInResponse` | **0** |
+| accepted by `decodeErrorOER` at every non-zero `0x04` offset mid-stream | **0** (the pre-existing stress figure) |
+| **accepted by the fixed-width status predicate at every non-zero offset mid-stream** | **149** |
+| standalone OCI status OERs completed by a bit-demanding predicate | **0** |
+| standalone OCI status OERs completed by the adopted predicate | **6** (1 + 5 across the two recordings) |
+
+That 149 is what decides both restrictions, and it is not junk being misread: an
+OCI fetch response carries a **genuine** summary object of exactly this shape at a
+constant offset in *every* continuation packet, naming the streaming cursor and
+reporting the fetch's running row count (13001, 13101, … 14901 in
+`sqlplus_midfetch_fail.pcapng`), and two of them even carry the end-of-call bit.
+Accepting one ends the call in the middle of the fetch — truncating capture,
+stopping mid-stream quota enforcement and mis-charging the rest of the stream,
+which is the production incident `handleResponse`'s row-stream guard descends
+from. So:
+
+- the fixed-width reading is offered **at offset 0 only** — a `0x04` that was the
+  packet's own leading byte, never one a scan found inside a payload. That is what
+  leaves `findOERInResponse` exactly as strict as it was: its scan starts at
+  offset 1, so **the fourth row of the table above is a measured refusal, not an
+  omission**. Outside a row stream nothing is lost by it either, because the
+  `findPlausibleOERInResponse` fall-through right behind it reads the fixed-width
+  encoding under the cursor bounds.
+- and **only outside a row stream** (`statusOERMayEndTheCall`), because a packet
+  boundary is all that separates that object from byte 0. Refusing costs nothing
+  measurable: of the 641 mid-stream packets only 4 lead with `0x04` and all four
+  are failures a status predicate rejects by their error code alone.
+
+A third restriction is about *ordering* rather than row bytes: the session's shape
+must already be **learned**, so the unlearned two-layout fallback
+`decodeOERFixedFieldsAt` offers is not available here. `handleOERStatus` runs the
+status reading before `decodeErrorOER`, so on a session that had not yet learned
+its encoding, a bit-less *error* OER satisfying one of the two layouts' anchors
+could be completed as a status and lose its ORA text. It costs nothing —
+`readUpstreamAuthMessages` learns the shape off the AUTH exchange, before any
+statement runs, and every standalone status OER in both recordings arrives with it
+already learned.
+
+##### What is still NULL: an OCI DML's `rows_affected`
+
+**This is not fixed, and a green nightly does not mean otherwise.** An OCI DML's
+`rows_affected` is still NULL, and the reason is a **third** fixed-width layout,
+not the standalone status reading above.
+
+A DML's summary object does not arrive standalone. In
+`sqlplus_midfetch_fail.pcapng` the whole `DROP` / `CREATE` / `INSERT ... SELECT` /
+`COMMIT` sequence is answered by func `0x08` Responses — `ociStatusDumps()` pins
+that recording at exactly **one** standalone status OER, the login probe — so a
+DML's row count is `handleResponse`'s business. And there, packet #31 (the
+`INSERT ... SELECT` of 20 000 rows) carries a **populated logical-rowid DLC** that
+displaces the trailing RetCode, so `decodeOERFixedFieldsAt`'s anchor refuses it at
+both known layouts (`oerFixed32Layout` and `oerFixed64Layout`) and the fall-through
+reaches the legacy `decodeTTCResponse`, which misreads v315+ responses. The INSERT
+is therefore completed by the *next* statement's flush, with `rows_affected` NULL
+— the same symptom the status reading removed for SELECTs, one path over.
+
+That is **out of the scope** of this section's change, and it has no spec file: it
+is tracked by a waiting test instead.
+`TestIntegration_DMLRowCountLandsFromItsOwnOEROCI` is the assertion, **gated off by
+default** (`ORACLE_TEST_OCI_DML_ROWCOUNT=1` runs it) precisely so a real
+out-of-scope gap does not become a red nightly with no owner. Un-gating it means
+teaching `decodeOERFixedFieldsAt` — or `oerFixedWidthTailFieldsAt`, which walks the
+same prefix, and whose `skipOERFixedFields` is where the walk bails today — the
+layout in which the rowid DLC is populated, so packet #31 decodes and its
+`CurRowNumber` of 20 000 is readable. The live test that *is* expected to pass is
+`TestIntegration_SuccessfulSelectCompletesOnItsOwnOEROCI`, which asserts the
+observable this change delivers: a sqlplus `SELECT`'s `duration_ms` must not
+include the `HOST sleep` that follows it.
 
 ##### A failure raised mid-fetch
 
@@ -635,7 +811,9 @@ never learned — precisely the old behaviour, with a DEBUG line saying so, so a
 unmeasured client reporting a different cursor is visible rather than silent.
 
 `handleResponse`'s mid-stream strictness, `findOERInResponse` and cursor-id
-learning are untouched by this.
+learning are untouched by this — and `findOERInResponse` stayed untouched by the
+fixed-width status reading too, on its own measurement; see "a successful call on
+an OCI client" above.
 
 **Why there is no third anchor.** All three of the conditions above are, in
 principle, influenceable by a *deliberate* client: row content through
@@ -815,7 +993,11 @@ followed by TTC compressed integers:
   DDL carries it. `decodeOERAt` therefore uses it to reject stray `0x04` runs
   only where a false positive would be made of row bytes, and
   `decodeErrorOER` stands in for it on a proven diagnostic — see the tables
-  under "the OER end-of-call bit is not universal". `ttc_oer.go`,
+  under "the OER end-of-call bit is not universal". The **fixed-width OCI
+  encoding has no equivalent to demand** (every standalone summary object
+  measured carries a bare `0x1`), so a standalone status there is read under the
+  layout anchors and the cursor bounds instead, at byte 0 of a packet no row
+  stream is open on: `decodeFixedStatusOERAt`. `ttc_oer.go`,
   `findOERInResponse` and `findPlausibleOERInResponse`.
 
 #### Ending a call: the OER encoder
@@ -1354,6 +1536,270 @@ of the two it is no longer has to be inferred — the byte case logs
 `ended the session: a held limit refusal never reached a call boundary`, and the
 slow-link case logs the crossover record above.
 
+##### The refusal that happens before the session: AUTH Phase 2
+
+A client can be refused before there is a session at all — no active grant, a
+service name matching several dbbat databases, a key that answers no verifier —
+and `sendAuthFailed` writes that refusal. It used to write a frame of its own
+invention: `0x00 0x00 0x08`, the ORA code as a compressed integer, and the
+message as a bare CLR. That is not an error structure, and **python-oracledb thin
+turned every AUTH-phase refusal into a driver bug**:
+
+```
+DPY-5002: internal error: read integer of length 39 when expecting integer
+of no more than length 4
+```
+
+39 is not a protocol quantity. It is `len("invalid username/password; logon
+denied")`. The driver read type `0x08` as a return-parameters message, called
+`read_str_with_length` → `read_ub4`, landed on the CLR's length byte and reported
+it as an integer width. The three refusals therefore reported 39, 59 and 92 — the
+lengths of dbbat's own three messages — and the reporter concluded the thin
+driver was at fault and began porting to thick mode, which would not have helped.
+
+The frame is now the same OER `writeTTCError` sends, from the same builder
+(`encodeOERPacket`); `buildAuthFailed` is gone. Two fields the mid-session path
+gets for free have to be supplied here:
+
+**The call number.** `observeClientCallNumber` runs on the proxy loop, which a
+session refused at AUTH never reaches, so the refusal would end call zero — the
+ORA-18745 case above. `observeAuthCallNumber` takes it off the newest AUTH packet
+instead: Phase 1 for a client refused before the challenge, Phase 2 for one
+refused on its key. Both are ordinary TTC ops (`03 76 <seq>` / `03 73 <seq>`).
+
+**The summary's trailing field count**, which is the one that cannot be left at
+its default. Mid-session an unlearned tail costs the message text and nothing
+else, which is why `nextOERFrame` writes zero until an upstream OER teaches it
+better. At AUTH the text *is* the fix — "request access via dbbat" is the whole
+point of the frame — and a client that expects the two 20c fields and does not
+find them lands on the message's length byte, which is DPY-5002 again, this time
+inside a well-formed OER. `authRefusalOERShape` therefore guesses, and the guess
+is **customHash**: a modern client (the 12c/18453 challenge) gets two, a legacy
+one (go-ora's 6949) gets none. That is the line the two hard-coded challenge
+summaries in `buildAuthChallengeEndMarker` already fall on — decode them and the
+6949 one carries no extra fields, the 18453 one carries two, and the 153-byte OCI
+capture carries two in the 64-bit fixed-width layout — and it is the line the
+real server OERs in `ttc_oer_encode_test.go` fall on. It is **not** the negotiated
+TTC field version: go-ora's is the *higher* of the two (see "The AUTH function
+header is negotiated, not fixed"), so a version rule gets both clients backwards.
+A tail learned off a real upstream OER still wins, and an OCI session has one
+before it is ever challenged (`beginUpstreamAuth` runs first).
+
+`TestIntegration_AuthRefusalAcrossClients` revokes the fixture user's grant and
+meets the refusal with each client. Measured against Oracle 23ai Free:
+
+| Client | What the client reported |
+|---|---|
+| python-oracledb thin 3.4.2 | `class=DatabaseError code=1045 full_code=ORA-01045`, message `ORA-01045: no active grant for this database; request access via dbbat` — where it used to report DPY-5002 |
+| sqlplus, Instant Client 23.3 (macOS, on PATH) | `ORA-01045: no active grant for this database; request access via dbbat`, printed verbatim |
+| go-ora v3 | `ORA-1045 error occur at position: 0` — the code, its own wording |
+
+A fourth subtest takes the *post-challenge* refusal, which is where the summary
+tail follows the verifier the challenge was actually built with rather than the
+negotiation: with a grant in place and a bogus key, python-oracledb reports
+`class=DatabaseError code=1017 full_code=ORA-01017`, message `ORA-01017: invalid
+username/password; logon denied` — the 39-byte message whose length DPY-5002 used
+to report. It runs last because it is the one case that needs a grant: a user
+without one is turned away before their key is looked at, so every other subtest
+reports ORA-01045 whatever password it sends.
+
+The sqlplus row is the flavor `plannedOCIClient` settled on for that run (a
+client on PATH wins when there is one); CI has none and measures the bundled
+23.26 client instead, which takes the 64-bit fixed-width layout — the same split
+the mid-reply table above spells out.
+
+The go-ora row is the accepted cost of the guess, and it is a real trade rather
+than an oversight. go-ora negotiates customHash like a modern client but parses
+like a legacy one — its summary reader takes the message CLR straight after the
+wide RetCode pair — so it reads dbbat's first trailing 20c field as an empty
+message and renders the code itself. The two layouts are mutually exclusive: no
+byte sequence puts a non-empty CLR where go-ora looks *and* two integers where
+python-oracledb looks. Given that, the tail goes to the client that **cannot
+parse the frame at all** without it over the one that loses a sentence. The
+refusal's ORA code reaches both.
+
+The probe reads python-oracledb's exception *object* — `class`, `code`,
+`full_code` — and not its text, for the same reason the mid-fetch probe does: the
+failure being measured produced an `InternalError` with no ORA code anywhere in
+it, so "the driver parsed the refusal" and "the driver could not read the frame"
+are indistinguishable from the message alone.
+
+**The third refusal — an ambiguous service name — is covered by unit test only,
+and that boundary is deliberate.** It is the one the original report was about
+(`MUTU01`, a service name shared by several dbbat databases), and it is issued
+from a different branch: `disambiguateDatabase`, which runs *before* the
+challenge, off the username in AUTH Phase 1.
+`TestDisambiguateDatabase_RefusesWithAReadableORAError` drives that branch against
+a real store — three server rows sharing one `oracle_service_name`, grants on
+two of them — and follows the same three steps `run()` does
+(`disambiguateDatabase` → `authRejectFor` → `sendAuthFailed`), decoding the frame
+off the socket: the ORA code, the whole 92-character sentence, the OER's own
+field walk, and the call number of the Phase 1 the client is parked on. Its
+sibling subtests cover the other two outcomes of the same branch (no grant on any
+candidate → ORA-01045 "no active grant", exactly one → that database selected).
+
+What no test does is drive it with a *live client*, and the reason is
+`resolveDatabase`: it resolves the connect string against a dbbat server **name**
+first and only falls through to the shared-service-name candidate list when that
+misses. The Oracle fixture's single server is named after the service it serves,
+so reaching the candidate list from `TestIntegration_AuthRefusalAcrossClients`
+means arranging for that name *not* to match the connect string mid-fixture.
+That is now possible without deleting the row: `store.ServerUpdate.Name` renames
+a server (`PUT /api/v1/servers/:uid`), so a fixture can rename its row to
+something the client never sends and keep the grants and history hanging off its
+`database_id`. A live-client version of this case is therefore feasible for the
+first time — it is simply not written yet. The frame is the same one the two
+measured refusals carry (same builder, same shape decision, same summary tail),
+so what goes unmeasured is the *branch's* wiring, not the encoding — and that is
+what the unit test pins.
+
+##### Keys that cannot do Oracle, and the refusal that says so
+
+O5LOGON needs a verifier derived from the API key. Keys are Argon2id-hashed, so
+that verifier cannot be recovered afterwards: it exists only if it was derived at
+mint time. **Every key minted before Oracle support therefore authenticates
+against the REST API and every other protocol and can never be used for Oracle**
+— and until 0.25 nothing said so anywhere. The production sighting (2026-08-13, a
+key created 2026-07-12) is the shape of it:
+
+```
+O5LOGON verifiers loaded — any of these API keys works for Oracle login
+  candidates=3 primary_key_prefix=dbb_8kre has_18453=true
+AUTH Phase 2: candidate did not decrypt AUTH_PASSWORD  key_prefix=dbb_8kre …
+WARN client authentication failed  error="API key verification failed: no candidate key decrypted AUTH_PASSWORD (3 tried)"
+```
+
+The three candidates are the user's *other*, newer keys. The key actually being
+presented is not in the list at all — that is what makes it invisible — and the
+client saw `ORA-01017 invalid username/password`, indistinguishable from a typo.
+Minting a new key happens to fix it, which hides the cause and teaches nothing.
+
+**The listing.** `GET /api/v1/keys` (and the single-key fetch) now carry
+`oracle_capable`, shown in the UI's key list as a per-row badge plus a banner
+counting the live keys that cannot do Oracle. The predicate is a *decryption*,
+not a column test — `store.APIKey.DecryptedO5LogonVerifier6949`, which is the
+same call `decryptVerifierData` makes to build a challenge, so the listing and
+the proxy cannot disagree. Material that no longer decrypts under the running
+`DBB_KEY` is reported unusable for exactly the reason the proxy treats it as no
+candidate. The field is a `*bool`: absent when the process has no master key and
+therefore cannot tell, so "unknown" never reads as "unusable".
+
+**The refusal.** dbbat cannot say *which* key was presented. It challenges from
+the user's shared salts and learns only that no candidate decrypted
+`AUTH_PASSWORD`; the presented key left no trace, and in this failure it was
+never a candidate. What it can say — and now does — is the strictly weaker,
+still-actionable thing: when a login is refused and the user owns live keys with
+no usable verifier, the message counts them and says to mint a new one. The code
+stays **ORA-01017** (the credential really was refused) and "invalid
+username/password" stays the primary clause, because dbbat does not know the key
+just typed was one of them. It is one more case in `authRejectFor`, carried there
+by a typed error (`keysWithoutVerifierError`) so the sentinel callers classify by
+survives, and it rides the same OER frame as the refusals above. Counts and
+advice only: no prefixes, no names, nothing derived from the material — the
+precedent for naming an account-shaped fact to an unauthenticated client is
+`ErrNoActiveGrant`, on this same frame.
+
+**Backfill-on-use was considered and rejected.** A key presented over REST
+arrives in plaintext, so its verifier *could* be derived and written at that
+moment, silently healing every legacy key on first use. It is not implemented, and
+should not be: verifier material is encrypted rather than hashed — unlike the key
+hash itself — so writing it for every key that has ever been used widens what a
+stolen store yields, to save the user one key rotation. The store's
+"a leaked database yields no usable key" property is worth more than the
+convenience. Reporting the fact is the honest fix.
+
+##### Refusals on Oracle 19c: what is covered, and what is still outstanding
+
+Everything above is measured against **Oracle 23ai Free**, because that is the
+only image with no licence and therefore the only one an integration suite can
+start. 19c is the version most dbbat deployments actually proxy, and it is not
+interchangeable: the refusal frame is shaped from what the session negotiated,
+and 19c negotiates differently.
+
+**The production measurement that opened this.** On 2026-08-13, against
+`dbbat.tools.stonal.io` running image **0.23.2**, upstream `Oracle Database 19c
+Standard Edition 2`, under a `read_only` grant, with python-oracledb 3.4.2 thin:
+
+- dbbat blocked the write correctly — `WARN query blocked by access control …
+  write operations not permitted with read-only access`.
+- the client never received it. A first run **hung past two minutes** with no
+  response. With `conn.call_timeout` set, the call came back after 30s as
+  `DPY-4011: the database or network closed the connection`, the connection was
+  dead for every subsequent statement (`DPY-1001`), and the interpreter exited on
+  a segfault (139) during driver teardown.
+
+That is the exact opposite of what `TestIntegration_BlockedStatementRefusesPythonThin`
+asserts and passes on 23ai. **0.23.2 predates the whole mid-session refusal
+rework** — `ttc_oer_encode.go`, "end the client's call on a refusal with a real
+OER frame", "refuse sqlplus/OCI in the encoding and framing it waits for" — so
+it is a measurement of code that no longer exists. Whether current code still
+fails that way on a live 19c is **not established here**; that re-measurement
+needs a deploy and a 19c instance, and it is outstanding.
+
+**What is established, and runs in CI on every commit:**
+`internal/proxy/oracle/refusal_19c_test.go`. The corpus already contains real 19c
+recordings — the premise that it was 23ai-only is wrong. `go_ora.pcapng` and
+`dbeaver_init.pcapng` carry `Oracle Database 19c Standard Edition 2 Release
+19.0.0.0.0 - Production` verbatim; `python_thin.pcapng` and `dbeaver.pcapng`
+carry the same server fingerprint (42-entry capability array, `caps[7]` = 12)
+and none of the 23ai captures do (54 entries, `caps[7]` = 27).
+`TestOracle19cCaptures_AreReallyA19cUpstream` pins that provenance, because it is
+what licenses the word 19c in the rest of the file.
+
+`TestRefusalOn19c_ReachesTheClientOnAStillUsableSession` then replays one of
+those recordings through the *production* observers — `observeCustomHashFlag`,
+`observeBigClrChunksFlag`, `observeOERServerCaps`, `observeClientAuthEncoding`,
+`observeOERClientVersion`, and `interceptUpstreamMessage`, so the OER layout is
+learned off that 19c server's own end-of-call frames — arms a restrictive grant,
+and drives blocked statements through the real `clientToUpstream` relay over a
+pipe pair. It asserts all three properties the measurement above lost, not just
+the error text:
+
+| property | how |
+|---|---|
+| an ORA error arrives | the frame is decoded by the same strict walk the AUTH refusal uses (`decodeAuthRejectOER`), so the message CLR has to sit exactly where *this session's* negotiated shape says — a tolerant "scan for ORA-" decode passes on a frame no client can parse |
+| it arrives promptly | every read carries a 5s deadline. The failure being guarded against is a two-minute hang, so a reintroduced one fails the suite in seconds instead of hanging it |
+| the connection survives | the next statement is read off the *upstream* socket unchanged, a second refusal is answered on the same session with an advanced sequence number, and the relay ends on the client's own EOF with no error |
+
+Covered refusals: `read_only`, `block_ddl`, the Oracle pattern list (`ALTER
+SYSTEM`, which is the one refusal a full-write grant still meets), and an
+exhausted quota. `block_copy` is covered by *asserting it refuses nothing* — an
+Oracle COPY is a client-side SQL\*Plus command, never a server statement, so it
+is deliberately absent from `hasStatementControls`, and a write under a
+block_copy-only grant is forwarded.
+
+**The statement being refused is synthetic, and cannot be otherwise.** No
+recording contains a refused statement — nobody records a session being refused —
+and the refusal frame is dbbat's own invention rather than something a server
+sends, so there is nothing to replay for it. The exec frames come out of this
+package's own builders in the wire shape each recorded client used (the piggyback
+exec for go-ora, the `11 69` close-list-plus-execute for DBeaver/JDBC thin). The
+quota subtest is the one that refuses a **recorded** 19c exec frame byte for
+byte, since a quota refuses every statement rather than only a write.
+
+Two things fell out of the replay and are pinned as their own tests, because both
+bear on the frame a 19c client can read:
+
+- **19c sends no trailing summary fields, to any client.** The two are Oracle's
+  "fields added in Oracle Database 20c", and 19c predates 20c. The same
+  python-oracledb thin build that gets **two** from 23ai gets **none** from 19c
+  (`TestOracle19cSummaryTail_IsWhatThatServerSends`). dbbat is right by
+  construction here rather than by luck: mid-session `nextOERFrame` leaves the
+  count at zero until an upstream OER teaches it, and on 19c what it learns is
+  zero. A change that started *assuming* the 20c tail would break the version
+  that has no such fields.
+- **On 19c the tail is learned before the AUTH-phase refusal can need it.** The
+  upstream's AUTH **Phase 1** response already carries a summary object, so
+  `authRefusalOERShape`'s modern-client guess (which would be wrong on 19c) never
+  applies — the learned shape wins one packet before a Phase 2 refusal
+  (`TestOracle19cLearnsItsTailBeforeAuthPhase2`).
+
+**Not covered:** a live 19c client end to end. There is no licence-free 19c image,
+and a suite leg that can never run in CI is not coverage, so no opt-in
+licensed-image build tag was added. What the tests above measure is the frame and
+the session, against a real 19c negotiation; what only a live 19c can settle is
+the re-measurement of the production symptom, which stays with the owner.
+
 ### Oracle NUMBER Encoding
 
 Oracle NUMBER is a variable-length, sign-and-magnitude, base-100 format:
@@ -1506,13 +1952,73 @@ dbbat logical name in the EZ-Connect string whenever it is EZ-Connect-safe
 (letters, digits, `_`, `.`, `-`), falling back to the raw upstream service name
 for names containing spaces or parentheses.
 
+#### The upstream comparison is textual, and the conflict is reported instead
+
+The "all candidates must share the same upstream `host:port`" check compares the
+addresses **as strings**. A CNAME in one row and the A-record of the same machine
+in another therefore read as two upstreams, and the connect is refused ORA-12514
+even though every candidate points at one database. That happened in production:
+three rows carried `oracle_service_name = MUTU02` under
+`oracle-abymutualise02.db.stonal.io` and
+`abymutualise02.cusruf0cguz3.eu-west-3.rds.amazonaws.com`.
+
+The compare stays textual on purpose. Resolving each candidate's host would put
+a DNS lookup on the connect path and could answer differently between two
+connects of the same DSN, turning a deterministic refusal into an intermittent
+one. So the *misconfiguration* is surfaced rather than worked around:
+
+- `store.OracleServiceNameConflictFor` is the single definition of "these rows
+  disagree", shared by the proxy and by the two fleet queries
+  (`ListOracleServiceNameConflicts`, `GetOracleServiceNameConflict`) — a second,
+  SQL-shaped implementation would be exactly the drift that lets the UI call a
+  configuration healthy while the proxy refuses it;
+- the admin server listing, the per-row `GET /api/v1/databases/{uid}` and the
+  create response carry `oracle_service_name_conflict`, and the servers page
+  renders an amber marker on the service name naming every row and address
+  involved;
+- the connectivity check reports it as an advisory `warnings` entry
+  (`oracle_service_name_conflict`) — the check itself still passes, because the
+  row *is* reachable; what is unreachable is the shared service name;
+- the refusal names the service name, the number of claiming rows and the number
+  of upstreams, and logs the full conflict (row names included) at WARN. The row
+  names deliberately stay out of the wire message: `resolveDatabase` runs before
+  authentication, and the same reasoning that keeps ORA-01017 generic applies.
+
+Soft-deleted rows and non-Oracle rows never raise a conflict, and only the
+dedicated `oracle_service_name` column counts — never the database-name fallback
+`oracleServiceName` uses for probes — because that column is what the candidate
+lookup keys off.
+
+#### The full connect descriptor as an escape hatch: spaces yes, parentheses no
+
+When a dbbat server name is not EZ-Connect-safe, the connection endpoint falls
+back to the raw upstream service name, which is what lands a client in the
+shared-candidate path above. A client *can* sidestep EZ-Connect by sending a full
+connect descriptor, but only so far — measured in
+`TestParseServiceName_NamesEZConnectCannotExpress`:
+
+| Client sends | `parseConnectDescriptor` yields | Usable? |
+|---|---|---|
+| `(CONNECT_DATA=(SERVICE_NAME=abyla mutu ro))` | `abyla mutu ro` | **yes** — spaces round-trip |
+| `(CONNECT_DATA=(SERVICE_NAME="abyla mutu ro"))` | `"abyla mutu ro"` | no — the quotes stay in the value |
+| `(CONNECT_DATA=(SERVICE_NAME=abyla_x (R/O)))` | `abyla_x (R/O` | no — truncated at the first `)` |
+| `(CONNECT_DATA=(SERVICE_NAME="abyla_x (R/O)"))` | `"abyla_x (R/O` | no — quoting does not rescue it |
+
+So the descriptor is a genuine escape hatch for a name containing **spaces**, and
+nothing else: quotes are not syntax to this parser, and `serviceNameRe`'s value
+class (`[^)]+`) cannot carry a parenthesis at all. Teaching it to would also mean
+teaching `rewriteServiceName` the same quoting — it locates the value in the live
+packet from the parsed text — so it is not a parser-only change. The durable fix
+is the naming rule: server names are slugs
+(`specs/todos/2026-08-13-23-server-names-must-be-slugs.md`).
+
 ## Known Limitations
 
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
 - **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the two re-execution frames that are real (the SQL-less `OALL8` and the `03/0x4e|0x04` piggyback) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
-- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. That now includes a failure raised **mid-fetch**, once column definitions are decoded — measured at 14 900 rows into a 20 000-row fetch on **four** clients, and accepted there only when the OER also names the cursor whose rows are streaming; see "A failure raised mid-fetch". "Every client" includes the OCI ones (sqlplus, Instant Client, SQL*Developer over OCI) only since `decodeOERFieldsAtLayout`: they marshal the summary object fixed-width, dbbat read TTC compressed integers only, and until then *every* failing statement on those clients — mid-fetch or not — was recorded as a success. What is still not covered is a mid-fetch failure whose OER names a *different* cursor (none has been observed; it fails closed to the old no-error behaviour and logs a DEBUG line), and any mid-fetch failure on a client not captured. See `ttc_oer.go`.
+- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. That now includes a failure raised **mid-fetch**, once column definitions are decoded — measured at 14 900 rows into a 20 000-row fetch on **four** clients, and accepted there only when the OER also names the cursor whose rows are streaming; see "A failure raised mid-fetch". "Every client" includes the OCI ones (sqlplus, Instant Client, SQL*Developer over OCI) only since `decodeOERFieldsAtLayout`: they marshal the summary object fixed-width, dbbat read TTC compressed integers only, and until then *every* failing statement on those clients — mid-fetch or not — was recorded as a success. A **successful** OCI call is a separate reading again, added later still (`decodeFixedStatusOERAt`): the standalone summary object that ends every OCI fetch reports ORA-01403 with a bare `CallStatus 0x1`, so until it was read, an OCI statement was completed by the *next* one's `flushPendingQuery` — no `rows_affected`, and a `duration_ms` measuring the client's think time. See "a successful call on an OCI client" for the predicate and its measured bounds. What is still not covered is a mid-fetch failure whose OER names a *different* cursor (none has been observed; it fails closed to the old no-error behaviour and logs a DEBUG line), any mid-fetch failure on a client not captured, and — the one to know about — **an OCI DML's `rows_affected`, which is still NULL**: its summary object is *embedded in a Response* with a populated logical-rowid DLC, a third fixed-width layout the RetCode anchor refuses (`sqlplus_midfetch_fail.pcapng` packet #31), so the statement is closed by the next one's flush. That is out of scope of the status reading above and tracked by the gated `TestIntegration_DMLRowCountLandsFromItsOwnOEROCI`; see "What is still NULL: an OCI DML's `rows_affected`". See `ttc_oer.go`.
 - **Bind values (parameterized queries)**: Bind values are captured from both the legacy `OALL8` execute path (`decodeBindValues`) and the v315+ **piggyback exec** path that modern clients use (`extractPiggybackBinds`, func `0x03` sub `0x5e`). The piggyback binds sit length-prefixed at the tail of the message; they're located as the suffix that parses as exactly as many values as there are distinct bind placeholders in the SQL, and each is decoded by content via `decodeOracleRawValue` (so a NUMBER bind like `42` renders as `42`, not hex). Verified against `testdata/go_ora_binds.pcapng` (`TestDumpReplay_Binds`). Captured binds are now persisted to `queries.parameters` (`formatOracleBinds` wired into `persistQueryRecord` and `completeQuery`), so the API (`GET /api/v1/queries/:uid`) and the UI Parameters card report them. Not yet handled: binds over ~253 bytes (extended length encoding) and full type-aware decoding from the bind-definition records.
 - **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results, verified end-to-end against `testdata/go_ora_temporal.pcapng` (`TestDumpReplay_Temporal`). The tz form renders the local wall clock plus its numeric offset, honouring byte 11's `0x40` "time in zone" flag (prefix stored as local vs UTC). Named-region time zones fall back to the stored wall clock without an offset suffix.
 - **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.pcapng`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.
@@ -1531,6 +2037,13 @@ The short version: all four supported client families — go-ora,
 python-oracledb thin, SQLcl/ojdbc and sqlplus / OCI instant client —
 authenticate, query and capture end-to-end against Oracle 23ai through the
 proxy. Against Oracle 19c the historical behaviour still applies.
+
+**19c is not covered end to end, and cannot be:** there is no licence-free 19c
+image to start a container from. What *is* covered on 19c, off the recorded 19c
+sessions in `testdata/`, is the mid-session refusal frame and the negotiation it
+is shaped from — see "Refusals on Oracle 19c: what is covered, and what is still
+outstanding" above, which also records the one production symptom still awaiting
+re-measurement.
 
 For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL extraction details.
 
@@ -1749,6 +2262,13 @@ and python-oracledb all conclude `true`. `customHash` was right by accident: off
 shifted array *is* the real `caps[4]`. The flags are measured off the captures in
 `internal/proxy/oracle/testdata/` and pinned by
 `TestServerCapBitSet_RealSetProtocolReplies`.
+
+The two columns are two *recorded servers*, not two guesses: the 42-entry array
+is `go_ora.pcapng`, `dbeaver_init.pcapng`, `dbeaver.pcapng` and
+`python_thin.pcapng` — the first two carry the 19c banner verbatim — and the
+54-entry one is every other capture in the corpus (Oracle 23.26). Which capture
+is which version is pinned by `TestOracle19cCaptures_AreReallyA19cUpstream`; the
+19c ones are what "Refusals on Oracle 19c" above replays.
 
 **Every AUTH site now follows the negotiated flag — there is no remaining hard-coded
 dialect.** Once the capability was read correctly it had to reach each place that frames or

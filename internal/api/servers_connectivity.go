@@ -35,7 +35,19 @@ type ConnectionTestResponse struct {
 	// challenge material, exactly like the host key.
 	CAPinned         bool   `json:"k8s_ca_pinned,omitempty"`
 	K8sLearnedCACert string `json:"k8s_learned_ca_cert,omitempty"`
-	DurationMs       int64  `json:"duration_ms"`
+	// Warnings are problems that did not fail the check but that the admin needs
+	// to see: today, an Oracle row whose upstream service name is also claimed
+	// by rows spelling their host differently. A check can be green and still
+	// carry one — the row works, connecting by shared service name does not.
+	Warnings   []ConnectionTestWarning `json:"warnings,omitempty"`
+	DurationMs int64                   `json:"duration_ms"`
+}
+
+// ConnectionTestWarning is one advisory finding of a check. The code is the
+// stable part the UI keys off; the message is what it shows.
+type ConnectionTestWarning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // toConnectionTestResponse converts a check result to its API shape.
@@ -49,8 +61,24 @@ func toConnectionTestResponse(res conncheck.Result) ConnectionTestResponse {
 		KnownHostKey:     res.KnownHostKey,
 		CAPinned:         res.CAPinned,
 		K8sLearnedCACert: res.LearnedCACert,
+		Warnings:         toConnectionTestWarnings(res.Warnings),
 		DurationMs:       res.DurationMs,
 	}
+}
+
+// toConnectionTestWarnings converts the check's advisory findings, returning nil
+// when there are none so the field stays absent rather than an empty array.
+func toConnectionTestWarnings(warnings []conncheck.Warning) []ConnectionTestWarning {
+	if len(warnings) == 0 {
+		return nil
+	}
+
+	out := make([]ConnectionTestWarning, 0, len(warnings))
+	for _, w := range warnings {
+		out = append(out, ConnectionTestWarning{Code: string(w.Code), Message: w.Message})
+	}
+
+	return out
 }
 
 // handleTestServerConnection validates that a server row actually works: for an
@@ -96,7 +124,8 @@ func (s *Server) runConnectionCheck(ctx context.Context, srv *store.Server) conn
 			slog.String("protocol", srv.Protocol),
 			slog.Bool("ok", res.OK),
 			slog.String("stage", string(res.Stage)),
-			slog.String("code", string(res.Code)))
+			slog.String("code", string(res.Code)),
+			slog.Int("warnings", len(res.Warnings)))
 	}
 
 	return res

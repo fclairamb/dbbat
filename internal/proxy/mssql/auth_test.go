@@ -434,7 +434,7 @@ func TestSessionRejectsADatabaseOnAnotherProtocol(t *testing.T) {
 	}
 
 	other, err := fixture.store.CreateServer(context.Background(), &store.Server{
-		Name:         "a-postgres-entry",
+		Name:         "a_postgres_entry",
 		Host:         "127.0.0.1",
 		Port:         5432,
 		DatabaseName: "postgres",
@@ -449,7 +449,7 @@ func TestSessionRejectsADatabaseOnAnotherProtocol(t *testing.T) {
 		context.Background(), t, fixture.store, fixture.user.UID, other.UID, nil)
 	require.NoError(t, err)
 
-	_, outcome := fixture.login(t, fixtureUser, fixturePassword, "a-postgres-entry")
+	_, outcome := fixture.login(t, fixtureUser, fixturePassword, "a_postgres_entry")
 
 	failure := requireLoginFailure(t, outcome)
 	assert.Equal(t, errNumberCannotOpenDBName, failure.Number)

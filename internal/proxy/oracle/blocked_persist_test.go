@@ -456,7 +456,7 @@ func TestBlockedStatement_IsAnOrdinaryChainAppend(t *testing.T) {
 	}
 
 	db, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "blocked-oracle-db",
+		Name:         "blocked_oracle_db",
 		Host:         "localhost",
 		Port:         1521,
 		DatabaseName: "ORCL",
@@ -626,7 +626,7 @@ func TestBlockedStatement_ReachesTheClientAsAnORAError(t *testing.T) {
 	assert.Equal(t, TTCFuncOERR, fc,
 		"a client only ends its call on the message type a server ends one with")
 
-	info := decodeOERAt(extractTTCPayload(pkt.Payload), 0)
+	info := decodeOERAt(defaultOERShape(), extractTTCPayload(pkt.Payload), 0)
 	require.NotNil(t, info, "the refusal must decode as an end-of-call OER")
 	assert.Equal(t, 1031, info.ErrorCode)
 	assert.Contains(t, info.ErrorMessage, "read-only")

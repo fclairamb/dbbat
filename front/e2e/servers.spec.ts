@@ -58,6 +58,35 @@ test.describe("Servers Management", () => {
     }
   });
 
+  test("create dialog rejects a hyphenated name before it reaches the server", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+
+    const nameInput = authenticatedPage.getByTestId("database-name-input");
+    await nameInput.fill("bad-name");
+    await authenticatedPage.locator("#host").fill("db.example.com");
+    await authenticatedPage.locator("#username").fill("postgres");
+    await authenticatedPage.locator("#password").fill("secret");
+
+    // The server name is a slug (^[a-z0-9_]{1,63}$) — no hyphens. The input's
+    // native HTML5 pattern must catch this before any request is made.
+    const isValid = await nameInput.evaluate((el: HTMLInputElement) =>
+      el.checkValidity()
+    );
+    expect(isValid).toBe(false);
+
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    // The browser blocks the submit, so the dialog stays open with the
+    // rejected value still in the field rather than a round-trip 400.
+    await expect(nameInput).toBeVisible();
+    await expect(nameInput).toHaveValue("bad-name");
+  });
+
   test("connection URL shows the {DBBAT_KEY} placeholder", async ({
     authenticatedPage,
   }) => {
@@ -108,7 +137,7 @@ test.describe("Servers Management", () => {
     const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
     await expect(sshSection).toBeVisible();
 
-    const name = `e2e-bastion-${Date.now()}`;
+    const name = `e2e_bastion_${Date.now()}`;
 
     await authenticatedPage.getByTestId("add-database-button").click();
 
@@ -137,7 +166,7 @@ test.describe("Servers Management", () => {
     const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
     await expect(sshSection).toBeVisible();
 
-    const name = `e2e-bastion-edit-${Date.now()}`;
+    const name = `e2e_bastion_edit_${Date.now()}`;
     const updatedDescription = `updated description ${Date.now()}`;
 
     // Create a bastion to edit.
@@ -178,7 +207,7 @@ test.describe("Servers Management", () => {
     const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
     await expect(sshSection).toBeVisible();
 
-    const name = `e2e-cluster-${Date.now()}`;
+    const name = `e2e_cluster_${Date.now()}`;
 
     await authenticatedPage.getByTestId("add-database-button").click();
     await authenticatedPage.getByTestId("protocol-select").click();
@@ -220,7 +249,7 @@ test.describe("Servers Management", () => {
     const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
     await expect(sshSection).toBeVisible();
 
-    const name = `e2e-bastion-test-${Date.now()}`;
+    const name = `e2e_bastion_test_${Date.now()}`;
 
     // 127.0.0.1:1 has nothing listening: the check must fail loudly rather than
     // report the write-and-hope success this feature exists to eliminate.
@@ -255,5 +284,234 @@ test.describe("Servers Management", () => {
     expect(typeof body.message).toBe("string");
     // The stored credentials must never come back out.
     expect(JSON.stringify(body)).not.toContain("bastion-password");
+  });
+
+  test("two Oracle rows spelling one host two ways are flagged on the service name", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // The reported incident, reproduced: one upstream service name claimed by
+    // two rows that spell the host differently. Each row is fine on its own;
+    // a client connecting with the shared service name is refused ORA-12514,
+    // because the proxy compares candidate upstreams as text. The admin must
+    // see that before a user hits it.
+    const stamp = Date.now();
+    const service = `E2EMUTU${stamp}`;
+    const first = `e2e_oracle_cname_${stamp}`;
+    const second = `e2e_oracle_arecord_${stamp}`;
+
+    const createOracleRow = async (name: string, host: string) => {
+      await authenticatedPage.getByTestId("add-database-button").click();
+      await authenticatedPage.getByTestId("protocol-select").click();
+      await authenticatedPage.getByTestId("protocol-option-oracle").click();
+      await authenticatedPage.getByTestId("database-name-input").fill(name);
+      await authenticatedPage.locator("#host").fill(host);
+      await authenticatedPage.locator("#oracleServiceName").fill(service);
+      await authenticatedPage.locator("#username").fill("system");
+      await authenticatedPage.locator("#password").fill("oracle-password");
+      await authenticatedPage.getByTestId("database-create-submit").click();
+      await expect(
+        authenticatedPage.locator("tr", { hasText: name }).first()
+      ).toBeVisible({ timeout: 10000 });
+    };
+
+    await createOracleRow(first, `oracle-${stamp}.db.example.com`);
+    // Before the second row exists there is nothing to disagree with.
+    const firstRow = authenticatedPage.locator("tr", { hasText: first }).first();
+    await expect(
+      firstRow.locator('[data-testid^="database-oracle-conflict-"]')
+    ).toHaveCount(0);
+
+    await createOracleRow(second, `${stamp}.eu-west-3.rds.amazonaws.com`);
+
+    // Both rows now carry the warning, and it names the conflict.
+    await authenticatedPage.reload();
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    for (const name of [first, second]) {
+      const row = authenticatedPage.locator("tr", { hasText: name }).first();
+      const marker = row
+        .locator('[data-testid^="database-oracle-conflict-"]')
+        .first();
+      await expect(marker).toBeVisible({ timeout: 10000 });
+      await expect(marker).toHaveAttribute("title", /ORA-12514/);
+      await expect(marker).toHaveAttribute("title", new RegExp(service));
+    }
+  });
+
+  test("the create dialog reopens clean, with nothing left over from the last one", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const stamp = Date.now();
+    const name = `e2e_reopen_${stamp}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("reopen.example.com");
+    await authenticatedPage.locator("#databaseName").fill("postgres");
+    await authenticatedPage.locator("#username").fill("reopen_user");
+    await authenticatedPage.locator("#password").fill("reopen-secret");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+    await expect(
+      authenticatedPage.locator("tr", { hasText: name }).first()
+    ).toBeVisible({ timeout: 10000 });
+
+    // Reopening immediately is the interesting moment: while the dialog was
+    // left mounted, its overlay stayed in the DOM for the whole fade-out — a
+    // `fixed inset-0 z-50` sheet over the trigger — so this click could be
+    // swallowed and the retry would toggle the dialog straight back shut.
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await expect(authenticatedPage.getByTestId("protocol-select")).toBeVisible();
+
+    // And it comes back blank rather than pre-filled with the server just
+    // created, password included.
+    await expect(authenticatedPage.getByTestId("database-name-input")).toHaveValue("");
+    await expect(authenticatedPage.locator("#host")).toHaveValue("");
+    await expect(authenticatedPage.locator("#username")).toHaveValue("");
+    await expect(authenticatedPage.locator("#password")).toHaveValue("");
+  });
+
+  test("a database row can be renamed, with the connection-target warning", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const stamp = Date.now();
+    const before = `e2e_rename_before_${stamp}`;
+    const after = `e2e_rename_after_${stamp}`;
+
+    // A row to rename. Name is the only field that used to be immutable.
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(before);
+    await authenticatedPage.locator("#host").fill("localhost");
+    await authenticatedPage.locator("#databaseName").fill("postgres");
+    await authenticatedPage.locator("#username").fill("postgres");
+    await authenticatedPage.locator("#password").fill("postgres");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = authenticatedPage.locator("tr", { hasText: before }).first();
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    await row.locator('[data-testid^="database-rename-"]').click();
+
+    const dialog = authenticatedPage.getByTestId("database-rename-dialog");
+    await expect(dialog).toBeVisible();
+
+    // Untouched, there is nothing to warn about yet.
+    await expect(
+      authenticatedPage.getByTestId("server-rename-warning")
+    ).toHaveCount(0);
+
+    const input = authenticatedPage.getByTestId("database-rename-input");
+    await input.fill(after);
+
+    // Changing it says what a rename actually breaks: the connection target.
+    const warning = authenticatedPage.getByTestId("server-rename-warning");
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText(/connection target/i);
+
+    await authenticatedPage.getByTestId("database-rename-submit").click();
+
+    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+    await expect(
+      authenticatedPage.locator("tr", { hasText: after }).first()
+    ).toBeVisible({ timeout: 10000 });
+    await expect(
+      authenticatedPage.locator("tr", { hasText: before })
+    ).toHaveCount(0);
+  });
+
+  test("the rename dialog rejects a hyphenated name before it reaches the server", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const stamp = Date.now();
+    const name = `e2e_rename_slug_${stamp}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("localhost");
+    await authenticatedPage.locator("#databaseName").fill("postgres");
+    await authenticatedPage.locator("#username").fill("postgres");
+    await authenticatedPage.locator("#password").fill("postgres");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = authenticatedPage.locator("tr", { hasText: name }).first();
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    await row.locator('[data-testid^="database-rename-"]').click();
+    await expect(
+      authenticatedPage.getByTestId("database-rename-dialog")
+    ).toBeVisible();
+
+    const input = authenticatedPage.getByTestId("database-rename-input");
+    await input.fill(`${name}-renamed`);
+    await authenticatedPage.getByTestId("database-rename-submit").click();
+
+    // The slug gate the create dialog enforces applies to the rename too: the
+    // form's own pattern refuses to submit, so the dialog stays open.
+    const isValid = await input.evaluate((el: HTMLInputElement) =>
+      el.checkValidity()
+    );
+    expect(isValid).toBe(false);
+    await expect(
+      authenticatedPage.getByTestId("database-rename-dialog")
+    ).toBeVisible();
+    await expect(
+      authenticatedPage.locator("tr", { hasText: name }).first()
+    ).toBeVisible();
+  });
+
+  test("a tunnel row can be renamed from its edit dialog", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
+    await expect(sshSection).toBeVisible();
+
+    const stamp = Date.now();
+    const before = `e2e_bastion_rename_${stamp}`;
+    const after = `e2e_bastion_renamed_${stamp}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("protocol-select").click();
+    await authenticatedPage.getByTestId("protocol-option-ssh").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(before);
+    await authenticatedPage.locator("#host").fill("bastion.example.com");
+    await authenticatedPage.locator("#username").fill("bastion-user");
+    await authenticatedPage.locator("#password").fill("bastion-password");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = sshSection.locator("tr", { hasText: before });
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    await row.locator('[data-testid^="ssh-server-edit-"]').click();
+    const editDialog = authenticatedPage.getByTestId("ssh-server-edit-dialog");
+    await expect(editDialog).toBeVisible();
+
+    await authenticatedPage
+      .getByTestId("ssh-server-edit-name-input")
+      .fill(after);
+
+    // A tunnel row is dialed by id, not by name — the warning has to say so
+    // rather than repeat the database row's "this breaks every client" copy.
+    const warning = authenticatedPage.getByTestId("server-rename-warning");
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText(/reference it by id/i);
+
+    await authenticatedPage.getByTestId("ssh-server-edit-submit").click();
+
+    await expect(editDialog).not.toBeVisible({ timeout: 10000 });
+    await expect(sshSection.getByText(after)).toBeVisible({ timeout: 10000 });
   });
 });

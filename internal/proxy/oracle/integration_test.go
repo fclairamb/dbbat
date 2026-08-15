@@ -282,9 +282,13 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	// and the proxy need the same 32-byte key.
 	encryptionKey := []byte("0123456789012345678901234567890X")
 
+	// service is the upstream Oracle service name, not a slug — kept apart from
+	// the dbbat entry's Name. The client below connects over raw TNS with
+	// `oracleTestService()` (the upstream name), which resolveDatabase resolves
+	// through the OracleServiceName fallback rather than an exact name match.
 	service := oracleTestService()
 	db, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:              service,
+		Name:              "oracle_e2e",
 		Host:              oracleHost,
 		Port:              oraclePort,
 		DatabaseName:      service,
@@ -515,9 +519,12 @@ func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
 
 	encryptionKey := []byte("0123456789012345678901234567890X")
 
+	// service is the upstream Oracle service name — a distinct value from the
+	// dbbat entry's Name below, which the MCP executor is what actually
+	// exercises (see the Database field of the ExecRequest further down).
 	service := oracleTestService()
 	db, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:              service,
+		Name:              "oracle_e2e",
 		Host:              oracleHost,
 		Port:              oraclePort,
 		DatabaseName:      service,
@@ -546,8 +553,10 @@ func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
 	result, err := executor.Execute(ctx, mcp.ExecRequest{
 		Protocol: store.ProtocolOracle,
 		// The dbbat entry's name, not the upstream SERVICE_NAME: the session
-		// resolver does an exact GetServerByName lookup on it.
-		Database:         service,
+		// resolver does an exact GetServerByName lookup on it (see
+		// exec_oracle.go). Must be db.Name now that it no longer coincides
+		// with the upstream service name.
+		Database:         db.Name,
 		UpstreamDatabase: service,
 		Username:         user.Username,
 		APIKey:           plainKey,
