@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.1](https://github.com/fclairamb/dbbat/compare/v0.25.0...v0.25.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* **store:** seal demo-seeded sessions' audit chain and evidence timestamps ([#325](https://github.com/fclairamb/dbbat/issues/325)) ([a72ff74](https://github.com/fclairamb/dbbat/commit/a72ff748e4000e511ce42d9195ad77bb34f61326))
+
 ## [0.25.0](https://github.com/fclairamb/dbbat/compare/v0.24.0...v0.25.0) (2026-08-15)
 
 
