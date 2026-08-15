@@ -1278,6 +1278,18 @@ type APIKey struct {
 	// etc.) in a single jsonb column rather than dedicated per-protocol columns.
 	// nil when the key has no protocol-specific data.
 	ProtocolData *ProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
+
+	// OracleCapable answers "can this key be used as the Oracle password?" —
+	// computed, never stored (`bun:"-"`), and only by the handlers that mean to
+	// say it. A key minted before Oracle support carries no O5LOGON verifier and
+	// can never authenticate against an Oracle database, while working perfectly
+	// against the REST API and every other protocol; without this field the two
+	// are indistinguishable and the failure reads as a wrong password.
+	//
+	// A pointer, so "not computed" and "computed as false" stay distinguishable:
+	// omitempty drops it from responses that did not evaluate it rather than
+	// asserting `false` about a key nobody asked about.
+	OracleCapable *bool `bun:"-" json:"oracle_capable,omitempty"`
 }
 
 // ProtocolData is the per-protocol material attached to an API key, stored as a
