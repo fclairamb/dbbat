@@ -5,7 +5,7 @@
 
 ### Bug Fixes
 
-* **store:** seal demo-seeded sessions' audit chain and evidence timestamps ([#325](https://github.com/fclairamb/dbbat/issues/325)) ([a72ff74](https://github.com/fclairamb/dbbat/commit/a72ff748e4000e511ce42d9195ad77bb34f61326))
+* **store:** a demo instance no longer reports its own query chain as broken. The demo seeder closed its sessions with a raw `UPDATE`, bypassing the only writer that seals a session's chain head — and a closed session holding statements but no head stamp is, by design, indistinguishable from someone deleting the stamp to hide trailing deletions, so it verified as a break on every boot. Seeding now goes through `CreateConnectionAt` / `CloseConnectionAt`, which share the real create and close routines rather than reimplementing them, so the chain is sealed exactly as a live session's is and both the `connection.opened` and `connection.closed` evidence entries carry the session's staged historical timestamp instead of disagreeing with the row on wall-clock time. ([#325](https://github.com/fclairamb/dbbat/issues/325)) ([a72ff74](https://github.com/fclairamb/dbbat/commit/a72ff748e4000e511ce42d9195ad77bb34f61326))
 
 ## [0.25.0](https://github.com/fclairamb/dbbat/compare/v0.24.0...v0.25.0) (2026-08-15)
 
