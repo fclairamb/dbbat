@@ -1461,11 +1461,15 @@ What no test does is drive it with a *live client*, and the reason is
 first and only falls through to the shared-service-name candidate list when that
 misses. The Oracle fixture's single server is named after the service it serves,
 so reaching the candidate list from `TestIntegration_AuthRefusalAcrossClients`
-would mean renaming or deleting that row mid-fixture — and a rename is not
-something dbbat supports today. The frame is the same one the two measured
-refusals carry (same builder, same shape decision, same summary tail), so what
-goes unmeasured is the *branch's* wiring, not the encoding — and that is what the
-unit test pins.
+means arranging for that name *not* to match the connect string mid-fixture.
+That is now possible without deleting the row: `store.ServerUpdate.Name` renames
+a server (`PUT /api/v1/servers/:uid`), so a fixture can rename its row to
+something the client never sends and keep the grants and history hanging off its
+`database_id`. A live-client version of this case is therefore feasible for the
+first time — it is simply not written yet. The frame is the same one the two
+measured refusals carry (same builder, same shape decision, same summary tail),
+so what goes unmeasured is the *branch's* wiring, not the encoding — and that is
+what the unit test pins.
 
 ### Oracle NUMBER Encoding
 
