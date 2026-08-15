@@ -136,6 +136,11 @@ type DatabaseResponse struct {
 	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
 	// ConnectionTest is present only when the request set test_connection.
 	ConnectionTest *ConnectionTestResponse `json:"connection_test,omitempty"`
+	// OracleServiceNameConflict is present only on an Oracle row whose upstream
+	// service name is also claimed by rows pointing at a different host:port —
+	// a configuration that makes every connect arriving with the shared service
+	// name fail ORA-12514 while each row on its own checks out.
+	OracleServiceNameConflict *OracleServiceNameConflictResponse `json:"oracle_service_name_conflict,omitempty"`
 }
 
 // DatabaseLimitedResponse represents a database with limited info (non-admin)
@@ -271,6 +276,9 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	resp := toDatabaseResponse(result)
 	resp.ConnectionTest = s.maybeInlineConnectionTest(c, req.TestConnection, result.UID)
+	// Creating the *second* spelling of one host behind a shared Oracle service
+	// name is the moment the trap is laid, so it is also the moment to say so.
+	s.attachOracleServiceNameConflict(c.Request.Context(), &resp)
 
 	successResponse(c, resp)
 }
@@ -307,6 +315,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 		for i, db := range databases {
 			response[i] = toDatabaseResponse(&db)
 		}
+		s.attachOracleServiceNameConflicts(c.Request.Context(), response)
 		successResponse(c, gin.H{"databases": response})
 		return
 	}
@@ -342,7 +351,10 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 
 	// Admin sees full details
 	if currentUser.IsAdmin() {
-		successResponse(c, toDatabaseResponse(db))
+		resp := toDatabaseResponse(db)
+		s.attachOracleServiceNameConflict(c.Request.Context(), &resp)
+		successResponse(c, resp)
+
 		return
 	}
 
