@@ -903,3 +903,209 @@ func TestCreateServer_ValidNameBoundary(t *testing.T) {
 		t.Fatalf("CreateServer(63-byte name) error = %v, want nil", err)
 	}
 }
+
+// TestUpdateServer_Rename verifies the rename path end to end: the new name is
+// what GetServerByName resolves, and the old one stops resolving. The name is
+// the client-facing selector on all five protocols, so "renamed" has to mean
+// "reachable under the new name and only that one".
+func TestUpdateServer_Rename(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	created, err := store.CreateServer(ctx, &Server{
+		Name:         "before_rename",
+		Host:         "localhost",
+		Port:         5432,
+		DatabaseName: "mydb",
+		Username:     "dbuser",
+		Password:     "secret",
+		SSLMode:      "prefer",
+		Listable:     true,
+	}, key)
+	if err != nil {
+		t.Fatalf("CreateServer() error = %v", err)
+	}
+
+	newName := "after_rename"
+	if err := store.UpdateServer(ctx, created.UID, ServerUpdate{Name: &newName}, key); err != nil {
+		t.Fatalf("UpdateServer(rename) error = %v", err)
+	}
+
+	reloaded, err := store.GetServerByUID(ctx, created.UID)
+	if err != nil {
+		t.Fatalf("GetServerByUID() error = %v", err)
+	}
+	if reloaded.Name != newName {
+		t.Errorf("Name after rename = %q, want %q", reloaded.Name, newName)
+	}
+
+	byName, err := store.GetServerByName(ctx, newName)
+	if err != nil {
+		t.Fatalf("GetServerByName(%q) error = %v", newName, err)
+	}
+	if byName.UID != created.UID {
+		t.Errorf("GetServerByName(%q) uid = %s, want %s", newName, byName.UID, created.UID)
+	}
+
+	if _, err := store.GetServerByName(ctx, "before_rename"); !errors.Is(err, ErrServerNotFound) {
+		t.Errorf("GetServerByName(old name) error = %v, want ErrServerNotFound", err)
+	}
+}
+
+// TestUpdateServer_RenameGrandfatheredName verifies that a row whose name
+// predates the slug gate can be renamed *to* a conforming one — that migration
+// path is the whole point of the feature, and it would be broken if validation
+// looked at the stored name rather than the new one.
+func TestUpdateServer_RenameGrandfatheredName(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	// Insert directly: CreateServer refuses this name, which is exactly how the
+	// grandfathered production rows came to exist (they predate the gate).
+	legacy := &Server{
+		Name:              "abyla_abymutualise (Admin)",
+		Host:              "localhost",
+		Port:              1521,
+		DatabaseName:      "ORCL",
+		Username:          "system",
+		PasswordEncrypted: []byte("placeholder"),
+		SSLMode:           "",
+		Protocol:          ProtocolOracle,
+	}
+	if _, err := store.db.NewInsert().Model(legacy).Returning("*").Exec(ctx); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	fixed := "abyla_abymutualise_admin"
+	if err := store.UpdateServer(ctx, legacy.UID, ServerUpdate{Name: &fixed}, key); err != nil {
+		t.Fatalf("UpdateServer(rename legacy) error = %v", err)
+	}
+
+	reloaded, err := store.GetServerByUID(ctx, legacy.UID)
+	if err != nil {
+		t.Fatalf("GetServerByUID() error = %v", err)
+	}
+	if reloaded.Name != fixed {
+		t.Errorf("Name after rename = %q, want %q", reloaded.Name, fixed)
+	}
+}
+
+// TestUpdateServer_RenameInvalidName verifies a rename goes through the exact
+// same slug gate as creation, at the store level, so no caller can install an
+// unreachable name.
+func TestUpdateServer_RenameInvalidName(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	created, err := store.CreateServer(ctx, &Server{
+		Name:         "rename_gate",
+		Host:         "localhost",
+		Port:         5432,
+		DatabaseName: "mydb",
+		Username:     "dbuser",
+		Password:     "secret",
+		SSLMode:      "prefer",
+	}, key)
+	if err != nil {
+		t.Fatalf("CreateServer() error = %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		srvName string
+	}{
+		{"hyphen", "my-server"},
+		{"uppercase", "MyServer"},
+		{"space and parens", "abyla_abypocs (R/O)"},
+		{"empty", ""},
+		{"too long", strings.Repeat("a", 64)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := store.UpdateServer(ctx, created.UID, ServerUpdate{Name: &tc.srvName}, key)
+			if !errors.Is(err, ErrServerNameInvalid) {
+				t.Fatalf("UpdateServer(rename to %q) error = %v, want ErrServerNameInvalid", tc.srvName, err)
+			}
+		})
+	}
+
+	// The rejected renames must not have touched the row.
+	reloaded, err := store.GetServerByUID(ctx, created.UID)
+	if err != nil {
+		t.Fatalf("GetServerByUID() error = %v", err)
+	}
+	if reloaded.Name != "rename_gate" {
+		t.Errorf("Name = %q, want it unchanged (%q)", reloaded.Name, "rename_gate")
+	}
+}
+
+// TestUpdateServer_RenameConflict verifies a rename onto a taken name surfaces
+// the typed ErrServerNameConflict (a 409) rather than an opaque database error
+// (a 500) — including the case that makes this non-obvious: servers_name_key is
+// a *global* unique constraint, so a soft-deleted row still holds its name.
+func TestUpdateServer_RenameConflict(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	newServer := func(name string) *Server {
+		return &Server{
+			Name:         name,
+			Host:         "localhost",
+			Port:         5432,
+			DatabaseName: "mydb",
+			Username:     "dbuser",
+			Password:     "secret",
+			SSLMode:      "prefer",
+		}
+	}
+
+	subject, err := store.CreateServer(ctx, newServer("rename_subject"), key)
+	if err != nil {
+		t.Fatalf("CreateServer(subject) error = %v", err)
+	}
+
+	if _, err := store.CreateServer(ctx, newServer("rename_taken_live"), key); err != nil {
+		t.Fatalf("CreateServer(live) error = %v", err)
+	}
+
+	deleted, err := store.CreateServer(ctx, newServer("rename_taken_deleted"), key)
+	if err != nil {
+		t.Fatalf("CreateServer(deleted) error = %v", err)
+	}
+	if err := store.DeleteServer(ctx, deleted.UID); err != nil {
+		t.Fatalf("DeleteServer() error = %v", err)
+	}
+
+	for _, taken := range []string{"rename_taken_live", "rename_taken_deleted"} {
+		name := taken
+		t.Run(name, func(t *testing.T) {
+			err := store.UpdateServer(ctx, subject.UID, ServerUpdate{Name: &name}, key)
+			if !errors.Is(err, ErrServerNameConflict) {
+				t.Fatalf("UpdateServer(rename to %q) error = %v, want ErrServerNameConflict", name, err)
+			}
+		})
+	}
+
+	reloaded, err := store.GetServerByUID(ctx, subject.UID)
+	if err != nil {
+		t.Fatalf("GetServerByUID() error = %v", err)
+	}
+	if reloaded.Name != "rename_subject" {
+		t.Errorf("Name = %q, want it unchanged (%q)", reloaded.Name, "rename_subject")
+	}
+}

@@ -472,8 +472,17 @@ func valueOrDefaultInt(ptr *int, def int) int {
 }
 
 // UpdateServer updates a database.
-// Returns ErrTargetMatchesStorage if the update would cause the target to match the DBBat storage database.
+// Returns ErrTargetMatchesStorage if the update would cause the target to match the DBBat storage database,
+// ErrServerNameInvalid if a rename does not match the slug format, and ErrServerNameConflict if the new
+// name is already taken (by a live *or* soft-deleted row — servers_name_key is global).
 func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerUpdate, encryptionKey []byte) error {
+	// A rename goes through the exact check CreateServer applies — enforced
+	// here rather than only in the handler so every caller of the store is
+	// covered, and checked first so a bad name costs no round trip.
+	if updates.Name != nil && !IsValidServerName(*updates.Name) {
+		return ErrServerNameInvalid
+	}
+
 	// Security check: if host, port, or database name are being updated,
 	// verify the resulting configuration doesn't match the storage DSN
 	if err := s.checkStorageDSNConflict(ctx, uid, updates); err != nil {
@@ -515,6 +524,13 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 
 	result, err := q.Exec(ctx)
 	if err != nil {
+		// servers_name_key is a *global* unique constraint: it covers
+		// soft-deleted rows too, so a name freed by a delete is still taken.
+		// Typed rather than wrapped so the API answers 409 instead of 500.
+		if isUniqueViolation(err, "servers_name_key") {
+			return ErrServerNameConflict
+		}
+
 		return fmt.Errorf("failed to update database: %w", err)
 	}
 
@@ -534,6 +550,9 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 // update query. Password and SSH-secret columns are handled by the caller,
 // which needs the encryption key.
 func applyServerColumnUpdates(q *bun.UpdateQuery, updates ServerUpdate) *bun.UpdateQuery {
+	if updates.Name != nil {
+		q = q.Set("name = ?", *updates.Name)
+	}
 	if updates.Description != nil {
 		q = q.Set("description = ?", *updates.Description)
 	}

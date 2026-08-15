@@ -356,6 +356,15 @@ func (db *Server) KubernetesNamespaceOrDefault() string {
 
 // ServerUpdate represents fields that can be updated
 type ServerUpdate struct {
+	// Name renames the server. It is the client-facing selector on all five
+	// protocols (the "database name" a client types in its connection string),
+	// so a rename is a breaking change for every saved connection string —
+	// which is exactly why it has to be doable through the API rather than by
+	// hand against the storage database. Validated against IsValidServerName,
+	// the same check CreateServer applies, and a collision with an existing
+	// name — soft-deleted rows included, since servers_name_key is global —
+	// comes back as ErrServerNameConflict.
+	Name              *string
 	Description       *string
 	Host              *string
 	Port              *int
