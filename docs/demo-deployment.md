@@ -84,6 +84,10 @@ helm template dbbat charts/dbbat -f charts/dbbat/values-demo.yaml -n dbbat \
   | kubectl --context k8xp -n dbbat diff -f -
 ```
 
+Until the adoption below has happened, step 3 aborts on the Deployment
+(`spec.selector: field is immutable`) and prints nothing else. Diff the other
+objects one at a time — split the rendered output per document — to see them.
+
 ## Adopting the hand-applied objects (not done yet)
 
 Every object in the namespace predates this values file and was created with a
