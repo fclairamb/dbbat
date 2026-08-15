@@ -1471,6 +1471,98 @@ measured refusals carry (same builder, same shape decision, same summary tail),
 so what goes unmeasured is the *branch's* wiring, not the encoding — and that is
 what the unit test pins.
 
+##### Refusals on Oracle 19c: what is covered, and what is still outstanding
+
+Everything above is measured against **Oracle 23ai Free**, because that is the
+only image with no licence and therefore the only one an integration suite can
+start. 19c is the version most dbbat deployments actually proxy, and it is not
+interchangeable: the refusal frame is shaped from what the session negotiated,
+and 19c negotiates differently.
+
+**The production measurement that opened this.** On 2026-08-13, against
+`dbbat.tools.stonal.io` running image **0.23.2**, upstream `Oracle Database 19c
+Standard Edition 2`, under a `read_only` grant, with python-oracledb 3.4.2 thin:
+
+- dbbat blocked the write correctly — `WARN query blocked by access control …
+  write operations not permitted with read-only access`.
+- the client never received it. A first run **hung past two minutes** with no
+  response. With `conn.call_timeout` set, the call came back after 30s as
+  `DPY-4011: the database or network closed the connection`, the connection was
+  dead for every subsequent statement (`DPY-1001`), and the interpreter exited on
+  a segfault (139) during driver teardown.
+
+That is the exact opposite of what `TestIntegration_BlockedStatementRefusesPythonThin`
+asserts and passes on 23ai. **0.23.2 predates the whole mid-session refusal
+rework** — `ttc_oer_encode.go`, "end the client's call on a refusal with a real
+OER frame", "refuse sqlplus/OCI in the encoding and framing it waits for" — so
+it is a measurement of code that no longer exists. Whether current code still
+fails that way on a live 19c is **not established here**; that re-measurement
+needs a deploy and a 19c instance, and it is outstanding.
+
+**What is established, and runs in CI on every commit:**
+`internal/proxy/oracle/refusal_19c_test.go`. The corpus already contains real 19c
+recordings — the premise that it was 23ai-only is wrong. `go_ora.pcapng` and
+`dbeaver_init.pcapng` carry `Oracle Database 19c Standard Edition 2 Release
+19.0.0.0.0 - Production` verbatim; `python_thin.pcapng` and `dbeaver.pcapng`
+carry the same server fingerprint (42-entry capability array, `caps[7]` = 12)
+and none of the 23ai captures do (54 entries, `caps[7]` = 27).
+`TestOracle19cCaptures_AreReallyA19cUpstream` pins that provenance, because it is
+what licenses the word 19c in the rest of the file.
+
+`TestRefusalOn19c_ReachesTheClientOnAStillUsableSession` then replays one of
+those recordings through the *production* observers — `observeCustomHashFlag`,
+`observeBigClrChunksFlag`, `observeOERServerCaps`, `observeClientAuthEncoding`,
+`observeOERClientVersion`, and `interceptUpstreamMessage`, so the OER layout is
+learned off that 19c server's own end-of-call frames — arms a restrictive grant,
+and drives blocked statements through the real `clientToUpstream` relay over a
+pipe pair. It asserts all three properties the measurement above lost, not just
+the error text:
+
+| property | how |
+|---|---|
+| an ORA error arrives | the frame is decoded by the same strict walk the AUTH refusal uses (`decodeAuthRejectOER`), so the message CLR has to sit exactly where *this session's* negotiated shape says — a tolerant "scan for ORA-" decode passes on a frame no client can parse |
+| it arrives promptly | every read carries a 5s deadline. The failure being guarded against is a two-minute hang, so a reintroduced one fails the suite in seconds instead of hanging it |
+| the connection survives | the next statement is read off the *upstream* socket unchanged, a second refusal is answered on the same session with an advanced sequence number, and the relay ends on the client's own EOF with no error |
+
+Covered refusals: `read_only`, `block_ddl`, the Oracle pattern list (`ALTER
+SYSTEM`, which is the one refusal a full-write grant still meets), and an
+exhausted quota. `block_copy` is covered by *asserting it refuses nothing* — an
+Oracle COPY is a client-side SQL\*Plus command, never a server statement, so it
+is deliberately absent from `hasStatementControls`, and a write under a
+block_copy-only grant is forwarded.
+
+**The statement being refused is synthetic, and cannot be otherwise.** No
+recording contains a refused statement — nobody records a session being refused —
+and the refusal frame is dbbat's own invention rather than something a server
+sends, so there is nothing to replay for it. The exec frames come out of this
+package's own builders in the wire shape each recorded client used (the piggyback
+exec for go-ora, the `11 69` close-list-plus-execute for DBeaver/JDBC thin). The
+quota subtest is the one that refuses a **recorded** 19c exec frame byte for
+byte, since a quota refuses every statement rather than only a write.
+
+Two things fell out of the replay and are pinned as their own tests, because both
+bear on the frame a 19c client can read:
+
+- **19c sends no trailing summary fields, to any client.** The two are Oracle's
+  "fields added in Oracle Database 20c", and 19c predates 20c. The same
+  python-oracledb thin build that gets **two** from 23ai gets **none** from 19c
+  (`TestOracle19cSummaryTail_IsWhatThatServerSends`). dbbat is right by
+  construction here rather than by luck: mid-session `nextOERFrame` leaves the
+  count at zero until an upstream OER teaches it, and on 19c what it learns is
+  zero. A change that started *assuming* the 20c tail would break the version
+  that has no such fields.
+- **On 19c the tail is learned before the AUTH-phase refusal can need it.** The
+  upstream's AUTH **Phase 1** response already carries a summary object, so
+  `authRefusalOERShape`'s modern-client guess (which would be wrong on 19c) never
+  applies — the learned shape wins one packet before a Phase 2 refusal
+  (`TestOracle19cLearnsItsTailBeforeAuthPhase2`).
+
+**Not covered:** a live 19c client end to end. There is no licence-free 19c image,
+and a suite leg that can never run in CI is not coverage, so no opt-in
+licensed-image build tag was added. What the tests above measure is the frame and
+the session, against a real 19c negotiation; what only a live 19c can settle is
+the re-measurement of the production symptom, which stays with the owner.
+
 ### Oracle NUMBER Encoding
 
 Oracle NUMBER is a variable-length, sign-and-magnitude, base-100 format:
@@ -1709,6 +1801,13 @@ python-oracledb thin, SQLcl/ojdbc and sqlplus / OCI instant client —
 authenticate, query and capture end-to-end against Oracle 23ai through the
 proxy. Against Oracle 19c the historical behaviour still applies.
 
+**19c is not covered end to end, and cannot be:** there is no licence-free 19c
+image to start a container from. What *is* covered on 19c, off the recorded 19c
+sessions in `testdata/`, is the mid-session refusal frame and the negotiation it
+is shaped from — see "Refusals on Oracle 19c: what is covered, and what is still
+outstanding" above, which also records the one production symptom still awaiting
+re-measurement.
+
 For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL extraction details.
 
 ### Integration tests
@@ -1926,6 +2025,13 @@ and python-oracledb all conclude `true`. `customHash` was right by accident: off
 shifted array *is* the real `caps[4]`. The flags are measured off the captures in
 `internal/proxy/oracle/testdata/` and pinned by
 `TestServerCapBitSet_RealSetProtocolReplies`.
+
+The two columns are two *recorded servers*, not two guesses: the 42-entry array
+is `go_ora.pcapng`, `dbeaver_init.pcapng`, `dbeaver.pcapng` and
+`python_thin.pcapng` — the first two carry the 19c banner verbatim — and the
+54-entry one is every other capture in the corpus (Oracle 23.26). Which capture
+is which version is pinned by `TestOracle19cCaptures_AreReallyA19cUpstream`; the
+19c ones are what "Refusals on Oracle 19c" above replays.
 
 **Every AUTH site now follows the negotiated flag — there is no remaining hard-coded
 dialect.** Once the capability was read correctly it had to reach each place that frames or
