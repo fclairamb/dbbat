@@ -351,7 +351,7 @@ func TestProxyRefusesEncryptionWhenTLSIsDisabled(t *testing.T) {
 const (
 	e2eDBBatUser     = "e2e-user"
 	e2eDBBatPassword = "e2e-p@ssw0rd"
-	e2eEntryName     = "e2e-sqlserver"
+	e2eEntryName     = "e2e_sqlserver"
 	e2eRealDatabase  = "master"
 )
 

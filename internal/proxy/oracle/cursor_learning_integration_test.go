@@ -131,9 +131,19 @@ func startOracleThroughProxyWith(t *testing.T, opts oracleFixtureOptions) *oracl
 	user, err := dataStore.CreateUser(ctx, "cursorprobe", "$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
 	require.NoError(t, err)
 
+	// service is the upstream Oracle service name (XEPDB1/FREEPDB1/ORCLPDB1,
+	// whichever the running image serves) — never a slug, so it cannot also be
+	// the dbbat entry's Name any more. Every client fixture below connects
+	// using `service` (the raw upstream name, in ociConnectStringAt and every
+	// go_ora.BuildUrl call), which resolveDatabase resolves through its
+	// OracleServiceName fallback (an exact GetServerByName miss on the slug
+	// name, then a single-candidate ListServersByOracleServiceName hit) — the
+	// same mutualized-instance path a real client hitting a shared upstream
+	// service takes, and a closer match to production than the old
+	// Name-equals-service coincidence that skipped it entirely.
 	service := oracleTestService()
 	db, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:              service,
+		Name:              "oracle_e2e",
 		Host:              oracleHost,
 		Port:              oraclePort,
 		DatabaseName:      service,
