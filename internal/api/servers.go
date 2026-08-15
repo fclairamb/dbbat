@@ -59,6 +59,13 @@ type CreateDatabaseRequest struct {
 
 // UpdateDatabaseRequest represents the request to update a database
 type UpdateDatabaseRequest struct {
+	// Name renames the server, subject to the same slug rule creation enforces
+	// (store.IsValidServerName). It is the one field clients actually type —
+	// the PostgreSQL/MySQL/MongoDB database name, the Oracle SERVICE_NAME — so
+	// a rename breaks every saved connection string using the old one, while
+	// leaving already-authenticated sessions alone. Omitted (null) leaves it
+	// unchanged; a name already taken, soft-deleted rows included, is a 409.
+	Name              *string    `json:"name"`
 	Description       *string    `json:"description"`
 	Host              *string    `json:"host"`
 	Port              *int       `json:"port"`
@@ -484,6 +491,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	}
 
 	updates := store.ServerUpdate{
+		Name:              req.Name,
 		Description:       req.Description,
 		Host:              req.Host,
 		Port:              req.Port,
@@ -520,6 +528,16 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		}
 		if errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle) {
 			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+			return
+		}
+		if errors.Is(err, store.ErrServerNameInvalid) {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+			return
+		}
+		// servers_name_key spans soft-deleted rows, so the name of a deleted
+		// server is still taken — a 409 with the reason, never a 500.
+		if errors.Is(err, store.ErrServerNameConflict) {
+			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
 			return
 		}
 		writeInternalError(c, s.logger, err, "failed to update database")
@@ -828,6 +846,10 @@ func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
 		}
 	}
 
+	// A rename is the most consequential non-secret edit on the row — it moves
+	// the connection target every client types — so the new name is recorded in
+	// full. It is a public identifier, not a credential.
+	addPtr("name", req.Name, req.Name != nil)
 	addPtr("description", req.Description, req.Description != nil)
 	addPtr("host", req.Host, req.Host != nil)
 	addPtr("port", req.Port, req.Port != nil)

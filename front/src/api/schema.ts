@@ -613,7 +613,7 @@ export interface paths {
         get: operations["getDatabase"];
         /**
          * Update database
-         * @description Updates a database configuration. Requires admin role.
+         * @description Updates a database configuration, `name` included — a rename moves the selector every client types, so see the field's own description. Requires admin role.
          */
         put: operations["updateDatabase"];
         post?: never;
@@ -2571,6 +2571,8 @@ export interface components {
             test_connection?: boolean;
         };
         UpdateDatabaseRequest: {
+            /** @description Renames the server. Same slug rule as creation (lowercase letters, digits and underscores, capped at 63 bytes); a name outside it is rejected with a 400. The name is the client-facing selector on every protocol — the "database name" a client types in its connection string, and the Oracle SERVICE_NAME — so a rename breaks every saved connection string and client config still using the old one. Sessions already authenticated are unaffected; new connects must use the new name. Names are globally unique across live *and* soft-deleted rows, so reusing the name of a deleted server is a 409. Omit to leave the name unchanged. */
+            name?: string;
             /** @description Description */
             description?: string;
             /** @description Target database host */
@@ -5119,6 +5121,8 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalError"];
         };
     };

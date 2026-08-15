@@ -1114,7 +1114,10 @@ paths:
       tags:
         - Databases
       summary: Update database
-      description: Updates a database configuration. Requires admin role.
+      description: >-
+        Updates a database configuration, `name` included — a rename moves the
+        selector every client types, so see the field's own description.
+        Requires admin role.
       operationId: updateDatabase
       requestBody:
         required: true
@@ -1135,6 +1138,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -4708,6 +4715,21 @@ components:
     UpdateDatabaseRequest:
       type: object
       properties:
+        name:
+          type: string
+          maxLength: 63
+          pattern: '^[a-z0-9_]{1,63}$'
+          description: >-
+            Renames the server. Same slug rule as creation (lowercase letters,
+            digits and underscores, capped at 63 bytes); a name outside it is
+            rejected with a 400. The name is the client-facing selector on every
+            protocol — the "database name" a client types in its connection
+            string, and the Oracle SERVICE_NAME — so a rename breaks every saved
+            connection string and client config still using the old one.
+            Sessions already authenticated are unaffected; new connects must use
+            the new name. Names are globally unique across live *and*
+            soft-deleted rows, so reusing the name of a deleted server is a 409.
+            Omit to leave the name unchanged.
         description:
           type: string
           description: Description
