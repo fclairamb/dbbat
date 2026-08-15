@@ -108,7 +108,7 @@ test.describe("Servers Management", () => {
     const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
     await expect(sshSection).toBeVisible();
 
-    const name = `e2e-bastion-${Date.now()}`;
+    const name = `e2e_bastion_${Date.now()}`;
 
     await authenticatedPage.getByTestId("add-database-button").click();
 
@@ -137,7 +137,7 @@ test.describe("Servers Management", () => {
     const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
     await expect(sshSection).toBeVisible();
 
-    const name = `e2e-bastion-edit-${Date.now()}`;
+    const name = `e2e_bastion_edit_${Date.now()}`;
     const updatedDescription = `updated description ${Date.now()}`;
 
     // Create a bastion to edit.
@@ -178,7 +178,7 @@ test.describe("Servers Management", () => {
     const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
     await expect(sshSection).toBeVisible();
 
-    const name = `e2e-cluster-${Date.now()}`;
+    const name = `e2e_cluster_${Date.now()}`;
 
     await authenticatedPage.getByTestId("add-database-button").click();
     await authenticatedPage.getByTestId("protocol-select").click();
@@ -220,7 +220,7 @@ test.describe("Servers Management", () => {
     const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
     await expect(sshSection).toBeVisible();
 
-    const name = `e2e-bastion-test-${Date.now()}`;
+    const name = `e2e_bastion_test_${Date.now()}`;
 
     // 127.0.0.1:1 has nothing listening: the check must fail loudly rather than
     // report the write-and-hope success this feature exists to eliminate.
@@ -270,8 +270,8 @@ test.describe("Servers Management", () => {
     // see that before a user hits it.
     const stamp = Date.now();
     const service = `E2EMUTU${stamp}`;
-    const first = `e2e-oracle-cname-${stamp}`;
-    const second = `e2e-oracle-arecord-${stamp}`;
+    const first = `e2e_oracle_cname_${stamp}`;
+    const second = `e2e_oracle_arecord_${stamp}`;
 
     const createOracleRow = async (name: string, host: string) => {
       await authenticatedPage.getByTestId("add-database-button").click();

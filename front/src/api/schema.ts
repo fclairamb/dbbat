@@ -2338,7 +2338,7 @@ export interface components {
              * @description Unique identifier
              */
             uid: string;
-            /** @description Database configuration name */
+            /** @description Database configuration name. Creation enforces the slug format `^[a-z0-9_]{1,63}$` (see `CreateDatabaseRequest.name`), but rows created before that gate existed are grandfathered and may not conform — the admin UI flags a non-conforming name so it gets renamed deliberately rather than silently. */
             name: string;
             /** @description Description */
             description?: string;
@@ -2492,7 +2492,7 @@ export interface components {
             description?: string;
         };
         CreateDatabaseRequest: {
-            /** @description Unique name for this database configuration */
+            /** @description Unique name for this database configuration. Must be a slug (lowercase letters, digits, underscores only — no hyphens, spaces or punctuation), capped at 63 bytes (PostgreSQL's identifier limit). This is the client-facing selector on every protocol — the "database name" typed in a connection string — so anything outside this charset costs reachability on at least one of the five (Oracle EZ-Connect, unquoted MySQL/CLI identifiers, URL percent-encoding). Existing non-conforming rows are grandfathered; only creation is gated. Rejected with a 400. */
             name: string;
             /** @description Description */
             description?: string;

@@ -84,6 +84,44 @@ function isFullDatabase(db: DatabaseItem): db is Database {
   return "host" in db;
 }
 
+// SERVER_NAME_PATTERN mirrors the store-level slug check
+// (internal/store.IsValidServerName): creation is gated on it, but rows
+// created before that gate existed are grandfathered — this is what lets the
+// admin UI flag those rows instead of hiding the drift.
+const SERVER_NAME_PATTERN = /^[a-z0-9_]{1,63}$/;
+
+// NonSlugNameWarning flags a server row whose name predates the slug gate
+// (or was created directly against the store/API). The row itself works, but
+// the name is the client-facing selector on every protocol, so a stray space,
+// hyphen or uppercase letter costs reachability somewhere down the line —
+// see OracleServiceConflictWarning below, whose shape this mirrors.
+function NonSlugNameWarning({ uid, name }: { uid: string; name: string }) {
+  return (
+    <Tooltip delayDuration={100}>
+      <TooltipTrigger asChild>
+        <span
+          data-testid={`database-name-warning-${uid}`}
+          title="Not a valid slug"
+          className="inline-flex cursor-help text-amber-600"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span className="sr-only">Name is not a slug</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm space-y-1">
+        <p className="font-medium">Not a valid slug</p>
+        <p>
+          "{name}" predates the naming rule and was grandfathered in. New
+          servers must be lowercase letters, numbers, and underscores only —
+          this is the name every client types as the database name in its
+          connection string, so anything else costs reachability on some
+          protocol. Renaming it is not supported yet.
+        </p>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 type Protocol =
   | "postgresql"
   | "oracle"
@@ -165,7 +203,14 @@ function ServersPage() {
     {
       key: "name",
       header: "Name",
-      cell: (srv) => <span className="font-medium">{srv.name}</span>,
+      cell: (srv) => (
+        <span className="inline-flex items-center gap-1.5">
+          <span className="font-medium">{srv.name}</span>
+          {!SERVER_NAME_PATTERN.test(srv.name) && (
+            <NonSlugNameWarning uid={srv.uid} name={srv.name} />
+          )}
+        </span>
+      ),
     },
     {
       key: "protocol",
@@ -288,7 +333,14 @@ function ServersPage() {
     {
       key: "name",
       header: "Name",
-      cell: (db) => <span className="font-medium">{db.name}</span>,
+      cell: (db) => (
+        <span className="inline-flex items-center gap-1.5">
+          <span className="font-medium">{db.name}</span>
+          {!SERVER_NAME_PATTERN.test(db.name) && (
+            <NonSlugNameWarning uid={db.uid} name={db.name} />
+          )}
+        </span>
+      ),
     },
     {
       key: "protocol",
@@ -879,9 +931,17 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               data-testid="database-name-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="production-db"
+              placeholder="production_db"
+              maxLength={63}
+              pattern="^[a-z0-9_]{1,63}$"
+              title="Lowercase letters, numbers, and underscores only (no hyphens or spaces)"
               required
             />
+            <p className="text-xs text-muted-foreground">
+              This is the client-facing selector every protocol uses — the
+              "database name" typed in a connection string — so it must be a
+              slug: lowercase letters, numbers, and underscores only.
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="description">Description</Label>
