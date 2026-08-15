@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -140,10 +141,8 @@ func readMessage(r io.Reader) (*message, error) {
 		return nil, fmt.Errorf("%w: %d", ErrMessageTooLarge, length)
 	}
 
-	raw := make([]byte, length)
-	copy(raw[:headerLen], hdr[:])
-
-	if _, err := io.ReadFull(r, raw[headerLen:]); err != nil {
+	raw, err := readFrame(r, hdr[:], int(length))
+	if err != nil {
 		return nil, err
 	}
 
@@ -155,6 +154,35 @@ func readMessage(r io.Reader) (*message, error) {
 		body:       raw[headerLen:],
 		raw:        raw,
 	}, nil
+}
+
+// frameReadChunk bounds how far ahead readFrame allocates. The declared length
+// is up to 48 MB of attacker-chosen number arriving in a 16-byte header on an
+// unauthenticated socket; sizing the buffer from it up front turned 16 bytes of
+// traffic into a 48 MB allocation per connection, which on a memory-limited
+// container is a cheap way to get the process OOM-killed. Growing in chunks
+// keeps the footprint tracking the bytes that actually arrive.
+const frameReadChunk = 64 * 1024
+
+// readFrame returns the complete message: hdr followed by the body bytes read
+// from r, up to total. It never allocates more than one chunk beyond what has
+// been received, and reports the same io.ErrUnexpectedEOF as a plain ReadFull
+// when the peer truncates the body.
+func readFrame(r io.Reader, hdr []byte, total int) ([]byte, error) {
+	raw := make([]byte, len(hdr), min(total, len(hdr)+frameReadChunk))
+	copy(raw, hdr)
+
+	for len(raw) < total {
+		want := min(frameReadChunk, total-len(raw))
+		start := len(raw)
+		raw = slices.Grow(raw, want)[:start+want]
+
+		if _, err := io.ReadFull(r, raw[start:]); err != nil {
+			return nil, err
+		}
+	}
+
+	return raw, nil
 }
 
 // decompressMessage unwraps an OP_COMPRESSED message (opcode 2012) into the
