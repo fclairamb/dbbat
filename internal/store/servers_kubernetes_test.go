@@ -37,7 +37,7 @@ func TestKubernetesServer_TokenAndPublicMaterialRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	created := makeKubernetesServer(t, s, key, "prod-cluster")
+	created := makeKubernetesServer(t, s, key, "prod_cluster")
 
 	reloaded, err := s.GetServerByUID(ctx, created.UID)
 	if err != nil {
@@ -45,13 +45,13 @@ func TestKubernetesServer_TokenAndPublicMaterialRoundTrip(t *testing.T) {
 	}
 
 	// The token is a secret: it must be ciphertext at rest.
-	if string(reloaded.PasswordEncrypted) == "sa-token-prod-cluster" {
+	if string(reloaded.PasswordEncrypted) == "sa-token-prod_cluster" {
 		t.Error("the service account token was stored in clear")
 	}
 	if err := reloaded.DecryptPassword(key); err != nil {
 		t.Fatalf("DecryptPassword() error = %v", err)
 	}
-	if reloaded.Password != "sa-token-prod-cluster" {
+	if reloaded.Password != "sa-token-prod_cluster" {
 		t.Errorf("decrypted token = %q, want the stored one", reloaded.Password)
 	}
 
@@ -99,7 +99,7 @@ func TestKubernetesServer_IsATunnelNotATarget(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	cluster := makeKubernetesServer(t, s, key, "cluster-scope")
+	cluster := makeKubernetesServer(t, s, key, "cluster_scope")
 
 	if !cluster.IsKubernetes() || !cluster.IsTunnel() || cluster.IsSSH() {
 		t.Errorf("classification wrong: IsKubernetes=%v IsTunnel=%v IsSSH=%v",
@@ -117,7 +117,7 @@ func TestKubernetesServer_IsATunnelNotATarget(t *testing.T) {
 		}
 	}
 
-	if _, err := s.GetServerByName(ctx, "cluster-scope"); !errors.Is(err, ErrServerNotFound) {
+	if _, err := s.GetServerByName(ctx, "cluster_scope"); !errors.Is(err, ErrServerNotFound) {
 		t.Errorf("GetServerByName(cluster) error = %v, want ErrServerNotFound", err)
 	}
 
@@ -146,10 +146,10 @@ func TestValidateViaUID_AcceptsAKubernetesCluster(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	cluster := makeKubernetesServer(t, s, key, "via-cluster")
+	cluster := makeKubernetesServer(t, s, key, "via_cluster")
 
 	target, err := s.CreateServer(ctx, &Server{
-		Name: "pg-in-cluster", Host: "svc/postgres", Port: 5432,
+		Name: "pg_in_cluster", Host: "svc/postgres", Port: 5432,
 		DatabaseName: "app", Username: "app", Password: "pw",
 		Protocol: ProtocolPostgreSQL, ViaUID: &cluster.UID,
 	}, key)
@@ -173,7 +173,7 @@ func TestValidateViaUID_AcceptsAClusterBehindABastion(t *testing.T) {
 	bastion := makeSSHServer(t, s, key, "jump", "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n")
 
 	cluster, err := s.CreateServer(ctx, &Server{
-		Name: "private-cluster", Host: "api.internal", Port: 6443,
+		Name: "private_cluster", Host: "api.internal", Port: 6443,
 		Username: "dbbat", Password: "sa-token", Protocol: ProtocolKubernetes,
 		ViaUID: &bastion.UID,
 		ProtocolData: &ServerProtocolData{
@@ -186,7 +186,7 @@ func TestValidateViaUID_AcceptsAClusterBehindABastion(t *testing.T) {
 
 	// A target behind that cluster validates through the whole two-hop chain.
 	if _, err := s.CreateServer(ctx, &Server{
-		Name: "pg-behind-both", Host: "pg-0", Port: 5432,
+		Name: "pg_behind_both", Host: "pg-0", Port: 5432,
 		DatabaseName: "app", Username: "app", Password: "pw",
 		Protocol: ProtocolPostgreSQL, ViaUID: &cluster.UID,
 	}, key); err != nil {
@@ -202,7 +202,7 @@ func TestValidateViaUID_StillRejectsADatabaseTarget(t *testing.T) {
 	key := testEncryptionKey()
 
 	plain, err := s.CreateServer(ctx, &Server{
-		Name: "plain-db", Host: "db.example.com", Port: 5432,
+		Name: "plain_db", Host: "db.example.com", Port: 5432,
 		DatabaseName: "app", Username: "app", Password: "pw", Protocol: ProtocolPostgreSQL,
 	}, key)
 	if err != nil {
@@ -210,7 +210,7 @@ func TestValidateViaUID_StillRejectsADatabaseTarget(t *testing.T) {
 	}
 
 	_, err = s.CreateServer(ctx, &Server{
-		Name: "bad-via", Host: "db2.example.com", Port: 5432,
+		Name: "bad_via", Host: "db2.example.com", Port: 5432,
 		DatabaseName: "app", Username: "app", Password: "pw",
 		Protocol: ProtocolPostgreSQL, ViaUID: &plain.UID,
 	}, key)
@@ -230,7 +230,7 @@ func TestUpdateServer_MergesKubernetesMaterial(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	cluster := makeKubernetesServer(t, s, key, "merge-cluster")
+	cluster := makeKubernetesServer(t, s, key, "merge_cluster")
 
 	newCA := "-----BEGIN CERTIFICATE-----\nBBBB\n"
 	newNS := "staging"
@@ -279,7 +279,7 @@ func TestSetKubernetesCACert_MergesTheLearnedPin(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	cluster := makeKubernetesServer(t, s, key, "tofu-cluster")
+	cluster := makeKubernetesServer(t, s, key, "tofu_cluster")
 	suppliedCA := "-----BEGIN CERTIFICATE-----\nAAAA\n"
 	learnedCA := "-----BEGIN CERTIFICATE-----\nLEARNED\n"
 

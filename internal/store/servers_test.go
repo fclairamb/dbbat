@@ -113,7 +113,7 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 		t.Parallel()
 
 		db := &Server{
-			Name:         "pg-db",
+			Name:         "pg_db",
 			Host:         "localhost",
 			Port:         5432,
 			DatabaseName: "mydb",
@@ -142,7 +142,7 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 		t.Parallel()
 
 		db := &Server{
-			Name:         "pg-db-explicit",
+			Name:         "pg_db_explicit",
 			Host:         "localhost",
 			Port:         5432,
 			DatabaseName: "mydb2",
@@ -165,7 +165,7 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 
 		serviceName := "ORCL"
 		db := &Server{
-			Name:              "ora-db",
+			Name:              "ora_db",
 			Host:              "oracle-host",
 			Port:              1521,
 			Username:          "orauser",
@@ -200,7 +200,7 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 		t.Parallel()
 
 		db := &Server{
-			Name:         "update-proto",
+			Name:         "update_proto",
 			Host:         "localhost",
 			Port:         5432,
 			DatabaseName: "mydb",
@@ -588,7 +588,7 @@ func TestCreateDatabase_DefaultListable(t *testing.T) {
 
 	// Create without explicitly setting Listable — should default to true.
 	db := &Server{
-		Name:         "listable-default-" + suffix,
+		Name:         "listable_default_" + suffix,
 		Host:         "localhost",
 		Port:         5432,
 		DatabaseName: "mydb",
@@ -638,7 +638,7 @@ func TestUpdateDatabase_Listable(t *testing.T) {
 
 	t.Run("true to false", func(t *testing.T) {
 		t.Parallel()
-		created, err := s.CreateServer(ctx, newDB("lu-true-to-false-"+uuid.NewString()[:8], true), key)
+		created, err := s.CreateServer(ctx, newDB("lu_true_to_false_"+uuid.NewString()[:8], true), key)
 		if err != nil {
 			t.Fatalf("CreateServer() error = %v", err)
 		}
@@ -657,7 +657,7 @@ func TestUpdateDatabase_Listable(t *testing.T) {
 
 	t.Run("false to true", func(t *testing.T) {
 		t.Parallel()
-		created, err := s.CreateServer(ctx, newDB("lu-false-to-true-"+uuid.NewString()[:8], false), key)
+		created, err := s.CreateServer(ctx, newDB("lu_false_to_true_"+uuid.NewString()[:8], false), key)
 		if err != nil {
 			t.Fatalf("CreateServer() error = %v", err)
 		}
@@ -685,7 +685,7 @@ func TestListListableDatabases(t *testing.T) {
 
 	mkDB := func(name string, listable bool) *Server {
 		return &Server{
-			Name:         name + "-" + suffix,
+			Name:         name + "_" + suffix,
 			Host:         "localhost",
 			Port:         5432,
 			DatabaseName: "mydb",
@@ -696,13 +696,13 @@ func TestListListableDatabases(t *testing.T) {
 		}
 	}
 
-	_, err := s.CreateServer(ctx, mkDB("listable-a", true), key)
+	_, err := s.CreateServer(ctx, mkDB("listable_a", true), key)
 	if err != nil {
-		t.Fatalf("CreateServer(listable-a) error = %v", err)
+		t.Fatalf("CreateServer(listable_a) error = %v", err)
 	}
-	_, err = s.CreateServer(ctx, mkDB("listable-b", true), key)
+	_, err = s.CreateServer(ctx, mkDB("listable_b", true), key)
 	if err != nil {
-		t.Fatalf("CreateServer(listable-b) error = %v", err)
+		t.Fatalf("CreateServer(listable_b) error = %v", err)
 	}
 	hidden, err := s.CreateServer(ctx, mkDB("hidden", false), key)
 	if err != nil {

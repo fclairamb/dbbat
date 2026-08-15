@@ -57,7 +57,7 @@ func TestCleanupOldQueryRows(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn := createTestConnection(t, ctx, store, "retention-basic")
+	conn := createTestConnection(t, ctx, store, "retention_basic")
 
 	old := createQueryWithRows(t, ctx, store, conn.UID, "SELECT 'old'", time.Now().Add(-48*time.Hour))
 	recent := createQueryWithRows(t, ctx, store, conn.UID, "SELECT 'recent'", time.Now().Add(-1*time.Hour))
@@ -92,7 +92,7 @@ func TestCleanupOldQueryRowsDisabled(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn := createTestConnection(t, ctx, store, "retention-off")
+	conn := createTestConnection(t, ctx, store, "retention_off")
 	old := createQueryWithRows(t, ctx, store, conn.UID, "SELECT 'ancient'", time.Now().Add(-3000*time.Hour))
 
 	for _, retention := range []time.Duration{0, -time.Hour} {
@@ -116,7 +116,7 @@ func TestCleanupOldQueryRowsReapsClosedConnections(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	user, database := createTestUserAndDatabase(t, ctx, store, "retention-conns")
+	user, database := createTestUserAndDatabase(t, ctx, store, "retention_conns")
 
 	closedConn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
 	require.NoError(t, err)
@@ -159,7 +159,7 @@ func TestCleanupOldQueryRowsBatches(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn := createTestConnection(t, ctx, store, "retention-batch")
+	conn := createTestConnection(t, ctx, store, "retention_batch")
 
 	// One and a half batches, so the loop must run more than once.
 	const total = RetentionBatchSize + RetentionBatchSize/2

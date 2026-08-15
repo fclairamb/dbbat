@@ -68,7 +68,7 @@ func TestSSHServer_ExcludedFromTargets(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	bastion := makeSSHServer(t, s, key, "bastion-excl", "pk")
+	bastion := makeSSHServer(t, s, key, "bastion_excl", "pk")
 
 	// Also create a real target so the lists are non-empty.
 	if _, err := s.CreateServer(ctx, &Server{
@@ -99,7 +99,7 @@ func TestSSHServer_ExcludedFromTargets(t *testing.T) {
 	}
 
 	// Even if forced listable, GetServerByName must not resolve an ssh row.
-	if _, err := s.GetServerByName(ctx, "bastion-excl"); !errors.Is(err, ErrServerNotFound) {
+	if _, err := s.GetServerByName(ctx, "bastion_excl"); !errors.Is(err, ErrServerNotFound) {
 		t.Errorf("GetServerByName(ssh) error = %v, want ErrServerNotFound", err)
 	}
 
@@ -126,11 +126,11 @@ func TestSSHServer_ViaUIDValidation(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	bastion := makeSSHServer(t, s, key, "bastion-via", "pk")
+	bastion := makeSSHServer(t, s, key, "bastion_via", "pk")
 
 	// A database target may reference the ssh bastion via via_uid.
 	target := &Server{
-		Name: "tunneled-db", Host: "10.0.0.5", Port: 5432, DatabaseName: "app",
+		Name: "tunneled_db", Host: "10.0.0.5", Port: 5432, DatabaseName: "app",
 		Username: "u", Password: "p", Protocol: ProtocolPostgreSQL,
 		ViaUID: &bastion.UID,
 	}
@@ -144,14 +144,14 @@ func TestSSHServer_ViaUIDValidation(t *testing.T) {
 
 	// via_uid must reference an ssh row, not a database target.
 	dbTarget, err := s.CreateServer(ctx, &Server{
-		Name: "plain-db", Host: "db", Port: 5432, DatabaseName: "app",
+		Name: "plain_db", Host: "db", Port: 5432, DatabaseName: "app",
 		Username: "u", Password: "p", Protocol: ProtocolPostgreSQL,
 	}, key)
 	if err != nil {
 		t.Fatalf("CreateServer(plain) error = %v", err)
 	}
 	_, err = s.CreateServer(ctx, &Server{
-		Name: "bad-via", Host: "h", Port: 5432, DatabaseName: "app",
+		Name: "bad_via", Host: "h", Port: 5432, DatabaseName: "app",
 		Username: "u", Password: "p", Protocol: ProtocolPostgreSQL,
 		ViaUID: &dbTarget.UID,
 	}, key)
@@ -172,7 +172,7 @@ func TestSSHServer_UpdateSecretsAndClearVia(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	bastion := makeSSHServer(t, s, key, "bastion-upd", "old-pk")
+	bastion := makeSSHServer(t, s, key, "bastion_upd", "old-pk")
 
 	// Update the private key.
 	newPK := "new-private-key"
@@ -192,7 +192,7 @@ func TestSSHServer_UpdateSecretsAndClearVia(t *testing.T) {
 
 	// A target tunneling through the bastion can have its tunnel cleared.
 	target, err := s.CreateServer(ctx, &Server{
-		Name: "clear-db", Host: "h", Port: 5432, DatabaseName: "app",
+		Name: "clear_db", Host: "h", Port: 5432, DatabaseName: "app",
 		Username: "u", Password: "p", Protocol: ProtocolPostgreSQL, ViaUID: &bastion.UID,
 	}, key)
 	if err != nil {

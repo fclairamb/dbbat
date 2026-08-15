@@ -427,7 +427,7 @@ func TestCloseOrphanedConnectionsWithUnsetInstanceID(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	user, database := createTestUserAndDatabase(t, ctx, store, "orphans-unset")
+	user, database := createTestUserAndDatabase(t, ctx, store, "orphans_unset")
 
 	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
 
@@ -600,7 +600,7 @@ func TestReclaimDeadInstanceConnectionsWithoutStartup(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	user, database := createTestUserAndDatabase(t, ctx, store, "periodic-reclaim")
+	user, database := createTestUserAndDatabase(t, ctx, store, "periodic_reclaim")
 
 	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
 
@@ -714,7 +714,7 @@ func TestReclaimDeadInstanceConnectionsWithUnsetInstanceID(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	user, database := createTestUserAndDatabase(t, ctx, store, "periodic-reclaim-unset")
+	user, database := createTestUserAndDatabase(t, ctx, store, "periodic_reclaim_unset")
 
 	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
 
@@ -773,7 +773,7 @@ func TestCloseOrphanedConnectionsWithSharedInstanceID(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	scenario := startUnderSharedInstanceID(t, ctx, "shared-id")
+	scenario := startUnderSharedInstanceID(t, ctx, "shared_id")
 	store := scenario.store
 
 	t.Run("a live peer sharing our instance id keeps its session", func(t *testing.T) {
@@ -825,7 +825,7 @@ func TestSharedInstanceIDPredecessorReclaimedOnceStale(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	scenario := startUnderSharedInstanceID(t, ctx, "shared-id-stale")
+	scenario := startUnderSharedInstanceID(t, ctx, "shared_id_stale")
 	store := scenario.store
 
 	_, err := store.db.ExecContext(ctx,
@@ -918,7 +918,7 @@ func TestCloseOrphanedConnectionsWithoutRunIDs(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	user, database := createTestUserAndDatabase(t, ctx, store, "null-run")
+	user, database := createTestUserAndDatabase(t, ctx, store, "null_run")
 
 	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
 
@@ -982,7 +982,7 @@ func TestCloseOrphanedConnectionsAreReapedByRetention(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	user, database := createTestUserAndDatabase(t, ctx, store, "orphan-reap")
+	user, database := createTestUserAndDatabase(t, ctx, store, "orphan_reap")
 
 	store.SetInstanceID("instance-a")
 	store.SetRunID("run-2")

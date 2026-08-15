@@ -264,7 +264,7 @@ func TestStoreQueryRows_BatchSpansQueries(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn := createTestConnection(t, ctx, store, "batch-span")
+	conn := createTestConnection(t, ctx, store, "batch_span")
 
 	first, err := store.CreateQuery(ctx, &Query{
 		ConnectionID: conn.UID,
@@ -322,7 +322,7 @@ func TestQueryPartialCaptureFlags(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	conn := createTestConnection(t, ctx, store, "partial-flags")
+	conn := createTestConnection(t, ctx, store, "partial_flags")
 
 	created, err := store.CreateQuery(ctx, &Query{
 		ConnectionID:     conn.UID,
