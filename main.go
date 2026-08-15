@@ -1360,14 +1360,15 @@ var errUnknownDemoUser = errors.New("demo history references an unknown user")
 // seedDemoHistory records demoSessions as closed connections carrying their
 // statements, all dated from the epoch.
 //
-// It uses CreateConnection/CreateQuery/CloseConnectionAt to build the row and
-// seal its query chain exactly like a real session, then re-dates
-// connected_at/last_activity_at/queries/bytes_transferred with a raw UPDATE:
-// those four columns are deliberately unsealed (see docs/audit-chain.md), but
-// disconnected_at is not — it is written once, by CloseConnectionAt, with the
-// staged instant, so the seeded session's query chain verifies clean and its
-// connection.closed audit entry agrees with the row instead of reading
-// wall-clock time.
+// It uses CreateConnectionAt/CreateQuery/CloseConnectionAt to build the row
+// and seal its query chain exactly like a real session, then re-dates
+// last_activity_at/queries/bytes_transferred with a raw UPDATE: those three
+// columns are deliberately unsealed (see docs/audit-chain.md), but
+// connected_at and disconnected_at are not — connected_at is written once, by
+// CreateConnectionAt, and disconnected_at once, by CloseConnectionAt, both
+// with the staged instant, so the seeded session's query chain verifies clean
+// and its connection.opened/connection.closed audit entries agree with the
+// row instead of reading wall-clock time.
 func seedDemoHistory(
 	ctx context.Context,
 	dataStore *store.Store,
@@ -1381,12 +1382,17 @@ func seedDemoHistory(
 			return fmt.Errorf("%w: %q", errUnknownDemoUser, session.user)
 		}
 
-		conn, err := dataStore.CreateConnection(ctx, userID, databaseID, session.sourceIP)
+		openedAt := epoch.Add(-session.openedAgo)
+
+		// Created through CreateConnectionAt rather than CreateConnection, so
+		// the row's connected_at and the connection.opened audit entry it
+		// writes both carry this staged instant instead of wall-clock time —
+		// see specs/todos/2026-08-15-04-demo-seed-opened-entry-wallclock.md.
+		conn, err := dataStore.CreateConnectionAt(ctx, userID, databaseID, session.sourceIP, openedAt)
 		if err != nil {
 			return fmt.Errorf("failed to create demo connection: %w", err)
 		}
 
-		openedAt := epoch.Add(-session.openedAgo)
 		lastActivityAt := openedAt
 
 		for _, query := range session.queries {
@@ -1421,16 +1427,15 @@ func seedDemoHistory(
 			return fmt.Errorf("failed to close demo connection: %w", err)
 		}
 
-		// The close call already wrote the correct disconnected_at, both on
-		// the row and into the audit entry it built from the RETURNING row —
-		// so this back-dating pass must not touch that column again.
-		// connected_at/last_activity_at/queries/bytes_transferred are
-		// deliberately unsealed (see docs/audit-chain.md), so rewriting them
-		// after the seal is safe.
+		// CreateConnectionAt and the close call already wrote the correct
+		// connected_at and disconnected_at, both on the row and into the
+		// audit entries built from it — so this back-dating pass must not
+		// touch either column again. last_activity_at/queries/bytes_transferred
+		// are deliberately unsealed (see docs/audit-chain.md), so rewriting
+		// them after the seal is safe.
 		if _, err := dataStore.DB().NewUpdate().
 			Model((*store.Connection)(nil)).
 			Where("uid = ?", conn.UID).
-			Set("connected_at = ?", openedAt).
 			Set("last_activity_at = ?", lastActivityAt).
 			Set("queries = ?", len(session.queries)).
 			Set("bytes_transferred = ?", session.bytes).

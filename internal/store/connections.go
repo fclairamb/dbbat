@@ -32,17 +32,45 @@ func WithGrantUID(grantUID uuid.UUID) ConnectionOption {
 	return func(c *Connection) { c.GrantUID = &grantUID }
 }
 
-// CreateConnection creates a new connection record
+// CreateConnection creates a new connection record, stamping connected_at
+// from time.Now().
 func (s *Store) CreateConnection(
 	ctx context.Context,
 	userID, databaseID uuid.UUID,
 	sourceIP string,
 	opts ...ConnectionOption,
 ) (*Connection, error) {
+	return s.createConnection(ctx, userID, databaseID, sourceIP, time.Now(), opts...)
+}
+
+// CreateConnectionAt is CreateConnection with the open instant supplied by
+// the caller instead of taken from time.Now(). It exists for seeding a
+// back-dated demo/fixture session: the row's connected_at and the
+// connection.opened audit entry built from it must both carry the staged
+// historical instant, not wall-clock time, and this is the same
+// write-then-evidence routine CreateConnection uses — never a second
+// evidence-writing path.
+func (s *Store) CreateConnectionAt(
+	ctx context.Context,
+	userID, databaseID uuid.UUID,
+	sourceIP string,
+	connectedAt time.Time,
+	opts ...ConnectionOption,
+) (*Connection, error) {
+	return s.createConnection(ctx, userID, databaseID, sourceIP, connectedAt, opts...)
+}
+
+func (s *Store) createConnection(
+	ctx context.Context,
+	userID, databaseID uuid.UUID,
+	sourceIP string,
+	connectedAt time.Time,
+	opts ...ConnectionOption,
+) (*Connection, error) {
 	// Truncated to what timestamptz can store: connected_at is copied into the
 	// session's audit entry, and a value the row cannot reproduce would make the
 	// two disagree on read.
-	now := normalizeStoredTime(time.Now())
+	now := normalizeStoredTime(connectedAt)
 
 	conn := &Connection{
 		UID:              newUIDv7(), // Generate UUIDv7 for time-ordered inserts
