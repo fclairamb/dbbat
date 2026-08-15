@@ -22,7 +22,7 @@ image:
   pullPolicy: IfNotPresent
   # Bumped by hand — the demo does not auto-follow releases. See
   # docs/demo-deployment.md.
-  tag: "0.22.0"
+  tag: "0.25.0"
 
 # Object names are pinned rather than derived from the release name, so the
 # rendered names match the ones the cluster (and its DNS/TLS secrets) already use.
