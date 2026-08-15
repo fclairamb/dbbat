@@ -732,15 +732,32 @@ func (s *session) resolveDatabase(connectPayload []byte) error {
 	// ambiguous name is only workable when every candidate shares the same
 	// upstream address (the mutualized-instance case). Otherwise refuse now —
 	// there is no address to relay to.
-	firstAddr := net.JoinHostPort(candidates[0].Host, fmt.Sprintf("%d", candidates[0].Port))
-	for i := 1; i < len(candidates); i++ {
-		addr := net.JoinHostPort(candidates[i].Host, fmt.Sprintf("%d", candidates[i].Port))
-		if addr != firstAddr {
-			s.sendRefuse(ORA12514,
-				"service name matches multiple dbbat databases with different upstreams; connect using the dbbat database name")
+	//
+	// The comparison is textual, deliberately: it never surprises, whereas
+	// resolving each candidate's host here would put a DNS lookup on the connect
+	// path and could answer differently between two connects of one DSN. The
+	// cost is that two spellings of one machine read as two upstreams, which is
+	// a configuration mistake rather than an ambiguity — so it is *reported*
+	// (store.OracleServiceNameConflict, surfaced on the server row and by the
+	// connectivity check) instead of guessed at, and named here in the log.
+	if conflict := store.OracleServiceNameConflictFor(s.serviceName, candidates); conflict != nil {
+		s.logger.WarnContext(s.ctx, "refusing an ambiguous Oracle service name",
+			slog.Int("candidates", len(conflict.Servers)),
+			slog.Int("upstreams", len(conflict.Upstreams)),
+			slog.String("conflict", conflict.Describe()))
 
-			return fmt.Errorf("%w: %s: candidates have different upstream addresses", ErrAmbiguousServiceName, s.serviceName)
-		}
+		// The client is told the shape of the problem and what to do about it,
+		// but not which rows are involved: this runs before authentication, and
+		// the same reasoning that keeps ORA-01017 generic keeps dbbat server
+		// names out of a pre-auth refusal. The names live in the WARN above and
+		// on the server row in the UI, which is where the operator looks.
+		s.sendRefuse(ORA12514, fmt.Sprintf(
+			"service name %s is registered by %d dbbat databases on %d different upstreams; "+
+				"connect using the dbbat database name",
+			s.serviceName, len(conflict.Servers), len(conflict.Upstreams)))
+
+		return fmt.Errorf("%w: %s: candidates have different upstream addresses (%s)",
+			ErrAmbiguousServiceName, s.serviceName, strings.Join(conflict.Upstreams, ", "))
 	}
 
 	s.logger.InfoContext(s.ctx, "service name matches multiple dbbat databases; deferring selection to AUTH Phase 1",
