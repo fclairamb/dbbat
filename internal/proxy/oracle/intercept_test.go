@@ -252,7 +252,7 @@ func TestWriteTTCError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, TTCFuncOERR, fc, "a server ends a call with an OER, not a Response")
 
-	info := decodeOERAt(extractTTCPayload(pkt.Payload), 0)
+	info := decodeOERAt(defaultOERShape(), extractTTCPayload(pkt.Payload), 0)
 	require.NotNil(t, info, "the frame must decode as an end-of-call OER")
 	assert.Equal(t, 1031, info.ErrorCode)
 	assert.Equal(t, "ORA-01031: insufficient privileges", info.ErrorMessage)

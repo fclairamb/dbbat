@@ -2940,9 +2940,19 @@ func (s *session) observeOERClientVersion(ttcBody []byte) {
 // dropped outright — see midFetchOERNamesTheStreamingCursor for what replaced
 // that, and why the bar is higher on this side of the boundary.
 //
+// A *success* or ORA-01403 status was lost here too, and for longer: on an OCI
+// client the whole summary object is marshaled fixed-width, so the first branch
+// read nothing at all and the statement stayed pending until the next one's
+// flushPendingQuery closed it — recording no rows_affected and a duration_ms
+// measuring the client's think time, the same symptom the bit-less relaxation
+// removed for python-oracledb thin. decodeFixedStatusOERAt is what reads it now,
+// and statusOERMayEndTheCall is where its mid-stream half is refused.
+//
 // Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleOERStatus(ttcPayload []byte) {
-	if info := decodeOERAt(ttcPayload, 0); info != nil {
+	shape := s.oerShapeSnapshot()
+
+	if info := decodeOERAt(shape, ttcPayload, 0); info != nil && s.statusOERMayEndTheCall(info) {
 		s.completeQueryFromOER(info)
 
 		return
@@ -2952,7 +2962,7 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 		return
 	}
 
-	info := decodeErrorOER(s.oerShapeSnapshot(), ttcPayload)
+	info := decodeErrorOER(shape, ttcPayload)
 	if info == nil {
 		return
 	}
@@ -2962,6 +2972,37 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 	}
 
 	s.completeQueryFromOER(info)
+}
+
+// statusOERMayEndTheCall gates decodeOERAt's bit-less half — the fixed-width
+// status object an OCI client's calls end with — on the session not being in the
+// middle of a row stream.
+//
+// An OER that carries the end-of-call bit is unaffected: the bit is the protocol
+// saying the call is over, and that reading is what it always was.
+//
+// The bit-less half needs the bound because an OCI fetch response demonstrably
+// carries a summary object of exactly this shape *inside* the row stream — one
+// per fetch round trip, at a constant offset, naming the streaming cursor and
+// reporting the running row count — so naming the cursor proves nothing here and
+// only a packet boundary separates such an object from byte 0. Refusing costs
+// nothing measurable: across testdata/, of the 641 server packets that arrive
+// mid-row-stream only 4 lead with 0x04, and all four are the genuine mid-fetch
+// ORA-01722 failures that decodeErrorOER completes below. See
+// decodeFixedStatusOERAt for both figures.
+//
+// Callers hold trackerMu.
+func (s *session) statusOERMayEndTheCall(info *oerInfo) bool {
+	if info.CallStatus&oerEndOfCallBit != 0 || !s.rowStreamActive() {
+		return true
+	}
+
+	s.logger.DebugContext(s.ctx, "bit-less status OER arrived mid-row-stream; leaving the call open",
+		slog.Int("oer_call_status", info.CallStatus),
+		slog.Int("oer_cursor_id", info.CursorID),
+		slog.Int("ora_code", info.ErrorCode))
+
+	return false
 }
 
 // midFetchOERNamesTheStreamingCursor is the extra anchor a proven diagnostic has
@@ -3103,6 +3144,8 @@ func (s *session) rowStreamActive() bool {
 //
 // Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleResponse(ttcPayload []byte) {
+	shape := s.oerShapeSnapshot()
+
 	// Mid-fetch, a leading 0x08 is NOT a fresh Response: it is row-stream
 	// content — an 8-byte first column value's length prefix, or the
 	// 0x08 0x01 0x06 end-of-rows footer — that happened to land at the start
@@ -3115,8 +3158,14 @@ func (s *session) handleResponse(ttcPayload []byte) {
 	// Query.Error, and cleared pendingQuery — which silently truncated row
 	// capture, stopped mid-stream quota enforcement, and mis-charged the rest
 	// of the stream's bytes for the remainder of the fetch.
+	//
+	// The bit stays the whole discriminator here, and that is measured, not
+	// inherited: an OCI fetch response carries a genuine fixed-width summary
+	// object inside every continuation packet, so a bit-less scan accepts 149 of
+	// the corpus's 641 mid-row-stream packets — each one ending the call
+	// mid-fetch. See findOERInResponse and decodeFixedStatusOERAt.
 	if s.rowStreamActive() {
-		if oer := findOERInResponse(ttcPayload); oer != nil {
+		if oer := findOERInResponse(shape, ttcPayload); oer != nil {
 			s.completeQueryFromOER(oer)
 			return
 		}
@@ -3130,7 +3179,7 @@ func (s *session) handleResponse(ttcPayload []byte) {
 	// affected-row count (INSERT/UPDATE/DELETE) or the ORA error. This is the
 	// reliable source — the legacy fixed-offset layout below misreads v315+
 	// responses, so prefer the OER whenever one is present.
-	if oer := findOERInResponse(ttcPayload); oer != nil {
+	if oer := findOERInResponse(shape, ttcPayload); oer != nil {
 		s.completeQueryFromOER(oer)
 		return
 	}
@@ -3159,7 +3208,7 @@ func (s *session) handleResponse(ttcPayload []byte) {
 	// these exact OERs while refusing to read the row count out of the same
 	// seven fields.
 	if s.tracker.pendingQuery != nil {
-		if oer := findPlausibleOERInResponse(s.oerShapeSnapshot(), ttcPayload); oer != nil {
+		if oer := findPlausibleOERInResponse(shape, ttcPayload); oer != nil {
 			s.completeQueryFromOER(oer)
 			return
 		}

@@ -436,7 +436,7 @@ func (p *oracle19cProbe) expectRefusal(ttc []byte, wantFragment string) *oerInfo
 
 	// A third, independent reading of the same bytes: this package's own OER
 	// decoder, which is what a relayed server error goes through.
-	info := decodeOERAt(body, 0)
+	info := decodeOERAt(shape, body, 0)
 	require.NotNil(p.t, info, "the end-of-call bit must be set or no call boundary is recognized")
 	assert.Equal(p.t, oraRefusalCode, info.ErrorCode)
 

@@ -301,7 +301,7 @@ func TestHeldRefusalEndsTheCallTheClientIsNextParkedOn(t *testing.T) {
 	body := refusal.Payload[ttcDataFlagsSize:]
 	require.Equal(t, byte(TTCFuncOERR), body[0])
 
-	info := decodeOERAt(body, 0)
+	info := decodeOERAt(defaultOERShape(), body, 0)
 	require.NotNil(t, info)
 	assert.Equal(t, int(ORA00028), info.ErrorCode, "a held limit violation ends the next call with ORA-00028")
 	assert.Contains(t, info.ErrorMessage, "session terminated", "the frame must carry the real reason")

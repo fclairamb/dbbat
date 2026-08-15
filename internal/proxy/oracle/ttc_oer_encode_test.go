@@ -159,7 +159,7 @@ func TestEncodeOER_MatchesServerFieldLayout(t *testing.T) {
 
 			// And through this package's own OER decoder, which is a third
 			// independent reading of the same bytes.
-			info := decodeOERAt(frame, 0)
+			info := decodeOERAt(defaultOERShape(), frame, 0)
 			require.NotNil(t, info, "the end-of-call bit must be set so a call boundary is recognized")
 			assert.Equal(t, 1031, info.ErrorCode)
 			assert.Equal(t, 8, info.SeqNumber)
@@ -299,7 +299,7 @@ func TestWriteTTCError_FramesV315(t *testing.T) {
 	body := pkt.Payload[ttcDataFlagsSize:]
 	require.Equal(t, byte(TTCFuncOERR), body[0])
 
-	info := decodeOERAt(body, 0)
+	info := decodeOERAt(defaultOERShape(), body, 0)
 	require.NotNil(t, info)
 	assert.Equal(t, 1031, info.ErrorCode)
 	assert.True(t, strings.HasPrefix(info.ErrorMessage, "ORA-01031: read-only grant"))
@@ -321,7 +321,7 @@ func TestWriteTTCError_TruncatesLongMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	body := pkt.Payload[ttcDataFlagsSize:]
-	info := decodeOERAt(body, 0)
+	info := decodeOERAt(defaultOERShape(), body, 0)
 	require.NotNil(t, info)
 	assert.Len(t, info.ErrorMessage, oerMaxMessageLen)
 }
