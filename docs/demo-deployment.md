@@ -38,12 +38,13 @@ hand, in `charts/dbbat/values-demo.yaml`:
 
 ```yaml
 image:
-  tag: "0.22.0"   # <- edit, commit, then run the helm upgrade above
+  tag: "0.25.1"   # <- edit, commit, then run the helm upgrade above
 ```
 
-It currently sits at **0.22.0** (built 2026-08-05). Commit the bump before
-running the upgrade, so the repository and the cluster never disagree about
-what is deployed.
+Commit the bump before running the upgrade, so the repository and the cluster
+never disagree about what is deployed. The tag in the values file is the record
+of what the demo runs — this paragraph deliberately does not repeat it, since a
+second copy only drifts.
 
 ### If you change the memory limit
 
