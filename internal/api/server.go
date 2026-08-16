@@ -884,14 +884,21 @@ func (s *Server) proxyToDevServer(c *gin.Context, rule *config.RedirectRule, ori
 		Scheme: "http",
 		Host:   rule.TargetHost,
 	}
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	// Rewrite rather than Director: the latter is deprecated, and is what
+	// NewSingleHostReverseProxy sets, so the two cannot be combined.
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(targetURL)
+			pr.SetXForwarded()
 
-	// Modify the request to use the new path
-	originalDirector := proxy.Director
-	proxy.Director = func(r *http.Request) {
-		originalDirector(r)
-		r.URL.Path = newPath
-		r.URL.RawPath = newPath
+			// SetURL points the outbound Host at the dev server; the previous
+			// Director-based code left the client's own Host in place, so keep
+			// doing that.
+			pr.Out.Host = pr.In.Host
+
+			pr.Out.URL.Path = newPath
+			pr.Out.URL.RawPath = newPath
+		},
 	}
 
 	// Handle WebSocket upgrades
