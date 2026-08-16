@@ -14,10 +14,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream"
-	apispdy "k8s.io/apimachinery/pkg/util/httpstream/spdy"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/portforward"
+	"k8s.io/streaming/pkg/httpstream"
+	apispdy "k8s.io/streaming/pkg/httpstream/spdy"
 )
 
 // fakeCluster is an in-process stand-in for a Kubernetes API server: it speaks

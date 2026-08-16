@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,13 +21,14 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream"
-	apispdy "k8s.io/apimachinery/pkg/util/httpstream/spdy"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
 	clientspdy "k8s.io/client-go/transport/spdy"
+	"k8s.io/streaming/pkg/httpstream"
+	apispdy "k8s.io/streaming/pkg/httpstream/spdy"
 )
 
 // This file is the *only* place in dbbat that imports k8s.io/client-go. Every
@@ -610,6 +612,16 @@ func (t *KubernetesTunnel) Dial(ctx context.Context, host string, port int) (net
 // would ignore rest.Config.Dial and try to reach the API server directly. The
 // SPDY round tripper can be handed a substitute transport, so that is the one
 // that can honor a bastion.
+//
+// Everything below is the `…ForStreaming` half of client-go's API, built on
+// k8s.io/streaming/pkg/httpstream rather than the deprecated duplicate at
+// k8s.io/apimachinery/pkg/util/httpstream. The two packages declare *distinct*
+// UpgradeFailureError types, and since client-go 0.36 the websocket round
+// tripper raises the streaming one — so the apimachinery IsUpgradeFailure
+// stopped matching it, the fallback predicate answered false, and a cluster too
+// old to tunnel SPDY over websockets failed the dial outright instead of
+// falling back to SPDY. Mixing the two packages is silent: it compiles, and
+// only misbehaves at that predicate.
 func (t *KubernetesTunnel) newStreamDialer(streamURL *url.URL) (httpstream.Dialer, error) {
 	spdyDialer, err := t.newSPDYDialer(streamURL)
 	if err != nil {
@@ -620,12 +632,12 @@ func (t *KubernetesTunnel) newStreamDialer(streamURL *url.URL) (httpstream.Diale
 		return spdyDialer, nil
 	}
 
-	wsDialer, err := portforward.NewSPDYOverWebsocketDialer(streamURL, t.restConfig)
+	wsDialer, err := portforward.NewSPDYOverWebsocketDialerForStreaming(streamURL, t.restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes: failed to build the websocket dialer: %w", err)
 	}
 
-	return portforward.NewFallbackDialer(wsDialer, spdyDialer, func(err error) bool {
+	return portforward.NewFallbackDialerForStreaming(wsDialer, spdyDialer, func(err error) bool {
 		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
 	}), nil
 }
@@ -664,7 +676,57 @@ func (t *KubernetesTunnel) newSPDYDialer(streamURL *url.URL) (httpstream.Dialer,
 		return nil, fmt.Errorf("kubernetes: failed to wrap the SPDY transport: %w", err)
 	}
 
-	return clientspdy.NewDialer(roundTripper, &http.Client{Transport: wrapper}, http.MethodPost, streamURL), nil
+	upgrader := clientspdy.NewUpgraderForStreaming(&statusPreservingUpgrader{UpgradeRoundTripper: roundTripper})
+
+	return clientspdy.NewDialerForStreaming(upgrader, &http.Client{Transport: wrapper}, http.MethodPost, streamURL), nil
+}
+
+// statusPreservingUpgrader restores the typed error a refused SPDY upgrade used
+// to carry.
+//
+// Through k8s 0.34 the round tripper decoded a non-101 response body as a
+// metav1.Status and returned an *apierrors.StatusError, which is what lets
+// classify() below tell 401 from 403 from 404 structurally. k8s.io/streaming
+// 0.36 dropped that: it now flattens the body to its `message` field and
+// reports `unable to upgrade connection: <message>`, discarding the status code
+// entirely. Every upgrade refusal would therefore classify as "unknown", and
+// an operator would get a bare transport error where they used to be told which
+// RBAC verb to grant.
+//
+// Recovering it here — rather than pattern-matching prose in classify() —
+// keeps the distinction resting on the HTTP status the API server actually
+// sent, in the one file that owns the client-go dependency.
+type statusPreservingUpgrader struct {
+	httpstream.UpgradeRoundTripper
+}
+
+// NewConnection returns the API server's own metav1.Status as a typed error
+// when the upgrade was refused, and otherwise defers to the real upgrader.
+func (u *statusPreservingUpgrader) NewConnection(resp *http.Response) (httpstream.Connection, error) {
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return u.UpgradeRoundTripper.NewConnection(resp)
+	}
+
+	// Reading the body consumes it, so put it back: on any path that does not
+	// yield a Status the delegate still has to produce its own error from it.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return u.UpgradeRoundTripper.NewConnection(resp)
+	}
+
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+
+	var status metav1.Status
+	if _, _, err := scheme.Codecs.UniversalDeserializer().Decode(body, nil, &status); err != nil || status.Kind != "Status" {
+		return u.UpgradeRoundTripper.NewConnection(resp)
+	}
+
+	// A Status may omit its code; the response carries it either way.
+	if status.Code == 0 {
+		status.Code = int32(resp.StatusCode)
+	}
+
+	return nil, &apierrors.StatusError{ErrStatus: status}
 }
 
 // classify maps an API/stream error onto one of this package's sentinels so the
