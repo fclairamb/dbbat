@@ -344,6 +344,14 @@ func (s *session) run() error {
 	// Step 1: Receive TNS Connect from client
 	connectPkt, err := readTNSPacket(s.clientConn)
 	if err != nil {
+		// A TCP health check opens the socket and closes it without a byte, so
+		// this read is where every probe lands. Demote only that exact case —
+		// zero bytes read on this connection, ever — and leave a hang-up
+		// mid-Connect-packet (a truncated client) a genuine error.
+		if silent := shared.ClientDisconnectedBeforeStartup(s.bytesFromClient.Load(), err); silent != nil {
+			return silent
+		}
+
 		return fmt.Errorf("failed to read connect packet: %w", err)
 	}
 
