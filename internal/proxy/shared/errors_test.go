@@ -14,6 +14,9 @@ import (
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
+// errMalformed stands in for any failure that is not a hang-up.
+var errMalformed = errors.New("malformed startup packet")
+
 func TestClientDisconnectedBeforeStartup(t *testing.T) {
 	t.Parallel()
 
@@ -49,7 +52,7 @@ func TestClientDisconnectedBeforeStartup(t *testing.T) {
 		},
 		{
 			name: "an unrelated failure is never demoted",
-			err:  errors.New("malformed startup packet"), wantSentinel: false,
+			err:  errMalformed, wantSentinel: false,
 		},
 		{
 			name: "no error, nothing to classify",
@@ -70,10 +73,10 @@ func TestClientDisconnectedBeforeStartup(t *testing.T) {
 			}
 
 			require.Error(t, got)
-			assert.ErrorIs(t, got, shared.ErrClientDisconnectedBeforeStartup)
+			require.ErrorIs(t, got, shared.ErrClientDisconnectedBeforeStartup)
 			// The cause is kept so a DEBUG line can still say what the
 			// transport reported.
-			assert.ErrorIs(t, got, tc.err)
+			require.ErrorIs(t, got, tc.err)
 		})
 	}
 }
@@ -86,6 +89,6 @@ func TestIsClientHangup(t *testing.T) {
 	assert.True(t, shared.IsClientHangup(net.ErrClosed))
 	assert.False(t, shared.IsClientHangup(io.ErrUnexpectedEOF),
 		"a peer that stopped mid-frame is a truncated client, not a hang-up")
-	assert.False(t, shared.IsClientHangup(errors.New("boom")))
+	assert.False(t, shared.IsClientHangup(fmt.Errorf("wrapped: %w", errMalformed)))
 	assert.False(t, shared.IsClientHangup(nil))
 }

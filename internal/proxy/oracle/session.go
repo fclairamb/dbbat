@@ -335,6 +335,25 @@ func newSession(
 	return s
 }
 
+// readConnectPacket reads the client's first TNS packet and classifies the two
+// ways that read can fail. A TCP health check opens the socket and closes it
+// without a byte, so this is where every probe lands: that exact case — zero
+// bytes read on this connection, ever — carries
+// shared.ErrClientDisconnectedBeforeStartup and is logged at DEBUG. A hang-up
+// mid-Connect-packet is a truncated client and stays a genuine error.
+func (s *session) readConnectPacket() (*TNSPacket, error) {
+	pkt, err := readTNSPacket(s.clientConn)
+	if err == nil {
+		return pkt, nil
+	}
+
+	if silent := shared.ClientDisconnectedBeforeStartup(s.bytesFromClient.Load(), err); silent != nil {
+		return nil, silent
+	}
+
+	return nil, fmt.Errorf("failed to read connect packet: %w", err)
+}
+
 // run executes the full session lifecycle with terminated authentication.
 // dbbat acts as an Oracle server toward the client (O5LOGON auth with API key)
 // and as an Oracle client toward the upstream database (stored credentials).
@@ -342,17 +361,9 @@ func (s *session) run() error {
 	defer s.cleanup()
 
 	// Step 1: Receive TNS Connect from client
-	connectPkt, err := readTNSPacket(s.clientConn)
+	connectPkt, err := s.readConnectPacket()
 	if err != nil {
-		// A TCP health check opens the socket and closes it without a byte, so
-		// this read is where every probe lands. Demote only that exact case —
-		// zero bytes read on this connection, ever — and leave a hang-up
-		// mid-Connect-packet (a truncated client) a genuine error.
-		if silent := shared.ClientDisconnectedBeforeStartup(s.bytesFromClient.Load(), err); silent != nil {
-			return silent
-		}
-
-		return fmt.Errorf("failed to read connect packet: %w", err)
+		return err
 	}
 
 	if connectPkt.Type != TNSPacketTypeConnect {
