@@ -242,6 +242,13 @@ func (s *Session) Run() error {
 func (s *Session) setupTransport() error {
 	var first [1]byte
 	if _, err := io.ReadFull(s.clientConn, first[:]); err != nil {
+		// A TCP health check opens the socket and closes it without a byte, so
+		// this read is where every probe lands. Demote only that exact case —
+		// zero bytes read on this connection, ever.
+		if silent := shared.ClientDisconnectedBeforeStartup(s.bytesFromClient.Load(), err); silent != nil {
+			return silent
+		}
+
 		return fmt.Errorf("peek first byte: %w", err)
 	}
 
