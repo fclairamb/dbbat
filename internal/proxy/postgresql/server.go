@@ -261,6 +261,17 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 			return
 		}
 
+		// Same class of outcome: a load balancer's TCP health check opens the
+		// socket and closes it without a byte, so nothing failed. Kept at DEBUG
+		// rather than dropped, with the remote address, because it is what one
+		// looks for when a client cannot reach the listener at all.
+		if errors.Is(err, shared.ErrClientDisconnectedBeforeStartup) {
+			s.logger.DebugContext(s.ctx, "Client disconnected before startup",
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+			return
+		}
+
 		s.logger.ErrorContext(s.ctx, "Session error", slog.Any("error", err), slog.Any("remote_addr", clientConn.RemoteAddr()))
 	}
 }
