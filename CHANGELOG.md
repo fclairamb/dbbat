@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.25.2](https://github.com/fclairamb/dbbat/compare/v0.25.1...v0.25.2) (2026-08-17)
+
+
+### Bug Fixes
+
+* **proxy:** a load balancer's TCP health check — open the socket, close it without sending a byte — is no longer logged as a session failure on any of the five listeners. Behind an NLB the PostgreSQL listener alone produced ~22 identical `ERROR "Session error"` lines every 3 minutes, which is exactly how a reader learns to ignore the `ERROR` level. A shared sentinel now marks the one demoted case, and it is deliberately narrow: the demotion is keyed on the session's own client-read counter being **zero**, so a client that hung up halfway through its startup packet is a truncated client and keeps its loud line. Every quieted probe stays observable at `DEBUG` with its remote address, and the paired "session ended" line is replaced rather than doubled. Oracle gains the most: its previous `strings.Contains(err, "EOF")` demotion also swallowed `unexpected EOF` and every connect-packet read failure whatever the cause — those are errors again. ([#332](https://github.com/fclairamb/dbbat/issues/332)) ([6bf0b96](https://github.com/fclairamb/dbbat/commit/6bf0b961df489c47ca625326a0abaefc486bf098))
+* **deps:** update kubernetes monorepo to v0.36.3 ([#319](https://github.com/fclairamb/dbbat/issues/319)) ([4fb5a69](https://github.com/fclairamb/dbbat/commit/4fb5a6993117266dce7b733c509a9d5a9c19ce2b))
+* **deps:** update module github.com/slack-go/slack to v0.29.0 ([#327](https://github.com/fclairamb/dbbat/issues/327)) ([2d1fc5f](https://github.com/fclairamb/dbbat/commit/2d1fc5fbc688a739df5e988a508a3ac31f15d2c5))
+* **deps:** update module github.com/stretchr/testify to v1.12.0 ([#331](https://github.com/fclairamb/dbbat/issues/331)) ([f02bceb](https://github.com/fclairamb/dbbat/commit/f02bceb4d11afd4c50904502d13d4ad31bbc8ec6))
+* **deps:** update module github.com/urfave/cli/v3 to v3.11.0 ([#330](https://github.com/fclairamb/dbbat/issues/330)) ([2f466dd](https://github.com/fclairamb/dbbat/commit/2f466dd09687503a04a6adf68dfa41d8e6a82a79))
+
 ## [0.25.1](https://github.com/fclairamb/dbbat/compare/v0.25.0...v0.25.1) (2026-08-15)
 
 
