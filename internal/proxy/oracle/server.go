@@ -2,12 +2,12 @@ package oracle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 
@@ -205,12 +205,26 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.approvalDeps = s.approvalDeps
 	session.dumpUploader = s.dumpUploader
 	if err := session.run(); err != nil {
-		// Health check probes (NLB, etc.) connect and immediately close — log at debug level
-		errStr := err.Error()
-		if strings.Contains(errStr, "failed to read connect packet") || strings.Contains(errStr, "EOF") {
-			s.logger.DebugContext(s.ctx, "Oracle connection closed early (likely health check)",
+		// Two expected outcomes, told apart by the sentinel rather than by
+		// matching on the error text as this used to. The string match demoted
+		// anything whose message merely contained "EOF", which swept up
+		// `unexpected EOF` — a client truncated mid-packet, which is a real
+		// failure — and every read failure of the connect packet whatever its
+		// cause. Both are ERROR again; only the two cases below are quiet.
+		switch {
+		// A TCP health check: opened the socket, said nothing, closed. Kept at
+		// DEBUG with the remote address because it is what one looks for when
+		// a client cannot reach the listener at all.
+		case errors.Is(err, shared.ErrClientDisconnectedBeforeStartup):
+			s.logger.DebugContext(s.ctx, "Oracle client disconnected before startup",
 				slog.Any("remote_addr", clientConn.RemoteAddr()))
-		} else {
+		// A client that hung up mid-session. Both relay directions already
+		// return nil on a clean EOF, so this is the residue — a reset, or a
+		// socket closed underneath a read during shutdown.
+		case shared.IsClientHangup(err):
+			s.logger.DebugContext(s.ctx, "Oracle client disconnected",
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		default:
 			s.logger.ErrorContext(s.ctx, "Oracle session error",
 				slog.Any("error", err),
 				slog.Any("remote_addr", clientConn.RemoteAddr()))

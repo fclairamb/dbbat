@@ -655,6 +655,14 @@ func (s *session) closeDump(ctx context.Context) {
 func (s *session) readPrelogin() (*preloginMessage, error) {
 	msgType, payload, err := s.pkt.ReadMessage()
 	if err != nil {
+		// A TCP health check opens the socket and closes it without a byte, so
+		// this read is where every probe lands. Demote only that exact case —
+		// zero bytes read on this connection, ever — and leave a hang-up
+		// mid-PRELOGIN (a truncated client) as it was.
+		if silent := shared.ClientDisconnectedBeforeStartup(s.bytesFromClient.Load(), err); silent != nil {
+			return nil, silent
+		}
+
 		return nil, err
 	}
 

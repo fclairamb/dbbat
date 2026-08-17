@@ -1147,6 +1147,14 @@ func (s *Session) negotiateSSL() error {
 	for round := 0; round < maxStartupNegotiationRounds; round++ {
 		header, err := s.clientReader.Peek(8)
 		if err != nil {
+			// A TCP health check opens the socket and closes it without a
+			// byte, so this peek is where every probe lands. Demote only that
+			// exact case — zero bytes read on this connection, ever — and
+			// leave an EOF mid-startup-packet (a truncated client) an error.
+			if silent := shared.ClientDisconnectedBeforeStartup(s.bytesFromClient.Load(), err); silent != nil {
+				return silent
+			}
+
 			return fmt.Errorf("peek startup header: %w", err)
 		}
 

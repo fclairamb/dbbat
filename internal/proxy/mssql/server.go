@@ -306,7 +306,18 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	session := newSession(clientConn, s)
 
-	if err := session.Run(s.ctx); err != nil && !isExpectedDisconnect(err) {
+	err := session.Run(s.ctx)
+
+	switch {
+	case err == nil:
+	// A session that never began: the probe stays observable at DEBUG, with
+	// the remote address, because that is what one looks for when a client
+	// cannot reach the listener at all — but never louder.
+	case errors.Is(err, shared.ErrClientDisconnectedBeforeStartup):
+		s.logger.DebugContext(s.ctx, "MSSQL client disconnected before startup",
+			slog.Any("remote_addr", clientConn.RemoteAddr()))
+	case isExpectedDisconnect(err):
+	default:
 		s.logger.InfoContext(s.ctx, "MSSQL session ended",
 			slog.Any("remote_addr", clientConn.RemoteAddr()),
 			slog.Any("error", err))
