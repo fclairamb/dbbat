@@ -225,6 +225,18 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 }
 
 func (h *dbbatAuthHandler) OnAuthFailure(c *gomysqlserver.Conn, err error) {
+	// go-mysql calls this for *any* handshake failure, including the read that
+	// fails because a TCP health check opened the socket and closed it without
+	// sending a byte. That is not an auth failure and must not be a WARN — see
+	// shared.ErrClientDisconnectedBeforeStartup. Nothing is logged here because
+	// Session.Run applies the same zero-byte test and returns the sentinel, and
+	// handleConnection emits the single DEBUG line for the whole probe; a
+	// second one here would only be reachable when go-mysql got as far as the
+	// read, which is not a distinction worth a log line.
+	if h.session.bytesFromClient.Load() == 0 {
+		return
+	}
+
 	h.session.logger.WarnContext(h.session.ctx, "MySQL auth failed",
 		slog.String("user", c.GetUser()),
 		slog.Any("error", err))

@@ -192,6 +192,19 @@ func (s *Session) Run() error {
 	limited.disarm()
 
 	if err != nil {
+		// A TCP health check opens the socket, reads (or ignores) the greeting
+		// and closes without a byte of its own, which surfaces here as a
+		// handshake failure. Zero bytes *from the client* is the whole test:
+		// anything the client did send makes this a real handshake failure.
+		//
+		// Unlike the other four protocols this one cannot look at the error —
+		// go-mysql rewraps the read failure as mysql.ErrBadConn and the io.EOF
+		// underneath is gone by the time it reaches us — so the byte counter is
+		// the signal, which is if anything the stricter of the two.
+		if s.bytesFromClient.Load() == 0 {
+			return fmt.Errorf("%w: %w", shared.ErrClientDisconnectedBeforeStartup, err)
+		}
+
 		return fmt.Errorf("MySQL handshake: %w", err)
 	}
 

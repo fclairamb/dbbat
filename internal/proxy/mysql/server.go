@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -236,6 +237,18 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	session := newSession(clientConn, s)
 	if err := session.Run(); err != nil {
+		// A session that never began has no ending worth reporting, so the
+		// "session ended" INFO is replaced rather than paired: a load
+		// balancer's TCP health check would otherwise cost two lines a probe.
+		// DEBUG rather than nothing, with the remote address, because it is
+		// what one looks for when a client cannot reach the listener at all.
+		if errors.Is(err, shared.ErrClientDisconnectedBeforeStartup) {
+			s.logger.DebugContext(s.ctx, "MySQL client disconnected before startup",
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+			return
+		}
+
 		s.logger.InfoContext(s.ctx, "MySQL session ended",
 			slog.Any("remote_addr", clientConn.RemoteAddr()),
 			slog.Any("error", err))
