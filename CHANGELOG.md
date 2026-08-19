@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.3](https://github.com/fclairamb/dbbat/compare/v0.25.2...v0.25.3) (2026-08-19)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/stretchr/testify to v1.12.1 ([#334](https://github.com/fclairamb/dbbat/issues/334)) ([4424f3a](https://github.com/fclairamb/dbbat/commit/4424f3af4bbab29463f4b7613f4627d668d482a0))
+
 ## [0.25.2](https://github.com/fclairamb/dbbat/compare/v0.25.1...v0.25.2) (2026-08-17)
 
 
