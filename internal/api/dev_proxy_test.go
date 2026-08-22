@@ -135,6 +135,7 @@ func TestProxyToDevServerCarriesWebSocketUpgrades(t *testing.T) {
 
 	type upgradeSeen struct {
 		path       string
+		query      string
 		connection string
 		upgrade    string
 	}
@@ -144,6 +145,7 @@ func TestProxyToDevServerCarriesWebSocketUpgrades(t *testing.T) {
 	dev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		got <- upgradeSeen{
 			path:       req.URL.Path,
+			query:      req.URL.RawQuery,
 			connection: req.Header.Get("Connection"),
 			upgrade:    req.Header.Get("Upgrade"),
 		}
@@ -219,7 +221,11 @@ func TestProxyToDevServerCarriesWebSocketUpgrades(t *testing.T) {
 		t.Fatalf("set deadline: %v", err)
 	}
 
-	if _, err := conn.Write([]byte("GET /app/@vite/client HTTP/1.1\r\n" +
+	// The query rides along deliberately: Vite gates its HMR socket on a
+	// `?token=` it puts in the client's URL, so a Rewrite that rebuilt the
+	// outbound URL without the query would turn every real HMR connection into
+	// a 400 while a bare-path test still passed.
+	if _, err := conn.Write([]byte("GET /app/@vite/client?token=s3cret&foo=bar HTTP/1.1\r\n" +
 		"Host: dbbat.example.com\r\n" +
 		"Connection: Upgrade\r\n" +
 		"Upgrade: websocket\r\n" +
@@ -268,6 +274,10 @@ func TestProxyToDevServerCarriesWebSocketUpgrades(t *testing.T) {
 	case s := <-got:
 		if want := "/@vite/client"; s.path != want {
 			t.Errorf("path = %q, want %q", s.path, want)
+		}
+
+		if want := "token=s3cret&foo=bar"; s.query != want {
+			t.Errorf("query = %q, want %q", s.query, want)
 		}
 		// ReverseProxy strips the hop-by-hop headers and then re-adds these
 		// two; if that ever stopped happening the dev server would answer with
