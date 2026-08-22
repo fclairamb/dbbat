@@ -901,11 +901,10 @@ func (s *Server) proxyToDevServer(c *gin.Context, rule *config.RedirectRule, ori
 		},
 	}
 
-	// Handle WebSocket upgrades
-	proxy.ModifyResponse = func(_ *http.Response) error {
-		return nil
-	}
-
+	// No ModifyResponse hook: ReverseProxy carries protocol upgrades itself
+	// (it re-adds Connection/Upgrade after stripping the hop-by-hop headers),
+	// so Vite's HMR websocket needs nothing from us. Covered by
+	// TestProxyToDevServerCarriesWebSocketUpgrades.
 	proxy.ServeHTTP(c.Writer, c.Request)
 }
 
