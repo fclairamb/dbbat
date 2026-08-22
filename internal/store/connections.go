@@ -931,6 +931,15 @@ func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([
 		q = q.Where("database_id = ?", *filter.DatabaseID)
 	}
 
+	// Server group, grant instance, grant policy and grant provenance are
+	// applied by the shared builder so /connections and /queries can never
+	// disagree about which sessions they select.
+	q, err := connectionObservabilityFilters.apply(ctx, s, q,
+		filter.ServerGroupUID, filter.GrantUID, filter.GrantDefinitionUID, filter.GrantProvenance)
+	if err != nil {
+		return nil, err
+	}
+
 	if filter.BeforeUID != nil {
 		q = q.Where("uid < ?", *filter.BeforeUID)
 	}
@@ -945,8 +954,7 @@ func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([
 		q = q.Offset(filter.Offset)
 	}
 
-	err := q.Scan(ctx)
-	if err != nil {
+	if err := q.Scan(ctx); err != nil {
 		return nil, fmt.Errorf("failed to list connections: %w", err)
 	}
 

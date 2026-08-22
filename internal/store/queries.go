@@ -692,6 +692,21 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 		q = q.Where("c.database_id = ?", *filter.DatabaseID)
 	}
 
+	// Session-scoped narrowing (server group, grant instance, grant policy,
+	// grant provenance), applied by the same builder the connections listing
+	// uses so the two can never disagree about which sessions they select.
+	q, err := queryObservabilityFilters.apply(ctx, s, q,
+		filter.ServerGroupUID, filter.GrantUID, filter.GrantDefinitionUID, filter.GrantProvenance)
+	if err != nil {
+		return nil, err
+	}
+
+	// A per-*statement* property, not a session one: which individual
+	// statements a second human held and released (see approvals.go).
+	if filter.ApprovalStatus != nil {
+		q = q.Where("q.approval_status = ?", *filter.ApprovalStatus)
+	}
+
 	if filter.StartTime != nil {
 		q = q.Where("q.executed_at >= ?", *filter.StartTime)
 	}
@@ -714,8 +729,7 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 		q = q.Offset(filter.Offset)
 	}
 
-	err := q.Scan(ctx)
-	if err != nil {
+	if err := q.Scan(ctx); err != nil {
 		return nil, fmt.Errorf("failed to list queries: %w", err)
 	}
 
