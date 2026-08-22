@@ -25,6 +25,15 @@ type observabilityFilters struct {
 	databaseColumn string
 	// grantColumn is the qualified connections.grant_uid column. Nullable:
 	// sessions predating the stamp, and sessions that ran without a grant.
+	//
+	// It is referenced from inside correlated subqueries, where it must resolve
+	// to the *outer* connections row. On the connections listing it is spelled
+	// unqualified, which is only safe because none of the tables those
+	// subqueries scan — access_grants, grant_definitions, grant_requests —
+	// has a column of that name; adding one there would silently rebind it.
+	// TestFilteredPaginationUsesAnIndex runs the fully-filtered statement
+	// against PostgreSQL, so such a rebinding shows up as an error or a wrong
+	// plan rather than as quietly wrong rows.
 	grantColumn string
 }
 
