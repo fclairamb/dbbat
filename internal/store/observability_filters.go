@@ -58,7 +58,7 @@ func (f observabilityFilters) applyServerGroup(
 		return q.Where("1 = 0"), nil
 	}
 
-	return q.Where(f.databaseColumn+" IN (?)", bun.In(members)), nil
+	return q.Where(f.databaseColumn+" IN (?)", bun.List(members)), nil
 }
 
 // applyGrant narrows to the exact grant instance a session authenticated under.

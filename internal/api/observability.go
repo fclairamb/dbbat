@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +18,95 @@ import (
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/store"
 )
+
+// parseStrictUUIDQuery reads a UUID query parameter, answering 400 rather than
+// dropping the filter when it does not parse.
+//
+// The pre-existing parameters (user_id, database_id, before) keep their
+// silent-ignore behavior for compatibility — see the spec of record — but a
+// filter that vanishes on a typo fails *open*: it returns more rows than were
+// asked for, and nothing on the page says so. Every parameter added from here
+// on refuses instead.
+//
+// Returns false, having already written the error response, when the request
+// must not proceed. An absent parameter is not an error; out stays nil.
+func parseStrictUUIDQuery(c *gin.Context, name string, out **uuid.UUID) bool {
+	raw := c.Query(name)
+	if raw == "" {
+		return true
+	}
+
+	uid, err := uuid.Parse(raw)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid "+name+": must be a UUID")
+
+		return false
+	}
+
+	*out = &uid
+
+	return true
+}
+
+// parseGrantProvenanceQuery reads the multi-valued grant_provenance parameter
+// (`approved`, or `approved,direct`), rejecting an unknown value.
+//
+// Multi-valued rather than a `manually_approved=true` boolean because a
+// boolean has nowhere to put `direct`: an admin-issued grant is unquestionably
+// manual and just as unquestionably was never approved, so either answer makes
+// the flag mean something other than what half its readers expect.
+func parseGrantProvenanceQuery(c *gin.Context, out *[]store.GrantProvenance) bool {
+	raw := c.Query("grant_provenance")
+	if raw == "" {
+		return true
+	}
+
+	values := make([]store.GrantProvenance, 0, 3)
+
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		value, ok := store.ParseGrantProvenance(part)
+		if !ok {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+				"invalid grant_provenance: must be one of approved, auto, direct")
+
+			return false
+		}
+
+		values = append(values, value)
+	}
+
+	*out = values
+
+	return true
+}
+
+// parseSessionFilters reads the session-scoped observability filters shared by
+// GET /connections and GET /queries, so both endpoints accept exactly the same
+// parameters with exactly the same validation.
+//
+// server_group_uid is resolved to its members **live, at query time** (see
+// store.observabilityFilters): a filtered view is a view of the group's
+// *current* membership, not of membership at session time — the same rule
+// grant scope follows everywhere else — and a group holding no servers returns
+// zero rows rather than silently going unfiltered.
+//
+// Returns false, having already answered the request, when a parameter is
+// malformed.
+func parseSessionFilters(
+	c *gin.Context,
+	serverGroupUID, grantUID, grantDefinitionUID **uuid.UUID,
+	provenance *[]store.GrantProvenance,
+) bool {
+	return parseStrictUUIDQuery(c, "server_group_uid", serverGroupUID) &&
+		parseStrictUUIDQuery(c, "grant_uid", grantUID) &&
+		parseStrictUUIDQuery(c, "grant_definition_uid", grantDefinitionUID) &&
+		parseGrantProvenanceQuery(c, provenance)
+}
 
 // handleListConnections lists connections based on user role
 func (s *Server) handleListConnections(c *gin.Context) {
@@ -34,6 +124,11 @@ func (s *Server) handleListConnections(c *gin.Context) {
 		if uid, err := uuid.Parse(databaseID); err == nil {
 			filter.DatabaseID = &uid
 		}
+	}
+
+	if !parseSessionFilters(c, &filter.ServerGroupUID, &filter.GrantUID,
+		&filter.GrantDefinitionUID, &filter.GrantProvenance) {
+		return
 	}
 
 	if before := c.Query("before"); before != "" {
@@ -56,7 +151,12 @@ func (s *Server) handleListConnections(c *gin.Context) {
 		}
 	}
 
-	// Connector can only see their own connections
+	// Connector can only see their own connections.
+	//
+	// This overwrite is deliberately the *last* thing that touches the filter:
+	// every parameter above has already been parsed, so a connector who sends a
+	// crafted user_id cannot widen their scope — whatever they asked for is
+	// replaced by their own UID here. Do not move it above the parsing.
 	if !currentUser.IsAdmin() && !currentUser.IsViewer() {
 		filter.UserID = &currentUser.UID
 	}
@@ -182,7 +282,51 @@ type DumpMetadata struct {
 	SizeBytes int64 `json:"size_bytes"`
 }
 
-// handleListQueries lists queries with optional filters
+// validApprovalStatuses are the states an approval hold can be listed by.
+var validApprovalStatuses = []string{
+	store.ApprovalPending,
+	store.ApprovalApproved,
+	store.ApprovalDenied,
+	store.ApprovalAbandoned,
+}
+
+// parseApprovalStatusQuery reads the approval_status filter.
+//
+// A per-*statement* property, and a different axis from grant_provenance: this
+// one says which individual statements a second human released, that one says
+// which access the whole session ran under. They are never folded together.
+func parseApprovalStatusQuery(c *gin.Context, out **string) bool {
+	raw := c.Query("approval_status")
+	if raw == "" {
+		return true
+	}
+
+	for _, valid := range validApprovalStatuses {
+		if raw == valid {
+			value := raw
+			*out = &value
+
+			return true
+		}
+	}
+
+	writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+		"invalid approval_status: must be one of "+strings.Join(validApprovalStatuses, ", "))
+
+	return false
+}
+
+// handleListQueries lists queries with optional filters.
+//
+// Every session-scoped filter means here exactly what it means on
+// GET /connections, and is applied by the same store code — including
+// server_group_uid's live membership resolution and the rule that an empty
+// group returns zero rows.
+//
+// There is no per-caller scoping overwrite as there is on the connections
+// listing: this route is behind requireAdminOrViewer, so a connector never
+// reaches the handler at all and cannot widen anything with a crafted
+// user_id — they are answered 403 before parsing begins.
 func (s *Server) handleListQueries(c *gin.Context) {
 	filter := store.QueryFilter{}
 
@@ -203,6 +347,15 @@ func (s *Server) handleListQueries(c *gin.Context) {
 		if uid, err := uuid.Parse(databaseID); err == nil {
 			filter.DatabaseID = &uid
 		}
+	}
+
+	if !parseSessionFilters(c, &filter.ServerGroupUID, &filter.GrantUID,
+		&filter.GrantDefinitionUID, &filter.GrantProvenance) {
+		return
+	}
+
+	if !parseApprovalStatusQuery(c, &filter.ApprovalStatus) {
+		return
 	}
 
 	if startTime := c.Query("start_time"); startTime != "" {

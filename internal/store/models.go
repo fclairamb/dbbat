@@ -593,7 +593,7 @@ const (
 	// It is deliberately not phrased as "provably admin-issued": being a
 	// negative predicate it also swallows a grant whose request row was
 	// deleted, and any grant predating resulting_grant_id. That is the correct
-	// trade — such a grant must not be labelled `auto`, which would assert "no
+	// trade — such a grant must not be labeled `auto`, which would assert "no
 	// human was involved" on no evidence at all.
 	GrantProvenanceDirect GrantProvenance = "direct"
 )

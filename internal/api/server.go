@@ -348,6 +348,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			// keeps that obvious to a reader; users_test.go asserts both
 			// still resolve.
 			users.GET("/role-syncs", s.requireAdminOrViewer(), s.handleListRoleSyncs)
+			users.GET("/last-connections", s.requireAdminOrViewer(), s.handleListLastConnections)
 			users.GET("/:uid", s.handleGetUser)
 			users.PUT("/:uid", s.handleUpdateUser)
 			// Note: PUT /:uid/password is registered separately (uses credential auth, not Bearer)

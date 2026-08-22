@@ -312,7 +312,7 @@ type UserLastConnection struct {
 // connection rows are deletable and DBB_QUERY_STORAGE_RETENTION's sibling
 // sweeps reap them, so a user whose sessions have all aged out reports as
 // never having connected. That is the correct reading of the stored evidence,
-// and the reason the column is labelled from the record rather than from
+// and the reason the column is labeled from the record rather than from
 // history.
 //
 // Served by idx_connections_user_connected_at.

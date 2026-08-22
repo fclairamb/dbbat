@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -98,6 +100,10 @@ func (s *Server) handleLogin(c *gin.Context) {
 		writeInternalError(c, s.logger, err, "failed to create web session")
 		return
 	}
+
+	// Interactive sign-in: record it. After the session exists, so the column
+	// only ever describes a login that actually succeeded.
+	s.stampLastLogin(ctx, user.UID)
 
 	// Format expiration time
 	expiresAt := ""
@@ -477,4 +483,23 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 		slog.Any("target_uid", targetUID))
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully"})
+}
+
+// stampLastLogin records an *interactive* sign-in on the user row.
+//
+// Called from exactly three places — the password login, the OAuth callback
+// and the OAuth exchange — and deliberately from nowhere else: token
+// validation, session refresh, API-key authentication and MCP must never move
+// it, or `last_login_at` stops meaning "last seen in the UI" and starts
+// meaning "last HTTP request from anything", which answers no question anyone
+// asked.
+//
+// Never fails the login. The caller has already authenticated somebody; a
+// stale activity timestamp is a far better outcome than refusing a valid
+// sign-in over bookkeeping, so the error is logged and swallowed.
+func (s *Server) stampLastLogin(ctx context.Context, uid uuid.UUID) {
+	if err := s.store.TouchUserLastLogin(ctx, uid); err != nil {
+		s.logger.WarnContext(ctx, "failed to record last login",
+			slog.Any("uid", uid), slog.Any("error", err))
+	}
 }
