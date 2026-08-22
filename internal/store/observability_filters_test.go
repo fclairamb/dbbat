@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -602,5 +603,133 @@ func TestTouchUserLastLogin(t *testing.T) {
 	// authenticated somebody and must never be failed over bookkeeping.
 	if err := s.TouchUserLastLogin(ctx, uuid.New()); err != nil {
 		t.Errorf("TouchUserLastLogin(unknown uid) error = %v, want nil", err)
+	}
+}
+
+// explainPlan renders the plan PostgreSQL would use for a built listing query.
+//
+// enable_seqscan is turned off for the statement so the planner has to show
+// what index-ordered plan is *available*: on a test table of a few hundred
+// rows a sequential scan plus a sort is genuinely cheapest, so leaving it on
+// would prove nothing about how the query behaves against a real store. What
+// the assertion below cares about is that an index-ordered plan exists at all —
+// if `ORDER BY uid DESC LIMIT n` could only ever be answered by sorting, no
+// amount of data would change that.
+func explainPlan(t *testing.T, s *Store, sql string) string {
+	t.Helper()
+
+	ctx := context.Background()
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire connection: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, "SET enable_seqscan = off"); err != nil {
+		t.Fatalf("disable seqscan: %v", err)
+	}
+
+	rows, err := conn.QueryContext(ctx, "EXPLAIN "+sql)
+	if err != nil {
+		t.Fatalf("EXPLAIN failed: %v\nSQL: %s", err, sql)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var plan string
+
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scan plan line: %v", err)
+		}
+
+		plan += line + "\n"
+	}
+
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read plan: %v", err)
+	}
+
+	return plan
+}
+
+// TestFilteredPaginationUsesAnIndex is the EXPLAIN check the spec asks for: a
+// *filtered* `ORDER BY uid DESC LIMIT n` page must still be answered by walking
+// an index backwards, not by sorting the whole table.
+//
+// It matters because every filter added here is a WHERE clause the planner
+// could decide to satisfy by scanning and sorting — which is fine at a hundred
+// rows and ruinous at ten million, exactly the size at which someone reaches
+// for these filters.
+func TestFilteredPaginationUsesAnIndex(t *testing.T) {
+	t.Parallel()
+
+	f := newObsFixture(t, "explain")
+
+	grant := f.grant(t, f.dbA.UID)
+
+	for range 200 {
+		conn := f.session(t, f.dbA.UID, &grant.UID)
+		f.statement(t, conn, "SELECT 1")
+	}
+
+	if err := f.store.AddServerToGroup(f.ctx, f.group.UID, f.dbA.UID); err != nil {
+		t.Fatalf("AddServerToGroup() error = %v", err)
+	}
+
+	cursor := uuid.Must(uuid.NewV7())
+
+	connFilter := ConnectionFilter{
+		UserID:             &f.user.UID,
+		ServerGroupUID:     &f.group.UID,
+		GrantUID:           &grant.UID,
+		GrantDefinitionUID: &f.def.UID,
+		GrantProvenance:    []GrantProvenance{GrantProvenanceDirect},
+		BeforeUID:          &cursor,
+		Limit:              50,
+	}
+
+	var conns []Connection
+
+	connQuery, err := f.store.buildListConnectionsQuery(f.ctx, &conns, connFilter)
+	if err != nil {
+		t.Fatalf("buildListConnectionsQuery() error = %v", err)
+	}
+
+	plan := explainPlan(t, f.store, connQuery.String())
+	if strings.Contains(plan, "Sort") {
+		t.Errorf("the filtered connections page sorts instead of walking an index:\n%s", plan)
+	}
+
+	if !strings.Contains(plan, "Index Scan Backward") && !strings.Contains(plan, "connections_pkey") {
+		t.Errorf("the filtered connections page does not reach the uid index:\n%s", plan)
+	}
+
+	pending := ApprovalPending
+	queryFilter := QueryFilter{
+		UserID:          &f.user.UID,
+		ServerGroupUID:  &f.group.UID,
+		GrantUID:        &grant.UID,
+		GrantProvenance: []GrantProvenance{GrantProvenanceDirect},
+		ApprovalStatus:  &pending,
+		BeforeUID:       &cursor,
+		Limit:           50,
+	}
+
+	var queries []Query
+
+	queryQuery, err := f.store.buildListQueriesQuery(f.ctx, &queries, queryFilter)
+	if err != nil {
+		t.Fatalf("buildListQueriesQuery() error = %v", err)
+	}
+
+	// The queries listing joins connections, so a hash/merge join may legally
+	// introduce a sort of the *inner* side. What must not happen is the
+	// pagination itself being answered by sorting `queries`, which is what a
+	// missing index scan on q.uid would look like.
+	plan = explainPlan(t, f.store, queryQuery.String())
+	if !strings.Contains(plan, "Index Scan Backward") && !strings.Contains(plan, "queries_pkey") {
+		t.Errorf("the filtered queries page does not reach the uid index:\n%s", plan)
 	}
 }

@@ -918,8 +918,35 @@ func (s *Store) GetConnectionsByUIDs(ctx context.Context, uids []uuid.UUID) (map
 // ListConnections retrieves connections with optional filters
 func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error) {
 	var connections []Connection
+
+	q, err := s.buildListConnectionsQuery(ctx, &connections, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := q.Scan(ctx); err != nil {
+		return nil, fmt.Errorf("failed to list connections: %w", err)
+	}
+
+	if connections == nil {
+		connections = []Connection{}
+	}
+
+	return connections, nil
+}
+
+// buildListConnectionsQuery assembles the listing query without running it.
+//
+// Split out so the query-plan test can EXPLAIN the *real* statement rather than
+// a hand-copied approximation of it — a second, drifting copy of this SQL is
+// precisely what would let a filter quietly start sorting the whole table.
+func (s *Store) buildListConnectionsQuery(
+	ctx context.Context,
+	dest *[]Connection,
+	filter ConnectionFilter,
+) (*bun.SelectQuery, error) {
 	q := s.db.NewSelect().
-		Model(&connections).
+		Model(dest).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, " +
 			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid")
 
@@ -954,12 +981,5 @@ func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([
 		q = q.Offset(filter.Offset)
 	}
 
-	if err := q.Scan(ctx); err != nil {
-		return nil, fmt.Errorf("failed to list connections: %w", err)
-	}
-
-	if connections == nil {
-		connections = []Connection{}
-	}
-	return connections, nil
+	return q, nil
 }
