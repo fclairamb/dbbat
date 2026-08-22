@@ -779,6 +779,45 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /users/last-connections:
+    get:
+      tags:
+        - Users
+      summary: Latest proxy session per user
+      description: |
+        Returns the most recent proxy connection of each user that has one —
+        one row per user, computed in the database.
+
+        Deliberately not derivable from a page of `GET /connections`: a user
+        whose last session fell off that page would render as "never
+        connected", which is indistinguishable from someone who genuinely never
+        has. Absence from this response means never, exactly.
+
+        It answers "last connection *still on record*". Connection rows are
+        deletable and are reaped by retention, so a user whose sessions have all
+        aged out reads as never having connected.
+
+        Requires admin or viewer role, like `GET /connections`.
+      operationId: listUserLastConnections
+      responses:
+        '200':
+          description: Latest connection per user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  last_connections:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserLastConnection'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /users/{uid}:
     parameters:
       - $ref: '#/components/parameters/UserUID'
@@ -2454,6 +2493,69 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: server_group_uid
+          in: query
+          description: |
+            Filter by server group. Membership is resolved **live, at query
+            time** — a filtered view is a view of the group's *current*
+            membership, not of membership at session time, matching how grant
+            scope is resolved everywhere else.
+
+            A group holding no servers returns zero rows; it is never treated
+            as "unfiltered". Combining it with `database_id` intersects.
+          schema:
+            type: string
+            format: uuid
+        - name: grant_uid
+          in: query
+          description: |
+            Filter by the exact grant *instance* the session authenticated
+            under (`connections.grant_uid`). Reached by deep-link from a
+            connection row rather than from a dropdown — a busy instance has
+            many time-boxed instances per user.
+          schema:
+            type: string
+            format: uuid
+        - name: grant_definition_uid
+          in: query
+          description: |
+            Filter by grant *policy*. Matched across the definition's whole
+            `lineage_uid`, not by uid equality: editing a definition archives
+            it and inserts a successor, so uid equality would silently drop
+            every session that ran under an earlier version. A uid naming an
+            archived version selects the same rows as the live one.
+          schema:
+            type: string
+            format: uuid
+        - name: grant_provenance
+          in: query
+          description: |
+            Filter by how the session's grant was issued. Comma-separated,
+            multi-valued (`approved`, or `approved,direct`); the values are
+            OR-ed.
+
+            * `approved` — a grant request references the grant and names a
+              human decider: someone signed off on this access.
+            * `auto` — a grant request references the grant and its
+              `decided_by` is NULL: the definition's auto-approve policy issued
+              it, no human in the loop.
+            * `direct` — **no approval on record**: no grant request references
+              the grant. Typically an admin issuing one straight through
+              `POST /grants`, which is a human act but never an *approval*.
+              Being a negative predicate it also covers a grant whose request
+              row was deleted; it is deliberately not phrased as "provably
+              admin-issued".
+
+            A session with no grant (`grant_uid` is null — sessions predating
+            the stamp, or that ran without one) matches **no** provenance
+            value, `direct` included.
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [approved, auto, direct]
+          style: form
+          explode: false
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Offset'
       responses:
@@ -2468,6 +2570,8 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Connection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -2896,6 +3000,57 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: server_group_uid
+          in: query
+          description: |
+            Filter by server group, resolved **live, at query time** — see the
+            identically named parameter on `GET /connections`. A group holding
+            no servers returns zero rows; it is never treated as "unfiltered".
+          schema:
+            type: string
+            format: uuid
+        - name: grant_uid
+          in: query
+          description: |
+            Filter by the exact grant *instance* the statements' session
+            authenticated under.
+          schema:
+            type: string
+            format: uuid
+        - name: grant_definition_uid
+          in: query
+          description: |
+            Filter by grant *policy*, matched across the definition's whole
+            `lineage_uid` so an edit-archival does not split the history — see
+            `GET /connections`.
+          schema:
+            type: string
+            format: uuid
+        - name: grant_provenance
+          in: query
+          description: |
+            Filter by how the session's grant was issued (`approved` / `auto` /
+            `direct`, comma-separated and OR-ed) — see `GET /connections` for
+            what each value asserts. This narrows which *access* the statements
+            ran under; `approval_status` below narrows which individual
+            statements a human released. The two are different axes and are
+            never folded together.
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [approved, auto, direct]
+          style: form
+          explode: false
+        - name: approval_status
+          in: query
+          description: |
+            Filter by approval-hold outcome — a per-*statement* property (see
+            `docs/approvals.md`). Statements that never matched an approval
+            pattern carry no status and are excluded by any value here.
+          schema:
+            type: string
+            enum: [pending, approved, denied, abandoned]
         - name: start_time
           in: query
           description: Filter by start time (RFC3339 format)
@@ -2922,6 +3077,8 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Query'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -4032,6 +4189,20 @@ components:
           type: string
           format: date-time
           description: Last update timestamp
+        last_login_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            When this account last signed in *interactively* — a password login
+            or an OAuth/OIDC login. Token validation, session refresh, API-key
+            authentication and MCP deliberately never move it, so the value
+            means "last seen in the UI" rather than "last HTTP request from
+            anything".
+
+            Absent when the account has never signed in interactively. Mutable
+            operational state outside the audit chain, so it is not
+            tamper-evident.
       required:
         - uid
         - username
@@ -6361,6 +6532,29 @@ components:
         - uid
         - event_type
         - created_at
+
+    UserLastConnection:
+      type: object
+      description: |
+        When one user last opened a proxy session, as returned by
+        `GET /users/last-connections`. Reads as "last connection still on
+        record" — connection rows are deletable and are reaped by retention.
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: The user this row is about
+        username:
+          type: string
+          description: Username of that user, joined in to save a second lookup
+        connected_at:
+          type: string
+          format: date-time
+          description: When that session opened
+      required:
+        - user_id
+        - username
+        - connected_at
 
     UserRoleSync:
       type: object
