@@ -368,3 +368,38 @@ Directives for the implementer:
    `AutoApproveGrantRequest`, API parsing/400/connector-scoping on both
    endpoints, `last_login_at` capture and non-capture, and a Playwright
    filter→URL round-trip + cursor reset.
+
+## Spec of record — decisions taken while implementing
+
+- **The pre-existing query parameters keep their silent-ignore behavior.**
+  `user_id`, `database_id`, `before` (on both `/connections` and `/queries`)
+  and `connection_id`, `start_time`, `end_time`, `limit`, `offset` (on
+  `/queries`) still drop a malformed value rather than answering 400. That is
+  a deliberate compatibility choice, not an oversight: those parameters have
+  been shipped for a long time and an existing integration passing a stray
+  empty-ish value would start failing outright. Every parameter this spec adds
+  — `server_group_uid`, `grant_uid`, `grant_definition_uid`,
+  `grant_provenance`, `approval_status` — answers **400** instead, because a
+  filter that vanishes on a typo fails *open*. `internal/api/observability.go`
+  documents the split at `parseStrictUUIDQuery`, and
+  `TestObservabilityFilters_RejectMalformedUUIDs` pins both halves so the
+  asymmetry stays intentional.
+
+- **`GET /queries` has no connector-scoping overwrite to protect.** The route
+  is behind `requireAdminOrViewer`, so a connector never reaches the handler
+  and cannot widen anything with a crafted `user_id` — they are answered 403
+  before parsing begins. `TestQueriesConnectorCannotWidenScope` asserts that,
+  and `TestConnectionsConnectorCannotWidenScope` asserts the real overwrite on
+  `/connections` still runs after every parameter is parsed.
+
+- **The `Last SQL connection` column is hidden from roles that cannot fetch
+  it.** `GET /users/last-connections` is admin-or-viewer (modelled on
+  `GET /users/role-syncs`, and matching `GET /connections`). A connector sees
+  only their own row in `/app/users`, and rendering a column whose endpoint
+  refuses them would show a confident "Never" that is simply wrong — so the
+  column is gated the same way the SSO-sync column already is. `Last login`
+  needs no gate: it rides on the user's own JSON.
+
+- **The `active` toggle was not folded in.** Moving it server-side is a
+  behaviour change to an existing control, filed separately as
+  `specs/todos/2026-08-22-01-connections-active-filter-server-side.md`.

@@ -102,9 +102,11 @@ function UsersPage() {
   // Last proxy session per user, computed in the database (one row per user)
   // rather than derived from a page of /connections — the latter reports
   // "never" for anyone whose last session fell off that page. Admin-or-viewer,
-  // like the endpoint; a connector would just collect a 403.
+  // like the endpoint (GET /connections is gated the same way); a connector
+  // would just collect a 403.
+  const canReadActivity = canViewAudit(user?.roles);
   const { data: lastConnections } = useLastConnections({
-    enabled: canViewAudit(user?.roles),
+    enabled: canReadActivity,
   });
 
   // Show the column when the mapping is live, and also when it is not but the
@@ -148,6 +150,22 @@ function UsersPage() {
         {formatDistanceToNow(new Date(at), { addSuffix: true })}
       </span>
     );
+  };
+
+  // Rendered only for a role that may fetch it. A connector sees their own row
+  // in this list, and showing them a column the API refuses to answer would
+  // read as a confident "Never" — worse than not offering the column at all.
+  const lastConnectionColumn: Column<User> = {
+    key: "last_connection",
+    header: "Last SQL connection",
+    // "Last connection still on record": connection rows are deletable and are
+    // reaped by retention, so a user whose sessions have all aged out reads as
+    // Never.
+    cell: (u) =>
+      relativeOrNever(
+        lastConnections?.get(u.uid)?.connected_at,
+        `last-connection-${u.username}`,
+      ),
   };
 
   const columns: Column<User>[] = [
@@ -199,18 +217,7 @@ function UsersPage() {
       // in the UI", not "last request from anything".
       cell: (u) => relativeOrNever(u.last_login_at, `last-login-${u.username}`),
     },
-    {
-      key: "last_connection",
-      header: "Last SQL connection",
-      // "Last connection still on record": connection rows are deletable and
-      // are reaped by retention, so a user whose sessions have all aged out
-      // reads as Never.
-      cell: (u) =>
-        relativeOrNever(
-          lastConnections?.get(u.uid)?.connected_at,
-          `last-connection-${u.username}`,
-        ),
-    },
+    ...(canReadActivity ? [lastConnectionColumn] : []),
     ...(showSyncColumn ? [syncColumn] : []),
     {
       key: "actions",
