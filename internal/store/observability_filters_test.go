@@ -435,6 +435,8 @@ func TestGrantProvenanceFilter(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.label, func(t *testing.T) {
+			t.Parallel()
+
 			assertSameSet(t, "provenance="+tc.label,
 				f.connectionUIDs(t, ConnectionFilter{GrantProvenance: tc.values}), tc.wantConns)
 			assertSameSet(t, "provenance="+tc.label+" (queries)",
