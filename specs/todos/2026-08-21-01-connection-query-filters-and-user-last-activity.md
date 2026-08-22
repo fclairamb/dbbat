@@ -305,3 +305,66 @@ Directives for the implementer:
   instance has many time-boxed instances per user. Exact-instance `grant_uid`
   filtering is reached by deep-link from a connection row, not by a dropdown of
   grant UIDs; both must round-trip through URL search params like the rest.
+
+## Implementation Plan
+
+1. **Migration** `20260822000000_observability_filters_and_last_login`
+   - `CREATE INDEX idx_grant_requests_resulting_grant ON grant_requests(resulting_grant_id) WHERE resulting_grant_id IS NOT NULL`
+   - `CREATE INDEX idx_connections_grant_uid ON connections(grant_uid) WHERE grant_uid IS NOT NULL`
+   - `CREATE INDEX idx_connections_user_connected_at ON connections(user_id, connected_at DESC)`
+   - `ALTER TABLE users ADD COLUMN last_login_at timestamptz` (nullable) + column comment
+   - `.down.sql` drops all four.
+
+2. **Store filters** (`internal/store/models.go`, `connections.go`, `queries.go`)
+   - `ConnectionFilter` / `QueryFilter` gain `ServerGroupUID`, `GrantUID`,
+     `GrantDefinitionUID`, `GrantProvenance []GrantProvenance`;
+     `QueryFilter` also gains `ApprovalStatus *string`.
+   - New `GrantProvenance` type + `GrantProvenanceApproved/Auto/Direct` constants
+     and `ParseGrantProvenance`.
+   - Shared predicate helpers in a new `internal/store/observability_filters.go`
+     so both list queries apply *identical* SQL:
+     - `applyServerGroupFilter` — resolves membership live through
+       `ListServerGroupMemberUIDs`, empty group ⇒ `1 = 0`.
+     - `applyGrantDefinitionFilter` — `EXISTS` over `access_grants` joined to
+       `grant_definitions`, matched on `lineage_uid = (SELECT lineage_uid …)`.
+     - `applyGrantProvenanceFilter` — OR-group of `EXISTS` / `NOT EXISTS` over
+       `grant_requests.resulting_grant_id`; `direct` carries an explicit
+       `IS NOT NULL` guard so a NULL `grant_uid` matches no value.
+   - Column expression differs per table (`grant_uid` vs `c.grant_uid`), so the
+     helpers take the qualified column name.
+
+3. **Last activity store reads** (`internal/store/users.go`)
+   - `UserLastConnection` model + `ListLastConnectionPerUser` (`DISTINCT ON
+     (c.user_id)`, joined to `users` for the username).
+   - `TouchUserLastLogin(ctx, uid)` — a targeted `UPDATE`, never a full-model
+     write.
+   - `User.LastLoginAt *time.Time` on the model, serialised as `last_login_at`.
+
+4. **API** (`internal/api/observability.go`, `users.go`, `auth.go`, `oauth.go`)
+   - Parse the new params with a strict `parseUUIDQuery` helper returning 400 on
+     a malformed UUID; existing `user_id`/`database_id`/`before` keep their
+     silent-ignore behaviour for compatibility (noted in the spec-of-record).
+   - Connector scoping overwrite stays the last thing before the store call.
+   - `GET /users/last-connections`, admin-or-viewer, modelled on
+     `GET /users/role-syncs`.
+   - `s.stampLastLogin` called from `handleLogin`, `handleOAuthCallback` and
+     `handleOAuthExchange`; failures are logged, never fatal.
+
+5. **OpenAPI + typed client** — document the six new query params on
+   `/connections` and the seven on `/queries`, the new `/users/last-connections`
+   path, `UserLastConnection` schema and `User.last_login_at`; regenerate
+   `front/src/api/schema.ts`.
+
+6. **Frontend**
+   - New `ObservabilityFilterBar` shared component (User / Server / Server group
+     / Grant policy / Provenance, plus Approval status on `/queries`).
+   - `validateSearch` on both routes carries every filter; any filter change
+     navigates with `before: undefined`.
+   - `/app/users`: `Last login` and `Last SQL connection` columns, relative
+     times, muted **Never** when null.
+
+7. **Tests** — store filter matrix incl. live-membership and the edited-definition
+   lineage fixture, provenance fixtures built through `ApproveGrantRequest` /
+   `AutoApproveGrantRequest`, API parsing/400/connector-scoping on both
+   endpoints, `last_login_at` capture and non-capture, and a Playwright
+   filter→URL round-trip + cursor reset.
