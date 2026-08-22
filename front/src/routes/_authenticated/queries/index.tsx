@@ -1,6 +1,16 @@
 import { useRef, useCallback } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQueries, useUsers, useDatabases } from "@/api";
+import {
+  useQueries,
+  useUsers,
+  useDatabases,
+  useServerGroups,
+  useGrantDefinitions,
+} from "@/api";
+import {
+  ObservabilityFilterBar,
+  type ObservabilityFilters,
+} from "@/components/shared/ObservabilityFilterBar";
 import { DataTable } from "@/components/shared/DataTable";
 import { buildQueryColumns } from "@/components/shared/queryColumns";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -15,25 +25,64 @@ import { AccessDenied } from "@/components/shared/AccessDenied";
 const DEFAULT_PAGE_SIZE = 50;
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
+type QuerySearch = ObservabilityFilters & {
+  connection_id?: string;
+  before?: string;
+  size: number;
+};
+
+const asString = (value: unknown) =>
+  typeof value === "string" && value !== "" ? value : undefined;
+
 export const Route = createFileRoute("/_authenticated/queries/")({
-  validateSearch: (search: Record<string, unknown>) => ({
-    connection_id: search.connection_id as string | undefined,
-    before: search.before as string | undefined,
+  // Filters ride in the URL alongside `connection_id`, `before` and `size`, so
+  // a filtered view is shareable and the back button works.
+  validateSearch: (search: Record<string, unknown>): QuerySearch => ({
+    connection_id: asString(search.connection_id),
+    before: asString(search.before),
     size: search.size ? Number(search.size) : DEFAULT_PAGE_SIZE,
+    user_id: asString(search.user_id),
+    database_id: asString(search.database_id),
+    server_group_uid: asString(search.server_group_uid),
+    grant_definition_uid: asString(search.grant_definition_uid),
+    grant_uid: asString(search.grant_uid),
+    grant_provenance: asString(search.grant_provenance),
+    approval_status: asString(search.approval_status),
   }),
   component: QueriesPage,
 });
 
 function QueriesPage() {
   const { user } = useAuth();
-  const { connection_id, before, size } = Route.useSearch();
+  const search = Route.useSearch();
+  const { connection_id, before, size } = search;
+  const navigate = Route.useNavigate();
+  // Server-side, all of it — see the note on the connections listing.
   const { data: queries, isLoading, refetch } = useQueries({
     connection_id,
     before,
     limit: size,
+    user_id: search.user_id,
+    database_id: search.database_id,
+    server_group_uid: search.server_group_uid,
+    grant_definition_uid: search.grant_definition_uid,
+    grant_uid: search.grant_uid,
+    grant_provenance: search.grant_provenance,
+    approval_status: search.approval_status,
   });
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
+  const { data: serverGroups } = useServerGroups();
+  const { data: grantDefinitions } = useGrantDefinitions();
+
+  // Any filter change drops the cursor: a `before` from the previous result
+  // set silently hides the head of the new one.
+  const applyFilters = (patch: ObservabilityFilters) => {
+    navigate({
+      search: (prev) => ({ ...prev, ...patch, before: undefined }),
+      replace: true,
+    });
+  };
 
   const isFirstPage = !before;
 
@@ -85,7 +134,15 @@ function QueriesPage() {
                   className="h-4 w-4 p-0 hover:bg-transparent"
                   asChild
                 >
-                  <Link to="/queries" search={{ before: undefined, size, connection_id: undefined }}>
+                  <Link
+                    to="/queries"
+                    search={(prev) => ({
+                      ...prev,
+                      size,
+                      before: undefined,
+                      connection_id: undefined,
+                    })}
+                  >
                     <X className="h-3 w-3" />
                   </Link>
                 </Button>
@@ -93,6 +150,16 @@ function QueriesPage() {
             )}
           </div>
         }
+      />
+
+      <ObservabilityFilterBar
+        filters={search}
+        onChange={applyFilters}
+        users={users}
+        databases={databases}
+        serverGroups={serverGroups}
+        grantDefinitions={grantDefinitions}
+        showApprovalStatus
       />
 
       <DataTable
@@ -118,7 +185,7 @@ function QueriesPage() {
             >
               <Link
                 to="/queries"
-                search={{ connection_id, before: undefined, size: opt }}
+                search={(prev) => ({ ...prev, before: undefined, size: opt })}
               >
                 {opt}
               </Link>
@@ -131,7 +198,7 @@ function QueriesPage() {
             <Button variant="outline" size="sm" asChild>
               <Link
                 to="/queries"
-                search={{ connection_id, before: undefined, size }}
+                search={(prev) => ({ ...prev, before: undefined, size })}
               >
                 <ChevronLeft className="h-4 w-4 mr-1" />
                 Newer
@@ -142,7 +209,7 @@ function QueriesPage() {
             <Button variant="outline" size="sm" asChild>
               <Link
                 to="/queries"
-                search={{ connection_id, before: lastUid, size }}
+                search={(prev) => ({ ...prev, before: lastUid, size })}
               >
                 Older
                 <ChevronRight className="h-4 w-4 ml-1" />

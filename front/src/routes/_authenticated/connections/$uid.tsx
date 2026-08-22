@@ -299,13 +299,32 @@ function ConnectionDetailPage() {
                 <dt className="text-sm font-medium text-muted-foreground mb-1">
                   &nbsp;
                 </dt>
-                <dd>
+                <dd className="flex flex-col gap-1">
                   <Link
                     to="/grants"
                     className="text-sm underline hover:text-foreground"
                     data-testid="connection-grant-link"
                   >
                     View grants
+                  </Link>
+                  {/* The exact-instance grant filter has no dropdown — a busy
+                      instance has many time-boxed grants per user — so this
+                      deep-link is how it is reached. */}
+                  <Link
+                    to="/connections"
+                    search={{ grant_uid: connection.grant.uid, size: 50 }}
+                    className="text-sm underline hover:text-foreground"
+                    data-testid="connection-grant-sessions-link"
+                  >
+                    Sessions under this grant
+                  </Link>
+                  <Link
+                    to="/queries"
+                    search={{ grant_uid: connection.grant.uid, size: 50 }}
+                    className="text-sm underline hover:text-foreground"
+                    data-testid="connection-grant-queries-link"
+                  >
+                    Queries under this grant
                   </Link>
                 </dd>
               </div>

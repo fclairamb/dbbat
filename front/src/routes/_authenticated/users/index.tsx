@@ -8,6 +8,7 @@ import {
   useDeleteUser,
   useSsoRoleMapping,
   useLastRoleSyncs,
+  useLastConnections,
   type User,
   type UserRoleSync,
 } from "@/api";
@@ -98,6 +99,14 @@ function UsersPage() {
     enabled: canViewAudit(user?.roles),
   });
 
+  // Last proxy session per user, computed in the database (one row per user)
+  // rather than derived from a page of /connections — the latter reports
+  // "never" for anyone whose last session fell off that page. Admin-or-viewer,
+  // like the endpoint; a connector would just collect a 403.
+  const { data: lastConnections } = useLastConnections({
+    enabled: canViewAudit(user?.roles),
+  });
+
   // Show the column when the mapping is live, and also when it is not but the
   // store still holds syncs — a mapping switched off does not unmake history.
   const showSyncColumn =
@@ -122,6 +131,23 @@ function UsersPage() {
         </span>
       );
     },
+  };
+
+  /** Relative time, or a muted "Never" when the timestamp is absent. */
+  const relativeOrNever = (at: string | null | undefined, testId: string) => {
+    if (!at) {
+      return (
+        <span className="text-muted-foreground" data-testid={testId}>
+          Never
+        </span>
+      );
+    }
+
+    return (
+      <span className="text-sm text-muted-foreground" data-testid={testId}>
+        {formatDistanceToNow(new Date(at), { addSuffix: true })}
+      </span>
+    );
   };
 
   const columns: Column<User>[] = [
@@ -164,6 +190,26 @@ function UsersPage() {
           {formatDistanceToNow(new Date(u.created_at), { addSuffix: true })}
         </span>
       ),
+    },
+    {
+      key: "last_login",
+      header: "Last login",
+      // Interactive sign-ins only — password or SSO. Token refreshes and
+      // API-key requests deliberately do not move it, so this reads "last seen
+      // in the UI", not "last request from anything".
+      cell: (u) => relativeOrNever(u.last_login_at, `last-login-${u.username}`),
+    },
+    {
+      key: "last_connection",
+      header: "Last SQL connection",
+      // "Last connection still on record": connection rows are deletable and
+      // are reaped by retention, so a user whose sessions have all aged out
+      // reads as Never.
+      cell: (u) =>
+        relativeOrNever(
+          lastConnections?.get(u.uid)?.connected_at,
+          `last-connection-${u.username}`,
+        ),
     },
     ...(showSyncColumn ? [syncColumn] : []),
     {

@@ -51,6 +51,8 @@ export type PendingQuery = Query & { approver_role?: string };
 export type QueryWithRows = components["schemas"]["QueryWithRows"];
 export type AuditEvent = components["schemas"]["AuditEvent"];
 export type UserRoleSync = components["schemas"]["UserRoleSync"];
+export type UserLastConnection =
+  components["schemas"]["UserLastConnection"];
 export type APIKey = components["schemas"]["APIKey"];
 export type CreateAPIKeyRequest = components["schemas"]["CreateAPIKeyRequest"];
 export type CreateAPIKeyResponse =
@@ -1013,9 +1015,28 @@ export function useCancelGrantRequest(options?: {
 // Connections
 // ============================================================================
 
-export function useConnections(filters?: {
+/**
+ * Filters shared by the connections and queries listings.
+ *
+ * Every one of them is applied **server-side**. Narrowing a fetched page in
+ * the browser under-reports the moment the matching rows are not in the
+ * current page, which is exactly the trap the legacy client-side "active only"
+ * toggle falls into.
+ */
+export type SessionFilters = {
   user_id?: string;
   database_id?: string;
+  /** Live membership: the servers the group holds *right now*. */
+  server_group_uid?: string;
+  /** The exact grant instance — reached by deep-link, not from a dropdown. */
+  grant_uid?: string;
+  /** The grant *policy*, matched across the definition's whole lineage. */
+  grant_definition_uid?: string;
+  /** Comma-separated `approved` / `auto` / `direct`; values are OR-ed. */
+  grant_provenance?: string;
+};
+
+export function useConnections(filters?: SessionFilters & {
   before?: string;
   limit?: number;
   offset?: number;
@@ -1087,10 +1108,11 @@ export function useDownloadConnectionDump(
 // ============================================================================
 
 export function useQueries(
-  filters?: {
+  filters?: SessionFilters & {
     connection_id?: string;
-    user_id?: string;
-    database_id?: string;
+    /** Per-*statement* approval-hold outcome — a different axis from
+     * `grant_provenance`, which is about the session's access. */
+    approval_status?: string;
     start_time?: string;
     end_time?: string;
     before?: string;
@@ -1210,6 +1232,36 @@ export function useLastRoleSyncs(options?: { enabled?: boolean }) {
       const byUser = new Map<string, UserRoleSync>();
       for (const sync of response.data?.role_syncs ?? []) {
         byUser.set(sync.user_id, sync);
+      }
+      return byUser;
+    },
+  });
+}
+
+/**
+ * The most recent proxy session of every user, keyed by user UID.
+ *
+ * The backend does the per-user picking (`GET /users/last-connections`, a
+ * DISTINCT ON over `connections`), so a user absent from the map has never
+ * connected — full stop, not a paging artefact. Deriving this from a page of
+ * `GET /connections` would report "never" for anyone whose last session fell
+ * off that page.
+ */
+export function useLastConnections(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["users", "last-connections"],
+    enabled: options?.enabled ?? true,
+    queryFn: async (): Promise<Map<string, UserLastConnection>> => {
+      const response = await apiClient.GET("/users/last-connections");
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to load last connections"
+        );
+      }
+
+      const byUser = new Map<string, UserLastConnection>();
+      for (const row of response.data?.last_connections ?? []) {
+        byUser.set(row.user_id, row);
       }
       return byUser;
     },
