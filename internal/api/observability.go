@@ -48,6 +48,37 @@ func parseStrictUUIDQuery(c *gin.Context, name string, out **uuid.UUID) bool {
 	return true
 }
 
+// parseStrictBoolQuery is parseStrictUUIDQuery's boolean half, and follows the
+// same rule: a value that is not exactly `true` or `false` is a 400, never a
+// filter that quietly disappears.
+//
+// Exactly those two spellings — not strconv.ParseBool's `1`/`t`/`TRUE`/`yes`
+// family. The parameter is written by the UI and read by humans reading a
+// shared URL; accepting six spellings of true buys nothing and makes the
+// boundary between "accepted" and "refused" impossible to state.
+//
+// An absent parameter leaves *out untouched, so the zero value means
+// unfiltered.
+func parseStrictBoolQuery(c *gin.Context, name string, out *bool) bool {
+	switch c.Query(name) {
+	case "":
+		return true
+	case "true":
+		*out = true
+
+		return true
+	case "false":
+		*out = false
+
+		return true
+	default:
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+			"invalid "+name+": must be true or false")
+
+		return false
+	}
+}
+
 // parseGrantProvenanceQuery reads the multi-valued grant_provenance parameter
 // (`approved`, or `approved,direct`), rejecting an unknown value.
 //
@@ -128,6 +159,13 @@ func (s *Server) handleListConnections(c *gin.Context) {
 
 	if !parseSessionFilters(c, &filter.ServerGroupUID, &filter.GrantUID,
 		&filter.GrantDefinitionUID, &filter.GrantProvenance) {
+		return
+	}
+
+	// Still-open sessions. Applied in the database like every other filter:
+	// the UI used to narrow the fetched page instead, which answered "no live
+	// sessions" whenever the live ones were not among the newest rows.
+	if !parseStrictBoolQuery(c, "active", &filter.ActiveOnly) {
 		return
 	}
 

@@ -84,6 +84,27 @@ func TestObservabilityFilters_RejectMalformedUUIDs(t *testing.T) {
 		}
 	}
 
+	// `active` is /connections-only, and follows the new-parameter rule too:
+	// only the two spellings, anything else refused. `?active=1` reads as
+	// "active" to a human and would have been silently unfiltered.
+	for _, value := range []string{"1", "yes", "TRUE", "on", ""} {
+		w := doGet(t, router, token, "/api/v1/connections?active="+value)
+		if value == "" {
+			assert.Equal(t, http.StatusOK, w.Code,
+				"an empty active is simply absent: %s", w.Body.String())
+
+			continue
+		}
+
+		assert.Equal(t, http.StatusBadRequest, w.Code,
+			"?active=%s must be refused, not silently unfiltered: %s", value, w.Body.String())
+	}
+
+	for _, value := range []string{"true", "false"} {
+		w := doGet(t, router, token, "/api/v1/connections?active="+value)
+		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+
 	// approval_status is /queries-only and likewise validated.
 	w := doGet(t, router, token, "/api/v1/queries?approval_status=released")
 	assert.Equal(t, http.StatusBadRequest, w.Code,
@@ -163,6 +184,60 @@ func TestObservabilityFilters_Accepted(t *testing.T) {
 	assert.ElementsMatch(t, []string{granted.UID.String(), ungranted.UID.String()},
 		listed("?server_group_uid="+group.UID.String()),
 		"membership is resolved live: adding the server makes its past sessions visible")
+
+	// `active` narrows to still-open sessions, and composes with the rest.
+	require.NoError(t, dataStore.CloseConnection(ctx, ungranted.UID))
+	assert.Equal(t, []string{granted.UID.String()}, listed("?active=true"))
+	assert.ElementsMatch(t, []string{granted.UID.String(), ungranted.UID.String()}, listed("?active=false"),
+		"false is unfiltered, not closed-only")
+	assert.Empty(t, listed("?active=true&grant_provenance=approved"),
+		"active composes with AND like every other filter")
+}
+
+// TestConnectionsActiveFilterStaysScopedToTheConnector pins that the new
+// parameter changes nothing about who a connector can see. The scoping
+// overwrite runs after every parameter is parsed, `active` included, so the
+// most a crafted request buys is a narrower view of their own sessions.
+func TestConnectionsActiveFilterStaysScopedToTheConnector(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore, db := newFilterTestServer(t)
+	ctx := context.Background()
+
+	admin := createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
+	connector := createTestUser(t, dataStore, "connector", "connectorpassword123", []string{"connector"})
+
+	// The admin's session is live — the one a broken scoping would leak into
+	// an "active only" page.
+	adminLive, err := dataStore.CreateConnection(ctx, admin.UID, db.UID, "10.0.0.1")
+	require.NoError(t, err)
+
+	ownLive, err := dataStore.CreateConnection(ctx, connector.UID, db.UID, "10.0.0.2")
+	require.NoError(t, err)
+
+	ownClosed, err := dataStore.CreateConnection(ctx, connector.UID, db.UID, "10.0.0.3")
+	require.NoError(t, err)
+	require.NoError(t, dataStore.CloseConnection(ctx, ownClosed.UID))
+
+	router := server.setupRouter()
+	token := loginUser(t, server, "connector", "connectorpassword123")
+
+	w := doGet(t, router, token, "/api/v1/connections?active=true&user_id="+admin.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var body struct {
+		Connections []struct {
+			UID    string `json:"uid"`
+			UserID string `json:"user_id"`
+		} `json:"connections"`
+	}
+
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Len(t, body.Connections, 1)
+	assert.Equal(t, ownLive.UID.String(), body.Connections[0].UID,
+		"a connector filtering on active sees their own live session and nothing else")
+	assert.NotEqual(t, adminLive.UID.String(), body.Connections[0].UID)
+	assert.Equal(t, connector.UID.String(), body.Connections[0].UserID)
 }
 
 // TestConnectionsConnectorCannotWidenScope is the non-negotiable one: the

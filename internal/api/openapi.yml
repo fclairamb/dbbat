@@ -2556,6 +2556,19 @@ paths:
               enum: [approved, auto, direct]
           style: form
           explode: false
+        - name: active
+          in: query
+          description: |
+            When `true`, return only sessions that are still open
+            (`disconnected_at` is null). Applied in the database, so a page of
+            active sessions is a page of *all* active sessions — not the
+            active ones that happen to fall inside an unfiltered page.
+
+            `false` is the same as omitting it: there is no "closed only"
+            filter. A value that is neither `true` nor `false` is refused with
+            400 rather than silently dropped.
+          schema:
+            type: boolean
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Offset'
       responses:
