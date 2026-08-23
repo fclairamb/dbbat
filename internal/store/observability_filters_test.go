@@ -231,6 +231,69 @@ func TestFiltersComposeWithAND(t *testing.T) {
 		f.connectionUIDs(t, ConnectionFilter{ServerGroupUID: &f.group.UID, DatabaseID: &f.dbC.UID}), nil)
 }
 
+// TestActiveOnlyFilterIsAppliedInTheDatabase is the regression the ActiveOnly
+// filter exists for.
+//
+// "Active only" used to narrow the *already fetched* page in the browser, so a
+// live session that had fallen off the current page simply did not exist as
+// far as the operator was concerned — the table went empty and read as
+// "nothing is running".
+//
+// The fixture is that situation exactly: one live session opened first, then
+// more closed sessions than fit in a page, all of them newer. A page of the
+// unfiltered list (uid DESC) therefore contains no live session at all, which
+// is asserted rather than assumed — without that assertion the test would
+// still pass against a client-side narrowing.
+func TestActiveOnlyFilterIsAppliedInTheDatabase(t *testing.T) {
+	t.Parallel()
+
+	f := newObsFixture(t, "activeonly")
+
+	const pageSize = 5
+
+	// Opened first, so its UUIDv7 sorts oldest and every closed session below
+	// is reached before it.
+	live := f.session(t, f.dbA.UID, nil)
+
+	closed := make([]uuid.UUID, 0, pageSize+3)
+
+	for range pageSize + 3 {
+		conn := f.session(t, f.dbA.UID, nil)
+		if err := f.store.CloseConnection(f.ctx, conn.UID); err != nil {
+			t.Fatalf("CloseConnection() error = %v", err)
+		}
+
+		closed = append(closed, conn.UID)
+	}
+
+	page := f.connectionUIDs(t, ConnectionFilter{Limit: pageSize})
+	if len(page) != pageSize {
+		t.Fatalf("unfiltered page returned %d rows, want %d", len(page), pageSize)
+	}
+
+	for _, uid := range page {
+		if uid == live.UID {
+			t.Fatal("the live session is on the first unfiltered page, so this fixture " +
+				"cannot distinguish a server-side filter from a client-side one")
+		}
+	}
+
+	// Server-side, the same page size finds the session the browser could not.
+	assertSameSet(t, "active only",
+		f.connectionUIDs(t, ConnectionFilter{ActiveOnly: true, Limit: pageSize}),
+		[]uuid.UUID{live.UID})
+
+	// False is "unfiltered", not "closed only": every session is still listed.
+	assertSameSet(t, "active only off",
+		f.connectionUIDs(t, ConnectionFilter{ActiveOnly: false}),
+		append([]uuid.UUID{live.UID}, closed...))
+
+	// And it composes with AND like every other filter — a server the live
+	// session never touched intersects it away.
+	assertSameSet(t, "active only ∩ dbB",
+		f.connectionUIDs(t, ConnectionFilter{ActiveOnly: true, DatabaseID: &f.dbB.UID}), nil)
+}
+
 // TestGrantUIDFilterSelectsOneInstance covers the exact-instance filter that
 // the connection detail page deep-links from.
 func TestGrantUIDFilterSelectsOneInstance(t *testing.T) {
@@ -790,7 +853,22 @@ func nodeAccessing(lines []string, table string) int {
 //     user to serve a fifty-row page", which is exactly the failure the spec
 //     asks to prevent. maxRows is normally the page size: if the planner is
 //     going to sort at all, it must be sorting no more than a page's worth.
-func assertPaginationNeverSortsTheTable(t *testing.T, label, plan, table string, maxRows int) {
+//
+// partialIndexes names indexes that restrict by *existing* rather than by an
+// Index Cond: an index partial on exactly the filter's predicate contains only
+// the matching rows, so scanning all of it reads no more than the filter
+// selects and EXPLAIN has no condition to print. `ActiveOnly` is the one such
+// filter — `disconnected_at IS NULL` is answered from
+// idx_connections_instance_id_open, which is partial on precisely that. Naming
+// an index here is not a way to wave a plan through: the cardinality tooth
+// still applies, and a plan that reached the table any other way is still
+// judged on its Index Cond as before.
+func assertPaginationNeverSortsTheTable(
+	t *testing.T,
+	label, plan, table string,
+	maxRows int,
+	partialIndexes ...string,
+) {
 	t.Helper()
 
 	lines := strings.Split(strings.TrimRight(plan, "\n"), "\n")
@@ -820,7 +898,19 @@ func assertPaginationNeverSortsTheTable(t *testing.T, label, plan, table string,
 
 	restricted := false
 
+	for _, name := range partialIndexes {
+		if strings.Contains(access, " using "+name+" ") {
+			restricted = true
+
+			break
+		}
+	}
+
 	for _, line := range subtreeOf(subtree, accessAt) {
+		if restricted {
+			break
+		}
+
 		if strings.Contains(line, "Index Cond:") || strings.Contains(line, "Recheck Cond:") {
 			restricted = true
 
@@ -1098,6 +1188,83 @@ func TestGrantInstanceIndexServesTheOrdering(t *testing.T) {
 	if !strings.Contains(indexDef, "WHERE (grant_uid IS NOT NULL)") {
 		t.Errorf("idx_connections_grant_uid = %q; want it partial on grant_uid IS NOT NULL — "+
 			"sessions with no grant match no grant filter and do not belong in it", indexDef)
+	}
+}
+
+// TestActiveOnlyPaginationUsesAnIndex holds the "still open" predicate to the
+// same bar as every other filter: a page of it must not be served by ordering
+// the table.
+//
+// It gets its own fixture rather than another row in
+// TestFilteredPaginationUsesAnIndex's table because it is the only shape whose
+// *data* has to be shaped a particular way — almost every session closed,
+// a handful still open. That is the real-world distribution, and it is the one
+// where a bad plan hurts: with everything open the predicate matches every row
+// and any plan looks fine.
+//
+// Note which index does the work, because it is not the obvious one.
+// 20260803010000's idx_connections_disconnected_at is partial on
+// `disconnected_at IS NOT NULL` — the retention sweep's half of the column —
+// and cannot serve this predicate at all. What serves it is
+// idx_connections_instance_id_open (20260803020000), partial on
+// `disconnected_at IS NULL`: scanning the whole of it reads exactly the live
+// sessions and nothing else, which is why it is named to the assertion as a
+// partial-index restriction. A backwards walk of connections_pkey with the
+// predicate as a filter is equally acceptable and needs no allowance; which
+// one the planner picks is a function of how many sessions are live.
+func TestActiveOnlyPaginationUsesAnIndex(t *testing.T) {
+	t.Parallel()
+
+	f := newObsFixture(t, "activeplan")
+
+	const pageSize = 50
+
+	// Realistic proportions: a few hundred sessions of history, a handful of
+	// them still running.
+	for i := range 400 {
+		conn := f.session(t, f.dbA.UID, nil)
+
+		if i%100 != 0 {
+			if err := f.store.CloseConnection(f.ctx, conn.UID); err != nil {
+				t.Fatalf("CloseConnection() error = %v", err)
+			}
+		}
+	}
+
+	if _, err := f.store.db.ExecContext(f.ctx, "ANALYZE"); err != nil {
+		t.Fatalf("ANALYZE: %v", err)
+	}
+
+	cursor := uuid.Must(uuid.NewV7())
+
+	shapes := []struct {
+		name   string
+		filter ConnectionFilter
+	}{
+		{
+			name:   "active only",
+			filter: ConnectionFilter{ActiveOnly: true, BeforeUID: &cursor, Limit: pageSize},
+		},
+		{
+			name: "active only + user",
+			filter: ConnectionFilter{
+				ActiveOnly: true, UserID: &f.user.UID,
+				BeforeUID: &cursor, Limit: pageSize,
+			},
+		},
+	}
+
+	for _, shape := range shapes {
+		var conns []Connection
+
+		q, err := f.store.buildListConnectionsQuery(f.ctx, &conns, shape.filter)
+		if err != nil {
+			t.Fatalf("buildListConnectionsQuery(%s) error = %v", shape.name, err)
+		}
+
+		assertPaginationNeverSortsTheTable(t,
+			"connections / "+shape.name, explainPlan(t, f.store, q.String()), "connections", pageSize,
+			"idx_connections_instance_id_open")
 	}
 }
 

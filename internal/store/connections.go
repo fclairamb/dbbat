@@ -967,6 +967,14 @@ func (s *Store) buildListConnectionsQuery(
 		return nil, err
 	}
 
+	// "Still open", asked of the database rather than of the page. Narrowing a
+	// fetched page in the browser answers "no live sessions" the moment the
+	// live ones are not among the newest `limit` rows, which on a busy
+	// instance is most of the time.
+	if filter.ActiveOnly {
+		q = q.Where("disconnected_at IS NULL")
+	}
+
 	if filter.BeforeUID != nil {
 		q = q.Where("uid < ?", *filter.BeforeUID)
 	}

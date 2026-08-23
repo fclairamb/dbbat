@@ -566,6 +566,15 @@ type ConnectionFilter struct {
 	// values are OR-ed together; empty means no provenance filter. See
 	// GrantProvenance for what each value asserts.
 	GrantProvenance []GrantProvenance
+
+	// ActiveOnly narrows to sessions still open (disconnected_at IS NULL).
+	//
+	// A plain bool, not the *bool the tri-state settings elsewhere use:
+	// "unfiltered" and "false" are the same request here. There is no third
+	// meaning to express — "only closed sessions" is not a filter anything
+	// asks for, and if it ever is it gets its own field rather than a nil that
+	// means one thing on this filter and another on the next.
+	ActiveOnly bool
 }
 
 // GrantProvenance says how the grant a session ran under came to exist. The
