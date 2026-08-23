@@ -67,6 +67,68 @@ func (f *obsFixture) session(t *testing.T, databaseID uuid.UUID, grantUID *uuid.
 	return conn
 }
 
+// bulkSessions seeds `total` sessions in one pass, `live(i)` deciding which of
+// them are still open.
+//
+// The rows are inserted directly instead of going through CreateConnection and
+// CloseConnection, which is a deliberate exception made for the planner tests
+// alone. Those two writers also append this session's audit entries and seal
+// its query chain — milliseconds per session, which is nothing at four hundred
+// rows and half a minute at the thousands a plan has to be judged on. Nothing
+// under test here reads that evidence: what is being judged is the access path
+// into `connections`, and the rows still go through the bun model, so they
+// cannot drift from the real schema. That the ActiveOnly predicate selects the
+// right sessions when written by the real writers is
+// TestActiveOnlyFilterIsAppliedInTheDatabase's job, not this one's.
+func (f *obsFixture) bulkSessions(t *testing.T, total int, live func(i int) bool) {
+	t.Helper()
+
+	const chunk = 1000
+
+	openedAt := time.Now()
+	closedAt := openedAt.Add(time.Minute)
+	rows := make([]Connection, 0, chunk)
+
+	flush := func() {
+		if len(rows) == 0 {
+			return
+		}
+
+		if _, err := f.store.db.NewInsert().Model(&rows).Exec(f.ctx); err != nil {
+			t.Fatalf("seed connections: %v", err)
+		}
+
+		rows = rows[:0]
+	}
+
+	for i := range total {
+		// UUIDv7, as CreateConnection mints them: the listing orders on uid, so
+		// a fixture whose uids were not time-ordered would order differently
+		// from the real table.
+		row := Connection{
+			UID:            newUIDv7(),
+			UserID:         f.user.UID,
+			DatabaseID:     f.dbA.UID,
+			SourceIP:       "10.0.0.1",
+			ConnectedAt:    openedAt,
+			LastActivityAt: openedAt,
+		}
+
+		if !live(i) {
+			disconnectedAt := closedAt
+			row.DisconnectedAt = &disconnectedAt
+		}
+
+		rows = append(rows, row)
+
+		if len(rows) == chunk {
+			flush()
+		}
+	}
+
+	flush()
+}
+
 // statement logs one query on a session, so the queries listing has something
 // to select and every session-scoped filter can be asserted on both endpoints.
 func (f *obsFixture) statement(t *testing.T, conn *Connection, sql string) *Query {
@@ -854,20 +916,18 @@ func nodeAccessing(lines []string, table string) int {
 //     asks to prevent. maxRows is normally the page size: if the planner is
 //     going to sort at all, it must be sorting no more than a page's worth.
 //
-// partialIndexes names indexes that restrict by *existing* rather than by an
-// Index Cond: an index partial on exactly the filter's predicate contains only
-// the matching rows, so scanning all of it reads no more than the filter
-// selects and EXPLAIN has no condition to print. `ActiveOnly` is the one such
-// filter — `disconnected_at IS NULL` is answered from
-// idx_connections_instance_id_open, which is partial on precisely that. Naming
-// an index here is not a way to wave a plan through: the cardinality tooth
-// still applies, and a plan that reached the table any other way is still
-// judged on its Index Cond as before.
+// There is deliberately no "this index is partial on the filter's predicate, so
+// scanning all of it is fine" allowance. `ActiveOnly` used to need one — its
+// only usable index was idx_connections_instance_id_open, partial on
+// `disconnected_at IS NULL`, which restricts by *existing* and so prints no
+// Index Cond for the tooth to read. idx_connections_open_uid (20260823000000)
+// carries `uid DESC` as its key, so that shape now streams with no Sort at all
+// and the allowance has no remaining user. Reintroducing one would be a way to
+// wave through exactly the plan this test exists to catch.
 func assertPaginationNeverSortsTheTable(
 	t *testing.T,
 	label, plan, table string,
 	maxRows int,
-	partialIndexes ...string,
 ) {
 	t.Helper()
 
@@ -898,19 +958,7 @@ func assertPaginationNeverSortsTheTable(
 
 	restricted := false
 
-	for _, name := range partialIndexes {
-		if strings.Contains(access, " using "+name+" ") {
-			restricted = true
-
-			break
-		}
-	}
-
 	for _, line := range subtreeOf(subtree, accessAt) {
-		if restricted {
-			break
-		}
-
 		if strings.Contains(line, "Index Cond:") || strings.Contains(line, "Recheck Cond:") {
 			restricted = true
 
@@ -931,16 +979,26 @@ func assertPaginationNeverSortsTheTable(
 }
 
 // assertOrderedIndexWalk is the stronger property: no Sort whatsoever, and the
-// backwards walk happens on the table being paginated.
+// walk that supplies the order happens on the table being paginated.
 //
 // The index is deliberately not pinned by name — the widest /queries shape is
 // answered from queries_pending_approval_idx rather than queries_pkey, and
 // either is fine: what matters is that *some* index on that table returns the
-// rows in uid DESC order so the LIMIT can stop early. "Scan Backward using"
-// rather than "Index Scan Backward using" for the same reason: an Index *Only*
-// Scan Backward is equally good and must not read as a failure. Pinning the
-// table, though, is essential: a backwards walk of the *joined* table would
-// satisfy a name-blind check while the paginated one still got sorted.
+// rows in uid DESC order so the LIMIT can stop early. "Scan using" rather than
+// "Index Scan using" for the same reason: an Index *Only* Scan is equally good
+// and must not read as a failure.
+//
+// Direction is not pinned either, because it is a property of the index rather
+// than of the plan: an index keyed `uid` ascending (connections_pkey, and the
+// queries indexes) is read *backwards* to produce uid DESC, while one keyed
+// `uid DESC` (idx_connections_open_uid) is read forwards to produce the same
+// order. Both stream and stop at the LIMIT, which is the whole claim. Nothing
+// weaker slips through: the ORDER BY is not optional, so a plan with no Sort
+// node has no other way to satisfy it.
+//
+// Pinning the table, though, is essential: an ordered walk of the *joined*
+// table would satisfy a name-blind check while the paginated one still got
+// sorted.
 func assertOrderedIndexWalk(t *testing.T, label, plan, table string) {
 	t.Helper()
 
@@ -953,13 +1011,13 @@ func assertOrderedIndexWalk(t *testing.T, label, plan, table string) {
 	}
 
 	for _, line := range lines {
-		if strings.Contains(line, "Scan Backward using ") &&
-			strings.Contains(line, " on "+table+" ") {
+		walk := strings.Contains(line, "Scan using ") || strings.Contains(line, "Scan Backward using ")
+		if walk && strings.Contains(line, " on "+table+" ") {
 			return
 		}
 	}
 
-	t.Errorf("%s never walks an index on %s backwards, so ORDER BY uid DESC is not "+
+	t.Errorf("%s never walks an index on %s in order, so ORDER BY uid DESC is not "+
 		"served by the index:\n%s", label, table, plan)
 }
 
@@ -1191,80 +1249,144 @@ func TestGrantInstanceIndexServesTheOrdering(t *testing.T) {
 	}
 }
 
+// TestOpenSessionsIndexRestrictsAndOrders pins both halves of
+// idx_connections_open_uid, because the EXPLAIN test above only notices one of
+// them.
+//
+// The key is what removes the Sort, and losing it is caught. The *predicate* is
+// not: an index over `(uid DESC)` with no WHERE clause would let the active
+// page stream just as happily — walking every session ever opened and
+// discarding the closed ones as it went — so every EXPLAIN assertion would
+// still pass while the plan quietly became unbounded again on an instance where
+// live sessions are rare. That is precisely the shape this index exists to
+// avoid, so it is asserted directly.
+func TestOpenSessionsIndexRestrictsAndOrders(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	var indexDef string
+
+	err := s.db.NewRaw(
+		"SELECT indexdef FROM pg_indexes WHERE tablename = 'connections' AND indexname = ?",
+		"idx_connections_open_uid",
+	).Scan(ctx, &indexDef)
+	if err != nil {
+		t.Fatalf("read index definition: %v", err)
+	}
+
+	// Either direction serves `ORDER BY uid DESC` — an ascending index is
+	// simply walked backwards — so both are accepted.
+	if !strings.Contains(indexDef, "(uid DESC)") && !strings.Contains(indexDef, "(uid)") {
+		t.Errorf("idx_connections_open_uid = %q; want it keyed on uid so a page of live "+
+			"sessions streams in uid order instead of being sorted", indexDef)
+	}
+
+	if !strings.Contains(indexDef, "WHERE (disconnected_at IS NULL)") {
+		t.Errorf("idx_connections_open_uid = %q; want it partial on disconnected_at IS NULL — "+
+			"without the predicate it indexes every session ever opened and the ?active=true "+
+			"page walks closed sessions looking for live ones", indexDef)
+	}
+}
+
 // TestActiveOnlyPaginationUsesAnIndex holds the "still open" predicate to the
-// same bar as every other filter: a page of it must not be served by ordering
-// the table.
+// strongest property in this file: a page of live sessions must stream out of
+// an index already in uid order, never be assembled by reading every live
+// session and sorting the result.
 //
 // It gets its own fixture rather than another row in
 // TestFilteredPaginationUsesAnIndex's table because it is the only shape whose
-// *data* has to be shaped a particular way — almost every session closed,
-// a handful still open. That is the real-world distribution, and it is the one
-// where a bad plan hurts: with everything open the predicate matches every row
-// and any plan looks fine.
+// *data* has to be arranged a particular way, and it runs over two arrangements
+// because the sort it forbids costs differently in each:
 //
-// Note which index does the work, because it is not the obvious one.
-// 20260803010000's idx_connections_disconnected_at is partial on
-// `disconnected_at IS NOT NULL` — the retention sweep's half of the column —
-// and cannot serve this predicate at all. What serves it is
-// idx_connections_instance_id_open (20260803020000), partial on
-// `disconnected_at IS NULL`: scanning the whole of it reads exactly the live
-// sessions and nothing else, which is why it is named to the assertion as a
-// partial-index restriction. A backwards walk of connections_pkey with the
-// predicate as a filter is equally acceptable and needs no allowance; which
-// one the planner picks is a function of how many sessions are live.
+//   - **a handful live** — the everyday distribution: a few hundred sessions of
+//     history, four still running. This is what the plan used to be measured on,
+//     and it sorted: with no index ordering the live sessions, PostgreSQL read
+//     the whole of idx_connections_instance_id_open (the crash reconcile's
+//     index, partial on `disconnected_at IS NULL`) and ordered the four rows it
+//     found. Cheap, which is precisely why it went unnoticed.
+//
+//   - **hundreds live** — the busy instance that sort actually hurts on, where
+//     "read every live session and order it" means hundreds of rows read and
+//     sorted to return fifty.
+//
+// Neither arrangement is anywhere near all-open on purpose: with every session
+// live the predicate matches every row and any plan looks fine.
+//
+// Note which index does *not* do the work. 20260803010000's
+// idx_connections_disconnected_at is partial on `disconnected_at IS NOT NULL` —
+// the retention sweep's half of the column — and cannot serve this predicate at
+// all. What serves it is idx_connections_open_uid (20260823000000): partial on
+// `disconnected_at IS NULL` so it holds exactly the live sessions, keyed on
+// `uid DESC` so walking it *is* the ordering the listing asks for.
 func TestActiveOnlyPaginationUsesAnIndex(t *testing.T) {
 	t.Parallel()
 
-	f := newObsFixture(t, "activeplan")
+	const (
+		pageSize = 50
+		history  = 4000
+	)
 
-	const pageSize = 50
-
-	// Realistic proportions: a few hundred sessions of history, a handful of
-	// them still running.
-	for i := range 400 {
-		conn := f.session(t, f.dbA.UID, nil)
-
-		if i%100 != 0 {
-			if err := f.store.CloseConnection(f.ctx, conn.UID); err != nil {
-				t.Fatalf("CloseConnection() error = %v", err)
-			}
-		}
-	}
-
-	if _, err := f.store.db.ExecContext(f.ctx, "ANALYZE"); err != nil {
-		t.Fatalf("ANALYZE: %v", err)
-	}
-
-	cursor := uuid.Must(uuid.NewV7())
-
-	shapes := []struct {
-		name   string
-		filter ConnectionFilter
+	arrangements := []struct {
+		name string
+		// live reports whether session i of the history is still open. Both
+		// spread the live sessions evenly through the history rather than
+		// clustering them at one end: the planner has no cross-column stats to
+		// see such a cluster with, so clustering would only make the fixture
+		// unlike the deployment it stands for.
+		live func(i int) bool
 	}{
-		{
-			name:   "active only",
-			filter: ConnectionFilter{ActiveOnly: true, BeforeUID: &cursor, Limit: pageSize},
-		},
-		{
-			name: "active only + user",
-			filter: ConnectionFilter{
-				ActiveOnly: true, UserID: &f.user.UID,
-				BeforeUID: &cursor, Limit: pageSize,
-			},
-		},
+		{name: "a handful live", live: func(i int) bool { return i%1000 == 0 }}, // 4 of 4000
+		{name: "hundreds live", live: func(i int) bool { return i%13 == 0 }},    // ~308 of 4000
 	}
 
-	for _, shape := range shapes {
-		var conns []Connection
+	for _, arrangement := range arrangements {
+		t.Run(arrangement.name, func(t *testing.T) {
+			t.Parallel()
 
-		q, err := f.store.buildListConnectionsQuery(f.ctx, &conns, shape.filter)
-		if err != nil {
-			t.Fatalf("buildListConnectionsQuery(%s) error = %v", shape.name, err)
-		}
+			f := newObsFixture(t, "activeplan_"+uuid.NewString()[:8])
 
-		assertPaginationNeverSortsTheTable(t,
-			"connections / "+shape.name, explainPlan(t, f.store, q.String()), "connections", pageSize,
-			"idx_connections_instance_id_open")
+			f.bulkSessions(t, history, arrangement.live)
+
+			if _, err := f.store.db.ExecContext(f.ctx, "ANALYZE"); err != nil {
+				t.Fatalf("ANALYZE: %v", err)
+			}
+
+			cursor := uuid.Must(uuid.NewV7())
+
+			shapes := []struct {
+				name   string
+				filter ConnectionFilter
+			}{
+				{
+					name:   "active only",
+					filter: ConnectionFilter{ActiveOnly: true, BeforeUID: &cursor, Limit: pageSize},
+				},
+				{
+					name: "active only + user",
+					filter: ConnectionFilter{
+						ActiveOnly: true, UserID: &f.user.UID,
+						BeforeUID: &cursor, Limit: pageSize,
+					},
+				},
+			}
+
+			for _, shape := range shapes {
+				var conns []Connection
+
+				q, err := f.store.buildListConnectionsQuery(f.ctx, &conns, shape.filter)
+				if err != nil {
+					t.Fatalf("buildListConnectionsQuery(%s) error = %v", shape.name, err)
+				}
+
+				label := "connections / " + arrangement.name + " / " + shape.name
+				plan := explainPlan(t, f.store, q.String())
+
+				assertPaginationNeverSortsTheTable(t, label, plan, "connections", pageSize)
+				assertOrderedIndexWalk(t, label, plan, "connections")
+			}
+		})
 	}
 }
 

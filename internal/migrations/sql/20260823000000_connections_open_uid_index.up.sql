@@ -1,0 +1,35 @@
+-- connections(uid DESC) WHERE disconnected_at IS NULL: the index behind
+-- `GET /api/v1/connections?active=true`.
+--
+-- Both halves earn their place. The predicate restricts the index to sessions
+-- that are still open, which on any real instance is a tiny fraction of the
+-- table, so scanning all of it reads no more than the filter selects. The
+-- `uid DESC` key supplies the `ORDER BY uid DESC` the listing *always* asks
+-- for, so a page streams out of the index and stops after `limit` rows.
+--
+-- Before this index the filter was served by idx_connections_instance_id_open
+-- (20260803020000), which is partial on the same predicate but keyed on
+-- instance_id: PostgreSQL read every live session out of it and sorted the
+-- result. Bounded by the concurrency of the deployment rather than by the size
+-- of the table, so it looked harmless — and stops being harmless on an
+-- instance with hundreds or thousands of concurrent sessions, where every page
+-- of the filter reads and orders all of them to return fifty rows. Nothing
+-- warned; the page just got slower as adoption grew. Measured by
+-- TestActiveOnlyPaginationUsesAnIndex, which now demands the ordered walk at
+-- both distributions.
+--
+-- 20260803010000's idx_connections_disconnected_at is *not* the index this
+-- replaces: it is partial on `disconnected_at IS NOT NULL` — the retention
+-- sweep's half of the column — and cannot serve `IS NULL` at all.
+--
+-- idx_connections_instance_id_open stays, and is not made redundant by this
+-- one. The crash reconcile (Store.CloseOrphanedConnections) asks "which of
+-- *this instance's* connections are still open" — `WHERE disconnected_at IS
+-- NULL AND instance_id = ? AND run_id IS DISTINCT FROM ?` — and the equality
+-- on instance_id is exactly what that index's key answers. This index carries
+-- no instance_id, so serving the reconcile from it would mean reading every
+-- live session in the store. Two partial indexes over the same rows, ordered
+-- for two different questions.
+CREATE INDEX IF NOT EXISTS idx_connections_open_uid
+    ON connections (uid DESC)
+    WHERE disconnected_at IS NULL;
