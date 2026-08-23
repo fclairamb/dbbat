@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -638,6 +639,16 @@ func explainPlan(t *testing.T, s *Store, sql string) string {
 		t.Fatalf("disable seqscan: %v", err)
 	}
 
+	// The connection goes back to a shared pool, so put the planner setting
+	// back before it does. Harmless today — every test owns its own database —
+	// but a session-level GUC leaking into someone else's query is the kind of
+	// thing that is impossible to debug once it does bite.
+	defer func() {
+		if _, err := conn.ExecContext(ctx, "RESET enable_seqscan"); err != nil {
+			t.Errorf("reset enable_seqscan: %v", err)
+		}
+	}()
+
 	rows, err := conn.QueryContext(ctx, "EXPLAIN "+sql)
 	if err != nil {
 		t.Fatalf("EXPLAIN failed: %v\nSQL: %s", err, sql)
@@ -679,9 +690,75 @@ func sortNodeIndex(lines []string) int {
 	return -1
 }
 
+// leadingSpaces is a plan line's indentation, which is how EXPLAIN's text
+// format encodes tree depth.
+func leadingSpaces(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " "))
+}
+
+// subtreeOf returns the lines belonging to the node at lines[at]: everything
+// after it indented more deeply, stopping at the first line that is not.
+//
+// This is the whole reason the checks below are not simple substring searches.
+// EXPLAIN prints depth-first, so "appears after the Sort line" and "is an input
+// to the Sort" are different claims — an InitPlan, a SubPlan or an entirely
+// separate sibling subtree all print after it too.
+func subtreeOf(lines []string, at int) []string {
+	indent := leadingSpaces(lines[at])
+
+	for i := at + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+
+		if leadingSpaces(lines[i]) <= indent {
+			return lines[at+1 : i]
+		}
+	}
+
+	return lines[at+1:]
+}
+
+// rowEstimate reads the `rows=N` the planner put on a node line, or -1.
+func rowEstimate(line string) int {
+	at := strings.Index(line, "rows=")
+	if at < 0 {
+		return -1
+	}
+
+	rest := line[at+len("rows="):]
+
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+
+	if end == 0 {
+		return -1
+	}
+
+	n, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return -1
+	}
+
+	return n
+}
+
+// nodeAccessing returns the index of the plan node that reads `table`, or -1.
+func nodeAccessing(lines []string, table string) int {
+	for i, line := range lines {
+		if strings.Contains(line, " on "+table+" ") {
+			return i
+		}
+	}
+
+	return -1
+}
+
 // assertPaginationNeverSortsTheTable is the invariant every filtered page must
 // satisfy, whatever shape its filters take: the LIMIT is never paid for by
-// sorting an unrestricted scan.
+// sorting a large, unrestricted row set.
 //
 // Exactly two plan shapes satisfy it, and both are correct:
 //
@@ -690,17 +767,30 @@ func sortNodeIndex(lines []string) int {
 //     sorting the table" describes, and it is what every ordinary filter shape
 //     gets (see the table in TestFilteredPaginationUsesAnIndex).
 //
-//  2. **A Sort whose input an index has already restricted** — some access path
-//     below it carries an `Index Cond:` or `Recheck Cond:`. This is what a
-//     filter combination the planner estimates will match a handful of rows
-//     gets, and it is the *better* plan for that case: when only one or two
-//     rows can match, fetching them and ordering them beats walking the uid
-//     index until a match happens to turn up. Forbidding it would be demanding
-//     a worse plan.
+//  2. **A small Sort over an index-restricted read of the paginated table.**
+//     This is what a filter combination the planner estimates will match a
+//     handful of rows gets, and it is the *better* plan for that case: when
+//     only one or two rows can match, fetching them and ordering them beats
+//     walking the uid index until a match happens to turn up. Forbidding it
+//     would be demanding a worse plan.
 //
-// What neither shape allows — and what this therefore catches — is a Sort over
-// a scan nothing restricted, i.e. ordering the whole table to serve one page.
-func assertPaginationNeverSortsTheTable(t *testing.T, label, plan string) {
+// Shape 2 is pinned by two independent teeth, because either alone is too
+// weak:
+//
+//   - **The restriction must be on `table` itself, inside the Sort's own
+//     subtree.** Scanning the whole plan text for any `Index Cond:` is close to
+//     a rubber stamp here: the provenance filter is a correlated EXISTS over
+//     grant_requests that prints its own `Index Cond: (resulting_grant_id = …)`,
+//     so a plan that sequentially scanned connections and sorted all of it
+//     would still have found one. What has to be true is that the read of the
+//     paginated table is itself index-restricted.
+//
+//   - **The Sort's own row estimate must be bounded.** "Index-restricted" with
+//     no cardinality bound still permits "sort all ten million sessions of one
+//     user to serve a fifty-row page", which is exactly the failure the spec
+//     asks to prevent. maxRows is normally the page size: if the planner is
+//     going to sort at all, it must be sorting no more than a page's worth.
+func assertPaginationNeverSortsTheTable(t *testing.T, label, plan, table string, maxRows int) {
 	t.Helper()
 
 	lines := strings.Split(strings.TrimRight(plan, "\n"), "\n")
@@ -710,14 +800,44 @@ func assertPaginationNeverSortsTheTable(t *testing.T, label, plan string) {
 		return // shape 1: the index supplied the order.
 	}
 
-	for _, line := range lines[sortAt+1:] {
+	subtree := subtreeOf(lines, sortAt)
+
+	accessAt := nodeAccessing(subtree, table)
+	if accessAt < 0 {
+		t.Errorf("%s sorts, but no read of %s appears beneath the Sort, so the sorted row "+
+			"set cannot be shown to be restricted:\n%s", label, table, plan)
+
+		return
+	}
+
+	access := subtree[accessAt]
+	if strings.Contains(access, "Seq Scan on "+table+" ") {
+		t.Errorf("%s sorts a sequential scan of %s — the whole table is being ordered to "+
+			"serve one page:\n%s", label, table, plan)
+
+		return
+	}
+
+	restricted := false
+
+	for _, line := range subtreeOf(subtree, accessAt) {
 		if strings.Contains(line, "Index Cond:") || strings.Contains(line, "Recheck Cond:") {
-			return // shape 2: the sorted row set is index-restricted.
+			restricted = true
+
+			break
 		}
 	}
 
-	t.Errorf("%s sorts a row set no index restricted — the whole table is being "+
-		"ordered to serve one page:\n%s", label, plan)
+	if !restricted {
+		t.Errorf("%s sorts a read of %s that no index restricted (%s):\n%s",
+			label, table, strings.TrimSpace(access), plan)
+	}
+
+	if rows := rowEstimate(lines[sortAt]); rows < 0 || rows > maxRows {
+		t.Errorf("%s sorts an estimated %d rows of %s, want at most %d — a sort is only "+
+			"acceptable here when it is bounded by roughly a page:\n%s",
+			label, rows, table, maxRows, plan)
+	}
 }
 
 // assertOrderedIndexWalk is the stronger property: no Sort whatsoever, and the
@@ -726,9 +846,11 @@ func assertPaginationNeverSortsTheTable(t *testing.T, label, plan string) {
 // The index is deliberately not pinned by name — the widest /queries shape is
 // answered from queries_pending_approval_idx rather than queries_pkey, and
 // either is fine: what matters is that *some* index on that table returns the
-// rows in uid DESC order so the LIMIT can stop early. Pinning the table,
-// though, is essential: a backwards walk of the *joined* table would satisfy a
-// name-blind check while the paginated one still got sorted.
+// rows in uid DESC order so the LIMIT can stop early. "Scan Backward using"
+// rather than "Index Scan Backward using" for the same reason: an Index *Only*
+// Scan Backward is equally good and must not read as a failure. Pinning the
+// table, though, is essential: a backwards walk of the *joined* table would
+// satisfy a name-blind check while the paginated one still got sorted.
 func assertOrderedIndexWalk(t *testing.T, label, plan, table string) {
 	t.Helper()
 
@@ -741,7 +863,7 @@ func assertOrderedIndexWalk(t *testing.T, label, plan, table string) {
 	}
 
 	for _, line := range lines {
-		if strings.Contains(line, "Index Scan Backward using ") &&
+		if strings.Contains(line, "Scan Backward using ") &&
 			strings.Contains(line, " on "+table+" ") {
 			return
 		}
@@ -794,6 +916,10 @@ func TestFilteredPaginationUsesAnIndex(t *testing.T) {
 
 	cursor := uuid.Must(uuid.NewV7())
 	pending := ApprovalPending
+
+	// The page size every shape below asks for, and the bound a Sort must stay
+	// under: sorting more than a page's worth to serve a page is the failure.
+	const pageSize = 50
 
 	connectionShapes := []struct {
 		name string
@@ -865,7 +991,7 @@ func TestFilteredPaginationUsesAnIndex(t *testing.T) {
 		label := "connections / " + shape.name
 		plan := explainPlan(t, f.store, q.String())
 
-		assertPaginationNeverSortsTheTable(t, label, plan)
+		assertPaginationNeverSortsTheTable(t, label, plan, "connections", pageSize)
 
 		if shape.streams {
 			assertOrderedIndexWalk(t, label, plan, "connections")
@@ -923,7 +1049,7 @@ func TestFilteredPaginationUsesAnIndex(t *testing.T) {
 		label := "queries / " + shape.name
 		plan := explainPlan(t, f.store, q.String())
 
-		assertPaginationNeverSortsTheTable(t, label, plan)
+		assertPaginationNeverSortsTheTable(t, label, plan, "queries", pageSize)
 		assertOrderedIndexWalk(t, label, plan, "queries")
 	}
 }
@@ -955,13 +1081,98 @@ func TestGrantInstanceIndexServesTheOrdering(t *testing.T) {
 		t.Fatalf("read index definition: %v", err)
 	}
 
-	if !strings.Contains(indexDef, "grant_uid, uid DESC") {
-		t.Errorf("idx_connections_grant_uid = %q; want a (grant_uid, uid DESC) composite so the "+
+	// Either direction on the trailing column serves `ORDER BY uid DESC` — a
+	// plain (grant_uid, uid) is walked backwards just as happily — so both are
+	// accepted. What is *not* accepted is the single-column index this replaced,
+	// which can only answer the equality and leaves the ordering to a sort. That
+	// is the revert this guards against, and the EXPLAIN test above would not
+	// catch it: all 400 fixture sessions share one grant_uid, so even a
+	// single-column index lets the "grant instance" shape stream from
+	// connections_pkey with no Sort at all.
+	if !strings.Contains(indexDef, "(grant_uid, uid DESC)") &&
+		!strings.Contains(indexDef, "(grant_uid, uid)") {
+		t.Errorf("idx_connections_grant_uid = %q; want a (grant_uid, uid) composite so the "+
 			"deep-linked per-grant page streams instead of sorting that grant's whole history", indexDef)
 	}
 
 	if !strings.Contains(indexDef, "WHERE (grant_uid IS NOT NULL)") {
 		t.Errorf("idx_connections_grant_uid = %q; want it partial on grant_uid IS NOT NULL — "+
 			"sessions with no grant match no grant filter and do not belong in it", indexDef)
+	}
+}
+
+// TestPlanSubtreeScoping pins the hole that made the earlier version of
+// assertPaginationNeverSortsTheTable a rubber stamp.
+//
+// EXPLAIN prints depth-first, so "later in the text" is not "beneath this
+// node". The plan below is the false pass in its purest form: connections is
+// sequentially scanned and the whole 400-row table is sorted to serve a 50-row
+// page — an unambiguous regression — while a SubPlan that is a *sibling* of
+// the Sort carries an `Index Cond:` further down the text. A check that
+// scanned every line after the Sort found that Index Cond and passed.
+//
+// This runs against synthetic text on purpose: it needs no container, and it
+// keeps working when a future PostgreSQL reshuffles the plan the real query
+// gets.
+func TestPlanSubtreeScoping(t *testing.T) {
+	t.Parallel()
+
+	plan := strings.Join([]string{
+		"Limit  (cost=100.00..100.01 rows=50 width=135)",
+		"  ->  Sort  (cost=99.00..99.50 rows=400 width=135)",
+		"        Sort Key: c.uid DESC",
+		"        ->  Seq Scan on connections c  (cost=0.00..80.00 rows=400 width=110)",
+		"              Filter: (user_id = 'x'::uuid)",
+		"  SubPlan 1",
+		"    ->  Index Only Scan using idx_grant_requests_resulting_grant on grant_requests fgr  (cost=0.12..8.14 rows=1 width=16)",
+		"          Index Cond: (resulting_grant_id = c.grant_uid)",
+	}, "\n")
+
+	lines := strings.Split(plan, "\n")
+
+	sortAt := sortNodeIndex(lines)
+	if sortAt != 1 {
+		t.Fatalf("sortNodeIndex = %d, want 1", sortAt)
+	}
+
+	subtree := subtreeOf(lines, sortAt)
+
+	// The sibling SubPlan, and the Index Cond that made this plan look
+	// restricted, must be outside the Sort's subtree.
+	for _, line := range subtree {
+		if strings.Contains(line, "Index Cond:") {
+			t.Errorf("the Sort's subtree wrongly includes a sibling SubPlan's Index Cond: %q", line)
+		}
+
+		if strings.Contains(line, "SubPlan") {
+			t.Errorf("the Sort's subtree wrongly includes a sibling SubPlan: %q", line)
+		}
+	}
+
+	// The read of the paginated table inside that subtree is the Seq Scan,
+	// which is what makes this plan a regression.
+	accessAt := nodeAccessing(subtree, "connections")
+	if accessAt < 0 {
+		t.Fatalf("nodeAccessing(connections) found nothing in:\n%s", strings.Join(subtree, "\n"))
+	}
+
+	if !strings.Contains(subtree[accessAt], "Seq Scan on connections c") {
+		t.Errorf("nodeAccessing picked %q, want the Seq Scan on connections", subtree[accessAt])
+	}
+
+	// And nothing restricts it.
+	for _, line := range subtreeOf(subtree, accessAt) {
+		if strings.Contains(line, "Index Cond:") || strings.Contains(line, "Recheck Cond:") {
+			t.Errorf("the Seq Scan's subtree wrongly looks index-restricted: %q", line)
+		}
+	}
+
+	// The cardinality tooth reads the Sort's own estimate, not the Limit's.
+	if got := rowEstimate(lines[sortAt]); got != 400 {
+		t.Errorf("rowEstimate(sort line) = %d, want 400", got)
+	}
+
+	if got := rowEstimate("  ->  Foo  (cost=1.00..2.00 width=8)"); got != -1 {
+		t.Errorf("rowEstimate(no rows=) = %d, want -1", got)
 	}
 }
