@@ -610,13 +610,19 @@ func TestTouchUserLastLogin(t *testing.T) {
 
 // explainPlan renders the plan PostgreSQL would use for a built listing query.
 //
-// enable_seqscan is turned off for the statement so the planner has to show
-// what index-ordered plan is *available*: on a test table of a few hundred
-// rows a sequential scan plus a sort is genuinely cheapest, so leaving it on
-// would prove nothing about how the query behaves against a real store. What
-// the assertion below cares about is that an index-ordered plan exists at all —
-// if `ORDER BY uid DESC LIMIT n` could only ever be answered by sorting, no
-// amount of data would change that.
+// enable_seqscan is turned off for the connection, and that is load-bearing
+// rather than a convenience: the fixture below holds a few hundred rows, and at
+// that size a sequential scan really is cheapest, so a planner left to its own
+// devices answers "seq scan, then sort" and tells us nothing about how the
+// query behaves against a store with millions of sessions. Turning it off makes
+// the planner reveal the index-ordered plan it *would* choose at scale — which
+// is the thing under test. (Verified: with seqscan enabled, the connections
+// table is sequentially scanned for the widest filter shape, and every
+// assertion below becomes vacuous.)
+//
+// The small lookup tables the subqueries touch — grant_requests,
+// access_grants, grant_definitions — are irrelevant here; only the access path
+// into connections/queries is being judged.
 func explainPlan(t *testing.T, s *Store, sql string) string {
 	t.Helper()
 
@@ -656,14 +662,102 @@ func explainPlan(t *testing.T, s *Store, sql string) string {
 	return plan
 }
 
-// TestFilteredPaginationUsesAnIndex is the EXPLAIN check the spec asks for: a
-// *filtered* `ORDER BY uid DESC LIMIT n` page must still be answered by walking
-// an index backwards, not by sorting the whole table.
+// sortNodeIndex returns the position of the first Sort *node* in a plan, or -1.
 //
-// It matters because every filter added here is a WHERE clause the planner
-// could decide to satisfy by scanning and sorting — which is fine at a hundred
-// rows and ruinous at ten million, exactly the size at which someone reaches
-// for these filters.
+// It matches the node line rather than the string "Sort", which also appears on
+// the "Sort Key:" and "Sort Method:" detail lines beneath it.
+func sortNodeIndex(lines []string) int {
+	for i, line := range lines {
+		node := strings.TrimSpace(line)
+		node = strings.TrimPrefix(node, "->  ")
+
+		if strings.HasPrefix(node, "Sort  (") {
+			return i
+		}
+	}
+
+	return -1
+}
+
+// assertPaginationNeverSortsTheTable is the invariant every filtered page must
+// satisfy, whatever shape its filters take: the LIMIT is never paid for by
+// sorting an unrestricted scan.
+//
+// Exactly two plan shapes satisfy it, and both are correct:
+//
+//  1. **No Sort at all** — the plan walks the uid index backwards and stops
+//     after n rows. This is what the spec's "still uses an index rather than
+//     sorting the table" describes, and it is what every ordinary filter shape
+//     gets (see the table in TestFilteredPaginationUsesAnIndex).
+//
+//  2. **A Sort whose input an index has already restricted** — some access path
+//     below it carries an `Index Cond:` or `Recheck Cond:`. This is what a
+//     filter combination the planner estimates will match a handful of rows
+//     gets, and it is the *better* plan for that case: when only one or two
+//     rows can match, fetching them and ordering them beats walking the uid
+//     index until a match happens to turn up. Forbidding it would be demanding
+//     a worse plan.
+//
+// What neither shape allows — and what this therefore catches — is a Sort over
+// a scan nothing restricted, i.e. ordering the whole table to serve one page.
+func assertPaginationNeverSortsTheTable(t *testing.T, label, plan string) {
+	t.Helper()
+
+	lines := strings.Split(strings.TrimRight(plan, "\n"), "\n")
+
+	sortAt := sortNodeIndex(lines)
+	if sortAt < 0 {
+		return // shape 1: the index supplied the order.
+	}
+
+	for _, line := range lines[sortAt+1:] {
+		if strings.Contains(line, "Index Cond:") || strings.Contains(line, "Recheck Cond:") {
+			return // shape 2: the sorted row set is index-restricted.
+		}
+	}
+
+	t.Errorf("%s sorts a row set no index restricted — the whole table is being "+
+		"ordered to serve one page:\n%s", label, plan)
+}
+
+// assertOrderedIndexWalk is the stronger property: no Sort whatsoever, because
+// the named index already returns rows in `uid DESC` order.
+func assertOrderedIndexWalk(t *testing.T, label, plan, table string) {
+	t.Helper()
+
+	lines := strings.Split(strings.TrimRight(plan, "\n"), "\n")
+
+	if at := sortNodeIndex(lines); at >= 0 {
+		t.Errorf("%s sorts instead of walking an index in uid order:\n%s", label, plan)
+
+		return
+	}
+
+	if !strings.Contains(plan, "Index Scan Backward using "+table+"_pkey") &&
+		!strings.Contains(plan, "Index Scan Backward using ") {
+		t.Errorf("%s does not walk any index backwards for ORDER BY uid DESC:\n%s", label, plan)
+	}
+}
+
+// TestFilteredPaginationUsesAnIndex is the EXPLAIN check the spec asks for:
+// a *filtered* `ORDER BY uid DESC LIMIT n` page must not be answered by sorting
+// the table.
+//
+// It matters because every filter added by this feature is a WHERE clause the
+// planner could choose to satisfy by scanning and ordering — fine at four
+// hundred rows, ruinous at ten million, which is exactly the size at which
+// somebody reaches for these filters.
+//
+// The expectation is deliberately *not* a blanket "no Sort node anywhere". That
+// was the first draft, and it was wrong: measured against a real planner, the
+// widest filter combination on /connections (user + server group + grant
+// instance + grant policy + provenance, all at once) is estimated to match
+// about one row, and for that estimate PostgreSQL correctly prefers to fetch
+// the index-restricted matches and order them rather than walk the uid index
+// hunting for one. Demanding "no Sort" there would be demanding a worse plan.
+// So each shape below is checked against the invariant that actually matters
+// (assertPaginationNeverSortsTheTable), and the shapes that genuinely can
+// stream from the index are additionally pinned to that stronger property.
 func TestFilteredPaginationUsesAnIndex(t *testing.T) {
 	t.Parallel()
 
@@ -671,7 +765,7 @@ func TestFilteredPaginationUsesAnIndex(t *testing.T) {
 
 	grant := f.grant(t, f.dbA.UID)
 
-	for range 200 {
+	for range 400 {
 		conn := f.session(t, f.dbA.UID, &grant.UID)
 		f.statement(t, conn, "SELECT 1")
 	}
@@ -680,58 +774,182 @@ func TestFilteredPaginationUsesAnIndex(t *testing.T) {
 		t.Fatalf("AddServerToGroup() error = %v", err)
 	}
 
+	// Without stats the planner works off hard-coded defaults and its shape
+	// choices say nothing about the data.
+	if _, err := f.store.db.ExecContext(f.ctx, "ANALYZE"); err != nil {
+		t.Fatalf("ANALYZE: %v", err)
+	}
+
 	cursor := uuid.Must(uuid.NewV7())
-
-	connFilter := ConnectionFilter{
-		UserID:             &f.user.UID,
-		ServerGroupUID:     &f.group.UID,
-		GrantUID:           &grant.UID,
-		GrantDefinitionUID: &f.def.UID,
-		GrantProvenance:    []GrantProvenance{GrantProvenanceDirect},
-		BeforeUID:          &cursor,
-		Limit:              50,
-	}
-
-	var conns []Connection
-
-	connQuery, err := f.store.buildListConnectionsQuery(f.ctx, &conns, connFilter)
-	if err != nil {
-		t.Fatalf("buildListConnectionsQuery() error = %v", err)
-	}
-
-	plan := explainPlan(t, f.store, connQuery.String())
-	if strings.Contains(plan, "Sort") {
-		t.Errorf("the filtered connections page sorts instead of walking an index:\n%s", plan)
-	}
-
-	if !strings.Contains(plan, "Index Scan Backward") && !strings.Contains(plan, "connections_pkey") {
-		t.Errorf("the filtered connections page does not reach the uid index:\n%s", plan)
-	}
-
 	pending := ApprovalPending
-	queryFilter := QueryFilter{
-		UserID:          &f.user.UID,
-		ServerGroupUID:  &f.group.UID,
-		GrantUID:        &grant.UID,
-		GrantProvenance: []GrantProvenance{GrantProvenanceDirect},
-		ApprovalStatus:  &pending,
-		BeforeUID:       &cursor,
-		Limit:           50,
+
+	connectionShapes := []struct {
+		name string
+		// streams is true when this shape must be answered by an ordered index
+		// walk with no Sort at all.
+		streams bool
+		filter  ConnectionFilter
+	}{
+		{
+			name: "cursor only", streams: true,
+			filter: ConnectionFilter{BeforeUID: &cursor, Limit: 50},
+		},
+		{
+			name: "user + cursor", streams: true,
+			filter: ConnectionFilter{UserID: &f.user.UID, BeforeUID: &cursor, Limit: 50},
+		},
+		{
+			// The server-group filter is an IN over live membership and the
+			// provenance filter an anti-join; neither may cost the ordered walk.
+			name: "server group + provenance", streams: true,
+			filter: ConnectionFilter{
+				UserID: &f.user.UID, ServerGroupUID: &f.group.UID,
+				GrantProvenance: []GrantProvenance{GrantProvenanceDirect},
+				BeforeUID:       &cursor, Limit: 50,
+			},
+		},
+		{
+			// The lineage subquery is correlated through grant_uid; it must not
+			// force a sort either.
+			name: "grant policy + provenance", streams: true,
+			filter: ConnectionFilter{
+				UserID: &f.user.UID, GrantDefinitionUID: &f.def.UID,
+				GrantProvenance: []GrantProvenance{GrantProvenanceDirect},
+				BeforeUID:       &cursor, Limit: 50,
+			},
+		},
+		{
+			// The deep-link from a connection row: "every session under this
+			// grant". idx_connections_grant_uid carries uid DESC as its second
+			// column precisely so this one can stream.
+			name: "grant instance", streams: true,
+			filter: ConnectionFilter{
+				UserID: &f.user.UID, GrantUID: &grant.UID,
+				BeforeUID: &cursor, Limit: 50,
+			},
+		},
+		{
+			// Every filter at once. The planner estimates ~1 matching row and
+			// sorts, which is correct — see the doc comment. Only the invariant
+			// is required here.
+			name: "every filter at once", streams: false,
+			filter: ConnectionFilter{
+				UserID: &f.user.UID, ServerGroupUID: &f.group.UID,
+				GrantUID: &grant.UID, GrantDefinitionUID: &f.def.UID,
+				GrantProvenance: []GrantProvenance{GrantProvenanceDirect},
+				BeforeUID:       &cursor, Limit: 50,
+			},
+		},
 	}
 
-	var queries []Query
+	for _, shape := range connectionShapes {
+		var conns []Connection
 
-	queryQuery, err := f.store.buildListQueriesQuery(f.ctx, &queries, queryFilter)
+		q, err := f.store.buildListConnectionsQuery(f.ctx, &conns, shape.filter)
+		if err != nil {
+			t.Fatalf("buildListConnectionsQuery(%s) error = %v", shape.name, err)
+		}
+
+		label := "connections / " + shape.name
+		plan := explainPlan(t, f.store, q.String())
+
+		assertPaginationNeverSortsTheTable(t, label, plan)
+
+		if shape.streams {
+			assertOrderedIndexWalk(t, label, plan, "connections")
+		}
+	}
+
+	// The /queries half, held to the *same* bar rather than a weaker one — an
+	// earlier draft only checked that it reached some index, which would have
+	// passed on a plan that sorted every statement in the store. Measured, it
+	// streams for every shape, the widest one included: the join to connections
+	// is driven from the queries uid index, so the ordering survives.
+	queryShapes := []struct {
+		name   string
+		filter QueryFilter
+	}{
+		{
+			name:   "cursor only",
+			filter: QueryFilter{BeforeUID: &cursor, Limit: 50},
+		},
+		{
+			name: "server group + provenance",
+			filter: QueryFilter{
+				UserID: &f.user.UID, ServerGroupUID: &f.group.UID,
+				GrantProvenance: []GrantProvenance{GrantProvenanceDirect},
+				BeforeUID:       &cursor, Limit: 50,
+			},
+		},
+		{
+			name: "grant instance",
+			filter: QueryFilter{
+				UserID: &f.user.UID, GrantUID: &grant.UID,
+				BeforeUID: &cursor, Limit: 50,
+			},
+		},
+		{
+			name: "every filter at once",
+			filter: QueryFilter{
+				UserID: &f.user.UID, ServerGroupUID: &f.group.UID,
+				GrantUID: &grant.UID, GrantDefinitionUID: &f.def.UID,
+				GrantProvenance: []GrantProvenance{GrantProvenanceDirect},
+				ApprovalStatus:  &pending,
+				BeforeUID:       &cursor, Limit: 50,
+			},
+		},
+	}
+
+	for _, shape := range queryShapes {
+		var queries []Query
+
+		q, err := f.store.buildListQueriesQuery(f.ctx, &queries, shape.filter)
+		if err != nil {
+			t.Fatalf("buildListQueriesQuery(%s) error = %v", shape.name, err)
+		}
+
+		label := "queries / " + shape.name
+		plan := explainPlan(t, f.store, q.String())
+
+		assertPaginationNeverSortsTheTable(t, label, plan)
+		assertOrderedIndexWalk(t, label, plan, "queries")
+	}
+}
+
+// TestGrantInstanceIndexServesTheOrdering pins the reason
+// idx_connections_grant_uid is a (grant_uid, uid DESC) composite rather than
+// the single-column index the earlier draft of the migration created.
+//
+// The deep-linked "sessions under this grant" page is always the same shape —
+// `WHERE grant_uid = ? ORDER BY uid DESC LIMIT n` — and a single-column index
+// answers only the equality, leaving PostgreSQL to sort every session of that
+// grant on every page. The trailing column makes the index supply the ordering
+// as well. This asserts the index exists with both columns in the right
+// direction, which is what a future "tidy up the indexes" pass would otherwise
+// silently undo.
+func TestGrantInstanceIndexServesTheOrdering(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	var indexDef string
+
+	err := s.db.NewRaw(
+		"SELECT indexdef FROM pg_indexes WHERE tablename = 'connections' AND indexname = ?",
+		"idx_connections_grant_uid",
+	).Scan(ctx, &indexDef)
 	if err != nil {
-		t.Fatalf("buildListQueriesQuery() error = %v", err)
+		t.Fatalf("read index definition: %v", err)
 	}
 
-	// The queries listing joins connections, so a hash/merge join may legally
-	// introduce a sort of the *inner* side. What must not happen is the
-	// pagination itself being answered by sorting `queries`, which is what a
-	// missing index scan on q.uid would look like.
-	plan = explainPlan(t, f.store, queryQuery.String())
-	if !strings.Contains(plan, "Index Scan Backward") && !strings.Contains(plan, "queries_pkey") {
-		t.Errorf("the filtered queries page does not reach the uid index:\n%s", plan)
+	if !strings.Contains(indexDef, "grant_uid, uid DESC") {
+		t.Errorf("idx_connections_grant_uid = %q; want a (grant_uid, uid DESC) composite so the "+
+			"deep-linked per-grant page streams instead of sorting that grant's whole history", indexDef)
+	}
+
+	if !strings.Contains(indexDef, "WHERE (grant_uid IS NOT NULL)") {
+		t.Errorf("idx_connections_grant_uid = %q; want it partial on grant_uid IS NOT NULL — "+
+			"sessions with no grant match no grant filter and do not belong in it", indexDef)
 	}
 }

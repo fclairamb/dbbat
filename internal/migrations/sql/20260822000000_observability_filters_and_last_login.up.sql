@@ -15,13 +15,25 @@ CREATE INDEX IF NOT EXISTS idx_grant_requests_resulting_grant
 
 --bun:split
 
--- connections(grant_uid): 20260806010000 deliberately shipped the column
--- without an index because nothing filtered on it. The grant_uid /
--- grant_definition_uid filters do, so it is needed now. Partial for the same
--- reason as above — every session predating the stamp, and every session that
--- ran without a grant, is NULL and matches no grant filter.
+-- connections(grant_uid, uid DESC): 20260806010000 deliberately shipped the
+-- column without an index because nothing filtered on it. The grant_uid /
+-- grant_definition_uid filters do, so it is needed now.
+--
+-- Composite rather than a bare (grant_uid) index, and uid DESC rather than the
+-- default ASC, because the query this exists for is *always* the same shape:
+-- the connection detail page's "sessions under this grant" deep-link, which is
+-- `WHERE grant_uid = ? ORDER BY uid DESC LIMIT n`. A single-column index
+-- answers the equality and then leaves PostgreSQL to sort every one of that
+-- grant's sessions to satisfy the ORDER BY — bounded by one grant rather than
+-- by the table, so never catastrophic, but paid on every page of a long-lived
+-- grant's history. The trailing uid DESC makes the index supply the ordering
+-- too, so the page streams the first n rows and stops. It costs no extra index
+-- and no extra write amplification worth the name.
+--
+-- Partial for the same reason as above: every session predating the stamp, and
+-- every session that ran without a grant, is NULL and matches no grant filter.
 CREATE INDEX IF NOT EXISTS idx_connections_grant_uid
-    ON connections (grant_uid)
+    ON connections (grant_uid, uid DESC)
     WHERE grant_uid IS NOT NULL;
 
 --bun:split
