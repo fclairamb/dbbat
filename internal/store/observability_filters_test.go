@@ -720,8 +720,15 @@ func assertPaginationNeverSortsTheTable(t *testing.T, label, plan string) {
 		"ordered to serve one page:\n%s", label, plan)
 }
 
-// assertOrderedIndexWalk is the stronger property: no Sort whatsoever, because
-// the named index already returns rows in `uid DESC` order.
+// assertOrderedIndexWalk is the stronger property: no Sort whatsoever, and the
+// backwards walk happens on the table being paginated.
+//
+// The index is deliberately not pinned by name — the widest /queries shape is
+// answered from queries_pending_approval_idx rather than queries_pkey, and
+// either is fine: what matters is that *some* index on that table returns the
+// rows in uid DESC order so the LIMIT can stop early. Pinning the table,
+// though, is essential: a backwards walk of the *joined* table would satisfy a
+// name-blind check while the paginated one still got sorted.
 func assertOrderedIndexWalk(t *testing.T, label, plan, table string) {
 	t.Helper()
 
@@ -733,10 +740,15 @@ func assertOrderedIndexWalk(t *testing.T, label, plan, table string) {
 		return
 	}
 
-	if !strings.Contains(plan, "Index Scan Backward using "+table+"_pkey") &&
-		!strings.Contains(plan, "Index Scan Backward using ") {
-		t.Errorf("%s does not walk any index backwards for ORDER BY uid DESC:\n%s", label, plan)
+	for _, line := range lines {
+		if strings.Contains(line, "Index Scan Backward using ") &&
+			strings.Contains(line, " on "+table+" ") {
+			return
+		}
 	}
+
+	t.Errorf("%s never walks an index on %s backwards, so ORDER BY uid DESC is not "+
+		"served by the index:\n%s", label, table, plan)
 }
 
 // TestFilteredPaginationUsesAnIndex is the EXPLAIN check the spec asks for:
