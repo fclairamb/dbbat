@@ -20,8 +20,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { UpstreamTlsIndicator } from "@/components/shared/UpstreamTlsIndicator";
 import { GrantAccessChip } from "@/components/shared/GrantAccessChip";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { formatBytes } from "@/lib/utils";
@@ -33,7 +31,6 @@ const PAGE_SIZE_OPTIONS = [25, 50, 100];
 type ConnectionSearch = ObservabilityFilters & {
   before?: string;
   size: number;
-  active?: true;
 };
 
 const asString = (value: unknown) =>
@@ -65,6 +62,7 @@ function ConnectionsPage() {
   const { data: connections, isLoading, refetch } = useConnections({
     before,
     limit: size,
+    active,
     user_id: search.user_id,
     database_id: search.database_id,
     server_group_uid: search.server_group_uid,
@@ -129,10 +127,6 @@ function ConnectionsPage() {
     grantUid
       ? grants?.find((g) => g.uid === grantUid)?.definition?.controls
       : undefined;
-
-  const filteredConnections = active
-    ? connections?.filter((c) => !c.disconnected_at)
-    : connections;
 
   const columns: Column<Connection>[] = [
     {
@@ -249,22 +243,6 @@ function ConnectionsPage() {
                 storageKey="dbbat.autoRefresh.connections"
               />
             )}
-            <div className="flex items-center gap-2">
-              <Switch
-                id="showActive"
-                checked={!!active}
-                onCheckedChange={(checked) => {
-                  navigate({
-                    search: (prev) => ({
-                      ...prev,
-                      active: checked ? true : undefined,
-                    }),
-                    replace: true,
-                  });
-                }}
-              />
-              <Label htmlFor="showActive">Active only</Label>
-            </div>
           </div>
         }
       />
@@ -276,11 +254,12 @@ function ConnectionsPage() {
         databases={databases}
         serverGroups={serverGroups}
         grantDefinitions={grantDefinitions}
+        showActive
       />
 
       <DataTable
         columns={columns}
-        data={filteredConnections ?? []}
+        data={connections ?? []}
         isLoading={isLoading}
         rowKey={(c) => c.uid}
         emptyMessage="No connections found"

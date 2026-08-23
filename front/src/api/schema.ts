@@ -6345,6 +6345,17 @@ export interface operations {
                  *     value, `direct` included.
                  */
                 grant_provenance?: ("approved" | "auto" | "direct")[];
+                /**
+                 * @description When `true`, return only sessions that are still open
+                 *     (`disconnected_at` is null). Applied in the database, so a page of
+                 *     active sessions is a page of *all* active sessions — not the
+                 *     active ones that happen to fall inside an unfiltered page.
+                 *
+                 *     `false` is the same as omitting it: there is no "closed only"
+                 *     filter. A value that is neither `true` nor `false` is refused with
+                 *     400 rather than silently dropped.
+                 */
+                active?: boolean;
                 /** @description Maximum number of results to return */
                 limit?: components["parameters"]["Limit"];
                 /** @description Number of results to skip for pagination */

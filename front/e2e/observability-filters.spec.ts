@@ -73,6 +73,37 @@ test.describe("Observability filters", () => {
     await expect(page).not.toHaveURL(/[?&]before=/);
   });
 
+  test("connections: the active toggle is a server-side filter and clears the cursor", async ({
+    authenticatedPage: page,
+  }) => {
+    // Same starting point as the test above: a URL that already carries a
+    // cursor. The toggle used to keep it, which is the subtler half of the bug
+    // — a cursor from the unfiltered list means nothing against the filtered
+    // one.
+    await page.goto(
+      "connections?size=50&before=ffffffff-ffff-7fff-bfff-ffffffffffff",
+    );
+    await page.waitForLoadState("networkidle");
+    await expect(page).toHaveURL(/[?&]before=/);
+
+    const toggle = page.getByTestId("filter-active");
+    await expect(toggle).toBeVisible();
+
+    // The request the click produces must carry the filter: this is what
+    // separates a server-side filter from narrowing the fetched page.
+    const filtered = page.waitForRequest(
+      (request) =>
+        request.url().includes("/connections") &&
+        request.url().includes("active=true"),
+    );
+
+    await toggle.click();
+    await filtered;
+
+    await expect(page).toHaveURL(/[?&]active=true/);
+    await expect(page).not.toHaveURL(/[?&]before=/);
+  });
+
   test("queries: the provenance and approval filters round-trip", async ({
     authenticatedPage: page,
   }) => {

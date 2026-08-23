@@ -1,6 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { MultiSelect } from "@/components/shared/MultiSelect";
 import {
   Select,
@@ -41,6 +42,12 @@ export type ObservabilityFilters = {
   grant_provenance?: string;
   /** `/queries` only: the per-statement approval-hold outcome. */
   approval_status?: string;
+  /**
+   * `/connections` only: still-open sessions. `true` or absent — `false` and
+   * "no filter" are the same request, so the off state drops the parameter
+   * rather than spelling it out.
+   */
+  active?: true;
 };
 
 /** Radix Select has no empty value, so "no filter" needs a sentinel. */
@@ -123,6 +130,7 @@ export function ObservabilityFilterBar({
   serverGroups,
   grantDefinitions,
   showApprovalStatus = false,
+  showActive = false,
 }: {
   filters: ObservabilityFilters;
   /** Applies a partial change. The route merges it and resets the cursor. */
@@ -132,12 +140,15 @@ export function ObservabilityFilterBar({
   serverGroups?: NamedOption[];
   grantDefinitions?: NamedOption[];
   showApprovalStatus?: boolean;
+  /** `/connections` only: a statement has no open/closed state. */
+  showActive?: boolean;
 }) {
   const provenance = filters.grant_provenance
     ? filters.grant_provenance.split(",").filter(Boolean)
     : [];
 
   const hasAny =
+    Boolean(filters.active) ||
     Boolean(filters.user_id) ||
     Boolean(filters.database_id) ||
     Boolean(filters.server_group_uid) ||
@@ -148,6 +159,7 @@ export function ObservabilityFilterBar({
 
   const clearAll = () =>
     onChange({
+      active: undefined,
       user_id: undefined,
       database_id: undefined,
       server_group_uid: undefined,
@@ -249,6 +261,32 @@ export function ObservabilityFilterBar({
             testId="filter-grant-provenance"
           />
         </div>
+
+        {/* Lives here rather than beside the page title because it is a
+            server-side filter exactly like the selects next to it — the page
+            used to have two filtering mechanisms that looked unrelated and,
+            worse, behaved differently. The id is kept as `showActive`: it is
+            what the URL-round-trip tests locate. */}
+        {showActive && (
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">
+              Session state
+            </Label>
+            <div className="flex h-9 items-center gap-2">
+              <Switch
+                id="showActive"
+                data-testid="filter-active"
+                checked={Boolean(filters.active)}
+                onCheckedChange={(checked) =>
+                  onChange({ active: checked ? true : undefined })
+                }
+              />
+              <Label htmlFor="showActive" className="text-sm font-normal">
+                Active only
+              </Label>
+            </div>
+          </div>
+        )}
       </div>
 
       {(filters.grant_uid || hasAny) && (

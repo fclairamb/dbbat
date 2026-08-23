@@ -1040,6 +1040,15 @@ export function useConnections(filters?: SessionFilters & {
   before?: string;
   limit?: number;
   offset?: number;
+  /**
+   * Still-open sessions only. Connections-only (a statement has no such
+   * state), and server-side like the rest: `true` selects every live session,
+   * not the live ones that happen to sit in the current page. Pass
+   * `undefined` rather than `false` to leave the parameter off the URL —
+   * they mean the same thing to the API, and an absent parameter keeps the
+   * shareable URL honest about what was asked for.
+   */
+  active?: true;
 }) {
   return useQuery({
     queryKey: ["connections", filters],
