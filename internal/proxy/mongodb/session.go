@@ -466,8 +466,10 @@ func (s *Session) pumpUpstreamToClient() error {
 		}
 
 		s.captureResult(m)
-		s.dumpPacket(dump.DirServerToClient, outRaw)
 
+		// Not recorded here: writeClient is the single server→client recording
+		// point, so the frames dbbat answers with itself land in the capture
+		// too.
 		if err := s.writeClient(outRaw); err != nil {
 			return err
 		}
@@ -476,7 +478,20 @@ func (s *Session) pumpUpstreamToClient() error {
 
 // writeClient writes a framed message to the client, compressing it into an
 // OP_COMPRESSED envelope when the client has enabled compression (item 4).
+//
+// It is also the capture's server→client recording point, and the only one.
+// Recording in pumpUpstreamToClient instead (which is what this used to do)
+// captured only the replies *relayed from the upstream*: every reply dbbat
+// synthesizes itself — the unauthorized reply for a blocked command, a refused
+// legacy opcode, an approval hold's outcome — went straight to the socket, so a
+// capture of a blocked command read as a dropped connection rather than as an
+// enforced control.
+//
+// The frame is recorded uncompressed, before maybeCompress: what the capture is
+// for is reading the command back, not reproducing the OP_COMPRESSED envelope.
 func (s *Session) writeClient(raw []byte) error {
+	s.dumpPacket(dump.DirServerToClient, raw)
+
 	out, err := s.maybeCompress(raw)
 	if err != nil {
 		return err
