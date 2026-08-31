@@ -68,7 +68,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 		ttcPayload := extractTTCPayload(tns.Payload)
 
 		if pkt.Direction == dump.DirClientToServer {
-			if sql := findSQLInPayload(ttcPayload); strings.Contains(sql, sqlMarker) {
+			if sql, _ := findSQLInPayload(ttcPayload); strings.Contains(sql, sqlMarker) {
 				started = true
 			} else if started && sql != "" {
 				done = true // a new statement begins → the result set is over

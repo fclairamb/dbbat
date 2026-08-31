@@ -184,6 +184,92 @@ Direction is recorded twice, redundantly:
 
 Readers prefer `epb_flags` and fall back to the source port.
 
+### What a capture contains
+
+A capture is forensic evidence, so the rule is *every frame the client actually
+exchanged with dbbat* — not only the ones relayed to or from the upstream. Two
+kinds of frame are easy to lose and are explicitly in scope:
+
+- **A statement dbbat blocked.** It never reaches the upstream, so a proxy that
+  records at the forwarding point records nothing at all.
+- **A frame dbbat synthesized.** Every refusal — an Oracle OER, a MongoDB
+  `Unauthorized` reply, a PostgreSQL `ErrorResponse`, a MySQL or TDS error — is
+  written by dbbat, not read from the upstream, so a proxy that records at the
+  relay point records the statement and then silence. That reads as a dropped
+  connection rather than as an enforced control, which is the opposite of what
+  the capture exists to show.
+
+Each proxy therefore has **exactly one recording point per direction**, placed
+where every frame of that direction passes, whatever its origin:
+
+| Proxy | client→server | server→client |
+|-------|---------------|---------------|
+| MySQL/MariaDB | client-socket tap (`dump.TapConn`) | same tap |
+| SQL Server | client-leg TDS codec taps (`packetRW.setTaps`) | same |
+| MongoDB | the read in `pumpClientToUpstream` | `writeClient` |
+| PostgreSQL | tap on `s.clientReader` (`dump.NewTapReader`) | client-socket **write** tap (`dump.NewWriteTapConn`) |
+| Oracle | the reads in `clientToUpstream` + the fragment collector | client-socket **write** tap |
+
+MySQL and SQL Server can tap one object for both directions because every byte
+either way passes through it — the client socket and the client-leg TDS codec
+respectively. The other three are split, each for its own reason.
+
+**PostgreSQL** puts the write side on the socket rather than onto the
+`pgproto3` backend, because the backend is not the only writer: `sendQueryError`
+(every `read_only` / `block_ddl` / `block_copy` / quota refusal) and
+`abortStream` (the mid-stream limit) encode an `ErrorResponse` and write it to
+`s.clientConn` directly. Its read side taps the *buffered reader* instead of the
+socket under it, because that buffer is built before the capture opens and may
+already hold bytes the client pipelined; wrapping the socket would strand them
+and rebuilding the buffer would discard them.
+
+**Oracle** taps the write side for the same reason — `writeTTCError` writes the
+socket directly — and cannot tap the read side at all: its reader reassembles
+TNS packets out of a header read plus a body read, and the fragment collector
+takes a single byte off the stream and hands it back, so a read tap would record
+socket chunk boundaries instead of TNS packets. The write side has no such
+split: one TNS packet is one `Write`.
+
+**MongoDB** frames its own messages either way, so both points sit at the
+message layer.
+
+Tapping the write side of the socket is what makes it impossible for a refusal
+path added later to answer the client without landing in the capture — which is
+how PostgreSQL's `sendQueryError` and Oracle's `writeTTCError` went uncaptured
+for as long as they did.
+
+### Captures are plaintext, above TLS
+
+The client-leg tap sits **above** the TLS layer, so a capture of an encrypted
+session is as legible as one of a plaintext session: what is recorded is
+protocol messages, never TLS records.
+
+That falls out of the ordering. dbbat terminates the client leg during the
+handshake — PostgreSQL in `negotiateSSL` at the top of `Run`, MySQL in
+go-mysql's `SSLRequest` branch (which swaps `c.Conn.Conn` for the `*tls.Conn`),
+MongoDB and SQL Server likewise — and the capture is not opened until the
+connection row exists, which is after authentication. Whatever the tap wraps is
+therefore already the `*tls.Conn`, and the bytes handed to it are the decrypted
+ones. MongoDB and SQL Server do not depend on that ordering at all: their
+recording points are at the message layer, above the socket entirely. Oracle is
+the one protocol dbbat never upgrades, so its client leg is plaintext by
+construction.
+
+The two orderings that *are* load-bearing are pinned by tests rather than by
+this paragraph — `TestStartDumpIfConfigured_RecordsPlaintextAboveTLS`
+(`internal/proxy/mysql`) and `TestAttachDumpTaps_RecordsPlaintextAboveTLS`
+(`internal/proxy/postgresql`), each of which runs a real TLS handshake and
+asserts a marker is legible in the capture and absent from the raw socket. The
+MySQL one matters most: its claim rests on go-mysql installing the `*tls.Conn`
+at `c.Conn.Conn`, which a library upgrade could move silently. The integration
+suite's `TestIntegration_SessionDump` asserts the same thing end to end, against
+a real TLS client, without knowing where the `*tls.Conn` lives.
+
+Only the **post-auth** phase is captured, on every protocol: the file is named
+after the connection UID, and that row does not exist until authentication has
+succeeded. A login dbbat refuses therefore has no capture at all, by
+construction — the refusal is in `audit_log` and in the process log instead.
+
 ### Sequence numbers
 
 Each direction keeps its own TCP sequence number, starting at 1 and advancing by

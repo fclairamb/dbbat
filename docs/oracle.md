@@ -2012,6 +2012,39 @@ packet from the parsed text — so it is not a parser-only change. The durable f
 is the naming rule: server names are slugs
 (`specs/todos/2026-08-13-23-server-names-must-be-slugs.md`).
 
+## What the session capture records
+
+The two directions of an Oracle capture are recorded at different points, and it
+is worth knowing which when reading one.
+
+**server→client** is a **write tap on the client socket**
+(`dump.NewWriteTapConn`, installed by `startDumpIfConfigured`). It used to be an
+explicit call in `upstreamToClient`, which meant a capture held only the frames
+*relayed from the upstream*: every OER dbbat writes itself — the `read_only` /
+`block_ddl` / `block_copy` / quota / expired-or-revoked refusal, the
+statement-dbbat-could-not-fully-read refusal, the ORA-00028 a held mid-stream
+limit delivers — went straight to the socket and was never captured. A capture
+of a refused statement therefore showed the statement and then silence, which
+reads as a dropped connection rather than as an enforced control (found while
+diagnosing the fragmented-MERGE incident). The tap sits where the bytes leave,
+so a refusal path added later cannot bypass it, and the framing is unchanged:
+`writeTNSPacket` writes `pkt.Raw` in a single `Write`, so one TNS packet is
+still one captured frame.
+
+**client→server** stays on the explicit per-packet calls in `clientToUpstream`
+and in the fragment collector (`reassembly.go`), and cannot move to a socket
+tap: `readTNSPacket` reads a header and then a body, and the collector's peek
+takes one byte off the stream and hands it back through `prefixedConn`, so a
+read tap would record those chunk boundaries instead of TNS packets — and would
+double-record everything the reader already dumps. Note that this direction
+records the client's packet **before** gating, so a blocked statement is in the
+capture even though it never reached the upstream.
+
+Only the post-auth phase is captured, because the file is named after the
+connection row: a login refused by `sendAuthFailed` has no capture to land in.
+See `docs/dump-format.md`, "What a capture contains", for the same table across
+all five protocols.
+
 ## Known Limitations
 
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
@@ -2534,6 +2567,100 @@ the wire, so both are covered by fixtures in `oci_instantclient_test.go`):
   contiguously, then **re-fragments at the upstream's original boundaries** before
   forwarding — a single merged packet exceeds the client's negotiated SDU and is rejected
   with `ORA-12592` ("bad packet").
+
+#### Data-phase reassembly: a statement larger than the SDU
+
+The AUTH-phase reassembly above has a data-phase twin, added in 2026-08 for the same
+underlying reason and after the same class of failure. TTC carries **no message-length
+field**, so a message larger than the negotiated SDU (8192 by default, on both ends) is
+written by the client as several TNS Data packets: only the first carries the TTC op
+header, and every continuation is raw bytes behind the same 8-byte TNS header and 2-byte
+data-flags prefix. The data phase used to read one packet at a time and gate each one
+independently, so a statement past ~8100 bytes of SQL reached the decoder as its first
+fragment only.
+
+What that cost, measured on the capture of the 2026-08-31 incident (a generated
+`MERGE … USING (SELECT … FROM dual UNION ALL …)` with literal French labels — 9214 UTF-8
+bytes, zero dynamic SQL):
+
+- the header-anchored decode (`locateExecSQLText`) needs the declared run to sit inside
+  the body and refused, the offset windows refused for the same reason, and the
+  last-resort keyword scan returned a prefix — cut at the first non-ASCII byte, the `è` of
+  `'Surface Pièce'`;
+- the gate then enforced against that prefix and `queries` recorded it as the statement.
+  Everything beyond the leading verb was therefore evadable by padding a statement past
+  the SDU: the Oracle blocked patterns, the approval patterns and the dynamic-SQL scan
+  only ever saw the padding;
+- the prefix ended inside an open literal, so the dynamic-SQL scan failed closed and the
+  refusal came back as *"dbbat cannot check dynamic SQL that is itself built from dynamic
+  SQL"* — a claim about a statement that carried none;
+- and a refusal answered the OER for the first fragment while the orphan continuation was
+  read next and forwarded upstream **alone**, which desynchronized the upstream and killed
+  the session (`DPY-4011` at the client's next call).
+
+`clientToUpstream` now collects the whole message before gating it
+(`internal/proxy/oracle/reassembly.go`):
+
+- **Trigger**: the op's own declared length. `execSQLLength` / `execSQLLengthWide` for the
+  `03 5e` piggyback execute and the `11 69` close-cursors piggyback with that execute
+  stapled behind it, and the varlen length for a legacy OALL8 — reassembly starts iff that
+  length runs past the bytes in hand. A message that fits its packet takes exactly the path
+  it always did.
+- **Forward path**: on allow, the **client's own packets** are forwarded in order, byte for
+  byte. The reassembled buffer is a reading device; dbbat never synthesizes wire bytes
+  toward the upstream.
+- **Refusal path**: every buffered fragment is dropped and the OER is answered once, so
+  nothing reaches the upstream, nothing desynchronizes, and the session answers the next
+  call normally.
+- **Bounds**: the declared length is attacker-controlled, so nothing is allocated from it —
+  the buffer grows as packets arrive, the total is capped at `execMaxSQLLen` plus slack
+  (`maxStatementReassembly`), and the wait is bounded by a read deadline
+  (`statementReassemblyTimeout`). A client that declares a length it never sends, or sends
+  a non-Data packet mid-message, is torn down: the session is the blast radius, which is
+  the answer `gateUnnameableFrame` already gives for the same reason.
+- **Where it stops reading**: at the declared statement length, never past it — over-reading
+  would swallow the *next* message. The end of the message is then *established*, not
+  assumed. In the ordinary shape the last fragment is short (the client fills each packet to
+  the SDU and the tail is what is left) and the message is over with no waiting at all. When
+  the statement instead ends on a full-sized fragment — which is what a message with more to
+  come also looks like — dbbat peeks for one more packet on a short deadline
+  (`statementContinuationPeek`, 250ms): nothing arrives and the message really did end on
+  the boundary, so the refusal takes the ordinary OER path; a byte arrives and the packet is
+  read on the full budget with that byte put back in front of the stream, so a peek window
+  closing mid-packet cannot desynchronize anything. Either way a refusal answers with an OER
+  and the session lives. `statementFragments.complete` is set only on those two determinate
+  exits and stays a fail-closed backstop: a message that somehow reaches the refusal path
+  without it ends the session rather than leaving a continuation to reach the upstream
+  alone.
+- Bind values may spill into a continuation too. They are captured when present, as before —
+  binds are best-effort, the statement text is not.
+
+Belt to those braces, for frames reassembly cannot fix (a declared length past the bound, a
+frame handed to a decoder without its continuations):
+
+- the fallback extractors report when their run was cut by the end of the frame rather than
+  by the TTC framing (`findSQLInPayload` now also accepts non-ASCII bytes and repairs the
+  run through `sanitizeSQLRun`, instead of truncating at the first byte past `0x7E` — the
+  header-anchored path always accepted them and the fallback contradicted it);
+- `decodeOALL8` hands back a marked prefix rather than a decode failure, because a decode
+  failure is forwarded ungated and the bytes past the cut are exactly where a blocked
+  pattern would sit;
+- a statement known to be partial is refused under a grant whose controls depend on reading
+  it (`read_only`, `block_ddl`, approval patterns, or the approval gate armed) with
+  `shared.ErrStatementNotFullyRead` — *"dbbat could not read this statement to its end"* —
+  and under a grant with none of those it is forwarded but recorded with a
+  `/* dbbat: statement text is partial … */` note, so `queries` never passes a prefix off
+  as the statement.
+
+That error is a split of `ErrDynamicSQLNotCheckable` (`internal/proxy/shared`), shared by
+all three protocols with dynamic SQL: a quoted run left open means dbbat holds a prefix,
+which is a different finding from dynamic SQL nested inside dynamic SQL and must not be
+reported as it.
+
+**Operator note**: the other four protocols are unaffected — their wire formats carry
+explicit message lengths and are reassembled before gating. Raising the SDU on both ends
+moves the threshold but does not change any of the above; the server side defaults to 8192,
+so verify the Accept packet before relying on a larger value.
 
 #### Two OCI encodings, not one (proxy mode)
 

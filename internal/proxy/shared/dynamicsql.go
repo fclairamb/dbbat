@@ -33,8 +33,9 @@ import "strings"
 //     field and not an empty Payloads.
 //
 // The boolean the extractors return alongside it is the third answer: false
-// means a dynamic-SQL form was found that dbbat could not read *at all*, or that
-// nests a second level. That is the fail-closed path and the caller refuses.
+// means a dynamic-SQL form was found that dbbat could not read *at all*, that
+// nests a second level, or that the text itself stopped mid-quote (Unterminated).
+// That is the fail-closed path and the caller refuses.
 type DynamicSQL struct {
 	// Payloads are the statically decidable inner statement texts, in the order
 	// they appear.
@@ -43,6 +44,16 @@ type DynamicSQL struct {
 	// is built at run time. Whether that is refused is a grant question, not a
 	// parsing one — see ValidateDynamicSQL.
 	Opaque bool
+	// Unterminated reports *why* the extractor answered false: the scan ran off
+	// the end of the text inside an open quoted run, so dbbat is holding a
+	// prefix of a statement rather than a statement. It is carried on the
+	// otherwise-empty value the extractors return alongside `false`, and it is
+	// the difference between ErrStatementNotFullyRead and
+	// ErrDynamicSQLNotCheckable — see ValidateDynamicSQL. False on the other
+	// fail-closed paths (a dynamic-SQL form whose argument dbbat could not
+	// locate, a second level of nesting), which are findings about the
+	// statement rather than about how much of it arrived.
+	Unterminated bool
 }
 
 // MSSQLDynamicSQL reads every dynamic-SQL form in a T-SQL batch whose text dbbat
@@ -53,7 +64,8 @@ type DynamicSQL struct {
 // quotes that escape a quote inside a literal undone.
 //
 // `false` means the batch carries dynamic SQL dbbat cannot vouch for and the
-// caller must refuse it: either a quoted run was left open, or the extracted
+// caller must refuse it: either a quoted run was left open (reported as
+// DynamicSQL.Unterminated — dbbat holds a prefix, not a batch), or the extracted
 // text nests *another* dynamic-SQL form. The nesting case is refused rather than
 // unwrapped a second time — one level is where the recursion stops, and stopping
 // silently would be a hole the shape of the one this file closes.
@@ -71,7 +83,7 @@ func MSSQLDynamicSQL(sql string) (DynamicSQL, bool) {
 func mssqlDynamicSQLAt(matchable string) (DynamicSQL, bool) {
 	dyn, ok := mssqlDynamicSQL(matchable)
 	if !ok {
-		return DynamicSQL{}, false
+		return DynamicSQL{Unterminated: dyn.Unterminated}, false
 	}
 
 	for _, text := range dyn.Payloads {
@@ -92,7 +104,9 @@ func mssqlDynamicSQL(sql string) (DynamicSQL, bool) {
 	for !p.eof() {
 		skipped, ok := p.skipOpaque()
 		if !ok {
-			return DynamicSQL{}, false
+			// A quoted/bracketed run left open at end-of-input: the batch dbbat
+			// was handed stops mid-token, so it is a prefix and not a batch.
+			return DynamicSQL{Unterminated: true}, false
 		}
 
 		if skipped {
@@ -116,6 +130,9 @@ func mssqlDynamicSQL(sql string) (DynamicSQL, bool) {
 			// argument is somewhere dbbat is not looking. Swallowing that and
 			// carrying on is how a bypass stays silent, so it fails closed.
 			return DynamicSQL{}, false
+
+		case dynamicUnterminated:
+			return DynamicSQL{Unterminated: true}, false
 
 		case dynamicReadable:
 			dyn.Payloads = append(dyn.Payloads, text)
@@ -152,6 +169,12 @@ const (
 	// dynamicUnreadable — the form is dynamic SQL and dbbat could not locate
 	// its statement argument at all. Fail closed.
 	dynamicUnreadable
+	// dynamicUnterminated — the statement argument was located, opens a quoted
+	// run, and that run never closes: the text ran out mid-literal. Fail closed
+	// like dynamicUnreadable, and told apart from it because it says the
+	// *statement* is a prefix rather than that the *form* is unreadable — see
+	// DynamicSQL.Unterminated and ErrStatementNotFullyRead.
+	dynamicUnterminated
 )
 
 // nestsMSSQLDynamicSQL reports whether an already-normalized statement carries
@@ -385,7 +408,7 @@ func (p *useScanner) execParenStatement() (string, dynamicOutcome) {
 
 	text, ok := p.stringLiteral()
 	if !ok {
-		return "", dynamicUnreadable
+		return "", dynamicUnterminated
 	}
 
 	text, outcome := p.foldLiteralConcatenation(text, '+', p.atStringLiteral, p.stringLiteral)
@@ -477,7 +500,7 @@ func (p *useScanner) statementArgumentValue() (string, dynamicOutcome) {
 
 	text, ok := p.stringLiteral()
 	if !ok {
-		return "", dynamicUnreadable
+		return "", dynamicUnterminated
 	}
 
 	// The literal has to be the *whole* value. `@stmt = N'USE ' + @db` continues
@@ -500,7 +523,7 @@ func (p *useScanner) statementArgumentValue() (string, dynamicOutcome) {
 //
 // A chain with one non-literal operand is dynamicUndecidable — dbbat holds part
 // of a statement, which is not a statement — and a literal left open is
-// dynamicUnreadable.
+// dynamicUnterminated.
 func (p *useScanner) foldLiteralConcatenation(
 	text string,
 	op byte,
@@ -530,7 +553,7 @@ func (p *useScanner) foldLiteralConcatenation(
 
 		next, ok := read()
 		if !ok {
-			return "", dynamicUnreadable
+			return "", dynamicUnterminated
 		}
 
 		text += next
@@ -710,7 +733,7 @@ func OracleDynamicSQL(sql string) (DynamicSQL, bool) {
 func oracleDynamicSQLAt(matchable string) (DynamicSQL, bool) {
 	dyn, ok := oracleDynamicSQL(matchable)
 	if !ok {
-		return DynamicSQL{}, false
+		return DynamicSQL{Unterminated: dyn.Unterminated}, false
 	}
 
 	for _, text := range dyn.Payloads {
@@ -732,7 +755,10 @@ func oracleDynamicSQL(sql string) (DynamicSQL, bool) {
 	for !p.eof() {
 		skipped, ok := p.skipLiteral()
 		if !ok {
-			return DynamicSQL{}, false
+			// A quoted run left open at end-of-input. On Oracle this is the
+			// shape a statement truncated at a TNS fragment boundary takes, so
+			// it is reported as such rather than as a dynamic-SQL finding.
+			return DynamicSQL{Unterminated: true}, false
 		}
 
 		if skipped {
@@ -751,6 +777,8 @@ func oracleDynamicSQL(sql string) (DynamicSQL, bool) {
 		switch outcome {
 		case dynamicUnreadable:
 			return DynamicSQL{}, false
+		case dynamicUnterminated:
+			return DynamicSQL{Unterminated: true}, false
 		case dynamicReadable:
 			dyn.Payloads = append(dyn.Payloads, text)
 		case dynamicUndecidable:
@@ -860,7 +888,7 @@ func (p *useScanner) oracleStatementValue() (string, dynamicOutcome) {
 
 	text, ok := p.oracleLiteral()
 	if !ok {
-		return "", dynamicUnreadable
+		return "", dynamicUnterminated
 	}
 
 	return p.foldLiteralConcatenation(text, '|', p.atOracleLiteral, p.oracleLiteral)
@@ -1049,7 +1077,7 @@ func MySQLDynamicSQL(sql string) (DynamicSQL, bool) {
 func mysqlPreparedStatement(matchable string) (MySQLPrepare, bool) {
 	prepared, ok := mysqlPrepared(matchable)
 	if !ok {
-		return MySQLPrepare{}, false
+		return MySQLPrepare{Dynamic: DynamicSQL{Unterminated: prepared.Dynamic.Unterminated}}, false
 	}
 
 	for _, text := range prepared.Dynamic.Payloads {
@@ -1108,7 +1136,7 @@ func mysqlPrepared(sql string) (MySQLPrepare, bool) {
 
 	dyn, ok := p.mysqlStatementValue(false)
 	if !ok {
-		return MySQLPrepare{}, false
+		return MySQLPrepare{Dynamic: DynamicSQL{Unterminated: dyn.Unterminated}}, false
 	}
 
 	prepared.Dynamic = dyn
@@ -1126,7 +1154,7 @@ func (p *useScanner) mysqlExecute() (MySQLPrepare, bool) {
 	if p.keyword("IMMEDIATE") {
 		dyn, ok := p.mysqlStatementValue(true)
 		if !ok {
-			return MySQLPrepare{}, false
+			return MySQLPrepare{Dynamic: DynamicSQL{Unterminated: dyn.Unterminated}}, false
 		}
 
 		return MySQLPrepare{Dynamic: dyn}, true
@@ -1161,7 +1189,10 @@ func (p *useScanner) mysqlStatementValue(allowUsing bool) (DynamicSQL, bool) {
 
 	text, ok := p.mysqlLiteral()
 	if !ok {
-		return DynamicSQL{}, false
+		// The literal never closes: dbbat holds a prefix of the prepared
+		// statement, which is ErrStatementNotFullyRead and not a dynamic-SQL
+		// finding.
+		return DynamicSQL{Unterminated: true}, false
 	}
 
 	p.spaces()

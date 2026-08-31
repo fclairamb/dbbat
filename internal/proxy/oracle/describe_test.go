@@ -27,7 +27,7 @@ func firstQueryResultFor(t *testing.T, td *testDump, marker string) []byte {
 		ttc := extractTTCPayload(tns.Payload)
 
 		if pkt.Direction == dump.DirClientToServer {
-			if strings.Contains(findSQLInPayload(ttc), marker) {
+			if sql, _ := findSQLInPayload(ttc); strings.Contains(sql, marker) {
 				started = true
 			}
 

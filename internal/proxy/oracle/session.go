@@ -176,6 +176,14 @@ type session struct {
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
 
+	// fragmentedMessage is the client TTC message currently being gated, when
+	// its own header said it spans more than one TNS packet. It is set and
+	// cleared by clientToUpstream around interceptClientMessage and is read on
+	// the refusal path only — no other goroutine touches it, so it needs no
+	// lock. nil means the message in the gate is a single packet, which is
+	// every message on a session that never sends a statement past the SDU.
+	fragmentedMessage *statementFragments
+
 	// rowWriter batches captured result rows. Oracle used to INSERT one row
 	// at a time, synchronously, on the capture path — up to 100 000 sequential
 	// round-trips on a single proxied query.
@@ -505,27 +513,66 @@ func (s *session) run() error {
 		slog.String("upstream", upstreamAddr))
 
 	// Step 8: Initialize dump writer if configured
-	if s.dumpConfig.Dir != "" && s.connectionUID != uuid.Nil {
-		dumpPath := filepath.Join(s.dumpConfig.Dir, s.connectionUID.String()+dump.FileExt)
-
-		dw, err := dump.NewWriter(dumpPath, dump.Header{
-			SessionID: s.connectionUID.String(),
-			Protocol:  dump.ProtocolOracle,
-			StartTime: time.Now(),
-			Connection: map[string]any{
-				"service_name":  s.serviceName,
-				"upstream_addr": upstreamAddr,
-			},
-		}, s.dumpConfig.MaxSize)
-		if err != nil {
-			s.logger.WarnContext(s.ctx, "failed to create dump writer", slog.Any("error", err))
-		} else {
-			s.dump = dw
-		}
-	}
+	s.startDumpIfConfigured(upstreamAddr)
 
 	// Step 9: Enter bidirectional TNS relay with query interception
 	return s.proxyMessages()
+}
+
+// startDumpIfConfigured opens the per-connection capture and installs the
+// server→client recording point.
+//
+// The two directions are recorded differently, and deliberately so.
+//
+// **client→server** is recorded by the reader, packet by packet, in
+// clientToUpstream and in the fragment collector (reassembly.go). It cannot be
+// tapped on the socket: readTNSPacket reads a header and then a body, and the
+// collector's peek takes a single byte off the stream and puts it back through
+// prefixedConn — a read tap would record those chunk boundaries instead of TNS
+// packets, and would double-record everything the reader already dumps.
+//
+// **server→client** is recorded by a write tap on the client socket, and by
+// nothing else. Recording it in upstreamToClient (which is what this used to
+// do) captured only the frames *relayed from the upstream*: every frame dbbat
+// synthesizes itself — the OER refusal writeTTCError emits for read_only,
+// block_ddl, block_copy, a quota, an expired or revoked grant, a statement it
+// could not fully read — went straight to the socket and never reached the
+// capture. A capture of a refused statement therefore showed the statement and
+// then silence, which reads as a dropped connection rather than as an enforced
+// control. The tap sits where the bytes leave, so a refusal path added later
+// cannot bypass it the same way. One TNS packet is one Write (writeTNSPacket
+// writes pkt.Raw in a single call), so the framing is exactly what the explicit
+// call recorded before.
+//
+// The tap goes on *outside* the counting/watched conns, so byte accounting and
+// client-gone detection are unaffected. Only the post-auth phase is captured:
+// the file is named after the connection UID, which does not exist until the
+// connection row is written, so the AUTH-phase refusal (sendAuthFailed) and the
+// pre-auth relay have no capture to land in by construction.
+func (s *session) startDumpIfConfigured(upstreamAddr string) {
+	if s.dumpConfig.Dir == "" || s.connectionUID == uuid.Nil {
+		return
+	}
+
+	dumpPath := filepath.Join(s.dumpConfig.Dir, s.connectionUID.String()+dump.FileExt)
+
+	dw, err := dump.NewWriter(dumpPath, dump.Header{
+		SessionID: s.connectionUID.String(),
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+		Connection: map[string]any{
+			"service_name":  s.serviceName,
+			"upstream_addr": upstreamAddr,
+		},
+	}, s.dumpConfig.MaxSize)
+	if err != nil {
+		s.logger.WarnContext(s.ctx, "failed to create dump writer", slog.Any("error", err))
+
+		return
+	}
+
+	s.dump = dw
+	s.clientConn = dump.NewWriteTapConn(s.clientConn, dw, dump.DirServerToClient)
 }
 
 // encodeV315DataPacket wraps a TTC payload in a v315+ TNS Data packet.
@@ -1946,9 +1993,36 @@ func (s *session) clientToUpstream() error {
 
 		// Only intercept Data packets
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
-			if blocked := s.interceptClientMessage(pkt); blocked {
-				continue // Don't forward — error already sent to client
+			// A statement whose TTC message is larger than the negotiated SDU
+			// arrives as several packets, and gating the first one on its own is
+			// how the gate came to enforce against a fragment. Collect the whole
+			// message first; the gate reads the reassembly, the upstream gets the
+			// client's own packets. See reassembly.go.
+			msg, err := s.collectStatementMessage(pkt)
+			if err != nil {
+				return err
 			}
+
+			s.fragmentedMessage = msg
+
+			blocked := s.interceptClientMessage(msg.gate)
+
+			s.fragmentedMessage = nil
+
+			if blocked {
+				// Every fragment is dropped, not just the first: the refusal was
+				// answered once, and letting a continuation through on its own is
+				// what used to desynchronize the upstream and kill the session.
+				continue
+			}
+
+			for _, frag := range msg.packets {
+				if err := writeTNSPacket(s.upstreamConn, frag); err != nil {
+					return fmt.Errorf("upstream write error: %w", err)
+				}
+			}
+
+			continue
 		}
 
 		// Forward to upstream
@@ -2122,12 +2196,40 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 // nothing.
 func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bool {
 	if err := handle(ttcPayload); err != nil {
+		if s.refusalWouldStrandFragments() {
+			return s.endSessionOnRefusal(ttcPayload, "", err)
+		}
+
 		_ = s.sendOracleError(err)
 
 		return true
 	}
 
 	return false
+}
+
+// refusalWouldStrandFragments reports whether answering the current message
+// with an OER would leave part of it unread on the client socket.
+//
+// It is a backstop rather than a path taken: every message the collector returns
+// is complete, because it establishes the end of the message instead of assuming
+// it — a short last fragment ends it outright, and a full-sized one is followed
+// by a bounded peek (peekContinuation in reassembly.go). A collection that can
+// establish neither returns an error and the session ends there, before any of
+// this.
+//
+// It is kept because the thing it guards against is silent. A refusal answered
+// while a continuation of the same message is still on the wire lets that
+// continuation reach the upstream alone, which desynchronizes it and turns one
+// refused statement into a dead session — the DPY-4011 half of the 2026-08-31
+// incident. So statementFragments.complete is set only on the two determinate
+// exits, and a message that somehow arrives here without it is refused by
+// ending the session, exactly as gateUnnameableFrame refuses when there is no
+// call it can safely answer.
+func (s *session) refusalWouldStrandFragments() bool {
+	msg := s.fragmentedMessage
+
+	return msg != nil && msg.fragmented() && !msg.complete
 }
 
 // gateUnnameableFrame decides what happens to a client message whose call dbbat
@@ -2428,12 +2530,10 @@ func (s *session) upstreamToClient() error {
 			s.interceptUpstreamMessage(pkt)
 		}
 
-		// Dump upstream->client packet
-		if s.dump != nil {
-			_ = s.dump.WritePacket(dump.DirServerToClient, pkt.Raw)
-		}
-
-		// Forward to client
+		// Forward to client. The capture's server→client recording point is the
+		// write tap on s.clientConn (startDumpIfConfigured), not a call here: a
+		// second one would double-record every relayed packet, and this one
+		// never saw the frames dbbat synthesizes itself.
 		if err := writeTNSPacket(s.clientConn, pkt); err != nil {
 			return fmt.Errorf("client write error: %w", err)
 		}

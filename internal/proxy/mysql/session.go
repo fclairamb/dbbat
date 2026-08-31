@@ -414,10 +414,18 @@ func (s *Session) recordDisconnect() {
 // run, so the auth handshake is already done by the time bytes start flowing
 // through the tap.
 //
-// For TLS-upgraded connections the library has already replaced
-// c.Conn.Conn with a *tls.Conn before this point; the tap will see TLS
-// records (encrypted application data), which is fine — the dump captures
-// timing and packet boundaries even when payload is opaque.
+// The tap sits **above** TLS, so an encrypted session captures just as
+// legibly as a plaintext one. For a TLS-upgraded connection go-mysql has
+// already swapped c.Conn.Conn for the *tls.Conn by this point
+// (server/handshake_resp.go), and we wrap *that* field — so packet.Conn
+// writes plaintext MySQL packets into the tap, which records them and hands
+// them on to be encrypted, and reads come back already decrypted. See
+// docs/dump-format.md, "Captures are plaintext, above TLS".
+//
+// That rests on a dependency's internals, so it is pinned by a test rather than
+// by this comment: TestStartDumpIfConfigured_RecordsPlaintextAboveTLS drives a
+// real TLS handshake through go-mysql and asserts the capture holds the
+// plaintext query the raw socket never carried.
 func (s *Session) startDumpIfConfigured() {
 	if s.server.dumpConfig.Dir == "" || s.connection == nil || s.serverConn == nil {
 		return

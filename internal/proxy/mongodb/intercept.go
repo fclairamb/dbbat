@@ -44,6 +44,14 @@ func (s *Session) pumpClientToUpstream() error {
 			return err
 		}
 
+		// The client→server recording point, and the only one. Recording it in
+		// forward() instead (which is what this used to do) captured only the
+		// commands that were *allowed*: a command refused by the grant, by the
+		// $db check, by a legacy opcode or by an approval hold never reached the
+		// capture at all, so the pcapng of a blocked command showed neither the
+		// command nor the refusal.
+		s.dumpPacket(dump.DirClientToServer, m.raw)
+
 		if m.opCode != opCodeMsg {
 			if err := s.refuseLegacyOpCode(m); err != nil {
 				return err
@@ -193,10 +201,10 @@ func (s *Session) rejectCommand(m *message, cmd string, body bson.Raw, moreToCom
 	return s.replyOpMsg(m.requestID, unauthorizedDoc(verr.Error()))
 }
 
-// forward relays a message verbatim to the upstream and dumps it.
+// forward relays a message verbatim to the upstream. The capture already holds
+// it — pumpClientToUpstream records every client message as it is read, allowed
+// or not — so recording it here too would duplicate every forwarded frame.
 func (s *Session) forward(m *message) error {
-	s.dumpPacket(dump.DirClientToServer, m.raw)
-
 	_, err := s.upstream.conn.Write(m.raw)
 
 	return err

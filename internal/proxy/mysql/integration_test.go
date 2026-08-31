@@ -24,6 +24,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -574,10 +575,22 @@ func TestIntegration_LoadDataInfile_Blocked(t *testing.T) {
 // TestIntegration_SessionDump verifies that when DBB_DUMP_DIR is configured
 // the MySQL session writes a per-connection dump file containing post-auth
 // command-phase traffic.
+//
+// The client leg is TLS (dialTLS), so this doubles as the end-to-end form of
+// TestStartDumpIfConfigured_RecordsPlaintextAboveTLS: the capture is parsed and
+// asserted to hold plaintext MySQL packets — the marker query legible, the
+// stream cleanly framed — rather than TLS records. The unit test pins the wrap
+// order against a real go-mysql handshake; this one would survive a go-mysql
+// release that installed the *tls.Conn somewhere else entirely, because nothing
+// here knows where it lives.
 func TestIntegration_SessionDump(t *testing.T) {
 	ctx := context.Background()
 
 	dumpDir := t.TempDir()
+
+	// The marker travels inside the COM_QUERY. It can only appear in the
+	// capture if the recording point sits above TLS.
+	const marker = "dbbat-plaintext-above-tls-marker"
 
 	f := setupFixtureWithDumpDir(ctx, t, mysqlImage(), store.ProtocolMySQL, dumpDir)
 	db := f.dialTLS()
@@ -585,7 +598,7 @@ func TestIntegration_SessionDump(t *testing.T) {
 	require.NoError(t, db.PingContext(ctx))
 
 	var n int
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT 99").Scan(&n))
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT 99 /* "+marker+" */").Scan(&n))
 	assert.Equal(t, 99, n)
 
 	require.NoError(t, db.Close())
@@ -613,6 +626,40 @@ func TestIntegration_SessionDump(t *testing.T) {
 	assert.Greater(t, stat.Size(), int64(0), "dump file should not be empty after a query round-trip")
 
 	t.Logf("dump file: %s (%d bytes)", dumpFile, stat.Size())
+
+	pkts := readCapture(t, dumpFile)
+	require.NotEmpty(t, pkts, "capture should hold the command phase")
+
+	toServer := captureStream(pkts, dump.DirClientToServer)
+	require.NotEmpty(t, toServer, "capture should hold client→server traffic")
+
+	assert.Contains(t, string(toServer), marker,
+		"the capture should hold the plaintext COM_QUERY, not TLS records")
+	assert.NotEqual(t, byte(0x17), toServer[0],
+		"capture starts with what looks like a TLS application-data record")
+	assertMySQLFramed(t, toServer)
+}
+
+// assertMySQLFramed walks stream as a sequence of MySQL packets (3-byte
+// little-endian payload length, sequence byte, payload) and fails unless it
+// consumes exactly. TLS records do not frame that way, which is what makes this
+// a check on where the tap sits rather than on the file merely being non-empty.
+func assertMySQLFramed(t *testing.T, stream []byte) {
+	t.Helper()
+
+	const headerLen = 4
+
+	for off := 0; off < len(stream); {
+		require.LessOrEqual(t, off+headerLen, len(stream),
+			"truncated MySQL packet header at offset %d", off)
+
+		length := int(stream[off]) | int(stream[off+1])<<8 | int(stream[off+2])<<16
+
+		require.LessOrEqual(t, off+headerLen+length, len(stream),
+			"MySQL packet at offset %d declares %d payload bytes, past the end of the stream", off, length)
+
+		off += headerLen + length
+	}
 }
 
 // TestIntegration_MariaDB exercises the same proxy path with a MariaDB

@@ -774,6 +774,14 @@ type OALL8Result struct {
 	SQL        string
 	CursorID   uint16
 	BindValues []string
+	// Truncated reports that SQL is a *prefix* of the statement the client
+	// sent: the run dbbat extracted was cut by the end of the frame rather
+	// than by the TTC framing behind the statement. It is never merely
+	// cosmetic — everything past the cut (a blocked pattern, an approval
+	// pattern, the dynamic-SQL scan) is text the gate never saw — so a caller
+	// must not put it through ValidateOracleQuery as if it were the statement.
+	// See the session's gatePartialStatement.
+	Truncated bool
 }
 
 // IsPLSQL returns true if the SQL text is a PL/SQL block.
@@ -837,6 +845,17 @@ func decodeOALL8(ttcPayload []byte) (*OALL8Result, error) {
 
 	// SQL text
 	if offset+int(sqlLen) > len(ttcPayload) {
+		// The declared statement runs past this frame. Reassembly (reassembly.go)
+		// is what normally makes that impossible; a frame that reaches here
+		// anyway — a length past the reassembly bound, a frame dbbat was handed
+		// without its continuations — holds a prefix of a statement. Hand the
+		// prefix back *marked as one* rather than reporting a decode failure,
+		// because a decode failure is forwarded ungated and the bytes past the
+		// cut are exactly where a blocked pattern would sit.
+		if prefix, ok := sanitizeSQLRun(string(ttcPayload[offset:])); ok && startsWithSQLVerb(prefix) {
+			return &OALL8Result{SQL: prefix, CursorID: cursorID, Truncated: true}, nil
+		}
+
 		return nil, fmt.Errorf("%w: sql_len=%d, remaining=%d", ErrSQLLengthInvalid, sqlLen, len(ttcPayload)-offset)
 	}
 
@@ -897,9 +916,12 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 
 	// Last resort: find SQL keywords directly in the payload. It returns a
 	// verbatim slice of the payload, so the text is its own anchor.
+	var truncated bool
+
 	if stmt.Text == "" {
-		if found := findSQLInPayload(ttcPayload); found != "" {
+		if found, cut := findSQLInPayload(ttcPayload); found != "" {
 			stmt = execStatement{Text: found, Raw: found}
+			truncated = cut
 		}
 	}
 
@@ -910,6 +932,7 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	return &OALL8Result{
 		SQL:        stmt.Text,
 		BindValues: extractPiggybackBinds(ttcPayload, stmt),
+		Truncated:  truncated,
 	}, nil
 }
 
@@ -1060,9 +1083,9 @@ func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	}
 
 	// Fallback: find SQL keywords directly
-	sql := findSQLInPayload(ttcPayload)
+	sql, truncated := findSQLInPayload(ttcPayload)
 	if sql != "" {
-		return &OALL8Result{SQL: sql}, nil
+		return &OALL8Result{SQL: sql, Truncated: truncated}, nil
 	}
 
 	return nil, fmt.Errorf("%w: could not find SQL text in JDBC exec payload", ErrEmptySQL)
@@ -1093,24 +1116,42 @@ var findSQLKeywords = [][]byte{
 // because clients send the statement verbatim and SQLcl lowercases its SQL, and
 // it must land on a word boundary so an identifier that merely starts with a
 // verb is not read as one.
-func findSQLInPayload(payload []byte) string {
+//
+// The second return says the run was cut by the end of the payload rather than
+// by the TTC framing behind the statement — i.e. dbbat is holding a prefix. That
+// is the honest half of this scan: it has no length to check the run against, so
+// "the bytes ran out" is the only signal available, and reporting it is what
+// stops a fragment being gated as if it were the statement.
+//
+// The run itself accepts the same bytes the header-anchored decode accepts
+// (isPrintableSQLByte, non-ASCII included) instead of stopping at the first byte
+// past 0x7E. Stopping there truncated every statement with an accent in it —
+// the 2026-08-31 incident cut a 9KB MERGE at the `è` of 'Surface Pièce' — while
+// sanitizeSQLRun, which the anchored path uses, is deliberately charitable about
+// a session charset dbbat does not know.
+func findSQLInPayload(payload []byte) (string, bool) {
 	idx := indexOfAnyKeywordCI(payload, findSQLKeywords)
 	if idx < 0 {
-		return ""
+		return "", false
 	}
 
-	// Found a keyword — extract until we hit a non-SQL byte. SQL ends at a
-	// control byte (the TTC framing that follows it) or the end of the payload.
+	// Found a keyword — extract until we hit a byte statement text cannot
+	// contain (the TTC framing that follows it) or the end of the payload.
 	end := idx
-	for end < len(payload) && payload[end] >= 0x0A && payload[end] <= 0x7E {
+	for end < len(payload) && isPrintableSQLByte(payload[end]) {
 		end++
 	}
 
-	if end > idx+2 {
-		return strings.TrimSpace(string(payload[idx:end]))
+	if end <= idx+2 {
+		return "", false
 	}
 
-	return ""
+	text, ok := sanitizeSQLRun(string(payload[idx:end]))
+	if !ok {
+		return "", false
+	}
+
+	return strings.TrimSpace(text), end == len(payload)
 }
 
 // indexOfAnyKeywordCI returns the offset of the earliest case-insensitive match
@@ -1198,6 +1239,11 @@ func extractSQLAtOffsetText(data []byte, offset int) (execStatement, error) {
 	sqlStart := offset + bytesRead
 	sqlEnd := sqlStart + int(sqlLen)
 
+	// The declared run does not fit what is in hand — the offset-window
+	// equivalent of the fragmentation reassembly.go exists for. Unlike
+	// findSQLInPayload this path has a length to check against, so it hands back
+	// *nothing* rather than a prefix: there is no truncated reading for a caller
+	// to mark, and the window scan simply moves on.
 	if sqlEnd > len(data) {
 		return execStatement{}, ErrSQLLengthInvalid
 	}
