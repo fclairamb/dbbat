@@ -487,17 +487,21 @@ func thinSyntheticPhase2PreambleLen(header []byte, username string, mode uint32,
 // builders are exercised with below: every value short, exactly as dbbat sends
 // today (AUTH_SESSKEY 64 hex chars, AUTH_PASSWORD 96, AUTH_PBKDF2_SPEEDY_KEY 160).
 func thinSyntheticAuthFixtures() (driverIdentity, *upstreamAuthSecrets) {
-	return driverIdentity{
-			HostName:    "workstation",
-			ProgramName: "dbbat for sqlplus",
-			OSUser:      "connector",
-			PID:         42,
-			DriverName:  "dbbat",
-		}, &upstreamAuthSecrets{
-			encClientSessKey: strings.Repeat("A", 64),
-			encPassword:      strings.Repeat("B", 96),
-			eSpeedyKey:       strings.Repeat("C", 160),
-		}
+	identity := driverIdentity{
+		HostName:    "workstation",
+		ProgramName: "dbbat for sqlplus",
+		OSUser:      "connector",
+		PID:         42,
+		DriverName:  "dbbat",
+	}
+
+	secrets := &upstreamAuthSecrets{
+		encClientSessKey: strings.Repeat("A", 64),
+		encPassword:      strings.Repeat("B", 96),
+		eSpeedyKey:       strings.Repeat("C", 160),
+	}
+
+	return identity, secrets
 }
 
 // TestThinSyntheticAuthLeg_ShortValues_ByteIdentical is the thin counterpart of
