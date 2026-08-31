@@ -2012,6 +2012,39 @@ packet from the parsed text — so it is not a parser-only change. The durable f
 is the naming rule: server names are slugs
 (`specs/todos/2026-08-13-23-server-names-must-be-slugs.md`).
 
+## What the session capture records
+
+The two directions of an Oracle capture are recorded at different points, and it
+is worth knowing which when reading one.
+
+**server→client** is a **write tap on the client socket**
+(`dump.NewWriteTapConn`, installed by `startDumpIfConfigured`). It used to be an
+explicit call in `upstreamToClient`, which meant a capture held only the frames
+*relayed from the upstream*: every OER dbbat writes itself — the `read_only` /
+`block_ddl` / `block_copy` / quota / expired-or-revoked refusal, the
+statement-dbbat-could-not-fully-read refusal, the ORA-00028 a held mid-stream
+limit delivers — went straight to the socket and was never captured. A capture
+of a refused statement therefore showed the statement and then silence, which
+reads as a dropped connection rather than as an enforced control (found while
+diagnosing the fragmented-MERGE incident). The tap sits where the bytes leave,
+so a refusal path added later cannot bypass it, and the framing is unchanged:
+`writeTNSPacket` writes `pkt.Raw` in a single `Write`, so one TNS packet is
+still one captured frame.
+
+**client→server** stays on the explicit per-packet calls in `clientToUpstream`
+and in the fragment collector (`reassembly.go`), and cannot move to a socket
+tap: `readTNSPacket` reads a header and then a body, and the collector's peek
+takes one byte off the stream and hands it back through `prefixedConn`, so a
+read tap would record those chunk boundaries instead of TNS packets — and would
+double-record everything the reader already dumps. Note that this direction
+records the client's packet **before** gating, so a blocked statement is in the
+capture even though it never reached the upstream.
+
+Only the post-auth phase is captured, because the file is named after the
+connection row: a login refused by `sendAuthFailed` has no capture to land in.
+See `docs/dump-format.md`, "What a capture contains", for the same table across
+all five protocols.
+
 ## Known Limitations
 
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.

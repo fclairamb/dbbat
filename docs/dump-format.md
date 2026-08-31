@@ -184,6 +184,44 @@ Direction is recorded twice, redundantly:
 
 Readers prefer `epb_flags` and fall back to the source port.
 
+### What a capture contains
+
+A capture is forensic evidence, so the rule is *every frame the client actually
+exchanged with dbbat* — not only the ones relayed to or from the upstream. Two
+kinds of frame are easy to lose and are explicitly in scope:
+
+- **A statement dbbat blocked.** It never reaches the upstream, so a proxy that
+  records at the forwarding point records nothing at all.
+- **A frame dbbat synthesized.** Every refusal — an Oracle OER, a MongoDB
+  `Unauthorized` reply, a PostgreSQL `ErrorResponse`, a MySQL or TDS error — is
+  written by dbbat, not read from the upstream, so a proxy that records at the
+  relay point records the statement and then silence. That reads as a dropped
+  connection rather than as an enforced control, which is the opposite of what
+  the capture exists to show.
+
+Each proxy therefore has **exactly one recording point per direction**, placed
+where every frame of that direction passes, whatever its origin:
+
+| Proxy | client→server | server→client |
+|-------|---------------|---------------|
+| PostgreSQL | client-socket tap (`dump.TapConn`) | same tap |
+| MySQL/MariaDB | client-socket tap | same tap |
+| SQL Server | client-leg TDS codec taps (`packetRW.setTaps`) | same |
+| MongoDB | the read in `pumpClientToUpstream` | `writeClient` |
+| Oracle | the reads in `clientToUpstream` + the fragment collector | client-socket **write** tap (`dump.NewWriteTapConn`) |
+
+Oracle is the one split case. Its reader reassembles TNS packets out of a header
+read plus a body read, and the fragment collector takes a single byte off the
+stream and puts it back, so a read tap would record socket chunk boundaries
+instead of TNS packets. The write side has no such split — one TNS packet is one
+`Write` — so it is tapped, which is what makes it impossible for a refusal path
+added later to answer the client without landing in the capture.
+
+Only the **post-auth** phase is captured, on every protocol: the file is named
+after the connection UID, and that row does not exist until authentication has
+succeeded. A login dbbat refuses therefore has no capture at all, by
+construction — the refusal is in `audit_log` and in the process log instead.
+
 ### Sequence numbers
 
 Each direction keeps its own TCP sequence number, starting at 1 and advancing by
