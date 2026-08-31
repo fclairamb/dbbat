@@ -293,7 +293,8 @@ func TestFindSQLInPayloadWordBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, findSQLInPayload([]byte(tc.payload)))
+			got, _ := findSQLInPayload([]byte(tc.payload))
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }

@@ -382,7 +382,7 @@ func TestDumpReplay_DBeaver_SelectQueries(t *testing.T) {
 		if dpkt.Direction != dump.DirClientToServer {
 			continue
 		}
-		if sql := findSQLInPayload(dpkt.Data); sql != "" {
+		if sql, _ := findSQLInPayload(dpkt.Data); sql != "" {
 			rawSQL = append(rawSQL, sql)
 		}
 	}

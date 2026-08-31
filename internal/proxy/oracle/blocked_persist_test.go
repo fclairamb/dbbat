@@ -315,10 +315,17 @@ func TestQuotaRefusalReasons_ArePersisted(t *testing.T) {
 func TestQuotaRefusal_DecodeFailureIsStillForwarded(t *testing.T) {
 	t.Parallel()
 
-	// A well-formed OALL8 truncated mid-SQL: everything up to the length parses,
-	// the text does not.
+	// A well-formed OALL8 cut before its statement is even a word: everything up
+	// to the declared length parses, and what is left of the text does not open
+	// with a SQL verb, so nothing readable comes out of it.
+	//
+	// Cut *further* along and the frame is no longer undecodable: decodeOALL8
+	// hands back the prefix marked Truncated (see gatePartialStatement), which
+	// is the point of the fragment work — a statement dbbat holds part of is a
+	// partial statement, not an unreadable frame. That path is pinned by
+	// TestPartialStatementIsNotGatedAsWhole.
 	truncatedOALL8 := buildOALL8("SELECT 1 FROM DUAL", nil, 7)
-	truncatedOALL8 = truncatedOALL8[:20]
+	truncatedOALL8 = truncatedOALL8[:12]
 
 	tests := []struct {
 		name    string

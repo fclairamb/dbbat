@@ -230,6 +230,56 @@ func (s *session) lookupCursor(cursorID uint16) (*trackedCursor, bool) {
 	return cursor, ok
 }
 
+// partialStatementNote is appended to the text dbbat records for a statement it
+// could only read part of. It is a SQL comment, so the validators and the
+// approval patterns — which run on the comment-stripped scratch copy
+// (shared.NormalizeSQL / matchableSQL) — match exactly what they would have
+// matched without it, while /queries stops passing a prefix off as the
+// statement.
+const partialStatementNote = " /* dbbat: statement text is partial — dbbat could not read it to its end */"
+
+// markPartialStatement annotates a statement dbbat holds only a prefix of.
+func markPartialStatement(sql string) string {
+	return sql + partialStatementNote
+}
+
+// gatePartialStatement is the pre-flight step for a statement dbbat could only
+// read part of — a frame whose statement ran past it and that reassembly could
+// not put back together (reassembly.go handles the ones it can).
+//
+// A prefix vouches for nothing: everything past the cut — a blocked pattern, an
+// approval pattern, an EXECUTE IMMEDIATE — is text the gate never saw. So under
+// a grant whose meaning depends on reading the statement (read_only, block_ddl,
+// approval patterns of its own) or with the approval gate armed, it is refused,
+// and refused *honestly*: ErrStatementNotFullyRead says dbbat did not receive
+// the whole statement rather than claiming a finding about its content, which
+// is the misdiagnosis the 2026-08-31 incident surfaced.
+//
+// A grant with none of those controls forwards it, as it did before: refusing
+// there would break well-behaved traffic to protect controls that grant does
+// not carry. The statement is still recorded as partial rather than as the
+// statement — see markPartialStatement — so the audit trail says what dbbat
+// actually saw.
+//
+// Callers hold trackerMu (refuseStatement bumps the in-session query counter).
+func (s *session) gatePartialStatement(truncated bool, sql string, binds []string) error {
+	if !truncated {
+		return nil
+	}
+
+	if !s.hasStatementControls() && !s.approvalGate.Active() {
+		s.logger.WarnContext(s.ctx, "oracle: statement read only in part, forwarded under a grant with no statement controls",
+			slog.String("sql", truncateSQL(sql, 200)))
+
+		return nil
+	}
+
+	s.logger.WarnContext(s.ctx, "oracle: statement read only in part, refused",
+		slog.String("sql", truncateSQL(sql, 200)))
+
+	return s.refuseStatement(sql, binds, shared.ErrStatementNotFullyRead)
+}
+
 // handleOALL8 intercepts an OALL8 message: decodes SQL, checks access controls,
 // and begins tracking the query. Returns an error if the query should be blocked.
 func (s *session) handleOALL8(ttcPayload []byte) error {
@@ -248,6 +298,10 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		return nil
 	}
 
+	if result.Truncated {
+		result.SQL = markPartialStatement(result.SQL)
+	}
+
 	s.logger.DebugContext(s.ctx, "intercepted OALL8",
 		slog.String("sql", truncateSQL(result.SQL, 200)),
 		slog.Uint64("cursor_id", uint64(result.CursorID)),
@@ -261,6 +315,12 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		// decode has produced the SQL to record it against.
 		if err := s.checkQuotas(); err != nil {
 			return s.refuseStatement(result.SQL, result.BindValues, err)
+		}
+
+		// A statement dbbat holds only a prefix of never reaches the validators
+		// as if it were the whole statement.
+		if err := s.gatePartialStatement(result.Truncated, result.SQL, result.BindValues); err != nil {
+			return err
 		}
 
 		// Access control check
@@ -572,6 +632,10 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		return nil // Don't block on decode failure
 	}
 
+	if result.Truncated {
+		result.SQL = markPartialStatement(result.SQL)
+	}
+
 	s.logger.InfoContext(s.ctx, logMsgQueryIntercepted,
 		slog.String("sql", truncateSQL(result.SQL, 200)),
 	)
@@ -580,6 +644,11 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		// Quota, expiry and revocation first — see handleOALL8.
 		if err := s.checkQuotas(); err != nil {
 			return s.refuseStatement(result.SQL, result.BindValues, err)
+		}
+
+		// See handleOALL8: a prefix is not put through the validators.
+		if err := s.gatePartialStatement(result.Truncated, result.SQL, result.BindValues); err != nil {
+			return err
 		}
 
 		// Access control check
@@ -655,6 +724,10 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 	// /queries is the same one the patterns ran against.
 	sql := shared.NormalizeSQL(result.SQL)
 
+	if result.Truncated {
+		sql = markPartialStatement(sql)
+	}
+
 	s.logger.InfoContext(s.ctx, logMsgQueryIntercepted,
 		slog.String("sql", truncateSQL(sql, 200)),
 		slog.String("source", "jdbc"),
@@ -665,6 +738,11 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 		// normalized text, like the control refusal below it.
 		if err := s.checkQuotas(); err != nil {
 			return s.refuseStatement(sql, result.BindValues, err)
+		}
+
+		// See handleOALL8: a prefix is not put through the validators.
+		if err := s.gatePartialStatement(result.Truncated, sql, result.BindValues); err != nil {
+			return err
 		}
 
 		// Access control check

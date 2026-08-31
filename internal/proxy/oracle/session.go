@@ -176,6 +176,14 @@ type session struct {
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
 
+	// fragmentedMessage is the client TTC message currently being gated, when
+	// its own header said it spans more than one TNS packet. It is set and
+	// cleared by clientToUpstream around interceptClientMessage and is read on
+	// the refusal path only — no other goroutine touches it, so it needs no
+	// lock. nil means the message in the gate is a single packet, which is
+	// every message on a session that never sends a statement past the SDU.
+	fragmentedMessage *statementFragments
+
 	// rowWriter batches captured result rows. Oracle used to INSERT one row
 	// at a time, synchronously, on the capture path — up to 100 000 sequential
 	// round-trips on a single proxied query.
@@ -1946,9 +1954,36 @@ func (s *session) clientToUpstream() error {
 
 		// Only intercept Data packets
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
-			if blocked := s.interceptClientMessage(pkt); blocked {
-				continue // Don't forward — error already sent to client
+			// A statement whose TTC message is larger than the negotiated SDU
+			// arrives as several packets, and gating the first one on its own is
+			// how the gate came to enforce against a fragment. Collect the whole
+			// message first; the gate reads the reassembly, the upstream gets the
+			// client's own packets. See reassembly.go.
+			msg, err := s.collectStatementMessage(pkt)
+			if err != nil {
+				return err
 			}
+
+			s.fragmentedMessage = msg
+
+			blocked := s.interceptClientMessage(msg.gate)
+
+			s.fragmentedMessage = nil
+
+			if blocked {
+				// Every fragment is dropped, not just the first: the refusal was
+				// answered once, and letting a continuation through on its own is
+				// what used to desynchronize the upstream and kill the session.
+				continue
+			}
+
+			for _, frag := range msg.packets {
+				if err := writeTNSPacket(s.upstreamConn, frag); err != nil {
+					return fmt.Errorf("upstream write error: %w", err)
+				}
+			}
+
+			continue
 		}
 
 		// Forward to upstream
@@ -2122,12 +2157,35 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 // nothing.
 func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bool {
 	if err := handle(ttcPayload); err != nil {
+		if s.refusalWouldStrandFragments() {
+			return s.endSessionOnRefusal(ttcPayload, "", err)
+		}
+
 		_ = s.sendOracleError(err)
 
 		return true
 	}
 
 	return false
+}
+
+// refusalWouldStrandFragments reports whether answering the current message
+// with an OER would leave part of it unread on the client socket.
+//
+// It is false for every single-packet message, and false for a reassembled one
+// whose last fragment was short — the ordinary shape, where the whole message is
+// in hand and dropping it strands nothing. It is true only in the boundary case
+// the collector cannot rule out: the declared statement length was covered by a
+// fragment that was itself SDU-sized, so the client may still owe bytes of this
+// same message. Reading them speculatively would swallow the *next* message, and
+// answering the OER without them would let a continuation reach the upstream on
+// its own — the desync that turned one refused statement into a dead session in
+// the 2026-08-31 incident. So the session ends instead, which is what
+// gateUnnameableFrame already does when there is no call it can safely answer.
+func (s *session) refusalWouldStrandFragments() bool {
+	msg := s.fragmentedMessage
+
+	return msg != nil && msg.fragmented() && !msg.complete
 }
 
 // gateUnnameableFrame decides what happens to a client message whose call dbbat

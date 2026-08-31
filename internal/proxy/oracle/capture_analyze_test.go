@@ -64,7 +64,7 @@ func TestAnalyzeDump(t *testing.T) {
 				desc += fmt.Sprintf(" sub=0x%02x", ttcPayload[1])
 			}
 
-			if sql := findSQLInPayload(ttcPayload); sql != "" && pkt.Direction == dump.DirClientToServer {
+			if sql, _ := findSQLInPayload(ttcPayload); sql != "" && pkt.Direction == dump.DirClientToServer {
 				desc += " sql=" + truncateSQL(strings.ReplaceAll(sql, "\n", " "), 80)
 			}
 		}
