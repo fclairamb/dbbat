@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.26.0](https://github.com/fclairamb/dbbat/compare/v0.25.2...v0.26.0) (2026-08-31)
+
+
+### Features
+
+* filter connections and queries server-side, and surface user last activity ([#337](https://github.com/fclairamb/dbbat/issues/337)) ([de3f57f](https://github.com/fclairamb/dbbat/commit/de3f57fcd2d26764e4ae86f21d2262118ffe1038))
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/stretchr/testify to v1.12.1 ([#334](https://github.com/fclairamb/dbbat/issues/334)) ([4424f3a](https://github.com/fclairamb/dbbat/commit/4424f3af4bbab29463f4b7613f4627d668d482a0))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.8.2 ([#338](https://github.com/fclairamb/dbbat/issues/338)) ([30c9e9c](https://github.com/fclairamb/dbbat/commit/30c9e9c0ce267f436fbfab325899e8ad032df4af))
+* **proxy:** gate SDU-fragmented statements whole and capture synthesized refusal frames ([#341](https://github.com/fclairamb/dbbat/issues/341)) ([36c88df](https://github.com/fclairamb/dbbat/commit/36c88dfb6d6b18cf8ff77f74079df7a01c3acce6))
+
 ## [0.25.2](https://github.com/fclairamb/dbbat/compare/v0.25.1...v0.25.2) (2026-08-17)
 
 
