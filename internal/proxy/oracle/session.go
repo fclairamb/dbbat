@@ -2172,16 +2172,21 @@ func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bo
 // refusalWouldStrandFragments reports whether answering the current message
 // with an OER would leave part of it unread on the client socket.
 //
-// It is false for every single-packet message, and false for a reassembled one
-// whose last fragment was short — the ordinary shape, where the whole message is
-// in hand and dropping it strands nothing. It is true only in the boundary case
-// the collector cannot rule out: the declared statement length was covered by a
-// fragment that was itself SDU-sized, so the client may still owe bytes of this
-// same message. Reading them speculatively would swallow the *next* message, and
-// answering the OER without them would let a continuation reach the upstream on
-// its own — the desync that turned one refused statement into a dead session in
-// the 2026-08-31 incident. So the session ends instead, which is what
-// gateUnnameableFrame already does when there is no call it can safely answer.
+// It is a backstop rather than a path taken: every message the collector returns
+// is complete, because it establishes the end of the message instead of assuming
+// it — a short last fragment ends it outright, and a full-sized one is followed
+// by a bounded peek (peekContinuation in reassembly.go). A collection that can
+// establish neither returns an error and the session ends there, before any of
+// this.
+//
+// It is kept because the thing it guards against is silent. A refusal answered
+// while a continuation of the same message is still on the wire lets that
+// continuation reach the upstream alone, which desynchronizes it and turns one
+// refused statement into a dead session — the DPY-4011 half of the 2026-08-31
+// incident. So statementFragments.complete is set only on the two determinate
+// exits, and a message that somehow arrives here without it is refused by
+// ending the session, exactly as gateUnnameableFrame refuses when there is no
+// call it can safely answer.
 func (s *session) refusalWouldStrandFragments() bool {
 	msg := s.fragmentedMessage
 

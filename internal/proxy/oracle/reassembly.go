@@ -3,7 +3,10 @@ package oracle
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"os"
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/dump"
@@ -59,6 +62,20 @@ const (
 	// budget — it is the fail-closed bound on a client that declares a length it
 	// never sends.
 	statementReassemblyTimeout = 30 * time.Second
+
+	// statementContinuationPeek bounds the wait for a continuation that may not
+	// exist: it is how "the message ended exactly on a full-sized fragment" is
+	// told from "one more fragment is on its way". See peekContinuation.
+	//
+	// It is spent only in that alignment — a declared statement length covered
+	// by a fragment that is itself SDU-sized — which is rare (the ordinary
+	// message ends on a short fragment and is recognized with no wait at all).
+	// So it is sized for a wide-area round trip rather than for a LAN: guessing
+	// "no more fragments" too early is what would let a continuation reach the
+	// upstream alone after a refusal, and that desync is the failure this whole
+	// file exists to remove. A quarter of a second on a statement past 8KB, in
+	// one alignment out of thousands, buys that away.
+	statementContinuationPeek = 250 * time.Millisecond
 )
 
 // errReassemblyAborted reports that a statement-carrying message could not be
@@ -66,6 +83,11 @@ const (
 // it and the session ends, because after a partial read the client's byte stream
 // is no longer at a message boundary.
 var errReassemblyAborted = errors.New("oracle: could not reassemble a fragmented statement message")
+
+// errNoMoreFragments reports that the peek window closed without a single byte
+// arriving: the message ended on the fragment boundary. Internal to the
+// collector — it is an answer, not a failure.
+var errNoMoreFragments = errors.New("oracle: no further fragment")
 
 // statementFragments is one client TTC message: the packets exactly as the
 // client sent them, plus the packet the gate reads.
@@ -80,14 +102,21 @@ type statementFragments struct {
 	// message it is packets[0] itself.
 	gate *TNSPacket
 
-	// complete reports that the whole message is in packets. It is false only
-	// when the last fragment collected was itself SDU-sized, which means the
-	// client may have had more to send: dbbat stops at the declared statement
-	// length and never reads past it, because over-reading would swallow the
-	// *next* message. A refusal in that state cannot answer with an OER and
-	// leave the session running — the residual fragment would be forwarded
-	// alone and desynchronize the upstream, which is the failure this whole
-	// file exists to remove — so it ends the session instead.
+	// complete reports that the whole message is in packets, which is what makes
+	// a refusal safe to answer with an OER: dropping the fragments strands
+	// nothing on the wire.
+	//
+	// Every successful collection sets it. The message is over either because
+	// its last fragment was short — the client fills each packet to the SDU and
+	// the tail is what is left — or because the peek that follows a full-sized
+	// last fragment closed with nothing behind it (peekContinuation). A
+	// collection that cannot establish either returns an error instead.
+	//
+	// It is still initialized false and set only on those determinate exits, so
+	// it doubles as a fail-closed backstop: a future path that forgot to
+	// establish completeness refuses by ending the session
+	// (session.refusalWouldStrandFragments) rather than by answering an OER and
+	// letting a residual fragment reach the upstream alone.
 	complete bool
 }
 
@@ -131,7 +160,14 @@ func (s *session) collectStatementMessage(pkt *TNSPacket) (*statementFragments, 
 }
 
 // readStatementFragments buffers pkt and reads continuation packets until the
-// declared statement length is covered.
+// declared statement length is covered *and* the end of the message is
+// established.
+//
+// The declared length is never over-read: reading past it speculatively would
+// swallow the message behind this one. So the end of the message is recognized
+// rather than assumed — a short fragment ends it outright, and a full-sized one
+// is followed by a bounded peek (peekContinuation) because a full packet is
+// exactly what a message with more to come looks like.
 func (s *session) readStatementFragments(pkt *TNSPacket, ttc []byte, need int) (*statementFragments, error) {
 	// Grown as packets arrive, never sized from the declared length.
 	body := make([]byte, 0, len(ttc)*2)
@@ -139,15 +175,36 @@ func (s *session) readStatementFragments(pkt *TNSPacket, ttc []byte, need int) (
 
 	out := &statementFragments{packets: []*TNSPacket{pkt}}
 
-	if err := s.clientConn.SetReadDeadline(time.Now().Add(statementReassemblyTimeout)); err != nil {
-		return nil, fmt.Errorf("%w: set read deadline: %w", errReassemblyAborted, err)
-	}
-
+	// Every read below sets its own deadline; this clears whatever the last one
+	// left, so the relay's next read is not inheriting a peek's few hundred
+	// milliseconds.
 	defer func() { _ = s.clientConn.SetReadDeadline(time.Time{}) }()
 
-	for need > 0 {
-		next, err := readTNSPacket(s.clientConn)
+	for {
+		// The statement is covered and the last fragment was short: the client
+		// filled each packet to the SDU and this is what was left, so the
+		// message is over with no waiting at all. This is the ordinary path.
+		last := out.packets[len(out.packets)-1]
+		if need <= 0 && len(last.Raw) < len(pkt.Raw) {
+			out.complete = true
+
+			break
+		}
+
+		// Either bytes of the declared statement are still owed (a required
+		// read, on the full budget), or the statement is covered but landed on
+		// a full-sized fragment and dbbat has to find out whether the message
+		// continues (a peek, on the short one).
+		next, err := s.readStatementContinuation(need <= 0)
 		if err != nil {
+			if errors.Is(err, errNoMoreFragments) {
+				// The peek closed with nothing behind it: the message really
+				// did end on the fragment boundary.
+				out.complete = true
+
+				break
+			}
+
 			return nil, fmt.Errorf("%w: %w", errReassemblyAborted, err)
 		}
 
@@ -174,10 +231,6 @@ func (s *session) readStatementFragments(pkt *TNSPacket, ttc []byte, need int) (
 		body = append(body, frag...)
 		out.packets = append(out.packets, next)
 		need -= len(frag)
-
-		// A fragment shorter than the first one is the end of the message: the
-		// client fills each packet to the SDU and the last one is what is left.
-		out.complete = len(next.Raw) < len(pkt.Raw)
 	}
 
 	out.gate = &TNSPacket{
@@ -192,6 +245,71 @@ func (s *session) readStatementFragments(pkt *TNSPacket, ttc []byte, need int) (
 		slog.Bool("complete", out.complete))
 
 	return out, nil
+}
+
+// readStatementContinuation reads the next packet of the message being
+// collected.
+//
+// peek says the declared statement is already covered, so the packet may
+// legitimately not exist: the wait is short and a window that closes before a
+// single byte arrives is reported as errNoMoreFragments rather than as a
+// failure. Otherwise bytes of the statement are still owed and the wait is the
+// full reassembly budget.
+//
+// The peek is measured on the *first byte*, not on the packet: a window that
+// expired midway through a packet would leave the byte stream desynchronized
+// with no way back. Once a byte has arrived the message is known to continue,
+// so the rest of the packet is read on the full budget with that byte put back
+// in front of the stream.
+func (s *session) readStatementContinuation(peek bool) (*TNSPacket, error) {
+	wait := statementReassemblyTimeout
+	if peek {
+		wait = statementContinuationPeek
+	}
+
+	if err := s.clientConn.SetReadDeadline(time.Now().Add(wait)); err != nil {
+		return nil, fmt.Errorf("set read deadline: %w", err)
+	}
+
+	if !peek {
+		return readTNSPacket(s.clientConn)
+	}
+
+	first := make([]byte, 1)
+
+	if _, err := io.ReadFull(s.clientConn, first); err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return nil, errNoMoreFragments
+		}
+
+		return nil, fmt.Errorf("peek continuation: %w", err)
+	}
+
+	if err := s.clientConn.SetReadDeadline(time.Now().Add(statementReassemblyTimeout)); err != nil {
+		return nil, fmt.Errorf("set read deadline: %w", err)
+	}
+
+	return readTNSPacket(&prefixedConn{Conn: s.clientConn, pending: first})
+}
+
+// prefixedConn is a net.Conn with bytes already taken off it put back in front,
+// so a packet whose first byte was consumed by the peek can still be read by the
+// ordinary reader.
+type prefixedConn struct {
+	net.Conn
+
+	pending []byte
+}
+
+func (c *prefixedConn) Read(b []byte) (int, error) {
+	if len(c.pending) > 0 {
+		n := copy(b, c.pending)
+		c.pending = c.pending[n:]
+
+		return n, nil
+	}
+
+	return c.Conn.Read(b) //nolint:wrapcheck // a transparent pass-through of the underlying conn
 }
 
 // statementFragmentShortfall reports how many more TTC bytes a
