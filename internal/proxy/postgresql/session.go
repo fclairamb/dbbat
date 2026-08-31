@@ -323,11 +323,22 @@ func (s *Session) Run() error {
 			s.logger.WarnContext(s.ctx, "failed to create dump writer", slog.Any("error", err))
 		} else {
 			s.dumpWriter = dw
-			// Wrap connections to capture traffic during the proxy phase
+			// Wrap the *client* connection to capture traffic during the proxy
+			// phase, and only that one. Tapping the upstream connection as well
+			// recorded every relayed frame twice — read off the client, then
+			// written to the upstream, both tagged client→server (and the
+			// mirror image on the way back) — which in a forensic capture reads
+			// as the client having sent the same query twice.
+			//
+			// The client leg is the side that has to be complete: it is where a
+			// query dbbat blocks is still seen (read from the client, never
+			// forwarded) and where the ErrorResponse dbbat synthesizes itself is
+			// seen too (written to the client, never read from the upstream).
+			// The upstream leg carries nothing the client leg does not, and
+			// dbbat's own upstream statements (setSessionReadOnly) run before
+			// this point, so they were never captured either way.
 			clientTap := dump.NewTapConn(s.clientConn, dw, dump.DirClientToServer, dump.DirServerToClient)
-			upstreamTap := dump.NewTapConn(s.upstreamConn, dw, dump.DirServerToClient, dump.DirClientToServer)
 			s.clientBackend = pgproto3.NewBackend(clientTap, clientTap)
-			s.upstreamFrontend = pgproto3.NewFrontend(upstreamTap, upstreamTap)
 		}
 	}
 
