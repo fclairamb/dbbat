@@ -7,7 +7,7 @@ go 1.26.0
 // cannot silently ship what the Dockerfile and CI already exclude. Kept
 // separate from the `go` directive above: this is a security floor, not a
 // language-version bump.
-toolchain go1.26.6
+toolchain go1.27.0
 
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
