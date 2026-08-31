@@ -513,27 +513,66 @@ func (s *session) run() error {
 		slog.String("upstream", upstreamAddr))
 
 	// Step 8: Initialize dump writer if configured
-	if s.dumpConfig.Dir != "" && s.connectionUID != uuid.Nil {
-		dumpPath := filepath.Join(s.dumpConfig.Dir, s.connectionUID.String()+dump.FileExt)
-
-		dw, err := dump.NewWriter(dumpPath, dump.Header{
-			SessionID: s.connectionUID.String(),
-			Protocol:  dump.ProtocolOracle,
-			StartTime: time.Now(),
-			Connection: map[string]any{
-				"service_name":  s.serviceName,
-				"upstream_addr": upstreamAddr,
-			},
-		}, s.dumpConfig.MaxSize)
-		if err != nil {
-			s.logger.WarnContext(s.ctx, "failed to create dump writer", slog.Any("error", err))
-		} else {
-			s.dump = dw
-		}
-	}
+	s.startDumpIfConfigured(upstreamAddr)
 
 	// Step 9: Enter bidirectional TNS relay with query interception
 	return s.proxyMessages()
+}
+
+// startDumpIfConfigured opens the per-connection capture and installs the
+// server→client recording point.
+//
+// The two directions are recorded differently, and deliberately so.
+//
+// **client→server** is recorded by the reader, packet by packet, in
+// clientToUpstream and in the fragment collector (reassembly.go). It cannot be
+// tapped on the socket: readTNSPacket reads a header and then a body, and the
+// collector's peek takes a single byte off the stream and puts it back through
+// prefixedConn — a read tap would record those chunk boundaries instead of TNS
+// packets, and would double-record everything the reader already dumps.
+//
+// **server→client** is recorded by a write tap on the client socket, and by
+// nothing else. Recording it in upstreamToClient (which is what this used to
+// do) captured only the frames *relayed from the upstream*: every frame dbbat
+// synthesizes itself — the OER refusal writeTTCError emits for read_only,
+// block_ddl, block_copy, a quota, an expired or revoked grant, a statement it
+// could not fully read — went straight to the socket and never reached the
+// capture. A capture of a refused statement therefore showed the statement and
+// then silence, which reads as a dropped connection rather than as an enforced
+// control. The tap sits where the bytes leave, so a refusal path added later
+// cannot bypass it the same way. One TNS packet is one Write (writeTNSPacket
+// writes pkt.Raw in a single call), so the framing is exactly what the explicit
+// call recorded before.
+//
+// The tap goes on *outside* the counting/watched conns, so byte accounting and
+// client-gone detection are unaffected. Only the post-auth phase is captured:
+// the file is named after the connection UID, which does not exist until the
+// connection row is written, so the AUTH-phase refusal (sendAuthFailed) and the
+// pre-auth relay have no capture to land in by construction.
+func (s *session) startDumpIfConfigured(upstreamAddr string) {
+	if s.dumpConfig.Dir == "" || s.connectionUID == uuid.Nil {
+		return
+	}
+
+	dumpPath := filepath.Join(s.dumpConfig.Dir, s.connectionUID.String()+dump.FileExt)
+
+	dw, err := dump.NewWriter(dumpPath, dump.Header{
+		SessionID: s.connectionUID.String(),
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+		Connection: map[string]any{
+			"service_name":  s.serviceName,
+			"upstream_addr": upstreamAddr,
+		},
+	}, s.dumpConfig.MaxSize)
+	if err != nil {
+		s.logger.WarnContext(s.ctx, "failed to create dump writer", slog.Any("error", err))
+
+		return
+	}
+
+	s.dump = dw
+	s.clientConn = dump.NewWriteTapConn(s.clientConn, dw, dump.DirServerToClient)
 }
 
 // encodeV315DataPacket wraps a TTC payload in a v315+ TNS Data packet.
@@ -2491,12 +2530,10 @@ func (s *session) upstreamToClient() error {
 			s.interceptUpstreamMessage(pkt)
 		}
 
-		// Dump upstream->client packet
-		if s.dump != nil {
-			_ = s.dump.WritePacket(dump.DirServerToClient, pkt.Raw)
-		}
-
-		// Forward to client
+		// Forward to client. The capture's server→client recording point is the
+		// write tap on s.clientConn (startDumpIfConfigured), not a call here: a
+		// second one would double-record every relayed packet, and this one
+		// never saw the frames dbbat synthesizes itself.
 		if err := writeTNSPacket(s.clientConn, pkt); err != nil {
 			return fmt.Errorf("client write error: %w", err)
 		}
