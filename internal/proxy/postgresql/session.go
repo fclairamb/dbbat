@@ -356,7 +356,9 @@ func (s *Session) Run() error {
 // Both taps sit **above** TLS: negotiateSSL runs at the top of Run and has
 // already replaced s.clientConn with the *tls.Conn by the time this runs, so
 // what is captured is plaintext PostgreSQL protocol on both legs, never TLS
-// records.
+// records. TestAttachDumpTaps_RecordsPlaintextAboveTLS pins that: it runs the
+// real negotiation with a real TLS client and asserts each direction's marker
+// is legible in the capture and absent from the raw socket.
 //
 // The upstream connection is deliberately not tapped. It was, and every relayed
 // frame was recorded twice — read off the client, then written to the upstream,

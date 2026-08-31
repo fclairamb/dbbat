@@ -421,6 +421,11 @@ func (s *Session) recordDisconnect() {
 // writes plaintext MySQL packets into the tap, which records them and hands
 // them on to be encrypted, and reads come back already decrypted. See
 // docs/dump-format.md, "Captures are plaintext, above TLS".
+//
+// That rests on a dependency's internals, so it is pinned by a test rather than
+// by this comment: TestStartDumpIfConfigured_RecordsPlaintextAboveTLS drives a
+// real TLS handshake through go-mysql and asserts the capture holds the
+// plaintext query the raw socket never carried.
 func (s *Session) startDumpIfConfigured() {
 	if s.server.dumpConfig.Dir == "" || s.connection == nil || s.serverConn == nil {
 		return

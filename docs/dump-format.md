@@ -255,6 +255,16 @@ recording points are at the message layer, above the socket entirely. Oracle is
 the one protocol dbbat never upgrades, so its client leg is plaintext by
 construction.
 
+The two orderings that *are* load-bearing are pinned by tests rather than by
+this paragraph — `TestStartDumpIfConfigured_RecordsPlaintextAboveTLS`
+(`internal/proxy/mysql`) and `TestAttachDumpTaps_RecordsPlaintextAboveTLS`
+(`internal/proxy/postgresql`), each of which runs a real TLS handshake and
+asserts a marker is legible in the capture and absent from the raw socket. The
+MySQL one matters most: its claim rests on go-mysql installing the `*tls.Conn`
+at `c.Conn.Conn`, which a library upgrade could move silently. The integration
+suite's `TestIntegration_SessionDump` asserts the same thing end to end, against
+a real TLS client, without knowing where the `*tls.Conn` lives.
+
 Only the **post-auth** phase is captured, on every protocol: the file is named
 after the connection UID, and that row does not exist until authentication has
 succeeded. A login dbbat refuses therefore has no capture at all, by
