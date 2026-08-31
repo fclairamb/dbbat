@@ -2586,12 +2586,19 @@ bytes, zero dynamic SQL):
   a non-Data packet mid-message, is torn down: the session is the blast radius, which is
   the answer `gateUnnameableFrame` already gives for the same reason.
 - **Where it stops reading**: at the declared statement length, never past it — over-reading
-  would swallow the *next* message. In the ordinary shape the message's last fragment is
-  short (the client fills each packet to the SDU and the tail is what is left), which is
-  how completeness is known. In the boundary case where the statement ends on a full-sized
-  fragment, dbbat cannot rule out that more of the message is still coming; a refusal there
-  ends the session instead of answering an OER, because answering one would let the residual
-  continuation reach the upstream on its own.
+  would swallow the *next* message. The end of the message is then *established*, not
+  assumed. In the ordinary shape the last fragment is short (the client fills each packet to
+  the SDU and the tail is what is left) and the message is over with no waiting at all. When
+  the statement instead ends on a full-sized fragment — which is what a message with more to
+  come also looks like — dbbat peeks for one more packet on a short deadline
+  (`statementContinuationPeek`, 250ms): nothing arrives and the message really did end on
+  the boundary, so the refusal takes the ordinary OER path; a byte arrives and the packet is
+  read on the full budget with that byte put back in front of the stream, so a peek window
+  closing mid-packet cannot desynchronize anything. Either way a refusal answers with an OER
+  and the session lives. `statementFragments.complete` is set only on those two determinate
+  exits and stays a fail-closed backstop: a message that somehow reaches the refusal path
+  without it ends the session rather than leaving a continuation to reach the upstream
+  alone.
 - Bind values may spill into a continuation too. They are captured when present, as before —
   binds are best-effort, the statement text is not.
 
