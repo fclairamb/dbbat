@@ -2535,6 +2535,93 @@ the wire, so both are covered by fixtures in `oci_instantclient_test.go`):
   forwarding — a single merged packet exceeds the client's negotiated SDU and is rejected
   with `ORA-12592` ("bad packet").
 
+#### Data-phase reassembly: a statement larger than the SDU
+
+The AUTH-phase reassembly above has a data-phase twin, added in 2026-08 for the same
+underlying reason and after the same class of failure. TTC carries **no message-length
+field**, so a message larger than the negotiated SDU (8192 by default, on both ends) is
+written by the client as several TNS Data packets: only the first carries the TTC op
+header, and every continuation is raw bytes behind the same 8-byte TNS header and 2-byte
+data-flags prefix. The data phase used to read one packet at a time and gate each one
+independently, so a statement past ~8100 bytes of SQL reached the decoder as its first
+fragment only.
+
+What that cost, measured on the capture of the 2026-08-31 incident (a generated
+`MERGE … USING (SELECT … FROM dual UNION ALL …)` with literal French labels — 9214 UTF-8
+bytes, zero dynamic SQL):
+
+- the header-anchored decode (`locateExecSQLText`) needs the declared run to sit inside
+  the body and refused, the offset windows refused for the same reason, and the
+  last-resort keyword scan returned a prefix — cut at the first non-ASCII byte, the `è` of
+  `'Surface Pièce'`;
+- the gate then enforced against that prefix and `queries` recorded it as the statement.
+  Everything beyond the leading verb was therefore evadable by padding a statement past
+  the SDU: the Oracle blocked patterns, the approval patterns and the dynamic-SQL scan
+  only ever saw the padding;
+- the prefix ended inside an open literal, so the dynamic-SQL scan failed closed and the
+  refusal came back as *"dbbat cannot check dynamic SQL that is itself built from dynamic
+  SQL"* — a claim about a statement that carried none;
+- and a refusal answered the OER for the first fragment while the orphan continuation was
+  read next and forwarded upstream **alone**, which desynchronized the upstream and killed
+  the session (`DPY-4011` at the client's next call).
+
+`clientToUpstream` now collects the whole message before gating it
+(`internal/proxy/oracle/reassembly.go`):
+
+- **Trigger**: the op's own declared length. `execSQLLength` / `execSQLLengthWide` for the
+  `03 5e` piggyback execute and the `11 69` close-cursors piggyback with that execute
+  stapled behind it, and the varlen length for a legacy OALL8 — reassembly starts iff that
+  length runs past the bytes in hand. A message that fits its packet takes exactly the path
+  it always did.
+- **Forward path**: on allow, the **client's own packets** are forwarded in order, byte for
+  byte. The reassembled buffer is a reading device; dbbat never synthesizes wire bytes
+  toward the upstream.
+- **Refusal path**: every buffered fragment is dropped and the OER is answered once, so
+  nothing reaches the upstream, nothing desynchronizes, and the session answers the next
+  call normally.
+- **Bounds**: the declared length is attacker-controlled, so nothing is allocated from it —
+  the buffer grows as packets arrive, the total is capped at `execMaxSQLLen` plus slack
+  (`maxStatementReassembly`), and the wait is bounded by a read deadline
+  (`statementReassemblyTimeout`). A client that declares a length it never sends, or sends
+  a non-Data packet mid-message, is torn down: the session is the blast radius, which is
+  the answer `gateUnnameableFrame` already gives for the same reason.
+- **Where it stops reading**: at the declared statement length, never past it — over-reading
+  would swallow the *next* message. In the ordinary shape the message's last fragment is
+  short (the client fills each packet to the SDU and the tail is what is left), which is
+  how completeness is known. In the boundary case where the statement ends on a full-sized
+  fragment, dbbat cannot rule out that more of the message is still coming; a refusal there
+  ends the session instead of answering an OER, because answering one would let the residual
+  continuation reach the upstream on its own.
+- Bind values may spill into a continuation too. They are captured when present, as before —
+  binds are best-effort, the statement text is not.
+
+Belt to those braces, for frames reassembly cannot fix (a declared length past the bound, a
+frame handed to a decoder without its continuations):
+
+- the fallback extractors report when their run was cut by the end of the frame rather than
+  by the TTC framing (`findSQLInPayload` now also accepts non-ASCII bytes and repairs the
+  run through `sanitizeSQLRun`, instead of truncating at the first byte past `0x7E` — the
+  header-anchored path always accepted them and the fallback contradicted it);
+- `decodeOALL8` hands back a marked prefix rather than a decode failure, because a decode
+  failure is forwarded ungated and the bytes past the cut are exactly where a blocked
+  pattern would sit;
+- a statement known to be partial is refused under a grant whose controls depend on reading
+  it (`read_only`, `block_ddl`, approval patterns, or the approval gate armed) with
+  `shared.ErrStatementNotFullyRead` — *"dbbat could not read this statement to its end"* —
+  and under a grant with none of those it is forwarded but recorded with a
+  `/* dbbat: statement text is partial … */` note, so `queries` never passes a prefix off
+  as the statement.
+
+That error is a split of `ErrDynamicSQLNotCheckable` (`internal/proxy/shared`), shared by
+all three protocols with dynamic SQL: a quoted run left open means dbbat holds a prefix,
+which is a different finding from dynamic SQL nested inside dynamic SQL and must not be
+reported as it.
+
+**Operator note**: the other four protocols are unaffected — their wire formats carry
+explicit message lengths and are reassembled before gating. Raising the SDU on both ends
+moves the threshold but does not change any of the above; the server side defaults to 8192,
+so verify the Accept packet before relying on a larger value.
+
 #### Two OCI encodings, not one (proxy mode)
 
 Everything above is about AUTH. The same split runs through **proxy mode**, and it was found
