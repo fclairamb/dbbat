@@ -1006,7 +1006,7 @@ func countBindPlaceholders(sql string) int {
 		}
 
 		j := i + 1
-		for j < len(sql) && (isBindNameByte(sql[j])) {
+		for j < len(sql) && isBindNameByte(sql[j]) {
 			j++
 		}
 

@@ -46,6 +46,10 @@ func (s *Server) startSocketMode() {
 	// every live proxy session on it.
 	go safe.RunGuarded(ctx, s.logger, goroutineNameSlackSocketRun, func() {
 		// RunContext blocks and reconnects internally until ctx is canceled.
+		// staticcheck knows today's RunContext only ever returns non-nil, so it
+		// flags the nil guard as always true; keep it anyway rather than depend
+		// on that being true of the next slack-go release.
+		//nolint:staticcheck // SA4023: nil guard is defensive against upstream changing
 		if err := client.RunContext(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.logger.WarnContext(ctx, "slack socket mode stopped", slog.Any("error", err))
 		}
