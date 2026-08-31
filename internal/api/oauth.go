@@ -339,6 +339,10 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 			return
 		}
 
+		// Interactive sign-in, same as the password path — recorded after the
+		// session exists, and never fatal.
+		s.stampLastLogin(ctx, user.UID)
+
 		// 6. Park the session behind a one-time exchange code. The session
 		// token itself must never travel in a URL: a redirect Location lands
 		// in access logs, proxy logs, browser history and Referer headers,
@@ -431,6 +435,13 @@ func (s *Server) handleOAuthExchange(c *gin.Context) {
 	}
 
 	s.logger.InfoContext(ctx, "OAuth login exchange redeemed", slog.Any("uid", userID))
+
+	// The exchange is the moment the browser actually holds a session, so it is
+	// stamped here too. Redundant with the callback in the normal flow and
+	// deliberately so: both halves are interactive, the write is idempotent, and
+	// a callback that stamped while the browser never redeemed the code would
+	// otherwise report a login that nobody completed.
+	s.stampLastLogin(ctx, userID)
 
 	c.JSON(http.StatusOK, LoginExchangeResponse{AccessToken: string(plainKey), TokenType: "Bearer"})
 }

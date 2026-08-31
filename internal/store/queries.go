@@ -673,8 +673,33 @@ func (s *Store) UpdateQueryCompletion(
 // ListQueries retrieves queries with optional filters
 func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, error) {
 	var queries []Query
+
+	q, err := s.buildListQueriesQuery(ctx, &queries, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := q.Scan(ctx); err != nil {
+		return nil, fmt.Errorf("failed to list queries: %w", err)
+	}
+
+	if queries == nil {
+		queries = []Query{}
+	}
+
+	return queries, nil
+}
+
+// buildListQueriesQuery assembles the listing query without running it — the
+// counterpart of buildListConnectionsQuery, and split out for the same reason:
+// the query-plan test EXPLAINs the real statement, not a copy of it.
+func (s *Store) buildListQueriesQuery(
+	ctx context.Context,
+	dest *[]Query,
+	filter QueryFilter,
+) (*bun.SelectQuery, error) {
 	q := s.db.NewSelect().
-		Model(&queries).
+		Model(dest).
 		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, " +
 			"q.results_truncated, q.results_dropped, q.copy_format, q.copy_direction, " +
 			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, c.user_id, c.database_id").
@@ -690,6 +715,21 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 
 	if filter.DatabaseID != nil {
 		q = q.Where("c.database_id = ?", *filter.DatabaseID)
+	}
+
+	// Session-scoped narrowing (server group, grant instance, grant policy,
+	// grant provenance), applied by the same builder the connections listing
+	// uses so the two can never disagree about which sessions they select.
+	q, err := queryObservabilityFilters.apply(ctx, s, q,
+		filter.ServerGroupUID, filter.GrantUID, filter.GrantDefinitionUID, filter.GrantProvenance)
+	if err != nil {
+		return nil, err
+	}
+
+	// A per-*statement* property, not a session one: which individual
+	// statements a second human held and released (see approvals.go).
+	if filter.ApprovalStatus != nil {
+		q = q.Where("q.approval_status = ?", *filter.ApprovalStatus)
 	}
 
 	if filter.StartTime != nil {
@@ -714,15 +754,7 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 		q = q.Offset(filter.Offset)
 	}
 
-	err := q.Scan(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list queries: %w", err)
-	}
-
-	if queries == nil {
-		queries = []Query{}
-	}
-	return queries, nil
+	return q, nil
 }
 
 // GetQueryWithRows retrieves a query with its result rows

@@ -112,9 +112,29 @@ func TestGrantDefinitionSlugMigrationBackfill(t *testing.T) {
 
 	s := &Store{db: db}
 
-	admin, err := s.CreateUser(ctx, "legacy-admin", "hash", []string{RoleAdmin})
+	// Raw insert, deliberately — not s.CreateUser.
+	//
+	// The schema is parked at a historical point here, while the Go models are
+	// always at head. A model-backed insert writes *every* column the struct
+	// declares, so the moment any later migration adds one to `users`
+	// (last_login_at, in 20260822000000) that write starts failing with an
+	// "column does not exist" error that says nothing about the slug backfill
+	// this test is actually about. The legacy grant_definitions rows below are
+	// seeded raw for exactly the same reason; the admin row is no different.
+	//
+	// This is a property of migrating *backwards in the test*, not a product
+	// compatibility break: dbbat runs its migrations to head before serving,
+	// so the models and the schema are only ever out of step here. Every other
+	// migration test in this package already seeds users this way — this one
+	// was the outlier.
+	var adminUID uuid.UUID
+
+	err = db.NewRaw(
+		"INSERT INTO users (username, password_hash, roles) VALUES (?, ?, ?) RETURNING uid",
+		"legacy-admin", "hash", pgdialect.Array([]string{RoleAdmin}),
+	).Scan(ctx, &adminUID)
 	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
+		t.Fatalf("seed legacy admin: %v", err)
 	}
 
 	// Seed several "legacy" rows the way they existed before this release:
@@ -133,7 +153,7 @@ func TestGrantDefinitionSlugMigrationBackfill(t *testing.T) {
 
 		err = db.NewRaw(
 			"INSERT INTO grant_definitions (name, duration_seconds, created_by) VALUES (?, ?, ?) RETURNING uid",
-			fmt.Sprintf("legacy-def-%d", i), 3600, admin.UID,
+			fmt.Sprintf("legacy-def-%d", i), 3600, adminUID,
 		).Scan(ctx, &legacyUID)
 		if err != nil {
 			t.Fatalf("seed legacy row %d: %v", i, err)
@@ -189,7 +209,7 @@ func TestGrantDefinitionSlugMigrationBackfill(t *testing.T) {
 		Name:            "post-migration",
 		Slug:            "post-migration",
 		DurationSeconds: 60,
-		CreatedBy:       admin.UID,
+		CreatedBy:       adminUID,
 	}); err != nil {
 		t.Fatalf("CreateGrantDefinition after migration: %v", err)
 	}

@@ -133,6 +133,30 @@ func (s *Server) handleListRoleSyncs(c *gin.Context) {
 	successResponse(c, gin.H{"role_syncs": syncs})
 }
 
+// handleListLastConnections returns the most recent proxy session per user.
+//
+// One row per user, computed in the database — like GET /users/role-syncs and
+// for the same reason: deriving it in the frontend from a page of
+// GET /connections reports "never connected" for anyone whose last session
+// fell off that page, which is indistinguishable from someone who genuinely
+// never connected. Absence here means never, exactly.
+//
+// It answers "last connection *still on record*": connection rows are
+// deletable and are reaped by retention, so a user whose sessions have all
+// aged out reads as never having connected.
+//
+// Admin-or-viewer, matching GET /connections, which is where these sessions
+// can be listed one by one.
+func (s *Server) handleListLastConnections(c *gin.Context) {
+	rows, err := s.store.ListLastConnectionPerUser(c.Request.Context())
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list last connections")
+		return
+	}
+
+	successResponse(c, gin.H{"last_connections": rows})
+}
+
 // handleGetUser retrieves a specific user.
 //
 // Visibility matches handleListUsers: admins and viewers see everyone, anyone

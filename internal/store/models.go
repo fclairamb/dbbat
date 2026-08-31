@@ -43,6 +43,16 @@ type User struct {
 	CreatedAt         time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	UpdatedAt         time.Time   `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
 	DeletedAt         *time.Time  `bun:"deleted_at,soft_delete" json:"-"`
+	// LastLoginAt is when this account last signed in *interactively* — a
+	// password login or an OAuth/OIDC login, and nothing else. Token
+	// validation, session refresh, API-key authentication and MCP deliberately
+	// never move it: the moment they do, the column stops meaning "last seen in
+	// the UI" and starts meaning "last HTTP request from anything".
+	//
+	// nil = never signed in interactively. Mutable operational state living
+	// outside the audit chain, so it is *not* tamper-evident — an evidential
+	// login history would be chained audit events, which is a different thing.
+	LastLoginAt *time.Time `bun:"last_login_at" json:"last_login_at,omitempty"`
 	// ProtocolData holds protocol-specific per-user material (Oracle O5LOGON
 	// user salts, etc.) in a single generic jsonb column — mirroring
 	// APIKey.ProtocolData — rather than protocol-specific user columns.
@@ -519,13 +529,101 @@ type Instance struct {
 	LastSeenAt time.Time `bun:"last_seen_at,notnull,default:current_timestamp" json:"last_seen_at"`
 }
 
-// ConnectionFilter represents filters for listing connections
+// ConnectionFilter represents filters for listing connections.
+//
+// Every field composes with AND. The four observability filters below share
+// their SQL with QueryFilter through observabilityFilters — a session's user,
+// server, grant and provenance mean the same thing whichever list you are
+// looking at, so they must not drift into two implementations.
 type ConnectionFilter struct {
 	UserID     *uuid.UUID
 	DatabaseID *uuid.UUID
 	BeforeUID  *uuid.UUID // Cursor: return connections with UID < this value
 	Limit      int
 	Offset     int
+
+	// ServerGroupUID narrows to the servers a group contains **right now**.
+	// Membership is resolved live at query time, never snapshotted, matching
+	// how grant scope is resolved everywhere else — so a filtered view is a
+	// view of current membership, not of membership at session time. An empty
+	// group yields zero rows, never "unfiltered".
+	ServerGroupUID *uuid.UUID
+
+	// GrantUID narrows to the exact grant *instance* a session authenticated
+	// under (connections.grant_uid). This is what a connection row links to
+	// and what the detail page deep-links from.
+	GrantUID *uuid.UUID
+
+	// GrantDefinitionUID narrows to a grant *policy*, matched across the
+	// definition's whole lineage rather than by uid equality: editing a
+	// definition archives it and inserts a successor, so uid equality would
+	// silently drop every session that ran under an earlier version — exactly
+	// the history an audit review is looking for. A uid naming an archived
+	// version selects the same rows as the live one.
+	GrantDefinitionUID *uuid.UUID
+
+	// GrantProvenance narrows to how the session's grant was issued. Multiple
+	// values are OR-ed together; empty means no provenance filter. See
+	// GrantProvenance for what each value asserts.
+	GrantProvenance []GrantProvenance
+
+	// ActiveOnly narrows to sessions still open (disconnected_at IS NULL).
+	//
+	// A plain bool, not the *bool the tri-state settings elsewhere use:
+	// "unfiltered" and "false" are the same request here. There is no third
+	// meaning to express — "only closed sessions" is not a filter anything
+	// asks for, and if it ever is it gets its own field rather than a nil that
+	// means one thing on this filter and another on the next.
+	ActiveOnly bool
+}
+
+// GrantProvenance says how the grant a session ran under came to exist. The
+// three routes are distinguishable only through grant_requests, whose
+// decided_by column carries the convention ApproveGrantRequest /
+// AutoApproveGrantRequest establish: a named human, or nobody (the
+// definition's auto-approve policy).
+type GrantProvenance string
+
+// The provenance routes a grant can have reached a session by.
+const (
+	// GrantProvenanceApproved: a request row references the grant and names a
+	// human decider — someone signed off on this access.
+	GrantProvenanceApproved GrantProvenance = "approved"
+
+	// GrantProvenanceAuto: a request row references the grant and its
+	// decided_by is NULL — the definition's auto_approve policy issued it with
+	// no human in the loop (see AutoApproveGrantRequest).
+	GrantProvenanceAuto GrantProvenance = "auto"
+
+	// GrantProvenanceDirect: **no approval on record** — no grant_requests row
+	// references the grant. Typically an admin issuing one straight through
+	// POST /grants, which is a human act but never an *approval*.
+	//
+	// It is deliberately not phrased as "provably admin-issued": being a
+	// negative predicate it also swallows a grant whose request row was
+	// deleted, and any grant predating resulting_grant_id. That is the correct
+	// trade — such a grant must not be labeled `auto`, which would assert "no
+	// human was involved" on no evidence at all.
+	GrantProvenanceDirect GrantProvenance = "direct"
+)
+
+// ValidGrantProvenances lists every accepted provenance value.
+var ValidGrantProvenances = []GrantProvenance{
+	GrantProvenanceApproved,
+	GrantProvenanceAuto,
+	GrantProvenanceDirect,
+}
+
+// ParseGrantProvenance validates one provenance value, so an API layer can
+// reject a typo instead of silently returning an unfiltered list.
+func ParseGrantProvenance(value string) (GrantProvenance, bool) {
+	for _, valid := range ValidGrantProvenances {
+		if GrantProvenance(value) == valid {
+			return valid, true
+		}
+	}
+
+	return "", false
 }
 
 // QueryParameters stores parameter values for prepared statements
@@ -653,7 +751,12 @@ type QueryWithRows struct {
 	Rows []QueryRow `json:"rows"`
 }
 
-// QueryFilter represents filters for listing queries
+// QueryFilter represents filters for listing queries.
+//
+// Every field composes with AND. The session-shaped filters (server group,
+// grant, provenance) mean exactly what they mean on ConnectionFilter and are
+// applied by the same shared code, reached through the connections row the
+// listing already joins.
 type QueryFilter struct {
 	ConnectionID *uuid.UUID
 	UserID       *uuid.UUID
@@ -663,6 +766,20 @@ type QueryFilter struct {
 	BeforeUID    *uuid.UUID // Cursor: return queries with UID < this value (for stable pagination)
 	Limit        int
 	Offset       int
+
+	// ServerGroupUID, GrantUID, GrantDefinitionUID and GrantProvenance are the
+	// session-scoped filters — see ConnectionFilter for their semantics. They
+	// narrow which *access* the statements ran under.
+	ServerGroupUID     *uuid.UUID
+	GrantUID           *uuid.UUID
+	GrantDefinitionUID *uuid.UUID
+	GrantProvenance    []GrantProvenance
+
+	// ApprovalStatus narrows to statements a human held: pending / approved /
+	// denied / abandoned (see approvals.go). Deliberately a *different* axis
+	// from GrantProvenance — that one says which access the session ran under,
+	// this one says which individual statements a second human released.
+	ApprovalStatus *string
 }
 
 // AccessGrant is one *instance* of a GrantDefinition: a named user's

@@ -264,3 +264,72 @@ func (s *Store) EnsureDefaultAdmin(ctx context.Context, passwordHash string) err
 
 	return nil
 }
+
+// TouchUserLastLogin stamps users.last_login_at with the current instant.
+//
+// Called only from the *interactive* login paths (password login, the OAuth
+// callback, the OAuth exchange) — see User.LastLoginAt for why nothing else
+// may call it.
+//
+// A targeted UPDATE rather than a model write: last_login_at is the only
+// column this is allowed to touch, and it deliberately leaves updated_at
+// alone, which tracks administrative edits to the account and would otherwise
+// be moved by every sign-in.
+//
+// A UID that names no row is not an error: the caller has already
+// authenticated somebody, and failing a login because the bookkeeping write
+// found nothing to update would be strictly worse than a stale timestamp.
+func (s *Store) TouchUserLastLogin(ctx context.Context, uid uuid.UUID) error {
+	_, err := s.db.NewUpdate().
+		Model((*User)(nil)).
+		Set("last_login_at = ?", time.Now()).
+		Where("uid = ?", uid).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to stamp last login: %w", err)
+	}
+
+	return nil
+}
+
+// UserLastConnection is when one user last opened a proxy session, as returned
+// by ListLastConnectionPerUser.
+type UserLastConnection struct {
+	UserID      uuid.UUID `bun:"user_id" json:"user_id"`
+	Username    string    `bun:"username" json:"username"`
+	ConnectedAt time.Time `bun:"connected_at" json:"connected_at"`
+}
+
+// ListLastConnectionPerUser returns the most recent proxy connection of every
+// user that has one — one row per user, computed in the database.
+//
+// Deliberately not derived from a page of the connections listing: on a busy
+// instance a user whose last session fell outside such a page would render as
+// "never connected", which is the same thing shown for someone who genuinely
+// never has. Absence from this response is therefore exact.
+//
+// It reads "last connection *still on record*", not "last connection ever":
+// connection rows are deletable and DBB_QUERY_STORAGE_RETENTION's sibling
+// sweeps reap them, so a user whose sessions have all aged out reports as
+// never having connected. That is the correct reading of the stored evidence,
+// and the reason the column is labeled from the record rather than from
+// history.
+//
+// Served by idx_connections_user_connected_at.
+func (s *Store) ListLastConnectionPerUser(ctx context.Context) ([]UserLastConnection, error) {
+	rows := []UserLastConnection{}
+
+	err := s.db.NewSelect().
+		Model((*Connection)(nil)).
+		DistinctOn("c.user_id").
+		ColumnExpr("c.user_id, c.connected_at").
+		ColumnExpr("u.username").
+		Join("JOIN users AS u ON u.uid = c.user_id AND u.deleted_at IS NULL").
+		Order("c.user_id", "c.connected_at DESC").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list the last connection per user: %w", err)
+	}
+
+	return rows, nil
+}

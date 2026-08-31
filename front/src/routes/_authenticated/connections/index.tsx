@@ -5,8 +5,14 @@ import {
   useUsers,
   useDatabases,
   useGrants,
+  useServerGroups,
+  useGrantDefinitions,
   type Connection,
 } from "@/api";
+import {
+  ObservabilityFilterBar,
+  type ObservabilityFilters,
+} from "@/components/shared/ObservabilityFilterBar";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
@@ -14,8 +20,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { UpstreamTlsIndicator } from "@/components/shared/UpstreamTlsIndicator";
 import { GrantAccessChip } from "@/components/shared/GrantAccessChip";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { formatBytes } from "@/lib/utils";
@@ -23,24 +27,63 @@ import { formatBytes } from "@/lib/utils";
 const DEFAULT_PAGE_SIZE = 50;
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
+/** Search params, minus pagination — the filters proper. */
+type ConnectionSearch = ObservabilityFilters & {
+  before?: string;
+  size: number;
+};
+
+const asString = (value: unknown) =>
+  typeof value === "string" && value !== "" ? value : undefined;
+
 export const Route = createFileRoute("/_authenticated/connections/")({
-  validateSearch: (search: Record<string, unknown>) => ({
-    before: search.before as string | undefined,
+  // Every filter lives in the URL, like `before` and `size` already do: a
+  // filtered view is then shareable and the back button works.
+  validateSearch: (search: Record<string, unknown>): ConnectionSearch => ({
+    before: asString(search.before),
     size: search.size ? Number(search.size) : DEFAULT_PAGE_SIZE,
     active: search.active === true || search.active === "true" ? true : undefined,
+    user_id: asString(search.user_id),
+    database_id: asString(search.database_id),
+    server_group_uid: asString(search.server_group_uid),
+    grant_definition_uid: asString(search.grant_definition_uid),
+    grant_uid: asString(search.grant_uid),
+    grant_provenance: asString(search.grant_provenance),
   }),
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
-  const { before, size, active } = Route.useSearch();
+  const search = Route.useSearch();
+  const { before, size, active } = search;
   const navigate = Route.useNavigate();
+  // Server-side, all of it. Narrowing an already-fetched page under-reports
+  // the instant the matching rows are not in the current one.
   const { data: connections, isLoading, refetch } = useConnections({
     before,
     limit: size,
+    active,
+    user_id: search.user_id,
+    database_id: search.database_id,
+    server_group_uid: search.server_group_uid,
+    grant_definition_uid: search.grant_definition_uid,
+    grant_uid: search.grant_uid,
+    grant_provenance: search.grant_provenance,
   });
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
+  const { data: serverGroups } = useServerGroups();
+  const { data: grantDefinitions } = useGrantDefinitions();
+
+  // Changing any filter drops the cursor: `before` was produced by the
+  // previous result set and against a different one it silently hides the head
+  // of the list.
+  const applyFilters = (patch: ObservabilityFilters) => {
+    navigate({
+      search: (prev) => ({ ...prev, ...patch, before: undefined }),
+      replace: true,
+    });
+  };
   // Unfiltered: a connector's ListGrants call is already scoped server-side
   // to their own grants, matching the connection-list scoping, so there is no
   // extra data exposed by fetching without a user_id/database_id filter here.
@@ -84,10 +127,6 @@ function ConnectionsPage() {
     grantUid
       ? grants?.find((g) => g.uid === grantUid)?.definition?.controls
       : undefined;
-
-  const filteredConnections = active
-    ? connections?.filter((c) => !c.disconnected_at)
-    : connections;
 
   const columns: Column<Connection>[] = [
     {
@@ -204,29 +243,23 @@ function ConnectionsPage() {
                 storageKey="dbbat.autoRefresh.connections"
               />
             )}
-            <div className="flex items-center gap-2">
-              <Switch
-                id="showActive"
-                checked={!!active}
-                onCheckedChange={(checked) => {
-                  navigate({
-                    search: (prev) => ({
-                      ...prev,
-                      active: checked ? true : undefined,
-                    }),
-                    replace: true,
-                  });
-                }}
-              />
-              <Label htmlFor="showActive">Active only</Label>
-            </div>
           </div>
         }
       />
 
+      <ObservabilityFilterBar
+        filters={search}
+        onChange={applyFilters}
+        users={users}
+        databases={databases}
+        serverGroups={serverGroups}
+        grantDefinitions={grantDefinitions}
+        showActive
+      />
+
       <DataTable
         columns={columns}
-        data={filteredConnections ?? []}
+        data={connections ?? []}
         isLoading={isLoading}
         rowKey={(c) => c.uid}
         emptyMessage="No connections found"
@@ -247,7 +280,7 @@ function ConnectionsPage() {
             >
               <Link
                 to="/connections"
-                search={{ before: undefined, size: opt, active }}
+                search={(prev) => ({ ...prev, before: undefined, size: opt })}
               >
                 {opt}
               </Link>
@@ -260,7 +293,7 @@ function ConnectionsPage() {
             <Button variant="outline" size="sm" asChild>
               <Link
                 to="/connections"
-                search={{ before: undefined, size, active }}
+                search={(prev) => ({ ...prev, before: undefined, size })}
               >
                 <ChevronLeft className="h-4 w-4 mr-1" />
                 Newer
@@ -271,7 +304,7 @@ function ConnectionsPage() {
             <Button variant="outline" size="sm" asChild>
               <Link
                 to="/connections"
-                search={{ before: lastUid, size, active }}
+                search={(prev) => ({ ...prev, before: lastUid, size })}
               >
                 Older
                 <ChevronRight className="h-4 w-4 ml-1" />
