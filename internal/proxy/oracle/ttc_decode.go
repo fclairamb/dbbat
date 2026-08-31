@@ -1239,6 +1239,11 @@ func extractSQLAtOffsetText(data []byte, offset int) (execStatement, error) {
 	sqlStart := offset + bytesRead
 	sqlEnd := sqlStart + int(sqlLen)
 
+	// The declared run does not fit what is in hand — the offset-window
+	// equivalent of the fragmentation reassembly.go exists for. Unlike
+	// findSQLInPayload this path has a length to check against, so it hands back
+	// *nothing* rather than a prefix: there is no truncated reading for a caller
+	// to mark, and the window scan simply moves on.
 	if sqlEnd > len(data) {
 		return execStatement{}, ErrSQLLengthInvalid
 	}
