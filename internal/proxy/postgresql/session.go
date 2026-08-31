@@ -323,27 +323,53 @@ func (s *Session) Run() error {
 			s.logger.WarnContext(s.ctx, "failed to create dump writer", slog.Any("error", err))
 		} else {
 			s.dumpWriter = dw
-			// Wrap the *client* connection to capture traffic during the proxy
-			// phase, and only that one. Tapping the upstream connection as well
-			// recorded every relayed frame twice — read off the client, then
-			// written to the upstream, both tagged client→server (and the
-			// mirror image on the way back) — which in a forensic capture reads
-			// as the client having sent the same query twice.
-			//
-			// The client leg is the side that has to be complete: it is where a
-			// query dbbat blocks is still seen (read from the client, never
-			// forwarded) and where the ErrorResponse dbbat synthesizes itself is
-			// seen too (written to the client, never read from the upstream).
-			// The upstream leg carries nothing the client leg does not, and
-			// dbbat's own upstream statements (setSessionReadOnly) run before
-			// this point, so they were never captured either way.
-			clientTap := dump.NewTapConn(s.clientConn, dw, dump.DirClientToServer, dump.DirServerToClient)
-			s.clientBackend = pgproto3.NewBackend(clientTap, clientTap)
+			s.attachDumpTaps(dw)
 		}
 	}
 
 	// Proxy messages
 	return s.proxyMessages()
+}
+
+// attachDumpTaps installs the capture's two recording points on the client leg
+// — one per direction, and only one, so no frame is recorded twice and none can
+// bypass them.
+//
+// **server→client** is a write tap on s.clientConn itself. It has to be the
+// conn rather than the pgproto3 backend, because the backend is not the only
+// writer: sendQueryError (every read_only / block_ddl / block_copy / quota
+// refusal) and abortStream (the mid-stream limit) encode an ErrorResponse and
+// write it to the socket directly. Tapping only the backend — which is what
+// this used to do — left every frame dbbat synthesizes out of the capture, so a
+// capture of a refused query showed the query and then silence, reading as a
+// dropped connection rather than as an enforced control.
+//
+// **client→server** taps s.clientReader, not the socket under it. The buffered
+// reader is built before the capture exists and may already hold bytes the
+// client pipelined behind its startup packet; wrapping the socket would strand
+// them, and rebuilding the buffer would discard them. Every post-capture client
+// read goes through the backend, so this is the whole inbound path — and it
+// records the client's message before the grant is consulted, which is what
+// keeps a *blocked* query in the capture even though it never reached the
+// upstream.
+//
+// Both taps sit **above** TLS: negotiateSSL runs at the top of Run and has
+// already replaced s.clientConn with the *tls.Conn by the time this runs, so
+// what is captured is plaintext PostgreSQL protocol on both legs, never TLS
+// records.
+//
+// The upstream connection is deliberately not tapped. It was, and every relayed
+// frame was recorded twice — read off the client, then written to the upstream,
+// both tagged client→server (and the mirror image on the way back) — which
+// reads as the client having sent each query twice. It carries nothing the
+// client leg does not: dbbat's own upstream statements (setSessionReadOnly) run
+// before this point.
+func (s *Session) attachDumpTaps(dw *dump.Writer) {
+	s.clientConn = dump.NewWriteTapConn(s.clientConn, dw, dump.DirServerToClient)
+	s.clientBackend = pgproto3.NewBackend(
+		dump.NewTapReader(s.clientReader, dw, dump.DirClientToServer),
+		s.clientConn,
+	)
 }
 
 // Names the per-session goroutines report themselves under when one of them

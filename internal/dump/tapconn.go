@@ -1,6 +1,7 @@
 package dump
 
 import (
+	"io"
 	"net"
 )
 
@@ -64,6 +65,35 @@ func (t *TapConn) Write(b []byte) (int, error) {
 	n, err := t.Conn.Write(b)
 	if n > 0 && t.writeDir != tapSkip {
 		_ = t.writer.WritePacket(t.writeDir, b[:n])
+	}
+
+	return n, err
+}
+
+// TapReader wraps an io.Reader and records what is read as one direction.
+//
+// It exists for a proxy whose inbound path is a *buffered* reader built before
+// the capture is opened: wrapping the socket instead would strand whatever the
+// buffer already holds (bytes a client pipelined behind its startup packet),
+// and rebuilding the buffer would discard them outright. Tapping the reader
+// itself keeps the buffer and puts the recording point on the only path the
+// post-capture reads take.
+type TapReader struct {
+	r      io.Reader
+	writer *Writer
+	dir    byte
+}
+
+// NewTapReader records everything read through r under direction dir.
+func NewTapReader(r io.Reader, w *Writer, dir byte) *TapReader {
+	return &TapReader{r: r, writer: w, dir: dir}
+}
+
+// Read reads from the underlying reader and records the data.
+func (t *TapReader) Read(b []byte) (int, error) {
+	n, err := t.r.Read(b)
+	if n > 0 {
+		_ = t.writer.WritePacket(t.dir, b[:n])
 	}
 
 	return n, err
