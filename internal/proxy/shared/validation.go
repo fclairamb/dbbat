@@ -23,15 +23,20 @@ var (
 // string, and they are deliberately two errors rather than one: an operator
 // reading a log has to be able to tell "dbbat could not read this at all" from
 // "dbbat read it and your grant says no" from "dbbat cannot tell what this runs,
-// and your grant is one of the two whose meaning that defeats".
+// and your grant is one of the two whose meaning that defeats". A fourth
+// finding — "dbbat received only part of this statement" — is
+// ErrStatementNotFullyRead, just below.
 var (
 	// ErrDynamicSQLNotCheckable — a dynamic-SQL form dbbat could not read all
 	// the way down: dynamic SQL nested inside dynamic SQL
-	// (`EXEC('EXEC(''…'')')`, `PREPARE s FROM 'PREPARE …'`), a quoted run left
-	// open, or a statement argument dbbat could not locate at all. One level is
-	// unwrapped and checked; a second is refused rather than unwrapped further,
-	// because stopping silently would leave a hole the exact shape of the one the
+	// (`EXEC('EXEC(''…'')')`, `PREPARE s FROM 'PREPARE …'`), or a statement
+	// argument dbbat could not locate at all. One level is unwrapped and
+	// checked; a second is refused rather than unwrapped further, because
+	// stopping silently would leave a hole the exact shape of the one the
 	// unwrapping closed. Refused whatever the grant says.
+	//
+	// A quoted run left open used to land here too and no longer does: that is
+	// a statement dbbat holds only part of, which is ErrStatementNotFullyRead.
 	ErrDynamicSQLNotCheckable = errors.New(
 		"dbbat: dbbat cannot check dynamic SQL that is itself built from dynamic SQL: " +
 			"run the inner statement directly")
@@ -51,6 +56,29 @@ var (
 			"would run; your access grant is read-only or blocks DDL, which is exactly what " +
 			"that defeats — send the statement literally, or use a grant without those controls")
 )
+
+// ErrStatementNotFullyRead — dbbat holds only part of the statement: the text
+// ran out mid-way (a quoted run left open at end-of-input, or a statement whose
+// wire message dbbat could not reassemble to its end), so what the controls,
+// the blocked patterns and the approval patterns would have matched on is text
+// dbbat never saw.
+//
+// It is deliberately not ErrDynamicSQLNotCheckable, which is what it used to
+// be reported as. That error claims a specific finding — "dynamic SQL built
+// from dynamic SQL" — and a truncated statement carrying no dynamic SQL at all
+// was being refused with it (the Oracle SDU-fragmentation incident of
+// 2026-08-31: a MERGE with literal values, cut at the first accented byte of
+// the first fragment, left an open quote and was refused as nested dynamic
+// SQL). An operator has to be able to tell "your statement is nested dynamic
+// SQL" from "dbbat did not receive all of your statement": the second is
+// dbbat's problem and names a workaround, the first is the caller's.
+//
+// Refused whatever the grant says on the dynamic-SQL path — a scan that fell
+// off the end vouches for nothing. On the Oracle fragment path the refusal is
+// conditional; see the Oracle proxy's partialStatementRefusal.
+var ErrStatementNotFullyRead = errors.New(
+	"dbbat: dbbat could not read this statement to its end — it arrived truncated, or a quoted " +
+		"run was left open — so it cannot be checked against your access grant")
 
 // Mongo-specific validation errors (contract §7 surfaces these as the errmsg
 // of an Unauthorized (13) reply).
@@ -574,6 +602,13 @@ func ValidateDynamicSQL(
 	check func(string) error,
 ) error {
 	if !readable {
+		// The two findings the caller has to be able to tell apart: text that
+		// stopped mid-way (nothing vouches for what was never received) and a
+		// dynamic-SQL form dbbat read and refused to unwrap further.
+		if dyn.Unterminated {
+			return ErrStatementNotFullyRead
+		}
+
 		return ErrDynamicSQLNotCheckable
 	}
 

@@ -231,13 +231,22 @@ func TestUnreadableDynamicSQLIsRefusedWhateverTheGrantSays(t *testing.T) {
 	tests := []struct {
 		sql      string
 		validate func(string, *store.Grant) error
+		want     error
 	}{
-		{"PREPARE s FROM 'PREPARE t FROM ''SELECT 1'''", ValidateMySQLQuery},
-		{"PREPARE s FROM 'SELECT 1", ValidateMySQLQuery},
-		{"BEGIN EXECUTE IMMEDIATE 'BEGIN EXECUTE IMMEDIATE ''SELECT 1''; END;'; END;", ValidateOracleQuery},
-		{"BEGIN DBMS_SQL.PARSE(c); END;", ValidateOracleQuery},
-		{"EXEC('EXEC(''SELECT 1'')')", validateMSSQL},
-		{"EXEC sp_executesql @params = N'@x int'", validateMSSQL},
+		{"PREPARE s FROM 'PREPARE t FROM ''SELECT 1'''", ValidateMySQLQuery, ErrDynamicSQLNotCheckable},
+		// The statement text stops inside an open literal. That is not a
+		// dynamic-SQL finding at all — dbbat is holding a prefix — and it is
+		// the shape an Oracle statement cut at a TNS fragment boundary takes.
+		{"PREPARE s FROM 'SELECT 1", ValidateMySQLQuery, ErrStatementNotFullyRead},
+		{
+			"BEGIN EXECUTE IMMEDIATE 'BEGIN EXECUTE IMMEDIATE ''SELECT 1''; END;'; END;",
+			ValidateOracleQuery, ErrDynamicSQLNotCheckable,
+		},
+		{"BEGIN DBMS_SQL.PARSE(c); END;", ValidateOracleQuery, ErrDynamicSQLNotCheckable},
+		{"SELECT * FROM t WHERE label = 'Surface Pi", ValidateOracleQuery, ErrStatementNotFullyRead},
+		{"EXEC('EXEC(''SELECT 1'')')", validateMSSQL, ErrDynamicSQLNotCheckable},
+		{"EXEC sp_executesql @params = N'@x int'", validateMSSQL, ErrDynamicSQLNotCheckable},
+		{"EXEC('SELECT 1", validateMSSQL, ErrStatementNotFullyRead},
 	}
 
 	for _, controls := range [][]string{nil, {store.ControlBlockCopy}, {store.ControlReadOnly}} {
@@ -247,7 +256,7 @@ func TestUnreadableDynamicSQLIsRefusedWhateverTheGrantSays(t *testing.T) {
 
 				require.ErrorIs(t,
 					tc.validate(tc.sql, controlGrant(controls...)),
-					ErrDynamicSQLNotCheckable)
+					tc.want)
 			})
 		}
 	}
