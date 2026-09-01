@@ -963,6 +963,14 @@ func extractPiggybackBinds(payload []byte, stmt execStatement) []string {
 		lo = idx + len(stmt.Raw)
 	}
 
+	// A chunked statement (CLR long form) does not sit contiguously in the
+	// payload, so the search above cannot find it and the floor would collapse
+	// to 0 — the guessed-wrong outcome the anchor exists to rule out. The
+	// locate knows where the statement's wire bytes end and says so.
+	if stmt.End > lo {
+		lo = stmt.End
+	}
+
 	// Scan from the tail so the tightest (real) value run is found before any
 	// bind-definition bytes that might also parse as length-prefixed values.
 	for start := len(payload) - 1; start >= lo; start-- {

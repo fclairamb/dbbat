@@ -78,9 +78,16 @@ func decodeExecStatement(ttcPayload []byte) (string, bool) {
 //
 // They are the same string whenever nothing needed repairing, which is every
 // frame in testdata/.
+//
+// End is the offset just past the statement's last wire byte in the payload the
+// decode ran on (the CLR terminator included, for a chunked statement), or 0
+// when the locate could not say. It exists for the chunked form, where the
+// statement does not sit contiguously in the payload, so anchoring the bind
+// scan by searching for Raw cannot work — see extractPiggybackBinds.
 type execStatement struct {
 	Text string
 	Raw  string
+	End  int
 }
 
 // decodeExecStatementText is decodeExecStatement keeping the verbatim run.
@@ -91,6 +98,10 @@ func decodeExecStatementText(ttcPayload []byte) (execStatement, bool) {
 
 	if end, ok := closeCursorsEnd(ttcPayload); ok {
 		if stmt, ok := decodeExecStatementAt(ttcPayload[end:]); ok {
+			if stmt.End > 0 {
+				stmt.End += end
+			}
+
 			return stmt, true
 		}
 	}
@@ -294,11 +305,120 @@ func locateExecSQLText(body []byte, sqlLen int) (execStatement, bool) {
 				continue
 			}
 
+			stmt.End = i + n
+
 			return stmt, true
 		}
 	}
 
+	return locateChunkedExecSQLText(body, sqlLen)
+}
+
+// clrChunkedMinLen is the smallest statement the CLR long form can carry: below
+// 252 bytes every client writes the single-length-byte short form, so a shorter
+// declared length can never legitimately be chunked and the scan is skipped.
+const clrChunkedMinLen = 0xFC
+
+// locateChunkedExecSQLText finds a statement the client sent in CLR long form:
+// a 0xFE marker followed by length-prefixed chunks whose contents concatenate
+// to exactly sqlLen bytes, closed by a zero-length terminator.
+//
+// This is not an exotic layout — it is how every thin client writes a
+// statement past its chunk size. python-oracledb, go-ora and JDBC thin all
+// chunk at 32767 bytes once the server advertises UseBigClrChunks (which every
+// supported server does), so a statement of 32768+ bytes has a chunk-length
+// prefix *in the middle of its text* and the contiguous scan above
+// structurally cannot find it. That was measured in production on 2026-09-01:
+// a 33241-byte MERGE declared `sqlLen=0x81d9` arrived as `FE 02 7F FF <32767
+// bytes> 02 01 DA <474 bytes> 00`, the contiguous scan failed, and the
+// last-resort keyword scan handed the gate a prefix cut at the chunk boundary
+// — refused whenever the cut landed inside a string literal, silently gated
+// short otherwise. Statements up to 32767 bytes are a single chunk and the
+// contiguous scan finds them, which is exactly why the reported failure
+// boundary sat at 32768.
+//
+// Chunk lengths come in the two encodings the AUTH leg already reads
+// (readCLRVariant): TTC compressed integers under UseBigClrChunks, single raw
+// bytes without it. Both are tried — the walk is self-validating enough that
+// trying the wrong one cannot mis-answer: every chunk must be printable
+// statement text, the totals must hit sqlLen exactly, the terminator must be
+// there, and the result must open with a SQL verb.
+func locateChunkedExecSQLText(body []byte, sqlLen int) (execStatement, bool) {
+	if sqlLen < clrChunkedMinLen {
+		return execStatement{}, false
+	}
+
+	for i := 0; i+1 < len(body); i++ {
+		if body[i] != 0xFE {
+			continue
+		}
+
+		for _, bigChunks := range [...]bool{true, false} {
+			if stmt, ok := chunkedExecRunAt(body, i, sqlLen, bigChunks); ok {
+				return stmt, true
+			}
+		}
+	}
+
 	return execStatement{}, false
+}
+
+// chunkedExecRunAt walks the CLR long form opening at the 0xFE marker and
+// reports the statement it carries, when — and only when — the chunks
+// concatenate to exactly sqlLen bytes of statement text.
+func chunkedExecRunAt(body []byte, marker, sqlLen int, bigChunks bool) (execStatement, bool) {
+	// Allocated on the first chunk rather than up front: most 0xFE bytes in a
+	// payload are not the marker (the OCI pointer sentinel alone is eight of
+	// them) and fail the walk within a byte or two, which must not cost a
+	// statement-sized allocation each.
+	var raw []byte
+
+	pos := marker + 1
+
+	for {
+		var chunkLen, n int
+
+		if bigChunks {
+			chunkLen, n = readCompressedInt(body[pos:])
+			if n == 0 {
+				return execStatement{}, false
+			}
+		} else {
+			if pos >= len(body) {
+				return execStatement{}, false
+			}
+
+			chunkLen, n = int(body[pos]), 1
+		}
+
+		pos += n
+
+		if chunkLen == 0 {
+			break
+		}
+
+		if pos+chunkLen > len(body) || len(raw)+chunkLen > sqlLen {
+			return execStatement{}, false
+		}
+
+		if raw == nil {
+			raw = make([]byte, 0, sqlLen)
+		}
+
+		raw = append(raw, body[pos:pos+chunkLen]...)
+		pos += chunkLen
+	}
+
+	if len(raw) != sqlLen {
+		return execStatement{}, false
+	}
+
+	text, ok := sanitizeSQLRun(string(raw))
+	if !ok || !startsWithSQLVerb(text) {
+		return execStatement{}, false
+	}
+
+	return execStatement{Text: text, Raw: string(raw), End: pos}, true
 }
 
 // execValidRunAt is execTextRunStartsHere plus the SQL-verb requirement: the
@@ -425,8 +545,18 @@ var sqlStatementVerbs = []string{
 // startsWithSQLVerb reports whether s opens with a SQL verb that ends at a word
 // boundary. The boundary is what stops `GRANTED_ROLE='DBA'` reading as a GRANT
 // and `DELETE_RULE, …` as a DELETE — both measured on real DBeaver frames.
+//
+// Leading comments are stepped over first, because a statement is allowed to
+// open with one and the database ignores it: `-- header\nSELECT …` is a SELECT
+// to Oracle. Refusing to see the verb behind a comment is not a tighter check —
+// it made the header-anchored decode reject the true run and fall through to
+// the keyword scan, which then started the "statement" at whatever verb the
+// comment happened to contain. A `-- MERGE s'execute` header line thus became a
+// statement opening at MERGE whose apostrophe opened a string that never
+// closed, and the client was refused with "a quoted run was left open"
+// (measured in production, 2026-09-01).
 func startsWithSQLVerb(s string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(s))
+	upper := strings.ToUpper(skipLeadingSQLComments(s))
 
 	for _, kw := range sqlStatementVerbs {
 		if !strings.HasPrefix(upper, kw) {
@@ -439,4 +569,36 @@ func startsWithSQLVerb(s string) bool {
 	}
 
 	return false
+}
+
+// skipLeadingSQLComments returns s with leading whitespace, `-- …` line
+// comments and `/* … */` block comments removed, so the caller sees the first
+// byte the server would parse. A remainder that is nothing but an unterminated
+// comment (or an unterminated block comment) comes back empty, which no verb
+// matches — the fail-closed direction.
+func skipLeadingSQLComments(s string) string {
+	for {
+		s = strings.TrimLeft(s, " \t\r\n\v\f")
+
+		switch {
+		case strings.HasPrefix(s, "--"):
+			nl := strings.IndexByte(s, '\n')
+			if nl < 0 {
+				return ""
+			}
+
+			s = s[nl+1:]
+
+		case strings.HasPrefix(s, "/*"):
+			end := strings.Index(s[2:], "*/")
+			if end < 0 {
+				return ""
+			}
+
+			s = s[2+end+2:]
+
+		default:
+			return s
+		}
+	}
 }
