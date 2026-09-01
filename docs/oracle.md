@@ -206,6 +206,43 @@ the word-boundary rule removes strictly more than the three verbs add, and
 `TestBundledOCIFixturesCarryNoStatement` pins that none of the recorded binary
 frames reads as a statement.
 
+#### Leading comments, and the CLR long form (the 2026-09-01 pair)
+
+Two ways the header-anchored locate rejected the very run its own header named,
+both measured in production captures from a python-oracledb thin client the day
+after the reassembly fix shipped, and both with the same consequence: the decode
+fell through to the last-resort keyword scan, which handed the gate (and
+`/queries`) a fragment.
+
+**A statement is allowed to open with a comment.** `startsWithSQLVerb` required
+the verb at the front, so `-- MERGE s'execute\nSELECT 1 FROM dual` — a
+generated file's header line — failed the locate, and the keyword scan then
+started the "statement" at the `MERGE` *inside* the comment. With the `--`
+gone, the apostrophe opened a quoted run that never closed, and the client was
+refused with `ErrStatementNotFullyRead` for a statement that had arrived whole.
+The verb check now steps over leading `--` and `/* … */` comments
+(`skipLeadingSQLComments`) before looking for the verb, which is what the
+server does too. A run that is *nothing but* a comment still names no verb and
+still falls through.
+
+**A statement past 32767 bytes is not one text run.** The statement travels as
+a CLR value, and every thin client writes a value past its chunk size in the
+long form: `0xFE`, then length-prefixed chunks, then a zero terminator. Under
+`UseBigClrChunks` — negotiated with every supported server; go-ora, JDBC thin
+and python-oracledb all chunk at `0x7FFF` — chunk lengths are TTC compressed
+ints, so a 33241-byte MERGE arrives as `FE 02 7F FF <32767 bytes> 02 01 DA
+<474 bytes> 00`. A chunk-length prefix sits *in the middle of the text*, the
+contiguous run of exactly `sqlLen` bytes structurally does not exist, and the
+keyword scan's prefix was cut at the chunk boundary — refused when the cut
+landed inside a string literal, silently gated-and-recorded short otherwise.
+That is why the reported failure boundary sat at exactly 32768: one chunk holds
+32767 bytes. `locateChunkedExecSQLText` now walks the long form (both
+chunk-length encodings, exactly as the AUTH leg's `readCLRVariant` does),
+requiring the chunks to concatenate to exactly `sqlLen` printable bytes behind
+a verb — and reports where the statement's wire bytes end, because bind capture
+cannot anchor a chunked statement by searching for its text
+(`execStatement.End`).
+
 ### `ALTER SESSION SET …` and the statement gate
 
 Once the gate saw `ALTER SESSION SET …` for what it is, `ALTER` being in both

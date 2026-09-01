@@ -138,6 +138,88 @@ func TestIntegration_FragmentedStatementIsExecutedRecordedAndRefusableWhole(t *t
 	})
 }
 
+// The 2026-09-01 pair of decode failures, end to end (see
+// exec_comment_chunked_test.go for the unit half and the production captures
+// both were measured on):
+//
+//   - a statement opening with a `--` comment was rejected by the
+//     header-anchored decode and re-read by the keyword scan from a verb
+//     *inside* the comment, so `-- MERGE s'execute` became a statement whose
+//     apostrophe never closed and the client was refused;
+//   - a statement of 32768+ bytes is written in the CLR long form (32767-byte
+//     chunks under UseBigClrChunks, which go-ora negotiates against this
+//     container), so a chunk-length prefix sat mid-text and the gate got a
+//     keyword-scan prefix cut at the chunk boundary.
+func TestIntegration_CommentLedAndChunkedStatements(t *testing.T) {
+	ctx := context.Background()
+
+	env := startOracleThroughProxy(t, nil)
+
+	_, _ = env.db.ExecContext(ctx, "DROP TABLE "+fragProbeTable)
+
+	_, err := env.db.ExecContext(ctx,
+		"CREATE TABLE "+fragProbeTable+" (num_attr NUMBER, lib VARCHAR2(200))")
+	require.NoError(t, err)
+
+	t.Run("comment-led statement executes and is recorded whole", func(t *testing.T) {
+		const commentLed = "-- MERGE s'execute\nSELECT 42 AS answer FROM dual"
+
+		var answer int
+
+		require.NoError(t, env.db.QueryRowContext(ctx, commentLed).Scan(&answer),
+			"a statement opening with a comment must not be refused")
+		assert.Equal(t, 42, answer)
+
+		recorded := env.awaitQueryContaining(t, "-- MERGE s'execute")
+		assert.Equal(t, commentLed, recorded.SQLText,
+			"the audit trail must hold the statement comment included, not a keyword-scan fragment")
+	})
+
+	t.Run("statement past the 32767-byte CLR chunk executes whole", func(t *testing.T) {
+		const chunkTail = "Pièce au-delà du premier chunk"
+
+		mergeSQL := chunkedProbeMergeSQL(chunkTail)
+		require.Greater(t, len(mergeSQL), 32768,
+			"the fixture has to exceed the CLR chunk size or it proves nothing")
+
+		_, err := env.db.ExecContext(ctx, mergeSQL)
+		require.NoError(t, err,
+			"a statement past 32767 bytes must be gated on its whole text, not on the first chunk")
+
+		var stored string
+
+		require.NoError(t, env.db.QueryRowContext(ctx,
+			"SELECT lib FROM "+fragProbeTable+" WHERE num_attr = 100000").Scan(&stored))
+		assert.Equal(t, chunkTail, stored,
+			"the literal past the chunk boundary must survive to the upstream intact")
+
+		recorded := env.awaitQueryContaining(t, chunkTail)
+		assert.Equal(t, len(mergeSQL), len(recorded.SQLText),
+			"the audit trail must hold the whole chunked statement")
+		assert.NotContains(t, recorded.SQLText, partialStatementNote)
+	})
+}
+
+// chunkedProbeMergeSQL builds a comment-led MERGE comfortably past the
+// 32767-byte CLR chunk size, tail as the last row's label.
+func chunkedProbeMergeSQL(tail string) string {
+	var b strings.Builder
+
+	b.WriteString("-- TRANSFO: généré — la ligne qui suit MERGE s'exécute\n")
+	fmt.Fprintf(&b, "MERGE INTO %s d\nUSING (\n  SELECT 1 AS num_attr, 'Surface Pièce' AS lib FROM dual\n", fragProbeTable)
+
+	for i := 2; b.Len() < 34000; i++ {
+		fmt.Fprintf(&b, "  UNION ALL SELECT %d AS num_attr, 'Périmètre chauffé n°%d' AS lib FROM dual\n", i, i)
+	}
+
+	fmt.Fprintf(&b, "  UNION ALL SELECT 100000 AS num_attr, '%s' AS lib FROM dual\n", tail)
+	b.WriteString(") s ON (d.num_attr = s.num_attr)\n")
+	b.WriteString("WHEN MATCHED THEN UPDATE SET d.lib = s.lib\n")
+	b.WriteString("WHEN NOT MATCHED THEN INSERT (num_attr, lib) VALUES (s.num_attr, s.lib)")
+
+	return b.String()
+}
+
 // awaitQueryContaining returns the single `queries` row whose SQL text contains
 // fragment, waiting for the asynchronous write.
 func (e *oracleThroughProxy) awaitQueryContaining(t *testing.T, fragment string) store.Query {
