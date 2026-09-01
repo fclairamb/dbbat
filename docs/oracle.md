@@ -225,6 +225,37 @@ The verb check now steps over leading `--` and `/* … */` comments
 server does too. A run that is *nothing but* a comment still names no verb and
 still falls through.
 
+**The keyword scan learned the same rule (2026-09-01, second pass).** The two
+fixes above put the header-anchored path right, so the frames that used to fall
+through no longer do — but the scan they fell through *to* was unchanged, and it
+is still reached whenever the exec header is unreadable, including on the
+unnameable-piggyback path where a false reading costs a session
+(`stapledStatements`). There, `-- MERGE s'execute` in any embedded text still
+read as a statement opening at `MERGE`. Production bears it out: on 2026-09-01
+`/queries` recorded `UPDATE d’instances ne pouvait faire le travail --` and
+`TRUNCATE : la table peut porter le mapping…` — French prose, gated as SQL.
+
+`findSQLInPayload` now re-anchors on the comment's opener
+(`commentOpenerBefore`) when the keyword it matched turns out to sit inside one,
+so the text handed on is the run the *server* would read. Three bounds keep this
+from becoming the backward extension the 2026-08 extraction survey rejected:
+
+- the search never leaves the printable run the keyword sits in — a `--` on the
+  far side of TTC framing bytes is not a comment over this text;
+- the opener has to be free-standing (run start, or behind a byte that cannot be
+  part of an identifier), so `a--b` in an expression is not one;
+- a re-anchored run that turns out to be comment all the way down is **discarded
+  in favour of the old reading**, which is refused. Handing the gate verbless
+  text would forward the frame unexamined, and a keyword in a comment must not
+  be the way past the gate. Fail-closed there costs a retry; the alternative
+  costs the control.
+
+Anchoring on a comment opener — rather than on the start of the printable run —
+is what keeps this safe: the opener is statement text by construction, whereas
+the run start pulls in length-prefix bytes that are themselves printable (a
+space is 32, `T` is 84), which is the misread the header-anchored decode exists
+to remove.
+
 **A statement past 32767 bytes is not one text run.** The statement travels as
 a CLR value, and every thin client writes a value past its chunk size in the
 long form: `0xFE`, then length-prefixed chunks, then a zero terminator. Under
