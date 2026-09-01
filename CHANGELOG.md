@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.1](https://github.com/fclairamb/dbbat/compare/v0.26.0...v0.26.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **oracle:** decode comment-led and CLR-chunked statements whole ([#344](https://github.com/fclairamb/dbbat/issues/344)) ([748606a](https://github.com/fclairamb/dbbat/commit/748606a0d71fc063cbf2c730fcd0eb7f9986e605))
+
 ## [0.26.0](https://github.com/fclairamb/dbbat/compare/v0.25.2...v0.26.0) (2026-08-31)
 
 
