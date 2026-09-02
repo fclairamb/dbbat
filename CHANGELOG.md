@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.2](https://github.com/fclairamb/dbbat/compare/v0.26.1...v0.26.2) (2026-09-02)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.37.0 ([#346](https://github.com/fclairamb/dbbat/issues/346)) ([cb577bd](https://github.com/fclairamb/dbbat/commit/cb577bdeab250b9f3e0439aff4c619b978719169))
+* **oracle:** stop the keyword scan opening a statement inside a comment ([#348](https://github.com/fclairamb/dbbat/issues/348)) ([c8ac89c](https://github.com/fclairamb/dbbat/commit/c8ac89ccf2e5d60702dfca1cb17cb89a0d8ecde0))
+
 ## [0.26.1](https://github.com/fclairamb/dbbat/compare/v0.26.0...v0.26.1) (2026-09-01)
 
 
