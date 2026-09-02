@@ -54,7 +54,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.1"
 
       # A manual dispatch naming its own package keeps the leg's race setting;
       # the four legs all still run, so `-race` is exercised whichever package
@@ -102,7 +102,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.1"
 
       # -race, matching `make test-e2e-oracle`. This suite is the only one that
       # runs two proxy goroutines over one session, and it hid two live races
@@ -148,7 +148,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.1"
 
       - name: Run Kubernetes tunnel integration suite
         run: go test -race -tags integration -timeout 40m -count=1 -v ./internal/proxy/kubernetes/
