@@ -60,7 +60,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.1"
 
       - uses: oven-sh/setup-bun@v2.2.0
         with:
@@ -144,7 +144,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.27.0"
+          go-version: "1.27.1"
 
       - uses: oven-sh/setup-bun@v2.2.0
         with:
