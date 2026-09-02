@@ -1154,12 +1154,95 @@ func findSQLInPayload(payload []byte) (string, bool) {
 		return "", false
 	}
 
+	// The keyword may be a word in a comment rather than the statement's verb.
+	// When it is, re-anchor on the comment's opener so the text handed on is
+	// the run the server would read, and never one that begins mid-comment.
+	if start := commentOpenerBefore(payload, idx); start >= 0 {
+		if text, ok := sanitizeSQLRun(string(payload[start:end])); ok {
+			trimmed := strings.TrimSpace(text)
+			// Only when the re-anchored run actually carries a statement.
+			// A run that is comment all the way down falls back to the reading
+			// below, which is refused: the scan vouches for nothing here, and
+			// widening it into a fail-open would make a keyword in a comment
+			// the way to get a frame past the gate.
+			if skipLeadingSQLComments(trimmed) != "" {
+				return trimmed, end == len(payload)
+			}
+		}
+	}
+
 	text, ok := sanitizeSQLRun(string(payload[idx:end]))
 	if !ok {
 		return "", false
 	}
 
 	return strings.TrimSpace(text), end == len(payload)
+}
+
+// commentOpenerBefore reports where the SQL comment enclosing idx opens, or -1
+// when idx is not inside one.
+//
+// It is the correction for the last-resort scan's one structural blind spot:
+// the scan matches a *word*, and `-- MERGE s'execute` is a French comment, not
+// a MERGE. Read from the keyword the `--` is gone, so the apostrophe two words
+// later opens a quoted run that never closes and the statement is refused as
+// unreadable — which is what a production Abyla session hit on 2026-09-01, on
+// a comment line that had nothing to do with the statement below it.
+//
+// The search is bounded to the printable run the keyword sits in — the same run
+// the scan would extract — because a `--` on the far side of TTC framing bytes
+// is not a comment over this text. Within that run the rules are the server's:
+// a `--` runs to the end of its line, a slash-star to its closing star-slash.
+// The opener also has to be free-standing (run start, or behind a byte that
+// cannot be part of an identifier), so `A--B` in an expression is not read as
+// one.
+//
+// Deliberately *not* a backward extension to the start of the printable run:
+// the 2026-08 extraction survey measured that swallowing whatever precedes the
+// text pulls in length-prefix bytes that are themselves printable (a space is
+// 32, `T` is 84), which is the misread the header-anchored decode exists to
+// remove. Anchoring on a comment opener moves the start to a byte that is
+// statement text by construction.
+func commentOpenerBefore(payload []byte, idx int) int {
+	runStart := idx
+	for runStart > 0 && isPrintableSQLByte(payload[runStart-1]) {
+		runStart--
+	}
+
+	for i := runStart; i+1 < idx; i++ {
+		if !freeStandingCommentOpener(payload, runStart, i) {
+			continue
+		}
+
+		switch {
+		case payload[i] == '-' && payload[i+1] == '-':
+			// A line comment ends at its newline, so it encloses idx only when
+			// no newline separates them.
+			if bytes.IndexByte(payload[i:idx], '\n') < 0 {
+				return i
+			}
+
+			i++
+
+		case payload[i] == '/' && payload[i+1] == '*':
+			// A block comment encloses idx only when it is still open there.
+			closer := bytes.Index(payload[i+2:idx], []byte("*/"))
+			if closer < 0 {
+				return i
+			}
+
+			i += 2 + closer + 1
+		}
+	}
+
+	return -1
+}
+
+// freeStandingCommentOpener reports whether the two bytes at i open a comment
+// rather than continue an identifier or an operator — `x--y` and `a/*` behind a
+// word byte are not comment openers dbbat should anchor on.
+func freeStandingCommentOpener(payload []byte, runStart, i int) bool {
+	return i == runStart || !isSQLWordByte(payload[i-1])
 }
 
 // indexOfAnyKeywordCI returns the offset of the earliest case-insensitive match
