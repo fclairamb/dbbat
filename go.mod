@@ -40,7 +40,7 @@ require (
 	github.com/uptrace/bun/driver/pgdriver v1.2.18
 	github.com/urfave/cli/v3 v3.11.0
 	github.com/xdg-go/scram v1.2.0
-	go.mongodb.org/mongo-driver/v2 v2.8.2
+	go.mongodb.org/mongo-driver/v2 v2.9.0
 	gocloud.dev v0.46.0
 	golang.org/x/crypto v0.56.0
 	golang.org/x/oauth2 v0.36.0
@@ -135,7 +135,7 @@ require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.18.7 // indirect
+	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
