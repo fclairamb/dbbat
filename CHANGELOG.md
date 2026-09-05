@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.26.3](https://github.com/fclairamb/dbbat/compare/v0.26.2...v0.26.3) (2026-09-05)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/coreos/go-oidc/v3 to v3.21.0 ([#357](https://github.com/fclairamb/dbbat/issues/357)) ([fecd488](https://github.com/fclairamb/dbbat/commit/fecd48850a3525095a076a54138955174da0c17d))
+* **deps:** update module github.com/go-sql-driver/mysql to v1.10.1 ([#354](https://github.com/fclairamb/dbbat/issues/354)) ([b802316](https://github.com/fclairamb/dbbat/commit/b80231609d48f44e5f46fac81078422b66e37501))
+* **deps:** update module github.com/microsoft/go-mssqldb to v1.11.0 ([#358](https://github.com/fclairamb/dbbat/issues/358)) ([867b8cd](https://github.com/fclairamb/dbbat/commit/867b8cd9d1e39a89743f8148de8b39d24c636603))
+* **deps:** update module github.com/moby/moby/api to v1.56.0 ([#359](https://github.com/fclairamb/dbbat/issues/359)) ([2035bdc](https://github.com/fclairamb/dbbat/commit/2035bdce65e1908f490f437890e6a7f0691ad43f))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.9.0 ([#363](https://github.com/fclairamb/dbbat/issues/363)) ([e8dde86](https://github.com/fclairamb/dbbat/commit/e8dde860cb11270b3daddf802815dff8df21110d))
+* **deps:** update module golang.org/x/crypto to v0.56.0 ([#360](https://github.com/fclairamb/dbbat/issues/360)) ([9149805](https://github.com/fclairamb/dbbat/commit/914980543b081a891e8e12f3aba210aeaed69e2d))
+
 ## [0.26.2](https://github.com/fclairamb/dbbat/compare/v0.26.1...v0.26.2) (2026-09-02)
 
 
