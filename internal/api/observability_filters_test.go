@@ -25,10 +25,9 @@ func newFilterTestServer(t *testing.T) (*Server, *store.Store, *store.Server) {
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 
-	// The name is a slug (^[a-z0-9_]{1,63}$ — see store.ErrServerNameInvalid),
-	// so it takes underscores, never the hyphens the other fixtures here use:
-	// a server name is what a client puts in its connection string, and the
-	// grammar is narrower than for a display name.
+	// The name is a slug (see store.ErrServerNameInvalid), narrower than the
+	// display names the other fixtures here use: a server name is what a
+	// client puts in its connection string.
 	db, err := dataStore.CreateServer(context.Background(), &store.Server{
 		Name:         "obs_db_" + uuid.NewString()[:8],
 		Host:         "localhost",

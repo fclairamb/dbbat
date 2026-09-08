@@ -23,11 +23,20 @@ import (
 // identifiers, URL percent-encoding). 63 bytes is PostgreSQL's identifier
 // limit, the tightest of the five. The charset is ASCII-only, so byte length
 // and rune count coincide.
-var serverNamePattern = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+//
+// `-` is allowed (it is the dominant convention for host/service naming, e.g.
+// "prod-eu-1", and a dbbat server name is never a parsed upstream identifier —
+// it is always an opaque selector), but it may not lead or trail: a leading
+// `-` makes the name untypeable on the command line (`psql -d -prod` parses
+// as a flag, likewise `mysql -D`, `sqlplus`, `mongosh`), and trailing is
+// barred for symmetry. `.` stays rejected — see specs/todos for the
+// hyphen-only decision.
+var serverNamePattern = regexp.MustCompile(`^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$`)
 
-// IsValidServerName reports whether name is a valid server slug
-// (^[a-z0-9_]{1,63}$). Exported so any future rename path can reuse the exact
-// same check CreateServer enforces, rather than re-deriving it.
+// IsValidServerName reports whether name is a valid server slug: 1-63 ASCII
+// lowercase letters, digits, underscores or hyphens, with the hyphen barred
+// from the first and last position. Exported so any future rename path can
+// reuse the exact same check CreateServer enforces, rather than re-deriving it.
 func IsValidServerName(name string) bool {
 	return serverNamePattern.MatchString(name)
 }

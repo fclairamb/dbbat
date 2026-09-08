@@ -124,7 +124,7 @@ func TestUpdateServerRenameRejectsNonSlug(t *testing.T) {
 
 	// Sequential rather than subtests: each attempt is asserted not to have
 	// touched the row, which only means anything before the next one runs.
-	for _, bad := range []string{"my-server", "MyServer", "abyla_abypocs (R/O)", "my.server"} {
+	for _, bad := range []string{"-lead", "trail-", "MyServer", "abyla_abypocs (R/O)", "my.server"} {
 		w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
 			"name": bad,
 		})
