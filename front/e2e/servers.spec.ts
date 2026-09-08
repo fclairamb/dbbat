@@ -1,5 +1,40 @@
 import { test, expect } from "./fixtures";
 
+// Regression guard for the HTML `pattern=` attribute going silently dead:
+// browsers compile `pattern=` under the `v` (unicodeSets) regex flag, where
+// an unescaped `-` in a class position like `[a-z0-9_-]` is a compile error
+// — and per the HTML spec, a `pattern` that fails to compile is silently
+// IGNORED rather than rejected, so client-side validation disappears with no
+// visible error (checkValidity() just returns true for everything). There is
+// no vitest/unit-test runner wired up under front/src, so this guard lives
+// here instead. Keep this string identical to SERVER_NAME_PATTERN in
+// front/src/routes/_authenticated/servers/index.tsx, serverNamePattern in
+// internal/store/servers.go, and the `pattern:` fields in
+// internal/api/openapi.yml.
+const SERVER_NAME_PATTERN_SOURCE =
+  "^[a-z0-9_][a-z0-9_\\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$";
+
+test.describe("Server name pattern — v-flag regression guard", () => {
+  test("the HTML pattern= source compiles under the v (unicodeSets) regex flag", () => {
+    // This is exactly what a Chromium-family browser does when it parses a
+    // <input pattern="..."> attribute. Reverting the `\-` escape reproduces
+    // the original bug: this assertion throws (SyntaxError: Invalid character
+    // in character class).
+    expect(() => new RegExp(SERVER_NAME_PATTERN_SOURCE, "v")).not.toThrow();
+  });
+
+  test("the v-flag-compiled pattern accepts/rejects the same names as before the escape", () => {
+    const re = new RegExp(`^(?:${SERVER_NAME_PATTERN_SOURCE})$`, "v");
+    expect(re.test("prod-eu-1")).toBe(true);
+    expect(re.test("a")).toBe(true);
+    expect(re.test("production_db")).toBe(true);
+    expect(re.test("-bad")).toBe(false);
+    expect(re.test("trail-")).toBe(false);
+    expect(re.test("prod.eu.1")).toBe(false);
+    expect(re.test("--")).toBe(false);
+  });
+});
+
 test.describe("Servers Management", () => {
   test("should display servers list page", async ({ authenticatedPage }) => {
     await authenticatedPage.goto("servers");
@@ -429,7 +464,7 @@ test.describe("Servers Management", () => {
     ).toHaveCount(0);
   });
 
-  test("the rename dialog rejects a hyphenated name before it reaches the server", async ({
+  test("the rename dialog rejects a leading-hyphen name before it reaches the server", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("servers");
@@ -455,7 +490,11 @@ test.describe("Servers Management", () => {
     ).toBeVisible();
 
     const input = authenticatedPage.getByTestId("database-rename-input");
-    await input.fill(`${name}-renamed`);
+    // An interior hyphen (e.g. "name-renamed") is valid by design — see
+    // specs/done/2026/09. A *leading* hyphen stays rejected (untypeable on
+    // the command line: `psql -d -foo` parses as a flag), so it's still a
+    // reachable negative case for this gate.
+    await input.fill(`-${name}`);
     await authenticatedPage.getByTestId("database-rename-submit").click();
 
     // The slug gate the create dialog enforces applies to the rename too: the

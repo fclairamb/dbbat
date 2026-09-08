@@ -90,8 +90,18 @@ function isFullDatabase(db: DatabaseItem): db is Database {
 // admin UI flag those rows instead of hiding the drift. A hyphen is allowed
 // in the interior (e.g. "prod-eu-1") but not leading or trailing; `.` is
 // still rejected.
+//
+// The `-` is escaped (`\-`) inside the character class. A browser compiles
+// an HTML `pattern=` attribute under the `v` (unicodeSets) regex flag, where
+// an unescaped `-` in a class position like `[a-z0-9_-]` is a compile error
+// — and per the HTML spec, a `pattern` that fails to compile is silently
+// ignored rather than rejected, so client-side validation goes dead with no
+// visible error. Do not "clean up" the backslash; it is load-bearing. Keep
+// this identical to the two `pattern=` attributes below and to
+// serverNamePattern in internal/store/servers.go and the `pattern:` fields
+// in internal/api/openapi.yml.
 const SERVER_NAME_PATTERN =
-  /^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$/;
+  /^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$/;
 
 // NonSlugNameWarning flags a server row whose name predates the slug gate
 // (or was created directly against the store/API). The row itself works, but
@@ -158,7 +168,7 @@ function ServerRenameField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         maxLength={63}
-        pattern="^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$"
+        pattern="^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$"
         title="Lowercase letters, numbers, underscores and hyphens only (no leading/trailing hyphen, no spaces or dots)"
         required
       />
@@ -1035,7 +1045,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               onChange={(e) => setName(e.target.value)}
               placeholder="production_db"
               maxLength={63}
-              pattern="^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$"
+              pattern="^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$"
               title="Lowercase letters, numbers, underscores and hyphens only (no leading/trailing hyphen, no spaces or dots)"
               required
             />

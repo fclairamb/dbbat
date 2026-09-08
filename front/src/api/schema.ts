@@ -2383,7 +2383,7 @@ export interface components {
              * @description Unique identifier
              */
             uid: string;
-            /** @description Database configuration name. Creation enforces the slug format `^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$` (see `CreateDatabaseRequest.name`), but rows created before that gate existed are grandfathered and may not conform — the admin UI flags a non-conforming name so it gets renamed deliberately rather than silently. */
+            /** @description Database configuration name. Creation enforces the slug format `^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$` (see `CreateDatabaseRequest.name`), but rows created before that gate existed are grandfathered and may not conform — the admin UI flags a non-conforming name so it gets renamed deliberately rather than silently. */
             name: string;
             /** @description Description */
             description?: string;
