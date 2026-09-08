@@ -360,20 +360,32 @@ func (s *Subscriber) Authorized(ev Event) bool {
 // deliberately does *not* happen at this point: it can touch the database, and
 // this runs on whichever goroutine published — including a proxy session
 // parked on an approval hold.
+//
+// The non-blocking send happens *while the read lock is held*, and Close's
+// close(s.ch) happens under the write lock: that pairing is what makes a send
+// on a closed channel impossible. Holding a read lock across the send costs
+// nothing — the send cannot block by construction — and several publishers may
+// hold it at once, which is fine because concurrent sends on one channel are
+// safe. The write lock is never taken from inside the read-locked section:
+// Go's RWMutex is not upgradable, so the overflow outcome is recorded here and
+// acted on below, after the read lock is released.
 func (s *Subscriber) offer(ev Event) {
-	s.mu.RLock()
-	closed := s.closed
-	_, subscribed := s.topics[ev.Topic]
-	s.mu.RUnlock()
+	overflowed := false
 
-	if closed || !subscribed {
-		return
+	s.mu.RLock()
+
+	if _, subscribed := s.topics[ev.Topic]; subscribed && !s.closed {
+		select {
+		case s.ch <- ev:
+		default:
+			overflowed = true
+		}
 	}
 
-	select {
-	case s.ch <- ev:
+	s.mu.RUnlock()
+
+	if !overflowed {
 		return
-	default:
 	}
 
 	if dropExempt(ev.Topic) {
@@ -408,6 +420,12 @@ func (s *Subscriber) TakePriority() []Event {
 
 // Close detaches the subscriber from the broker and closes its channel.
 // Idempotent.
+//
+// close(s.ch) runs *inside* the write-locked section, so it can never overlap
+// offer's non-blocking send, which holds the read lock across it. The broker
+// detach stays outside s.mu: deliver releases b.mu before calling offer, so
+// s.mu → b.mu is the only ordering the broker ever establishes and holding
+// both at once here would be the start of a cycle.
 func (s *Subscriber) Close() {
 	s.mu.Lock()
 	if s.closed {
@@ -418,13 +436,12 @@ func (s *Subscriber) Close() {
 
 	s.closed = true
 	s.priority = nil
+	close(s.ch)
 	s.mu.Unlock()
 
 	s.broker.mu.Lock()
 	delete(s.broker.subs, s.id)
 	s.broker.mu.Unlock()
-
-	close(s.ch)
 }
 
 // dropExempt reports whether events on a topic must never be dropped.

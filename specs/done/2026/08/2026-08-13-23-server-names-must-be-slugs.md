@@ -96,3 +96,14 @@ tightest of the five protocols. It is part of the same regex above, so a single
 check covers charset and length; measure it in **bytes**, and since the charset
 is ASCII-only the byte length and the rune count coincide. An over-long name is
 the same typed `ErrServerNameInvalid` → 400 as a bad charset.
+
+## Superseded
+
+**2026-09-08:** the underscore-only decision above was reversed by
+[specs/done/2026/09/2026-09-08-01-allow-hyphen-in-server-names.md](../09/2026-09-08-01-allow-hyphen-in-server-names.md).
+`-` is now accepted (not leading or trailing): the stated risk — an unquoted
+`-` being an operator in MySQL/Oracle identifier positions — turned out not to
+apply, because a dbbat server name is never a parsed upstream identifier, only
+an opaque client-facing selector on all five protocols. `.` remains rejected.
+The "Resolved open questions" section above reflects the rule as it stood at
+the time this spec was written, not current policy.

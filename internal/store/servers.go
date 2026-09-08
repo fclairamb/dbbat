@@ -23,11 +23,32 @@ import (
 // identifiers, URL percent-encoding). 63 bytes is PostgreSQL's identifier
 // limit, the tightest of the five. The charset is ASCII-only, so byte length
 // and rune count coincide.
-var serverNamePattern = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+//
+// `-` is allowed (it is the dominant convention for host/service naming, e.g.
+// "prod-eu-1", and a dbbat server name is never a parsed upstream identifier —
+// it is always an opaque selector), but it may not lead or trail: a leading
+// `-` makes the name untypeable on the command line (`psql -d -prod` parses
+// as a flag, likewise `mysql -D`, `sqlplus`, `mongosh`), and trailing is
+// barred for symmetry. `.` stays rejected — see specs/done/2026/09 for the
+// hyphen-only decision.
+//
+// The `-` inside the character class is escaped (`\-`) even though RE2 does
+// not require it. This string is copied verbatim into the OpenAPI spec's
+// `pattern:` fields and the frontend's HTML `pattern=` attributes, and a
+// browser compiles that attribute under the `v` (unicodeSets) regex flag,
+// where an unescaped `-` in a class position like `[a-z0-9_-]` is a compile
+// error — and an uncompilable `pattern` is silently ignored by the HTML spec,
+// not rejected, so client-side validation goes dead with no visible error.
+// Do not "clean up" the backslash; it is load-bearing. Keep this pattern
+// byte-for-byte identical to CreateDatabaseRequest/UpdateDatabaseRequest in
+// internal/api/openapi.yml and SERVER_NAME_PATTERN in
+// front/src/routes/_authenticated/servers/index.tsx.
+var serverNamePattern = regexp.MustCompile(`^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$`)
 
-// IsValidServerName reports whether name is a valid server slug
-// (^[a-z0-9_]{1,63}$). Exported so any future rename path can reuse the exact
-// same check CreateServer enforces, rather than re-deriving it.
+// IsValidServerName reports whether name is a valid server slug: 1-63 ASCII
+// lowercase letters, digits, underscores or hyphens, with the hyphen barred
+// from the first and last position. Exported so any future rename path can
+// reuse the exact same check CreateServer enforces, rather than re-deriving it.
 func IsValidServerName(name string) bool {
 	return serverNamePattern.MatchString(name)
 }

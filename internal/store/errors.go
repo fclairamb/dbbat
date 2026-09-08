@@ -36,7 +36,7 @@ var (
 	ErrServerNameConflict = errors.New("a server with this name already exists")
 	// ErrServerNameInvalid is returned when a server name does not match the
 	// required slug format (see IsValidServerName) — wrong charset or too long.
-	ErrServerNameInvalid = errors.New("server name must be a slug matching ^[a-z0-9_]{1,63}$")
+	ErrServerNameInvalid = errors.New("server name must be a slug: 1-63 lowercase letters, digits, underscores or hyphens, and may not start or end with a hyphen")
 	// ErrUserNameConflict is returned when creating a user whose username is
 	// already taken by an active (non-soft-deleted) user (violates the
 	// users_username_active_uq unique index).

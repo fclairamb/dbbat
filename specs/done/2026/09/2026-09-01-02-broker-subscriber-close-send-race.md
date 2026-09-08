@@ -170,3 +170,52 @@ flake is gone.
 
 `go test -race ./...` green, plus `-count=10` on `internal/events`,
 `internal/mcp` and `internal/proxy/conncheck`.
+
+## Implementation Plan
+
+1. **`internal/events/broker.go` — `offer` holds `RLock` across the send.**
+   Restructure `offer` so the closed check, the topic-membership check and the
+   non-blocking `select { case s.ch <- ev: default: }` all happen inside a
+   single `s.mu.RLock()` section, recording only an `overflow` boolean. The send
+   is non-blocking by construction, so the read lock is never held across a
+   block, and concurrent `RLock` holders sending on the same channel is safe.
+   Release the read lock *before* the drop-exempt branch re-acquires the write
+   lock (Go's `RWMutex` is not upgradable), keeping that branch's existing
+   `!s.closed` re-check.
+
+2. **`internal/events/broker.go` — `Close` closes the channel under the write
+   lock.** Move `close(s.ch)` inside the same write-locked section that sets
+   `s.closed = true`, so no publisher can sit between its check and its send.
+   Keep the broker detach (`delete(b.subs, s.id)`) *after* `s.mu` is released,
+   so `s.mu` and `b.mu` are never held simultaneously and the existing
+   `s.mu → b.mu` ordering is preserved. Idempotency is unchanged (the early
+   return on `s.closed` still guards).
+
+3. **Confirm the invariant in the other direction.** `TakePriority`,
+   `Subscribe`, `Unsubscribe`, `Topics` and `Authorized` must not observe the
+   channel/`closed` pair inconsistently: everything that touches `s.ch` or
+   `s.closed` now does so under `s.mu`, and `Authorized` touches neither.
+
+4. **Regression test in `internal/events`.** Hammer `Publish` from N goroutines
+   on both a droppable topic and the drop-exempt `approvals/pending` topic while
+   a subscriber closes concurrently, with a reader draining part of the time and
+   with a deliberately tiny buffer so the overflow paths are exercised. Runs
+   under `-race`; a pre-fix binary panics with "send on closed channel".
+
+5. **Sweep for the same shape elsewhere.** Grep every `close(` on a channel in
+   `internal/` and record whether each has a lock-free sender.
+
+6. **Fix 2 — one shared half-closing SSH relay helper.** Add
+   `internal/proxy/testsupport/sshrelay.go` exporting `PipeSSHChannel(ch
+   ssh.Channel, upstream net.Conn)`: two copy goroutines, each propagating its
+   EOF as a *half*-close (`upstream.CloseWrite()` via the
+   `interface{ CloseWrite() error }` assertion with a `Close()` fallback;
+   `ch.CloseWrite()` on the SSH side), and a `sync.WaitGroup` that fully closes
+   both ends only once both directions have finished. Replace the duplicated
+   helpers at `internal/proxy/conncheck/conncheck_test.go` and
+   `internal/proxy/shared/dial_test.go` with calls to it.
+
+7. **QA.** `go test -race ./internal/events/ -count=10`,
+   `go test -race ./internal/mcp/ -count=10`,
+   `go test -race -count=20 ./internal/proxy/conncheck/`, then `make lint`,
+   `make build-binary`, `make test`.

@@ -838,9 +838,13 @@ func TestCreateServer_DuplicateName(t *testing.T) {
 }
 
 // TestCreateServer_InvalidName verifies that CreateServer rejects any name
-// that is not a slug matching ^[a-z0-9_]{1,63}$ — the client-facing selector
-// used by all five protocols — with the typed ErrServerNameInvalid (mapped to
-// a 400 by the API), rather than persisting an unreachable name.
+// that is not a slug matching
+// ^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$ — the client-facing
+// selector used by all five protocols — with the typed ErrServerNameInvalid
+// (mapped to a 400 by the API), rather than persisting an unreachable name.
+// Hyphen is allowed in the interior (see TestCreateServer_ValidName) but
+// barred at the edges: a leading `-` makes the name untypeable on the command
+// line (`psql -d -prod` parses as a flag).
 func TestCreateServer_InvalidName(t *testing.T) {
 	t.Parallel()
 
@@ -852,12 +856,17 @@ func TestCreateServer_InvalidName(t *testing.T) {
 		name    string
 		srvName string
 	}{
-		{"hyphen", "my-server"},
+		{"leading hyphen", "-lead"},
+		{"trailing hyphen", "trail-"},
+		{"bare hyphen", "-"},
+		{"double hyphen edges", "--"},
 		{"uppercase", "MyServer"},
 		{"space", "my server"},
 		{"dot", "my.server"},
+		{"dotted like an env name", "prod.eu.1"},
 		{"empty", ""},
 		{"too long", strings.Repeat("a", 64)},
+		{"too long hyphenated", "a" + strings.Repeat("-", 62) + "a"},
 	}
 
 	for _, tc := range cases {
@@ -901,6 +910,45 @@ func TestCreateServer_ValidNameBoundary(t *testing.T) {
 	}
 	if _, err := store.CreateServer(ctx, db, key); err != nil {
 		t.Fatalf("CreateServer(63-byte name) error = %v, want nil", err)
+	}
+}
+
+// TestCreateServer_ValidHyphenatedName verifies the hyphen widening: a
+// conventional hyphenated host-style name is accepted, and interior hyphens
+// are allowed all the way to the 63-byte boundary as long as the name still
+// starts and ends with a non-hyphen character.
+func TestCreateServer_ValidHyphenatedName(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	cases := []struct {
+		name    string
+		srvName string
+	}{
+		{"conventional", "prod-eu-1"},
+		{"63-byte hyphenated", "a" + strings.Repeat("-", 61) + "a"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := &Server{
+				Name:         tc.srvName,
+				Host:         "localhost",
+				Port:         5432,
+				DatabaseName: "mydb",
+				Username:     "dbuser",
+				Password:     "secret",
+				SSLMode:      "prefer",
+			}
+			if _, err := store.CreateServer(ctx, db, key); err != nil {
+				t.Fatalf("CreateServer(%q) error = %v, want nil", tc.srvName, err)
+			}
+		})
 	}
 }
 
@@ -1023,7 +1071,10 @@ func TestUpdateServer_RenameInvalidName(t *testing.T) {
 		name    string
 		srvName string
 	}{
-		{"hyphen", "my-server"},
+		{"leading hyphen", "-lead"},
+		{"trailing hyphen", "trail-"},
+		{"bare hyphen", "-"},
+		{"dotted like an env name", "prod.eu.1"},
 		{"uppercase", "MyServer"},
 		{"space and parens", "abyla_abypocs (R/O)"},
 		{"empty", ""},
@@ -1047,6 +1098,43 @@ func TestUpdateServer_RenameInvalidName(t *testing.T) {
 	}
 	if reloaded.Name != "rename_gate" {
 		t.Errorf("Name = %q, want it unchanged (%q)", reloaded.Name, "rename_gate")
+	}
+}
+
+// TestUpdateServer_RenameHyphenatedName verifies the rename path accepts the
+// same widened hyphen charset as CreateServer — the two share IsValidServerName,
+// but this pins it against a regression that only fixes one call site.
+func TestUpdateServer_RenameHyphenatedName(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	created, err := store.CreateServer(ctx, &Server{
+		Name:         "rename_hyphen_gate",
+		Host:         "localhost",
+		Port:         5432,
+		DatabaseName: "mydb",
+		Username:     "dbuser",
+		Password:     "secret",
+		SSLMode:      "prefer",
+	}, key)
+	if err != nil {
+		t.Fatalf("CreateServer() error = %v", err)
+	}
+
+	newName := "prod-eu-1"
+	if err := store.UpdateServer(ctx, created.UID, ServerUpdate{Name: &newName}, key); err != nil {
+		t.Fatalf("UpdateServer(rename to hyphenated name) error = %v, want nil", err)
+	}
+
+	reloaded, err := store.GetServerByUID(ctx, created.UID)
+	if err != nil {
+		t.Fatalf("GetServerByUID() error = %v", err)
+	}
+	if reloaded.Name != newName {
+		t.Errorf("Name after rename = %q, want %q", reloaded.Name, newName)
 	}
 }
 

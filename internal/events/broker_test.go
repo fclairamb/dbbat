@@ -1,6 +1,7 @@
 package events
 
 import (
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -294,5 +295,124 @@ func TestValidTopic(t *testing.T) {
 		if ValidTopic(topic) {
 			t.Fatalf("accepted junk as a topic: %q", topic)
 		}
+	}
+}
+
+// TestCloseDuringConcurrentPublishDoesNotPanic is the regression test for the
+// send-on-closed-channel window between offer's closed check and its send.
+// Before the fix, offer released the read lock before the select and Close
+// closed the channel with no lock held, so a publisher descheduled in between
+// woke up on a closed channel and panicked. Under -race the same window is
+// also reported as a write/read data race on the channel.
+//
+// The shape that matters: many publishers, a deliberately tiny buffer so both
+// the fast path and the overflow paths are exercised, a droppable topic and
+// the drop-exempt one (whose overflow re-takes the write lock), and a reader
+// that only drains part of the time so the channel is neither always full nor
+// always empty when Close lands.
+func TestCloseDuringConcurrentPublishDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rounds     = 200
+		publishers = 8
+	)
+
+	for i := range rounds {
+		b := New()
+
+		sub := b.Subscribe(allow, 1)
+		if !sub.Subscribe(TopicConnections) || !sub.Subscribe(TopicApprovalsPending) {
+			t.Fatal("subscribe refused")
+		}
+
+		var (
+			wg   sync.WaitGroup
+			stop = make(chan struct{})
+		)
+
+		for p := range publishers {
+			wg.Add(1)
+
+			go func(p int) {
+				defer wg.Done()
+
+				topic := TopicConnections
+				if p%2 == 0 {
+					topic = TopicApprovalsPending
+				}
+
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+
+					// A panic here fails the test rather than the process,
+					// because Publish runs on this goroutine.
+					b.Publish(topic, EventConnection, nil)
+				}
+			}(p)
+		}
+
+		// Drain part of the time: a channel that is neither permanently full
+		// nor permanently empty widens the window Close has to land in.
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for range sub.Events() {
+				sub.TakePriority()
+			}
+		}()
+
+		// Let the publishers get going, staggered so Close lands at a
+		// different point in the loop on each round.
+		for range i % 32 {
+			runtime.Gosched()
+		}
+
+		sub.Close()
+		// Publishing after the close must be safe too: deliver still holds a
+		// reference to a subscriber the broker has already forgotten only if
+		// it snapshotted before the detach, which is exactly the race.
+		b.Publish(TopicConnections, EventConnection, nil)
+		b.Publish(TopicApprovalsPending, EventApprovalPending, nil)
+
+		close(stop)
+		wg.Wait()
+
+		if b.SubscriberCount() != 0 {
+			t.Fatalf("round %d: subscriber still attached after Close", i)
+		}
+	}
+}
+
+// TestOfferAfterCloseDropsInsteadOfBuffering pins the other half of the
+// invariant: once Close has run, no path may hand the subscriber an event —
+// neither the channel (closed) nor the priority list, which TakePriority would
+// otherwise resurrect for a caller holding a stale reference.
+func TestOfferAfterCloseDropsInsteadOfBuffering(t *testing.T) {
+	t.Parallel()
+
+	b := New()
+
+	sub := b.Subscribe(allow, 1)
+	if !sub.Subscribe(TopicApprovalsPending) {
+		t.Fatal("subscribe refused")
+	}
+
+	// Fill the buffer so the next offer takes the drop-exempt overflow branch.
+	b.Publish(TopicApprovalsPending, EventApprovalPending, nil)
+	sub.Close()
+
+	// deliver() would have skipped a detached subscriber; call offer directly
+	// to exercise the branch a snapshot taken before the detach would reach.
+	sub.offer(Event{Topic: TopicApprovalsPending, Type: EventApprovalPending})
+
+	if got := sub.TakePriority(); got != nil {
+		t.Fatalf("priority events buffered on a closed subscriber: %v", got)
 	}
 }
