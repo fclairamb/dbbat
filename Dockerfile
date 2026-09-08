@@ -16,7 +16,7 @@
 # -----------------------------------------------------------------------------
 # Builds the React frontend using Bun. The output (dist/) will be embedded
 # into the Go binary in the next stage.
-FROM oven/bun:1.4.0 AS frontend
+FROM oven/bun:1.4.2 AS frontend
 
 WORKDIR /app/front
 
@@ -39,7 +39,7 @@ RUN bun run generate-client && bun run build:no-check
 # Stage 2: Backend Build
 # -----------------------------------------------------------------------------
 # Builds the Go binary with the frontend embedded via go:embed.
-FROM golang:1.27.0-trixie AS backend
+FROM golang:1.27.1-trixie AS backend
 
 WORKDIR /app
 
