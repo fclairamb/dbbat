@@ -58,7 +58,7 @@ test.describe("Servers Management", () => {
     }
   });
 
-  test("create dialog rejects a hyphenated name before it reaches the server", async ({
+  test("create dialog rejects a leading-hyphen name before it reaches the server", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("servers");
@@ -67,13 +67,15 @@ test.describe("Servers Management", () => {
     await authenticatedPage.getByTestId("add-database-button").click();
 
     const nameInput = authenticatedPage.getByTestId("database-name-input");
-    await nameInput.fill("bad-name");
+    await nameInput.fill("-bad-name");
     await authenticatedPage.locator("#host").fill("db.example.com");
     await authenticatedPage.locator("#username").fill("postgres");
     await authenticatedPage.locator("#password").fill("secret");
 
-    // The server name is a slug (^[a-z0-9_]{1,63}$) — no hyphens. The input's
-    // native HTML5 pattern must catch this before any request is made.
+    // The server name is a slug (see store.ErrServerNameInvalid) — an
+    // interior hyphen is fine (e.g. "prod-eu-1"), but it may not lead or
+    // trail. The input's native HTML5 pattern must catch that before any
+    // request is made.
     const isValid = await nameInput.evaluate((el: HTMLInputElement) =>
       el.checkValidity()
     );
@@ -84,7 +86,7 @@ test.describe("Servers Management", () => {
     // The browser blocks the submit, so the dialog stays open with the
     // rejected value still in the field rather than a round-trip 400.
     await expect(nameInput).toBeVisible();
-    await expect(nameInput).toHaveValue("bad-name");
+    await expect(nameInput).toHaveValue("-bad-name");
   });
 
   test("connection URL shows the {DBBAT_KEY} placeholder", async ({

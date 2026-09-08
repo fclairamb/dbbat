@@ -80,9 +80,9 @@ export const DEMO_TARGET = {
 /**
  * Name of the server row the showcase creates and then drives traffic to.
  *
- * Underscore, not a hyphen: server names are slugs (`^[a-z0-9_]{1,63}$`, see
- * `store.ErrServerNameInvalid`), so `analytics-prod` is refused with a 400 and
- * the whole showcase run dies in `global-setup`.
+ * Underscore, kept for stability across captures rather than any charset
+ * requirement — server names are slugs (see `store.ErrServerNameInvalid`),
+ * and hyphens are accepted too.
  */
 export const SERVER_NAME = env("SHOWCASE_SERVER_NAME", "analytics_prod");
 

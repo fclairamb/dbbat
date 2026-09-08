@@ -87,13 +87,16 @@ function isFullDatabase(db: DatabaseItem): db is Database {
 // SERVER_NAME_PATTERN mirrors the store-level slug check
 // (internal/store.IsValidServerName): creation is gated on it, but rows
 // created before that gate existed are grandfathered — this is what lets the
-// admin UI flag those rows instead of hiding the drift.
-const SERVER_NAME_PATTERN = /^[a-z0-9_]{1,63}$/;
+// admin UI flag those rows instead of hiding the drift. A hyphen is allowed
+// in the interior (e.g. "prod-eu-1") but not leading or trailing; `.` is
+// still rejected.
+const SERVER_NAME_PATTERN =
+  /^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$/;
 
 // NonSlugNameWarning flags a server row whose name predates the slug gate
 // (or was created directly against the store/API). The row itself works, but
 // the name is the client-facing selector on every protocol, so a stray space,
-// hyphen or uppercase letter costs reachability somewhere down the line —
+// dot or uppercase letter costs reachability somewhere down the line —
 // see OracleServiceConflictWarning below, whose shape this mirrors.
 function NonSlugNameWarning({ uid, name }: { uid: string; name: string }) {
   return (
@@ -112,11 +115,12 @@ function NonSlugNameWarning({ uid, name }: { uid: string; name: string }) {
         <p className="font-medium">Not a valid slug</p>
         <p>
           "{name}" predates the naming rule and was grandfathered in. New
-          servers must be lowercase letters, numbers, and underscores only —
-          this is the name every client types as the database name in its
-          connection string, so anything else costs reachability on some
-          protocol. Rename it from the pencil action on this row; every client
-          config using the old name has to be updated to match.
+          servers must be lowercase letters, numbers, underscores or hyphens
+          (a hyphen may not lead or trail) — this is the name every client
+          types as the database name in its connection string, so anything
+          else costs reachability on some protocol. Rename it from the pencil
+          action on this row; every client config using the old name has to be
+          updated to match.
         </p>
       </TooltipContent>
     </Tooltip>
@@ -154,13 +158,14 @@ function ServerRenameField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         maxLength={63}
-        pattern="^[a-z0-9_]{1,63}$"
-        title="Lowercase letters, numbers, and underscores only (no hyphens or spaces)"
+        pattern="^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$"
+        title="Lowercase letters, numbers, underscores and hyphens only (no leading/trailing hyphen, no spaces or dots)"
         required
       />
       <p className="text-xs text-muted-foreground">
-        Lowercase letters, numbers, and underscores only. Names are unique
-        across every server, deleted ones included.
+        Lowercase letters, numbers, underscores and hyphens (not leading or
+        trailing). Names are unique across every server, deleted ones
+        included.
       </p>
       {changed && (
         <Alert data-testid="server-rename-warning">
@@ -1030,14 +1035,15 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               onChange={(e) => setName(e.target.value)}
               placeholder="production_db"
               maxLength={63}
-              pattern="^[a-z0-9_]{1,63}$"
-              title="Lowercase letters, numbers, and underscores only (no hyphens or spaces)"
+              pattern="^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$"
+              title="Lowercase letters, numbers, underscores and hyphens only (no leading/trailing hyphen, no spaces or dots)"
               required
             />
             <p className="text-xs text-muted-foreground">
               This is the client-facing selector every protocol uses — the
               "database name" typed in a connection string — so it must be a
-              slug: lowercase letters, numbers, and underscores only.
+              slug: lowercase letters, numbers, underscores and hyphens (not
+              leading or trailing).
             </p>
           </div>
           <div className="space-y-2">

@@ -2383,7 +2383,7 @@ export interface components {
              * @description Unique identifier
              */
             uid: string;
-            /** @description Database configuration name. Creation enforces the slug format `^[a-z0-9_]{1,63}$` (see `CreateDatabaseRequest.name`), but rows created before that gate existed are grandfathered and may not conform — the admin UI flags a non-conforming name so it gets renamed deliberately rather than silently. */
+            /** @description Database configuration name. Creation enforces the slug format `^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$` (see `CreateDatabaseRequest.name`), but rows created before that gate existed are grandfathered and may not conform — the admin UI flags a non-conforming name so it gets renamed deliberately rather than silently. */
             name: string;
             /** @description Description */
             description?: string;
@@ -2537,7 +2537,7 @@ export interface components {
             description?: string;
         };
         CreateDatabaseRequest: {
-            /** @description Unique name for this database configuration. Must be a slug (lowercase letters, digits, underscores only — no hyphens, spaces or punctuation), capped at 63 bytes (PostgreSQL's identifier limit). This is the client-facing selector on every protocol — the "database name" typed in a connection string — so anything outside this charset costs reachability on at least one of the five (Oracle EZ-Connect, unquoted MySQL/CLI identifiers, URL percent-encoding). Existing non-conforming rows are grandfathered; only creation is gated. Rejected with a 400. */
+            /** @description Unique name for this database configuration. Must be a slug (lowercase letters, digits, underscores or hyphens — no spaces, dots or other punctuation; a hyphen may not lead or trail), capped at 63 bytes (PostgreSQL's identifier limit). This is the client-facing selector on every protocol — the "database name" typed in a connection string — so anything outside this charset costs reachability on at least one of the five (Oracle EZ-Connect, unquoted MySQL/CLI identifiers, URL percent-encoding). Existing non-conforming rows are grandfathered; only creation is gated. Rejected with a 400. */
             name: string;
             /** @description Description */
             description?: string;
@@ -2616,7 +2616,7 @@ export interface components {
             test_connection?: boolean;
         };
         UpdateDatabaseRequest: {
-            /** @description Renames the server. Same slug rule as creation (lowercase letters, digits and underscores, capped at 63 bytes); a name outside it is rejected with a 400. The name is the client-facing selector on every protocol — the "database name" a client types in its connection string, and the Oracle SERVICE_NAME — so a rename breaks every saved connection string and client config still using the old one. Sessions already authenticated are unaffected; new connects must use the new name. Names are globally unique across live *and* soft-deleted rows, so reusing the name of a deleted server is a 409. Omit to leave the name unchanged. */
+            /** @description Renames the server. Same slug rule as creation (lowercase letters, digits, underscores or hyphens, capped at 63 bytes; a hyphen may not lead or trail); a name outside it is rejected with a 400. The name is the client-facing selector on every protocol — the "database name" a client types in its connection string, and the Oracle SERVICE_NAME — so a rename breaks every saved connection string and client config still using the old one. Sessions already authenticated are unaffected; new connects must use the new name. Names are globally unique across live *and* soft-deleted rows, so reusing the name of a deleted server is a 409. Omit to leave the name unchanged. */
             name?: string;
             /** @description Description */
             description?: string;
