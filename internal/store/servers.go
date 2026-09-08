@@ -29,7 +29,7 @@ import (
 // it is always an opaque selector), but it may not lead or trail: a leading
 // `-` makes the name untypeable on the command line (`psql -d -prod` parses
 // as a flag, likewise `mysql -D`, `sqlplus`, `mongosh`), and trailing is
-// barred for symmetry. `.` stays rejected — see specs/todos for the
+// barred for symmetry. `.` stays rejected — see specs/done/2026/09 for the
 // hyphen-only decision.
 var serverNamePattern = regexp.MustCompile(`^[a-z0-9_][a-z0-9_-]{0,61}[a-z0-9_]$|^[a-z0-9_]$`)
 

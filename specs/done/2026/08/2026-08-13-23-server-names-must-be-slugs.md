@@ -100,7 +100,7 @@ the same typed `ErrServerNameInvalid` → 400 as a bad charset.
 ## Superseded
 
 **2026-09-08:** the underscore-only decision above was reversed by
-[specs/todos/2026-09-08-01-allow-hyphen-in-server-names.md](../../../todos/2026-09-08-01-allow-hyphen-in-server-names.md).
+[specs/done/2026/09/2026-09-08-01-allow-hyphen-in-server-names.md](../09/2026-09-08-01-allow-hyphen-in-server-names.md).
 `-` is now accepted (not leading or trailing): the stated risk — an unquoted
 `-` being an operator in MySQL/Oracle identifier positions — turned out not to
 apply, because a dbbat server name is never a parsed upstream identifier, only
