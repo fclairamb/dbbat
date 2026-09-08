@@ -17,6 +17,8 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/fclairamb/dbbat/internal/store"
+
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 )
 
 var (
@@ -205,8 +207,10 @@ func (s *fakeSSHServer) pipe(ch ssh.Channel, target string) {
 		_ = ch.Close()
 		return
 	}
-	go func() { _, _ = io.Copy(upstream, ch); _ = upstream.Close() }()
-	go func() { _, _ = io.Copy(ch, upstream); _ = ch.Close() }()
+	// Half-closing relay: reacting to one direction's EOF with a full close of
+	// the other end truncates whatever the peer is still writing. See
+	// testsupport.PipeSSHChannel.
+	testsupport.PipeSSHChannel(ch, upstream)
 }
 
 // startEchoTarget starts a TCP server that echoes back everything it reads.

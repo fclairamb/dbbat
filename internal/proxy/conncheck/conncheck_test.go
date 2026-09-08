@@ -18,6 +18,8 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/fclairamb/dbbat/internal/store"
+
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 )
 
 var (
@@ -206,13 +208,11 @@ func handleSSHConn(nConn net.Conn, cfg *ssh.ServerConfig) {
 		}
 
 		go ssh.DiscardRequests(chReqs)
-		go pipeChannel(ch, upstream)
+		// Half-closing relay: a full close of the opposite end on one
+		// direction's EOF truncates an in-flight protocol refusal, which is
+		// what the Oracle probe test distinguishes. See testsupport.
+		go testsupport.PipeSSHChannel(ch, upstream)
 	}
-}
-
-func pipeChannel(ch ssh.Channel, upstream net.Conn) {
-	go func() { _, _ = io.Copy(upstream, ch); _ = upstream.Close() }()
-	go func() { _, _ = io.Copy(ch, upstream); _ = ch.Close() }()
 }
 
 // startEchoTarget starts a TCP echo server — a host that is reachable but does
