@@ -97,11 +97,18 @@ function isFullDatabase(db: DatabaseItem): db is Database {
 // — and per the HTML spec, a `pattern` that fails to compile is silently
 // ignored rather than rejected, so client-side validation goes dead with no
 // visible error. Do not "clean up" the backslash; it is load-bearing. Keep
-// this identical to the two `pattern=` attributes below and to
-// serverNamePattern in internal/store/servers.go and the `pattern:` fields
-// in internal/api/openapi.yml.
-const SERVER_NAME_PATTERN =
-  /^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$/;
+// this in step with serverNamePattern in internal/store/servers.go and the
+// `pattern:` fields in internal/api/openapi.yml.
+//
+// It lives in a *string* rather than a regex literal for two reasons: the
+// two `pattern=` attributes below are fed from this one constant, so they
+// cannot drift from it, and `no-useless-escape` would (correctly) flag `\-`
+// in a literal — a regex literal is compiled without the `v` flag, where the
+// escape really is redundant. The attribute is not, which is the whole point.
+const SERVER_NAME_PATTERN_SOURCE =
+  "^[a-z0-9_][a-z0-9_\\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$";
+
+const SERVER_NAME_PATTERN = new RegExp(SERVER_NAME_PATTERN_SOURCE);
 
 // NonSlugNameWarning flags a server row whose name predates the slug gate
 // (or was created directly against the store/API). The row itself works, but
@@ -168,7 +175,7 @@ function ServerRenameField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         maxLength={63}
-        pattern="^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$"
+        pattern={SERVER_NAME_PATTERN_SOURCE}
         title="Lowercase letters, numbers, underscores and hyphens only (no leading/trailing hyphen, no spaces or dots)"
         required
       />
@@ -1045,7 +1052,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               onChange={(e) => setName(e.target.value)}
               placeholder="production_db"
               maxLength={63}
-              pattern="^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$"
+              pattern={SERVER_NAME_PATTERN_SOURCE}
               title="Lowercase letters, numbers, underscores and hyphens only (no leading/trailing hyphen, no spaces or dots)"
               required
             />
