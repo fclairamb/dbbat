@@ -917,6 +917,12 @@ export interface paths {
          * Add a server to a group (admin)
          * @description Idempotent — re-adding an existing member is a no-op. Takes effect
          *     immediately for every live grant bound to the group.
+         *
+         *     The response quantifies that: `live_grants_widened` is how many live
+         *     grants now cover this server as well, and `users` names the people
+         *     holding them. Sessions already running are included, and no separate
+         *     approval is involved — which is why the number comes back in the body
+         *     instead of being left for the caller to reconstruct.
          */
         put: operations["addServerGroupMember"];
         post?: never;
@@ -2353,6 +2359,30 @@ export interface components {
             readonly created_by?: string | null;
             /** Format: date-time */
             readonly created_at: string;
+        };
+        /**
+         * @description The result of `PUT /server-groups/{uid}/members/{server_uid}`, with the
+         *     blast radius of the edit that just landed.
+         *
+         *     There is no matching payload on the DELETE half: removing a member
+         *     narrows what live grants cover, which is not a surprise worth
+         *     reporting.
+         */
+        ServerGroupMemberAddedResponse: {
+            message: string;
+            /**
+             * Format: int64
+             * @description How many live grants bound to this group now cover the added
+             *     server as well. Live means the auth path's own definition — not
+             *     revoked, inside its window, issued from an active definition —
+             *     so sessions already running are included.
+             */
+            live_grants_widened: number;
+            /**
+             * @description The distinct usernames holding those grants, sorted. Shorter than
+             *     `live_grants_widened` when someone holds more than one.
+             */
+            users: string[];
         };
         CreateServerGroupRequest: {
             name: string;
@@ -4257,6 +4287,7 @@ export type CreateUserRequest = components['schemas']['CreateUserRequest'];
 export type UserGroup = components['schemas']['UserGroup'];
 export type CreateUserGroupRequest = components['schemas']['CreateUserGroupRequest'];
 export type ServerGroup = components['schemas']['ServerGroup'];
+export type ServerGroupMemberAddedResponse = components['schemas']['ServerGroupMemberAddedResponse'];
 export type CreateServerGroupRequest = components['schemas']['CreateServerGroupRequest'];
 export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
 export type Database = components['schemas']['Database'];
@@ -5804,7 +5835,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MessageResponse"];
+                    "application/json": components["schemas"]["ServerGroupMemberAddedResponse"];
                 };
             };
             400: components["responses"]["BadRequest"];

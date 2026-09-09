@@ -441,6 +441,16 @@ func (s *Server) handleListServerGroupMembers(c *gin.Context) {
 }
 
 // handleAddServerGroupMember — admin-only. Idempotent.
+//
+// The response quantifies what the call just did: membership is live, so the
+// new server is covered by every grant bound to this group from the instant
+// the write lands — sessions already running included, with no separate
+// approval. The admin UI warns about that at the point of edit; automation and
+// CLI callers go through here, so the count and the affected usernames come
+// back in the body rather than being left for the operator to reconstruct.
+//
+// The DELETE half deliberately says nothing of the sort: removing a member
+// narrows, which surprises nobody.
 func (s *Server) handleAddServerGroupMember(c *gin.Context) {
 	groupUID, serverUID, err := parseServerMemberParams(c)
 	if err != nil {
@@ -475,11 +485,22 @@ func (s *Server) handleAddServerGroupMember(c *gin.Context) {
 		return
 	}
 
+	// Read the blast radius *after* the write, so it describes the state the
+	// caller now has rather than the one they had a moment ago.
+	radius, err := s.store.GetServerGroupBlastRadius(ctx, groupUID)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to compute server group blast radius")
+
+		return
+	}
+
 	currentUser := getCurrentUser(c)
 
 	details, _ := json.Marshal(map[string]any{
-		"server_group_uid": groupUID,
-		"server_uid":       serverUID,
+		"server_group_uid":    groupUID,
+		"server_uid":          serverUID,
+		"live_grants_widened": radius.Grants,
+		"users":               radius.Users,
 	})
 
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
@@ -488,7 +509,11 @@ func (s *Server) handleAddServerGroupMember(c *gin.Context) {
 		Details:     details,
 	})
 
-	successResponse(c, gin.H{"message": "member added"})
+	successResponse(c, gin.H{
+		"message":             "member added",
+		"live_grants_widened": radius.Grants,
+		"users":               radius.Users,
+	})
 }
 
 // handleRemoveServerGroupMember — admin-only. Idempotent.

@@ -1774,6 +1774,12 @@ paths:
       description: |
         Idempotent — re-adding an existing member is a no-op. Takes effect
         immediately for every live grant bound to the group.
+
+        The response quantifies that: `live_grants_widened` is how many live
+        grants now cover this server as well, and `users` names the people
+        holding them. Sessions already running are included, and no separate
+        approval is involved — which is why the number comes back in the body
+        instead of being left for the caller to reconstruct.
       operationId: addServerGroupMember
       responses:
         '200':
@@ -1781,7 +1787,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MessageResponse'
+                $ref: '#/components/schemas/ServerGroupMemberAddedResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -4391,6 +4397,38 @@ components:
         - access_approver_user_group_uids
         - query_approver_user_group_uids
         - created_at
+
+    ServerGroupMemberAddedResponse:
+      type: object
+      description: |
+        The result of `PUT /server-groups/{uid}/members/{server_uid}`, with the
+        blast radius of the edit that just landed.
+
+        There is no matching payload on the DELETE half: removing a member
+        narrows what live grants cover, which is not a surprise worth
+        reporting.
+      properties:
+        message:
+          type: string
+        live_grants_widened:
+          type: integer
+          format: int64
+          description: |
+            How many live grants bound to this group now cover the added
+            server as well. Live means the auth path's own definition — not
+            revoked, inside its window, issued from an active definition —
+            so sessions already running are included.
+        users:
+          type: array
+          items:
+            type: string
+          description: |
+            The distinct usernames holding those grants, sorted. Shorter than
+            `live_grants_widened` when someone holds more than one.
+      required:
+        - message
+        - live_grants_widened
+        - users
 
     CreateServerGroupRequest:
       type: object
