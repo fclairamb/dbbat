@@ -261,8 +261,11 @@ single global chain would break the first time it ran.
   prefix — counted, not flagged as tampering — and keeps verifying everything
   after it.
 - Retention deleting *every* statement of a session whose connection record
-  survives — a pooled connection that went quiet long before it closed, or one
-  still open — is the extreme of the same case, and is counted the same way.
+  survives — a pooled connection that went quiet long before it closed, one
+  still open, or (whenever `DBB_CONNECTION_RETENTION` is longer than
+  `DBB_QUERY_STORAGE_RETENTION`) every closed session between the two windows —
+  is counted separately, as `chains_emptied_by_retention`, so that the ordinary
+  by-design case cannot bury the truncated prefixes above.
   Verification excuses it only when the session began before the retention
   cutoff, which is the only way the sweep could have taken all of them;
   otherwise an emptied session is a break. One caveat follows from that: after

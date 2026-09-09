@@ -1090,14 +1090,19 @@ Walks the per-connection query chains. **Requires admin role.**
   "connections": 412,
   "statements": 98213,
   "chains_with_truncated_prefix": 3,
+  "chains_emptied_by_retention": 128,
   "checked_at": "2026-08-10T09:14:02Z",
   "cached": false
 }
 ```
 
-`chains_with_truncated_prefix` counts chains missing their oldest statements —
-what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a long-lived session. That
-is expected housekeeping, not tampering. The response never contains SQL text,
+`chains_with_truncated_prefix` counts chains missing their oldest statements but
+still holding some — what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a
+long-lived session. `chains_emptied_by_retention` counts the sessions that
+window emptied completely, which is the ordinary state of every closed session
+between `DBB_QUERY_STORAGE_RETENTION` and a longer `DBB_CONNECTION_RETENTION`.
+Both are expected housekeeping, not tampering, and they are separate numbers so
+the second cannot hide the first. The response never contains SQL text,
 parameters or any other statement content.
 
 ---
