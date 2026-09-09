@@ -1760,10 +1760,13 @@ export interface paths {
          *     `chains_with_truncated_prefix` counts chains missing their oldest
          *     statements — what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a
          *     long-lived session. That is expected housekeeping, not tampering, and
-         *     everything after the truncation is still verified. A session retention
-         *     emptied *entirely* is counted there too; one emptied while it was too
-         *     young for the sweep to have reached it is a **break**, because the
-         *     stamp on the connection row still attests to statements that are gone.
+         *     everything after the truncation is still verified.
+         *     `chains_emptied_by_retention` counts the sessions that window emptied
+         *     *entirely*, which is the ordinary state of every closed session between
+         *     `DBB_QUERY_STORAGE_RETENTION` and a longer `DBB_CONNECTION_RETENTION`.
+         *     A session emptied while it was too young for the sweep to have reached
+         *     it is a **break** rather than either count, because the stamp on the
+         *     connection row still attests to statements that are gone.
          *
          *     A session carrying an unkeyed head stamp — a verbatim copy of the last
          *     statement's MAC, forgeable by anyone who can write to the store — is a
@@ -3492,6 +3495,22 @@ export interface components {
             dump: components["schemas"]["DumpMetadata"];
             /** @description The grant named by `grant_uid`, or null when `grant_uid` is null or the grant it names could not be resolved. */
             grant: components["schemas"]["GrantSummary"] | null;
+            /**
+             * @description False when `DBB_QUERY_STORAGE_RETENTION` can account for this
+             *     session having fewer statements in the store than it ran — i.e.
+             *     the session started before the statement cutoff, so the sweep
+             *     could have reaped some or all of them.
+             *
+             *     It exists because `DBB_CONNECTION_RETENTION` can be longer than
+             *     `DBB_QUERY_STORAGE_RETENTION`: every closed session between the
+             *     two windows keeps its ledger row and loses its statements, so
+             *     an empty statement list is the expected state rather than a
+             *     session that ran nothing. The `queries` counter on the row is a
+             *     lifetime count and does not settle it either. True means
+             *     retention cannot explain a missing statement — with retention
+             *     disabled, the default, it is always true.
+             */
+            statements_retained: boolean;
         };
         GrantSummary: {
             /**
@@ -3863,14 +3882,24 @@ export interface components {
             statements: number;
             /**
              * Format: int64
-             * @description Chains missing their oldest statements — what
-             *     DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session.
-             *     Expected housekeeping, not tampering; everything after the
-             *     truncation is still verified. A session the sweep emptied of every
-             *     statement is counted here as well; an emptied session the sweep
-             *     cannot account for is a break instead.
+             * @description Chains missing their oldest statements but still holding some —
+             *     what DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived
+             *     session. Expected housekeeping, not tampering; everything after the
+             *     truncation is still verified.
              */
             chains_with_truncated_prefix: number;
+            /**
+             * Format: int64
+             * @description Sessions with no statement left at all, accounted for by
+             *     DBB_QUERY_STORAGE_RETENTION. Counted apart from
+             *     `chains_with_truncated_prefix` rather than folded into it: with
+             *     DBB_CONNECTION_RETENTION set longer than the statement window,
+             *     every closed session between the two windows is in this state by
+             *     design, so one number would drown the other. An emptied session the
+             *     statement window cannot account for is a **break** instead of a
+             *     count here.
+             */
+            chains_emptied_by_retention: number;
             /**
              * Format: int64
              * @description Chain position the walk ended on. Reported only for a
