@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // TDS token types the proxy emits (MS-TDS 2.2.5.x). Stage 1 only ever needs to
@@ -261,10 +263,18 @@ func clientMessageFor(username string, reason error) (int32, string) {
 		return errNumberCannotOpenDBName, "dbbat: this login named no database. Connect with the " +
 			"name of the dbbat database entry you have a grant on (for example Database=my-target)."
 
-	case errors.Is(reason, ErrServerNotFound):
+	case errors.Is(reason, ErrServerNotFound), errors.Is(reason, shared.ErrTargetNotFound):
 		return errNumberCannotOpenDBName, "dbbat: no SQL Server database is registered under that " +
-			"name. The Database in your connection string must be the name of the dbbat entry, " +
-			"not the name of a database on the server."
+			"name. Put the name of the dbbat entry in Database, or the real upstream database " +
+			"name with the entry selected as User Id=<user>#<entry>."
+
+	// These two carry their own text on purpose: they are the only refusals a
+	// human can act on without asking an administrator, and everything they
+	// name (the selected entry, the database it exposes, the entries the
+	// caller already holds a grant on) is information the resolver only
+	// produces for someone already granted on it.
+	case errors.Is(reason, shared.ErrDatabaseNotExposed), errors.Is(reason, shared.ErrTargetAmbiguous):
+		return errNumberCannotOpenDBName, "dbbat: " + reason.Error()
 
 	case errors.Is(reason, ErrNoActiveGrant):
 		return errNumberCannotOpenDBName, "dbbat: you have no active grant on that database. " +

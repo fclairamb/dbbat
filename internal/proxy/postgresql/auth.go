@@ -38,11 +38,17 @@ func (s *Session) authenticate() error {
 		return ErrExpectedStartupMessage
 	}
 
-	username := startup.Parameters["user"]
+	// The username may carry a "user#server" selector: the database field is
+	// the one an IDE rewrites per database as it walks the catalog, the
+	// username is the one it preserves verbatim. Only the bare name is looked
+	// up, so the connection row, the audit log, Slack and the approval gate
+	// all keep recording the plain user.
+	rawUsername := startup.Parameters["user"]
+	username, serverHint := shared.ParseUsername(rawUsername)
 	databaseName := startup.Parameters["database"]
 	s.clientApplicationName = startup.Parameters["application_name"]
 
-	if username == "" || databaseName == "" {
+	if username == "" || (databaseName == "" && serverHint == "") {
 		s.sendError("username and database required")
 
 		return ErrMissingCredentials
@@ -59,9 +65,16 @@ func (s *Session) authenticate() error {
 	s.user = user
 
 	// Look up database configuration
-	database, err := s.store.GetServerByName(s.ctx, databaseName)
+	database, err := shared.ResolveTarget(s.ctx, s.store, shared.TargetRequest{
+		UserID:      user.UID,
+		ServerHint:  serverHint,
+		RequestedDB: databaseName,
+		ProtocolAccepted: func(protocol string) bool {
+			return protocol == store.ProtocolPostgreSQL
+		},
+	})
 	if err != nil {
-		s.sendError("database not found")
+		s.sendError(err.Error())
 
 		return fmt.Errorf("database not found: %w", err)
 	}

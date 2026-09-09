@@ -156,6 +156,7 @@ func TestResolveTarget_Rung2Hint(t *testing.T) {
 	ro := srv("demo_datalake_ro", "demo_datalake", store.ProtocolPostgreSQL)
 	st := &fakeTargetStore{servers: []store.Server{ro}}
 	user := uuid.New()
+	st.grant(user, &ro)
 
 	t.Run("hint plus the real database name", func(t *testing.T) {
 		t.Parallel()
@@ -193,6 +194,21 @@ func TestResolveTarget_Rung2Hint(t *testing.T) {
 		})
 		require.ErrorIs(t, err, shared.ErrDatabaseNotExposed)
 		assert.Contains(t, err.Error(), `server "demo_datalake_ro" exposes database "demo_datalake", not "postgres"`)
+	})
+
+	t.Run("the mismatch detail is withheld from a caller without a grant", func(t *testing.T) {
+		t.Parallel()
+
+		// Same probe, by somebody who holds no grant on that server: the
+		// answer must not leak the upstream database name.
+		_, err := shared.ResolveTarget(context.Background(), st, shared.TargetRequest{
+			UserID:           uuid.New(),
+			ServerHint:       "demo_datalake_ro",
+			RequestedDB:      "postgres",
+			ProtocolAccepted: pgOnly,
+		})
+		require.ErrorIs(t, err, shared.ErrTargetNotFound)
+		assert.NotContains(t, err.Error(), "demo_datalake\"")
 	})
 
 	t.Run("unknown server in the hint", func(t *testing.T) {

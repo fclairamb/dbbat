@@ -89,7 +89,10 @@ func (r TargetRequest) accepts(protocol string) bool {
 //     otherwise the call is refused with a message naming both. Refusing here
 //     rather than silently redirecting is deliberate: an IDE that reconnects
 //     to `postgres` must be told what went wrong, not handed a different
-//     database than the one it asked for.
+//     database than the one it asked for. The explanatory message is reserved
+//     for a caller who already holds an active grant on that server, so the
+//     rung cannot be used to read back the upstream database name of a target
+//     the caller may not reach.
 //
 //  3. Otherwise the requested name is read as an upstream database name, and
 //     matched only against servers **the caller currently holds an active
@@ -138,6 +141,15 @@ func resolveFromHint(
 
 	if requested == "" || requested == srv.DatabaseName {
 		return srv, nil
+	}
+
+	// The explicit message names the upstream database this server exposes,
+	// which is more than "not found" tells. Only say it to someone who already
+	// holds an active grant on that server — otherwise a `user#server` probe
+	// would be a way to read the upstream database name of every registered
+	// target. Everyone else gets the same answer as an unknown name.
+	if _, gerr := st.GetActiveGrant(ctx, req.UserID, srv.UID); gerr != nil {
+		return nil, fmt.Errorf("%w: no server named %q on this listener", ErrTargetNotFound, hint)
 	}
 
 	return nil, fmt.Errorf(
