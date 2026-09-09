@@ -145,6 +145,16 @@ test.describe("Servers Management", () => {
     const connUrl = authenticatedPage.getByTestId("database-connection-url");
     if ((await connUrl.count()) > 0) {
       await expect(connUrl.first()).toHaveValue(/\{DBBAT_KEY\}/);
+
+      // The URI protocols select the dbbat entry from the username, as
+      // `user%23entry`, leaving the path free to carry the real upstream
+      // database name — the form DataGrip and DBeaver can sustain across their
+      // per-database reconnects. Oracle and MongoDB carry the selector
+      // elsewhere, so only assert it on the URI shapes.
+      const value = await connUrl.first().inputValue();
+      if (value.startsWith("postgresql://") || value.startsWith("mysql://")) {
+        expect(value).toContain("%23");
+      }
     }
   });
 
