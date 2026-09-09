@@ -119,3 +119,83 @@ Rewriting `current_database()` / `pg_database` in flight: it breaks the
 transparent-proxy contract and DataGrip issues dozens of catalog queries.
 Renaming servers so `name == database_name` is impossible with the `_ro`/`_rw`
 twins.
+
+## Implementation Plan
+
+### 1. `internal/proxy/shared/target.go` — the shared parse + resolver
+
+- `shared.ParseUsername(raw) (bare, serverHint string)` — the hoisted
+  `splitUserDBHint`, split on the **last** `#` so a username may contain one.
+- `shared.TargetStore` — the three store calls the ladder needs
+  (`GetServerByName`, `ListServersByDatabaseName`, `GetActiveGrant`), so the
+  resolver unit-tests against a fake and never needs a container.
+- `shared.ResolveTarget(ctx, st, TargetRequest) (*store.Server, error)`, rungs:
+  1. `RequestedDB` equals a server `name` on an accepted protocol → that server.
+     Exact name match always wins, so a `database_name` can never shadow it.
+  2. `ServerHint` non-empty → that server (protocol-checked). `RequestedDB` must
+     be empty or equal the server's `database_name`, else
+     `ErrDatabaseNotExposed` naming both. This is the rung DataGrip's reconnect
+     to `postgres` / `template1` lands on.
+  3. Otherwise → `ListServersByDatabaseName(RequestedDB)`, keep the ones on an
+     accepted protocol **that the caller currently holds an active grant on**
+     (`GetActiveGrant` per candidate — the authoritative coverage function, so
+     server-group-bound grants are honoured and the rung can never widen
+     access). Exactly one → use it; several → `ErrTargetAmbiguous` naming the
+     candidates and the `user#server` form; none → `ErrTargetNotFound`.
+  - No `RequestedDB` and no hint → `ErrNoDatabaseRequested`.
+
+### 2. `internal/store` — one new read
+
+- `Store.ListServersByDatabaseName(ctx, name)`; targets only (same
+  `protocol NOT IN (ssh, kubernetes)` guard as `GetServerByName`), ordered by
+  name so ambiguity messages are stable.
+
+### 3. Per-protocol wiring
+
+- PostgreSQL `auth.go`: split the startup `user`, look the user up by the bare
+  name, resolve through `shared.ResolveTarget`, surface the resolver's message
+  through `sendError`.
+- MySQL: split in `GetCredential` (stash the hint on the session) and in
+  `dbbatAuthProvider.verifyCredentials`; `OnAuthSuccess` calls the resolver with
+  `store.IsMySQLFamily` as the protocol predicate.
+- SQL Server: split `login.UserName` in `authenticate`, `resolveDatabase`
+  delegates to the resolver.
+- MongoDB: keeps its own `authSource`-first ladder and its single-active-grant
+  rung, but drops `splitUserDBHint` for `shared.ParseUsername`.
+- In all four the *bare* username is what `GetUserByUsername` resolves, so
+  `connections`, `audit_log`, Slack and the approval gate keep recording the
+  plain user and `#` never reaches the upstream credential.
+
+### 4. `internal/api/connection_url.go` — what the UI hands out
+
+- PostgreSQL and MySQL/MariaDB: userinfo becomes `user%23<server name>` and the
+  path becomes the real `database_name` (falling back to the dbbat name when the
+  row has none).
+- New SQL Server branch:
+  `Server=host,1434;Database=<real>;User Id=user#server;Password={DBBAT_KEY};Encrypt=true`,
+  `format: "connection-string"`. `ResolvedEndpoints` gains `MSSQLHost` /
+  `MSSQLPort` (host from the shared public host, port from `DBB_LISTEN_MSSQL`);
+  per-protocol MSSQL overrides in the settings UI are a follow-up todo.
+- Oracle and MongoDB unchanged.
+- `connection_url_test.go`: `makeDB` takes `name` and `databaseName` separately.
+
+### 5. UI + docs
+
+- `front/src/routes/_authenticated/servers/index.tsx` and `api-keys/index.tsx`:
+  one line under the field — "Database is the real upstream name; the
+  `#<server>` suffix selects the dbbat server."
+- `internal/api/openapi.yml`: endpoint description + the `format` enum.
+- `website/docs/configuration/servers.md`: `name` is the selector, the three
+  ways to provide it, and an "IDEs (DataGrip, DBeaver)" section carrying the
+  DataGrip *Single database mode* note.
+- `docs/mongodb.md`: cross-reference the now-shared ladder.
+
+### 6. Tests
+
+- `internal/proxy/shared/target_test.go`: every rung, ambiguity, shadowing,
+  protocol mismatch, hint/database mismatch, `#`-in-username parsing.
+- `internal/api/connection_url_test.go`: `Name != DatabaseName` asserted on the
+  path and the userinfo for PostgreSQL / MySQL / SQL Server.
+- Integration (`//go:build integration`): PostgreSQL, MySQL and SQL Server each
+  connect with `database=<real name>` and with `user#server`, plus a refused
+  reconnect to a database the server does not expose.
