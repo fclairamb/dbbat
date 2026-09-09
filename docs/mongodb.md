@@ -74,6 +74,14 @@ its "single active grant" rung has no equivalent on a protocol whose startup
 packet always carries a database field. See
 `website/docs/configuration/servers.md` for the user-facing version.
 
+On all four protocols the ladder runs **after** the credential check, never
+before: MongoDB after SASL, MySQL in `OnAuthSuccess`, SQL Server after verifying
+the LOGIN7 credential, PostgreSQL after the cleartext-password exchange. Its
+refusals name registered entries and the upstream databases they expose, and a
+startup packet's username is only a claim until a password verifies it — so
+resolving early would turn `user=victim#some_entry` into an anonymous read of
+that entry's upstream database name.
+
 ## TLS Handling: Termination at the Proxy
 
 MongoDB TLS is implicit-from-byte-0 (no STARTTLS dance). The session peeks the

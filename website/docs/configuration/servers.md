@@ -322,7 +322,11 @@ Use form 2 above: put `alice#demo_datalake_ro` in **User**, and the real
 `demo_datalake` in **Database**. The username survives every per-database
 reconnect, so the entry stays selected. A reconnect to a database the entry does
 not expose (`postgres`, `template1`) is refused with an explanatory message
-rather than silently landing somewhere else.
+rather than silently landing somewhere else. That explanation arrives *after*
+the credentials are accepted — DBBat resolves nothing and says nothing about
+registered entries until it knows who is asking — so a client configured with
+the wrong password sees only `authentication failed`, never the name of the
+database the entry exposes.
 
 DBeaver works the same way — user field, `#` suffix, real database name.
 
