@@ -354,17 +354,78 @@ func (s *Store) SetServerGroupMembers(ctx context.Context, groupUID uuid.UUID, s
 // grants are bound to this server group. It is what tells an operator, before
 // they add or remove a server, how much live access the edit moves — the
 // blast radius of live membership, surfaced rather than implied.
+// The liveness predicate is the auth path's own (applyGrantLiveness), not a
+// second spelling of it: a blast-radius number that disagreed with what the
+// proxy admits would be worse than no number at all.
 func (s *Store) CountActiveGrantsForServerGroup(ctx context.Context, groupUID uuid.UUID) (int64, error) {
-	count, err := s.db.NewSelect().
+	count, err := applyGrantLiveness(s.db.NewSelect().
 		Model((*AccessGrant)(nil)).
-		Where("server_group_uid = ?", groupUID).
-		Where("revoked_at IS NULL").
-		Where("expires_at > NOW()").
-		Where("grant_definition_id IN (SELECT uid FROM grant_definitions WHERE is_active)").
+		Where("ag.server_group_uid = ?", groupUID)).
 		Count(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("count active grants for server group: %w", err)
 	}
 
 	return int64(count), nil
+}
+
+// ServerGroupBlastRadius is what a membership edit on a server group moves:
+// the live grants bound to that group, and the distinct people holding them.
+//
+// Both numbers describe the same set — Grants counts grant rows, Users names
+// the humans — because one user can hold several grants on the group and an
+// operator deciding whether an edit was safe needs the headcount, not the row
+// count.
+type ServerGroupBlastRadius struct {
+	// Grants is how many live grants are bound to the group, and therefore
+	// how many widened the instant a server joined it.
+	Grants int64
+	// Users holds the distinct usernames behind those grants, sorted. A grant
+	// whose user row is gone still counts in Grants but contributes no name.
+	Users []string
+}
+
+// GetServerGroupBlastRadius reports the live grants bound to a server group
+// together with the distinct users holding them.
+//
+// This is what makes the REST API say out loud what the admin UI warns about
+// before the edit: membership is live and never snapshotted, so adding a
+// server extends every one of these grants — sessions already running
+// included — with no separate approval. A caller that only learns the count by
+// reconstructing it (list the group, list the grants, filter to the live ones
+// bound to it) is a caller that will sometimes skip the step.
+//
+// The join to users is a LEFT join on purpose: the grant count must not depend
+// on whether the holder's row still exists, or an edit's blast radius would
+// silently shrink when someone leaves.
+func (s *Store) GetServerGroupBlastRadius(ctx context.Context, groupUID uuid.UUID) (*ServerGroupBlastRadius, error) {
+	var rows []struct {
+		Username sql.NullString `bun:"username"`
+		Count    int64          `bun:"count"`
+	}
+
+	err := applyGrantLiveness(s.db.NewSelect().
+		TableExpr("access_grants AS ag").
+		Join("LEFT JOIN users AS u ON u.uid = ag.user_id").
+		ColumnExpr("u.username AS username").
+		ColumnExpr("count(*) AS count").
+		Where("ag.server_group_uid = ?", groupUID)).
+		GroupExpr("u.username").
+		OrderExpr("u.username").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, fmt.Errorf("blast radius for server group: %w", err)
+	}
+
+	radius := &ServerGroupBlastRadius{Users: make([]string, 0, len(rows))}
+
+	for _, row := range rows {
+		radius.Grants += row.Count
+
+		if row.Username.Valid && row.Username.String != "" {
+			radius.Users = append(radius.Users, row.Username.String)
+		}
+	}
+
+	return radius, nil
 }

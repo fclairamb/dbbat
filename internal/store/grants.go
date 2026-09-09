@@ -134,6 +134,27 @@ func copyUUIDs(in []uuid.UUID) []uuid.UUID {
 const coversDatabaseSQL = "((server_group_uid IS NULL AND database_id = ?) " +
 	"OR server_group_uid IN (SELECT group_uid FROM server_group_members WHERE server_uid = ?))"
 
+// applyGrantLiveness narrows a query over `access_grants AS ag` to the grants
+// that authorize *right now*: not revoked, inside their window, and issued
+// from a definition that has not been deactivated.
+//
+// It lives in one place because it is an authorization predicate, and every
+// report that claims to describe live access — the blast radius of a
+// server-group membership edit, in particular — must mean exactly what the
+// auth path means by it. A second spelling in SQL is a drift waiting to
+// happen, and the drift would be silent: a report saying "this widens 3 live
+// grants" while the proxy admits 4.
+//
+// The window is compared against the *database's* clock, matching Store.Now
+// and every issuance path — see GetActiveGrant.
+func applyGrantLiveness(q *bun.SelectQuery) *bun.SelectQuery {
+	return q.
+		Where("ag.revoked_at IS NULL").
+		Where("ag.starts_at <= NOW()").
+		Where("ag.expires_at > NOW()").
+		Where("ag.grant_definition_id IN (SELECT uid FROM grant_definitions WHERE is_active)")
+}
+
 // CreateGrant creates a new access grant. The grant must name the definition
 // it is an instance of: a grant with no definition would carry no shape at
 // all, and there is deliberately no code path that produces one.
@@ -209,14 +230,10 @@ func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 // elapsed.
 func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID) (*Grant, error) {
 	grant := new(AccessGrant)
-	err := s.db.NewSelect().
+	err := applyGrantLiveness(s.db.NewSelect().
 		Model(grant).
 		Where("user_id = ?", userID).
-		Where(coversDatabaseSQL, databaseID, databaseID).
-		Where("revoked_at IS NULL").
-		Where("starts_at <= NOW()").
-		Where("expires_at > NOW()").
-		Where("grant_definition_id IN (SELECT uid FROM grant_definitions WHERE is_active)").
+		Where(coversDatabaseSQL, databaseID, databaseID)).
 		// Highest priority wins — including between two group-bound grants
 		// whose groups overlap on this database, which is exactly how
 		// priority ranks them. Ties go to the grant that lasts longest (a
