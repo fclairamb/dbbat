@@ -189,13 +189,15 @@ func selfSignedCert(t *testing.T) ([]byte, []byte) {
 // fixture wires up: a storage container + dbbat store, a user/database/grant,
 // an upstream PostgreSQL container, and a started proxy.
 type fixture struct {
-	t         *testing.T
-	store     *store.Store
-	proxy     *Server
-	proxyAddr string
-	user      *store.User
-	dbUID     string
-	encKey    []byte
+	t            *testing.T
+	store        *store.Store
+	proxy        *Server
+	proxyAddr    string
+	user         *store.User
+	dbUID        string
+	encKey       []byte
+	upstreamHost string
+	upstreamPort int
 }
 
 func setupFixture(ctx context.Context, t *testing.T) *fixture {
@@ -319,13 +321,15 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 		5*time.Second, 50*time.Millisecond, "proxy never started listening")
 
 	return &fixture{
-		t:         t,
-		store:     dataStore,
-		proxy:     proxy,
-		proxyAddr: proxy.Addr().String(),
-		user:      user,
-		dbUID:     db.UID.String(),
-		encKey:    encKey,
+		t:            t,
+		store:        dataStore,
+		proxy:        proxy,
+		proxyAddr:    proxy.Addr().String(),
+		user:         user,
+		dbUID:        db.UID.String(),
+		encKey:       encKey,
+		upstreamHost: upstreamHost,
+		upstreamPort: upstreamPort,
 	}
 }
 
