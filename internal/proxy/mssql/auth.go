@@ -29,14 +29,20 @@ func (s *session) authenticate(ctx context.Context, login *Login7) error {
 		return ErrAuthFailed
 	}
 
-	user, err := s.verifyCredentials(ctx, login.UserName, login.Password)
+	// The username may carry a "user#server" selector: it is the one field an
+	// IDE preserves verbatim, while the database field is rewritten per
+	// database as the client walks the catalog. Only the bare name names a
+	// dbbat user, so the connection row and the audit log keep recording it.
+	username, serverHint := shared.ParseUsername(login.UserName)
+
+	user, err := s.verifyCredentials(ctx, username, login.Password)
 	if err != nil {
 		return err
 	}
 
 	s.user = user
 
-	database, err := s.resolveDatabase(ctx, login.Database)
+	database, err := s.resolveDatabase(ctx, user, serverHint, login.Database)
 	if err != nil {
 		return err
 	}
@@ -132,29 +138,34 @@ func (s *session) authenticateAPIKey(ctx context.Context, username, key string) 
 	return user, nil
 }
 
-// resolveDatabase maps the LOGIN7 database field onto a dbbat server row.
-//
-// The convention is the one all the other proxies use: what the client puts in
-// the "database" slot of its connection string is the *dbbat* entry's name, not
-// a database name on the target — the real database comes from the row. The row
-// must also be a SQL Server target, so a name that happens to match a
-// PostgreSQL entry is not a way to reach it through the wrong listener.
-func (s *session) resolveDatabase(ctx context.Context, requested string) (*store.Server, error) {
+// resolveDatabase maps the LOGIN7 database field (and the "#server" half of the
+// login name) onto a dbbat server row, through the ladder every SQL proxy
+// shares — see shared.ResolveTarget. The dbbat entry's name still wins as an
+// exact match, so every stored connection string keeps working; a real upstream
+// database name resolves only among the servers this caller already holds an
+// active grant on. The row must be a SQL Server target, so a name that happens
+// to match a PostgreSQL entry is not a way to reach it through the wrong
+// listener.
+func (s *session) resolveDatabase(
+	ctx context.Context,
+	user *store.User,
+	serverHint, requested string,
+) (*store.Server, error) {
 	requested = strings.TrimSpace(requested)
-	if requested == "" {
+	serverHint = strings.TrimSpace(serverHint)
+
+	if requested == "" && serverHint == "" {
 		return nil, ErrNoDatabaseRequested
 	}
 
-	database, err := s.server.store.GetServerByName(ctx, requested)
-	if err != nil {
-		return nil, ErrServerNotFound
-	}
-
-	if database.Protocol != store.ProtocolMSSQL {
-		return nil, ErrServerNotFound
-	}
-
-	return database, nil
+	return shared.ResolveTarget(ctx, s.server.store, shared.TargetRequest{
+		UserID:      user.UID,
+		ServerHint:  serverHint,
+		RequestedDB: requested,
+		ProtocolAccepted: func(protocol string) bool {
+			return protocol == store.ProtocolMSSQL
+		},
+	})
 }
 
 // isAPIKey reports whether the given password looks like a dbbat API key.

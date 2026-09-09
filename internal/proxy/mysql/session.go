@@ -34,6 +34,7 @@ type Session struct {
 	database     *store.Server
 	grant        *store.Grant
 	requestedDB  string // captured by Handler.UseDB during handshake
+	serverHint   string // the "#server" half of a "user#server" login name
 	authComplete bool
 
 	// go-mysql server-side wrapper around the client connection. Set after
