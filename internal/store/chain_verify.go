@@ -101,10 +101,19 @@ type QueryChainResult struct {
 	ConnectionUID uuid.UUID
 	// Verified is how many statements were checked.
 	Verified int64
-	// TruncatedPrefix is true when the chain does not start at 1 — the
-	// expected shape for a connection whose oldest statements were reaped by
-	// DBB_QUERY_STORAGE_RETENTION.
+	// TruncatedPrefix is true when the chain does not start at 1 but something
+	// still survives — the expected shape for a connection whose *oldest*
+	// statements were reaped by DBB_QUERY_STORAGE_RETENTION.
 	TruncatedPrefix bool
+	// EmptiedByRetention is true when *no* statement of the session survives
+	// and the query window accounts for it (see checkEmptiedChain).
+	//
+	// Deliberately disjoint from TruncatedPrefix rather than the extreme of it:
+	// with DBB_CONNECTION_RETENTION longer than DBB_QUERY_STORAGE_RETENTION,
+	// every closed session between the two windows is in this state by design,
+	// so folding it into the truncated count would drown the thing an operator
+	// actually watches — a chain that lost only part of itself.
+	EmptiedByRetention bool
 	// FirstSeq is the oldest surviving statement's chain_seq, or 0 when nothing
 	// survives. It is 1 unless retention reaped the chain's prefix, and it is
 	// what tells a stamp whose sealed position was *reaped* from one that names
@@ -121,8 +130,14 @@ type QueryChainsResult struct {
 	Connections int64
 	// Verified is how many statements were checked across them.
 	Verified int64
-	// Truncated is how many of those chains were missing a prefix.
+	// Truncated is how many of those chains were missing a prefix but still had
+	// statements left.
 	Truncated int64
+	// Emptied is how many had no statement left at all, accounted for by the
+	// query retention window. Between a short query window and a long
+	// connection window this is simply how many closed sessions have aged out
+	// of statement history while their ledger row is still kept.
+	Emptied int64
 	// Break is the first failure found, or nil.
 	Break *ChainBreak
 }
@@ -295,6 +310,10 @@ func (s *Store) VerifyQueryChains(
 
 		if one.TruncatedPrefix {
 			result.Truncated++
+		}
+
+		if one.EmptiedByRetention {
+			result.Emptied++
 		}
 
 		if one.Break != nil {
@@ -739,10 +758,13 @@ func (s *Store) checkMissingStamp(result *QueryChainResult, conn Connection) {
 // nothing in this walk does that for you.
 func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
 	if s.retentionCouldEmpty(conn) {
-		// The whole chain is gone rather than just its oldest statements: the
-		// extreme of a truncated prefix, and counted as one so the sweep still
-		// reports the session instead of walking it silently.
-		result.TruncatedPrefix = true
+		// The whole chain is gone rather than just its oldest statements.
+		// Counted on its own, not as a truncated prefix: with a connection
+		// window longer than the query window this is the ordinary state of
+		// every closed session between the two, and an operator has to be able
+		// to read "statements reaped by design" apart from "a chain lost part
+		// of itself".
+		result.EmptiedByRetention = true
 
 		return
 	}
@@ -761,10 +783,39 @@ func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
 }
 
 // retentionCouldEmpty reports whether DBB_QUERY_STORAGE_RETENTION can account
-// for a session having no statements left. Every statement of a session ran at
-// or after connected_at, so the sweep can only have taken them all when the
-// session itself began before the cutoff.
+// for a session having no statements left.
 func (s *Store) retentionCouldEmpty(conn Connection) bool {
+	return s.StatementsPastRetention(conn)
+}
+
+// StatementsPastRetention reports whether the configured query-history window
+// can account for this session having fewer statements in the store than it
+// ran — up to and including none at all.
+//
+// Every statement of a session ran at or after connected_at, so the sweep can
+// only have reaped any of them once the session itself began before the
+// cutoff. That makes this the *sound* answer rather than the tight one: a
+// session that connected before the cutoff but ran everything after it is
+// covered too. Reaching that precision would need the deleted statements'
+// timestamps, which is exactly what is gone.
+//
+// It is read from configuration rather than from the data (say, the oldest
+// statement left in the store), because a young or quiet store has its oldest
+// surviving statement a few minutes back, which would cover nearly every
+// session.
+//
+// Two callers, one rule. The chain verifier uses it to tell a session retention
+// emptied from one somebody emptied (see checkEmptiedChain), and the connection
+// detail API uses it to tell the UI whether an empty statement feed means "past
+// retention" or "this session ran nothing". Splitting the connection window off
+// from the query window is what made the second caller necessary: a closed
+// session between the two windows is a ledger row whose statements are gone by
+// design, and it must not read as a session that did nothing.
+//
+// Note it is the **query** window that decides this, never the connection one:
+// the connection window only decides whether the ledger row itself still
+// exists.
+func (s *Store) StatementsPastRetention(conn Connection) bool {
 	if s.queryRetention <= 0 {
 		return false
 	}

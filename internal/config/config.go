@@ -148,6 +148,146 @@ func (c QueryStorageConfig) RetentionMisconfigured() bool {
 	return c.Retention != "" && c.Retention != "0" && c.RetentionDuration() <= 0
 }
 
+// DefaultConnectionRetention leaves the connection window unset, which makes it
+// inherit the query window — i.e. exactly the single-window behavior that
+// predates the split. Empty, not "0": "0" would mean "keep the ledger forever"
+// and would silently stop reaping sessions on upgrade.
+const DefaultConnectionRetention = ""
+
+// ConnectionConfig holds the session-ledger settings.
+type ConnectionConfig struct {
+	// Retention is how long a **closed** connection row is kept, as a Go
+	// duration (e.g. "8760h").
+	//
+	// Deliberately separate from QueryStorageConfig.Retention: a connection is
+	// one small row per session — who, from where, to which database, under
+	// which grant — and that ledger is what a security review asks for a year
+	// later, while the statements and their captured rows are the bulk of the
+	// store and the thing an operator wants to expire after 30 or 90 days.
+	//
+	// Empty means "unset", and an unset connection window *inherits the query
+	// window*, so an upgraded deployment sweeps exactly what it swept before.
+	// An explicit "0" means "keep the ledger forever" and is the interesting
+	// combination: reap statements after N days, keep the sessions.
+	Retention string `koanf:"retention"`
+}
+
+// RetentionDuration parses Retention into a duration, with the same rules as
+// QueryStorageConfig.RetentionDuration: zero, negative or malformed all mean
+// "keep forever", never a built-in fallback period.
+//
+// Note this cannot distinguish "unset" from an explicit "0" — both are 0. That
+// distinction lives in RetentionSet, and it matters: unset inherits the query
+// window, explicit "0" overrides it.
+func (c ConnectionConfig) RetentionDuration() time.Duration {
+	if c.Retention == "" {
+		return 0
+	}
+
+	d, err := time.ParseDuration(c.Retention)
+	if err != nil {
+		return 0
+	}
+
+	if d < 0 {
+		return 0
+	}
+
+	return d
+}
+
+// RetentionSet reports whether the operator configured a connection window at
+// all. Unset inherits the query window (see RetentionWindows).
+func (c ConnectionConfig) RetentionSet() bool { return c.Retention != "" }
+
+// RetentionMisconfigured reports that Retention was set to something that is
+// neither empty nor a usable positive duration — the ConnectionConfig half of
+// QueryStorageConfig.RetentionMisconfigured.
+func (c ConnectionConfig) RetentionMisconfigured() bool {
+	return c.Retention != "" && c.Retention != "0" && c.RetentionDuration() <= 0
+}
+
+// RetentionWindows is the resolved pair of history windows: how long statements
+// (and their captured rows) are kept, and how long the closed-session ledger
+// they hang off is kept.
+type RetentionWindows struct {
+	// Query is DBB_QUERY_STORAGE_RETENTION, resolved. Zero disables the query
+	// sweep — history is kept forever.
+	Query time.Duration
+
+	// Connection is DBB_CONNECTION_RETENTION, resolved (inheriting Query when
+	// unset). Zero disables the connection sweep — the ledger is kept forever.
+	Connection time.Duration
+
+	// Misconfiguration is empty when the pair is coherent. When it is not, both
+	// windows are zero — nothing is deleted — and this is the WARN the sweeper
+	// logs. It is never a startup failure: the precedent this codebase set for
+	// a retention typo is "keep everything and warn", and a proxy that refuses
+	// to start over one is a worse outcome than one that keeps history.
+	Misconfiguration string
+}
+
+// Enabled reports whether either sweep has anything to do.
+func (w RetentionWindows) Enabled() bool { return w.Query > 0 || w.Connection > 0 }
+
+// RetentionWindows resolves the two history windows and the rules that bind
+// them together.
+//
+// The rules exist because deleting a connection cascades to its queries and
+// their captured rows, so the connection window is an *upper* bound on the
+// query window in practice. Anything that would make the ledger shorter than
+// the statement history deletes more than the operator wrote down, which this
+// codebase treats as the one unacceptable failure mode — so it disables both
+// sweeps and warns instead of guessing.
+//
+//  1. Connection window unset -> it inherits the query window. This is the
+//     backward-compatibility rule: an upgrade sweeps exactly what it swept
+//     before, and it is why the default is not "keep the ledger forever".
+//  2. Either value malformed -> both sweeps off.
+//  3. Connection window shorter than the query window -> both sweeps off.
+//  4. Query window 0 (forever) with an explicit non-zero connection window ->
+//     both sweeps off. If statements are kept forever their parent rows must
+//     be too.
+//  5. Explicit connection window of 0 with a query window > 0 -> valid, and the
+//     point of the whole split: reap statements, keep the ledger forever.
+func (c *Config) RetentionWindows() RetentionWindows {
+	query := c.QueryStorage.RetentionDuration()
+
+	if c.QueryStorage.RetentionMisconfigured() {
+		return RetentionWindows{Misconfiguration: fmt.Sprintf(
+			"DBB_QUERY_STORAGE_RETENTION is %q, which is not a Go duration such as 720h; "+
+				"no history is deleted", c.QueryStorage.Retention)}
+	}
+
+	if c.Connection.RetentionMisconfigured() {
+		return RetentionWindows{Misconfiguration: fmt.Sprintf(
+			"DBB_CONNECTION_RETENTION is %q, which is not a Go duration such as 8760h; "+
+				"no history is deleted", c.Connection.Retention)}
+	}
+
+	if !c.Connection.RetentionSet() {
+		return RetentionWindows{Query: query, Connection: query}
+	}
+
+	connection := c.Connection.RetentionDuration()
+
+	if connection > 0 && query <= 0 {
+		return RetentionWindows{Misconfiguration: fmt.Sprintf(
+			"DBB_CONNECTION_RETENTION is %q while DBB_QUERY_STORAGE_RETENTION keeps query history "+
+				"forever: deleting a session deletes its statements, so this would delete history "+
+				"that is configured to be kept; no history is deleted", c.Connection.Retention)}
+	}
+
+	if connection > 0 && connection < query {
+		return RetentionWindows{Misconfiguration: fmt.Sprintf(
+			"DBB_CONNECTION_RETENTION (%s) is shorter than DBB_QUERY_STORAGE_RETENTION (%s): "+
+				"deleting a session cascades to its statements, so this would delete query history "+
+				"earlier than configured; no history is deleted", connection, query)}
+	}
+
+	return RetentionWindows{Query: query, Connection: connection}
+}
+
 // RateLimitConfig holds configuration for API rate limiting.
 type RateLimitConfig struct {
 	// Enabled enables/disables rate limiting.
@@ -803,6 +943,9 @@ type Config struct {
 	// QueryStorage holds query result storage configuration.
 	QueryStorage QueryStorageConfig `koanf:"query_storage"`
 
+	// Connection holds the session-ledger settings, retention above all.
+	Connection ConnectionConfig `koanf:"connection"`
+
 	// RateLimit holds rate limiting configuration.
 	RateLimit RateLimitConfig `koanf:"rate_limit"`
 
@@ -945,6 +1088,9 @@ func defaultConfig() Config {
 			StoreResults:   true,
 			Retention:      DefaultQueryStorageRetention,
 		},
+		Connection: ConnectionConfig{
+			Retention: DefaultConnectionRetention,
+		},
 		RateLimit: RateLimitConfig{
 			Enabled:               DefaultRateLimitEnabled,
 			RequestsPerMinute:     DefaultRateLimitRPM,
@@ -1039,6 +1185,18 @@ func envTransform(k, v string) (string, any) {
 	// query_storage_* -> query_storage.*
 	if strings.HasPrefix(key, "query_storage_") {
 		return "query_storage." + strings.TrimPrefix(key, "query_storage_"), v
+	}
+	// connection_retention -> connection.retention
+	//
+	// An exact match rather than a connection_* prefix rule, because
+	// DBB_CONNECTION_RETENTION deliberately does not follow the <table>_storage
+	// shape its query counterpart has, and "connection" is a word too many
+	// future settings could start with for a blanket prefix to be safe. A
+	// silently unmapped value would read as "unset" and inherit the query
+	// window — exactly the outcome this setting exists to avoid — so there is a
+	// test pinning that this mapping happens.
+	if key == "connection_retention" {
+		return "connection.retention", v
 	}
 	// rate_limit_* -> rate_limit.*
 	if strings.HasPrefix(key, "rate_limit_") {

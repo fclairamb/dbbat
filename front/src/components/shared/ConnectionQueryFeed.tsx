@@ -203,10 +203,26 @@ function millis(at: string): number {
 export function ConnectionQueryFeed({
   connectionUid,
   active,
+  statementsRetained = true,
 }: {
   connectionUid: string;
   /** True while the connection is open (`disconnected_at` is null). */
   active: boolean;
+  /**
+   * `statements_retained` from the connection detail: false when the query
+   * retention window can account for this session having fewer statements in
+   * the store than it ran.
+   *
+   * It changes what an empty feed *means*. The connection window can be set
+   * longer than the query window, so a closed session between the two keeps
+   * its ledger row and loses every statement — by design, and indistinguishable
+   * from "this session ran nothing" without this flag (the `queries` counter on
+   * the row is a lifetime count, not a count of what survives).
+   *
+   * Defaults to true — the shape a caller that has not fetched the detail sees,
+   * and the only possible answer when retention is disabled.
+   */
+  statementsRetained?: boolean;
 }) {
   // Live by default on an active connection; the toggle below only pauses.
   const [live, setLive] = useState(active);
@@ -543,7 +559,11 @@ export function ConnectionQueryFeed({
             emptyMessage={
               watching
                 ? "No queries yet — waiting for this connection to run one"
-                : "No queries recorded for this connection"
+                : statementsRetained
+                  ? "No queries recorded for this connection"
+                  : "This session's queries are past the retention window and have been deleted. " +
+                    "The session itself is kept longer than its statements, so this record remains; " +
+                    "the query count above is a lifetime count, not a count of what is still stored."
             }
           />
         </div>

@@ -213,3 +213,89 @@ func TestGetConnection_GrantSummaryNilWhenUnstamped(t *testing.T) {
 	require.Nil(t, body.GrantUID)
 	require.Nil(t, body.Grant)
 }
+
+// TestGetConnection_StatementsRetained covers the flag the connection detail
+// page reads to tell "this session's statements aged out" from "this session
+// ran nothing" — a distinction that only exists because
+// DBB_CONNECTION_RETENTION can be set longer than DBB_QUERY_STORAGE_RETENTION,
+// leaving a closed session that keeps its ledger row and none of its
+// statements.
+func TestGetConnection_StatementsRetained(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServerWithStoreOptions(t,
+		store.Options{QueryRetention: 24 * time.Hour})
+	suffix := "gcretain"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
+
+	fresh, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
+	require.NoError(t, err)
+
+	aged, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.2")
+	require.NoError(t, err)
+
+	// Older than the statement window, so the sweep could have reaped every
+	// statement it ran.
+	long := time.Now().Add(-72 * time.Hour)
+	_, err = dataStore.DB().ExecContext(t.Context(),
+		"UPDATE connections SET connected_at = ?, disconnected_at = ? WHERE uid = ?", long, long, aged.UID)
+	require.NoError(t, err)
+
+	router := newConnectionsTestRouter(server)
+
+	var body struct {
+		StatementsRetained bool `json:"statements_retained"`
+	}
+
+	w := doGetConnection(router, token, fresh.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.True(t, body.StatementsRetained,
+		"a session inside the retention window keeps every statement it ran")
+
+	w = doGetConnection(router, token, aged.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.False(t, body.StatementsRetained,
+		"a session older than the statement window may have had statements reaped")
+}
+
+// TestGetConnection_StatementsRetainedWithRetentionDisabled pins the default:
+// with no retention configured nothing legitimately deletes statements, so an
+// empty feed always means the session ran nothing.
+func TestGetConnection_StatementsRetainedWithRetentionDisabled(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	suffix := "gcnoret"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
+
+	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
+	require.NoError(t, err)
+
+	ancient := time.Now().Add(-9000 * time.Hour)
+	_, err = dataStore.DB().ExecContext(t.Context(),
+		"UPDATE connections SET connected_at = ?, disconnected_at = ? WHERE uid = ?",
+		ancient, ancient, conn.UID)
+	require.NoError(t, err)
+
+	router := newConnectionsTestRouter(server)
+	w := doGetConnection(router, token, conn.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var body struct {
+		StatementsRetained bool `json:"statements_retained"`
+	}
+
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.True(t, body.StatementsRetained,
+		"retention disabled means no statement was ever legitimately deleted, however old the session")
+}

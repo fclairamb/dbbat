@@ -235,9 +235,10 @@ func (s *Server) handleGetConnection(c *gin.Context) {
 	}
 
 	successResponse(c, connectionDetailResponse{
-		Connection: conn,
-		Dump:       s.dumpMetadata(c, uid),
-		Grant:      s.grantSummary(c, conn),
+		Connection:         conn,
+		Dump:               s.dumpMetadata(c, uid),
+		Grant:              s.grantSummary(c, conn),
+		StatementsRetained: !s.store.StatementsPastRetention(*conn),
 	})
 }
 
@@ -252,6 +253,24 @@ type connectionDetailResponse struct {
 
 	Dump  DumpMetadata  `json:"dump"`
 	Grant *GrantSummary `json:"grant"`
+
+	// StatementsRetained is false when DBB_QUERY_STORAGE_RETENTION can account
+	// for this session having fewer statements in the store than it ran — i.e.
+	// the session started before the statement cutoff.
+	//
+	// It exists because DBB_CONNECTION_RETENTION can outlive
+	// DBB_QUERY_STORAGE_RETENTION, which makes "a closed session whose
+	// statement feed is empty" the *normal* state of every session between the
+	// two windows. Without this the UI cannot tell that from a session that
+	// genuinely ran nothing, and the `queries` counter on the row is a lifetime
+	// counter, so it does not settle it either.
+	//
+	// A derived boolean on the resource the page already fetches, rather than a
+	// new endpoint for one flag or the two raw windows on a config payload: the
+	// question the UI asks is about *this* session, and the rule that answers
+	// it (Store.StatementsPastRetention) is the same one chain verification
+	// uses, so it stays in one place.
+	StatementsRetained bool `json:"statements_retained"`
 }
 
 // GrantSummary is the slice of an access grant a connection detail page needs
