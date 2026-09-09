@@ -6924,8 +6924,9 @@ components:
       description: >-
         Public endpoint advertisement settings. Covers two independent
         network paths: the *connection* host (host/pg_host/ora_host/
-        mysql_host/*_port — where SQL clients reach the PG/Oracle/MySQL
-        proxies, via direct or TCP-load-balancer access) and the *Web UI*
+        mysql_host/mongo_host/mssql_host/*_port — where SQL clients reach the
+        PG/Oracle/MySQL/MongoDB/SQL Server proxies, via direct or
+        TCP-load-balancer access) and the *Web UI*
         host (web_ui_url — where the browser and REST API are reached,
         behind an HTTP ingress / reverse proxy). These are typically two
         different DNS names on two different network paths.
@@ -6945,6 +6946,9 @@ components:
         mongo_host:
           type: string
           description: MongoDB-specific host override (empty = use host)
+        mssql_host:
+          type: string
+          description: SQL Server-specific host override (empty = use host)
         pg_port:
           type: integer
           nullable: true
@@ -6961,6 +6965,10 @@ components:
           type: integer
           nullable: true
           description: MongoDB port override (null = use local listen port)
+        mssql_port:
+          type: integer
+          nullable: true
+          description: SQL Server port override (null = use local listen port)
         web_ui_url:
           type: string
           description: >-
@@ -6991,6 +6999,10 @@ components:
           type: string
         mongo_port:
           type: integer
+        mssql_host:
+          type: string
+        mssql_port:
+          type: integer
         web_ui_url:
           type: string
           description: Effective Web UI / public base URL (web_ui_url parameter, falling back to DBB_PUBLIC_URL)
@@ -7003,6 +7015,8 @@ components:
         - mysql_port
         - mongo_host
         - mongo_port
+        - mssql_host
+        - mssql_port
         - web_ui_url
 
     InstanceInfo:
