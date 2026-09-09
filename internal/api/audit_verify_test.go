@@ -370,6 +370,8 @@ func TestVerifyQueryChains_SweepAndScope(t *testing.T) {
 	require.Equal(t, int64(1), sweepResp.Connections)
 	require.Equal(t, int64(3), sweepResp.Statements)
 	require.Equal(t, int64(0), sweepResp.ChainsWithTruncatedPrefix)
+	require.Equal(t, int64(0), sweepResp.ChainsEmptiedByRetention,
+		"nothing has been reaped, so neither retention count moves")
 	require.Empty(t, sweepResp.ConnectionUID, "a sweep is not scoped to a session")
 	require.Nil(t, sweepResp.HeadSeq, "an aggregate head over independent chains means nothing")
 
@@ -488,7 +490,8 @@ func TestVerifyQueryChains_LeaksNothing(t *testing.T) {
 
 	sweepFields := []string{
 		"chain", "verified", "connections", "statements",
-		"chains_with_truncated_prefix", "checked_at", "cached",
+		"chains_with_truncated_prefix", "chains_emptied_by_retention",
+		"checked_at", "cached",
 	}
 
 	sweep := doChainVerify(router, token, "/api/v1/audit/verify/queries")
