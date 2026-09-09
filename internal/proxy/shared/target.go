@@ -145,9 +145,17 @@ func resolveFromHint(
 
 	// The explicit message names the upstream database this server exposes,
 	// which is more than "not found" tells. Only say it to someone who already
-	// holds an active grant on that server — otherwise a `user#server` probe
-	// would be a way to read the upstream database name of every registered
-	// target. Everyone else gets the same answer as an unknown name.
+	// holds an active grant on that server — an authenticated user must not be
+	// able to turn a `user#server` probe into a read of the upstream database
+	// name of every registered target. Everyone else gets the same answer as an
+	// unknown name.
+	//
+	// req.UserID is a *verified* identity, never a claimed one: every front-end
+	// resolves after its credential check (PostgreSQL after the cleartext
+	// password exchange, MySQL in OnAuthSuccess, SQL Server after verifying the
+	// LOGIN7 credential, MongoDB after SASL). This check therefore narrows what
+	// an authenticated caller may learn; it is not what keeps an anonymous one
+	// out, and it never was — that is the front-ends' ordering.
 	if _, gerr := st.GetActiveGrant(ctx, req.UserID, srv.UID); gerr != nil {
 		return nil, fmt.Errorf("%w: no server named %q on this listener", ErrTargetNotFound, hint)
 	}
