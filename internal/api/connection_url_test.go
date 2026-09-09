@@ -211,7 +211,7 @@ func TestBuildConnectionURL_MSSQL(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("honours an mssql_host override", func(t *testing.T) {
+	t.Run("honors an mssql_host override", func(t *testing.T) {
 		t.Parallel()
 		e := makeEndpoints()
 		e.MSSQLHost = "mssql.example.com"
