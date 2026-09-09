@@ -165,3 +165,50 @@ them as written.
   silently-unmapped env var would read as "unset" and inherit the query window,
   which is exactly the failure this spec exists to prevent. Use this name
   everywhere: config, sweeper logs, `CLAUDE.md`, `README.md`, and the website docs.
+
+## Implementation Plan
+
+1. **Config** (`internal/config/config.go`) — `ConnectionConfig{Retention string}`
+   on `Config.Connection` (`koanf:"connection"`), an exact-match `envTransform`
+   case `connection_retention -> connection.retention` (not a `connection_*`
+   prefix rule), `RetentionDuration()` / `RetentionMisconfigured()` mirroring
+   `QueryStorageConfig`, and one resolver `Config.RetentionWindows()
+   RetentionWindows{Query, Connection time.Duration; Misconfiguration string}`
+   holding all four rules: inherit when unset, a malformed value on either side
+   disables both, connection < query disables both, query `0` + connection > 0
+   disables both, explicit connection `0` with query > 0 is valid (reap
+   statements, keep the ledger forever). Never a startup failure.
+2. **Store sweep** (`internal/store/queries.go`) — `CleanupOldQueryRows(ctx,
+   queryOlderThan, connectionOlderThan time.Duration)`; the two batched deletes
+   keep their order (connections first) but take their own cutoff, and each is
+   skipped when its own window is <= 0.
+3. **Sweeper + wiring** (`retention.go`, `main.go`) — `startQueryRetentionSweep`
+   reads `cfg.RetentionWindows()`, warns with `Misconfiguration`, starts when
+   either window is positive, logs both windows on start and on a sweep that
+   deleted something. `store.Options.QueryRetention` gets the **query** window
+   (both call sites, main.go:263 and main.go:1672).
+4. **Chain verification** (`internal/store/chain_verify.go`) — split the single
+   counter: `QueryChainResult.EmptiedByRetention` / `QueryChainsResult.Emptied`
+   for a session whose statements are *all* gone and excused by the query
+   window (the normal state between the two windows), disjoint from
+   `TruncatedPrefix` / `Truncated`, which keeps meaning "lost its oldest
+   statements, some survive". Export `Store.StatementsPastRetention(conn)` as
+   the single implementation `retentionCouldEmpty` delegates to. Surface the new
+   counter as `chains_emptied_by_retention` on the REST responses
+   (`internal/api/audit_verify.go`, `openapi.yml`, `front/src/api/schema.ts`,
+   `ChainVerificationCard.tsx`) and in the CLI log line (`main.go:1739`).
+5. **UI half** — `statements_retained` on `connectionDetailResponse`
+   (`internal/api/observability.go`), computed from
+   `Store.StatementsPastRetention`; documented in `openapi.yml`, regenerated
+   into `schema.ts`; `connections/$uid.tsx` passes it to `ConnectionQueryFeed`,
+   which says the statements are past retention instead of "No queries recorded
+   for this connection". Playwright coverage in `front/e2e/`.
+6. **Tests** — `internal/config/connection_retention_test.go` (mirrors
+   `query_storage_retention_test.go`, plus the env→key mapping test the
+   resolved question asks for), `internal/store/queries_retention_test.go` (two
+   windows, equal windows, open connection untouched),
+   `internal/store/chain_test.go` (emptied vs truncated counters).
+7. **Docs** — `CLAUDE.md` env table, `README.md`,
+   `website/docs/features/query-logging.md`,
+   `website/docs/configuration/index.md`, `docs/audit-chain.md` (~421–460, 640),
+   including the dump-object-key orphaning note.
