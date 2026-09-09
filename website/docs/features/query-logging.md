@@ -159,15 +159,61 @@ DBB_QUERY_STORAGE_RETENTION=720h   # 30 days
 
 The sweep runs once at startup and then hourly, deleting in batches:
 
-- **Queries** executed before the cutoff, along with every result row captured
-  for them (`query_rows` cascades from the query).
-- **Connections** that were closed before the cutoff, along with their queries
-  and rows.
+- **Connections** that were closed before the *connection* cutoff, along with
+  whatever queries and rows they still have.
+- **Queries** executed before the *query* cutoff that hang off a session the
+  first pass left alone.
 
 Connections that are still **open** are never deleted, however old they are —
-the session may still be live. Such a connection can therefore outlive all of
-its queries and show up with none left; its `queries` counter is a lifetime
+the session may still be live. A connection's `queries` counter is a lifetime
 counter, not a count of retained rows.
+
+### Two windows: statements and the session ledger
+
+The two cutoffs above are configured separately, because the two things they
+delete are not the same kind of data.
+
+| Variable | Deletes | Default |
+|---|---|---|
+| `DBB_QUERY_STORAGE_RETENTION` | Statements and their captured result rows | `0` — keep forever |
+| `DBB_CONNECTION_RETENTION` | Closed connections (cascading to any statements they still have) | Unset — inherit the query window |
+
+Statements and captured rows are the bulk of the store, and captured rows can
+hold customer data, so they are what an operator wants to expire after 30 or 90
+days. A connection is one small row per session — who connected, from where, to
+which database, under which grant, when — the ledger a security review asks for
+a year later, and it costs almost nothing to keep.
+
+```bash
+DBB_QUERY_STORAGE_RETENTION=720h    # 30 days of statements
+DBB_CONNECTION_RETENTION=8760h      # a year of sessions
+```
+
+`DBB_CONNECTION_RETENTION=0` with a query window set keeps the session ledger
+**forever** while statements still expire.
+
+Leaving `DBB_CONNECTION_RETENTION` unset makes it inherit the query window, so
+upgrading dbbat sweeps exactly what it swept before.
+
+The connection window must be **greater than or equal to** the query window:
+deleting a session cascades to its statements, so a shorter one would delete
+query history earlier than you asked for. A shorter window, a malformed value on
+either side, or a non-zero connection window while queries are kept forever is a
+misconfiguration — dbbat **disables both sweeps**, logs a warning naming both
+values at startup, and deletes nothing. It never refuses to start over a
+retention typo.
+
+With two windows, a **closed** connection can outlive all of its statements —
+in fact every closed session between the two cutoffs is in that state. The
+connection detail page says so explicitly ("past the retention window") instead
+of showing an empty list, and `dbbat audit verify --queries` counts those
+sessions under `chains_emptied_by_retention` rather than reporting them as
+tampering. See [the audit chain notes](https://github.com/fclairamb/dbbat/blob/main/docs/audit-chain.md).
+
+Session captures are uploaded under an object key recorded on the connection
+row, so if you upload dumps to a bucket, keep the ledger window at least as long
+as the bucket's lifecycle policy — a deleted connection row leaves its object in
+place with nothing able to find it.
 
 A crash or a `SIGKILL` never runs the normal session teardown, so those
 connections would stay "open" — and therefore un-reapable — forever. To stop
@@ -182,9 +228,9 @@ process, so a replica that crashes while the rest of the deployment stays up is
 reclaimed without waiting for an unrelated restart. See
 [`DBB_INSTANCE_ID`](/docs/configuration) for the registry and the grace period.
 
-Set the value to `0` (the default), or leave it unset, to keep history forever.
-An unparseable value also leaves retention off and logs a warning at startup,
-rather than falling back to some other period.
+Set `DBB_QUERY_STORAGE_RETENTION` to `0` (the default), or leave it unset, to
+keep history forever. An unparseable value also leaves retention off and logs a
+warning at startup, rather than falling back to some other period.
 
 Note this is separate from [session packet dumps](/docs/features/session-dumps),
 which have their own `DBB_DUMP_RETENTION` (default `24h`).

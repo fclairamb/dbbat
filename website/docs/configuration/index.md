@@ -239,10 +239,27 @@ and both ends revert to cleartext TDS once login is through.
 | `DBB_QUERY_STORAGE_MAX_RESULT_ROWS` | Max rows captured per query | `100000` |
 | `DBB_QUERY_STORAGE_MAX_RESULT_BYTES` | Max bytes captured per query | `104857600` (100 MB) |
 | `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history and its captured rows past this Go duration. `0` keeps everything forever. | `0` (recommended: `720h`) |
+| `DBB_CONNECTION_RETENTION` | Auto-delete **closed** connections — the session ledger — once they disconnected longer ago than this. Unset inherits the query window above; `0` keeps sessions forever. Must be ≥ the query window. | Inherits `DBB_QUERY_STORAGE_RETENTION` |
 
 Retention is **opt-in**: upgrading dbbat never starts deleting audit history on
 its own. The per-query caps above bound one query's capture; retention bounds
-the accumulation of every query ever proxied. See
+the accumulation of every query ever proxied.
+
+There are two windows because the two things expire on different schedules.
+Statements and their captured rows are the bulk of the store and can hold
+customer data, so an operator wants them gone after 30 or 90 days.
+A connection is one small row per session — who, from where, to which database,
+under which grant — and that ledger is what a security review asks for a year
+later. `DBB_CONNECTION_RETENTION=8760h` with
+`DBB_QUERY_STORAGE_RETENTION=720h` keeps a year of sessions and a month of
+statements; `DBB_CONNECTION_RETENTION=0` keeps the ledger forever.
+
+The connection window can never be **shorter** than the query window, because
+deleting a session deletes its statements — that would expire history earlier
+than configured. A shorter one, a malformed value on either side, or a non-zero
+connection window while queries are kept forever is a misconfiguration that
+**disables both sweeps** with a startup warning naming both values. Nothing is
+deleted and the server still starts. See
 [Query Logging](/docs/features/query-logging#retention) for exactly what a sweep
 removes.
 
