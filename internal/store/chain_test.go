@@ -991,7 +991,7 @@ func TestQueryChainRetentionKeepsOtherConnectionsVerifiable(t *testing.T) {
 		`UPDATE connections SET disconnected_at = NOW() - INTERVAL '30 days' WHERE uid = ?`, oldConn.UID)
 	require.NoError(t, err)
 
-	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour, 24*time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), swept.Connections)
 
@@ -1022,7 +1022,7 @@ func TestQueryChainRetentionPrefixIsNotABreak(t *testing.T) {
 		queries[0].UID, queries[1].UID)
 	require.NoError(t, err)
 
-	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour, 24*time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), swept.Queries)
 
@@ -1222,7 +1222,7 @@ func TestQueryChainRetentionNeverClearsTheStamp(t *testing.T) {
 		`UPDATE queries SET executed_at = NOW() - INTERVAL '30 days' WHERE connection_id = ?`, conn.UID)
 	require.NoError(t, err)
 
-	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour, 24*time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, int64(3), swept.Queries)
 
@@ -1234,7 +1234,7 @@ func TestQueryChainRetentionNeverClearsTheStamp(t *testing.T) {
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
 	require.Nil(t, result.Break, "retention emptying a session is not tampering: %v", result.Break)
-	require.True(t, result.TruncatedPrefix)
+	require.True(t, result.EmptiedByRetention)
 }
 
 // TestQueryChainSilentSessionIsNotWalked pins the other side of the widened
@@ -1287,7 +1287,7 @@ func TestQueryChainRetentionEmptyingASessionIsNotABreak(t *testing.T) {
 		`UPDATE queries SET executed_at = NOW() - INTERVAL '30 days' WHERE connection_id = ?`, conn.UID)
 	require.NoError(t, err)
 
-	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour, 24*time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), swept.Connections, "the session closed too recently to be reaped whole")
 	require.Equal(t, int64(3), swept.Queries)
@@ -1295,13 +1295,17 @@ func TestQueryChainRetentionEmptyingASessionIsNotABreak(t *testing.T) {
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
 	require.Nil(t, result.Break, "retention emptying a session is not tampering: %v", result.Break)
-	require.True(t, result.TruncatedPrefix, "a fully reaped chain is the extreme of a truncated prefix")
+	require.True(t, result.EmptiedByRetention, "a fully reaped chain is counted as emptied")
+	require.False(t, result.TruncatedPrefix,
+		"and not as a truncated prefix — the two counts are disjoint so an operator "+
+			"can tell a by-design reaping from a chain that lost part of itself")
 
 	all, err := store.VerifyQueryChains(ctx, nil)
 	require.NoError(t, err)
 	require.True(t, all.OK(), "%v", all.Break)
 	require.Equal(t, int64(1), all.Connections)
-	require.Equal(t, int64(1), all.Truncated, "the session is counted, not silently skipped")
+	require.Equal(t, int64(1), all.Emptied, "the session is counted, not silently skipped")
+	require.Equal(t, int64(0), all.Truncated)
 }
 
 // TestQueryChainWipeInsideTheRetentionWindowIsABreak is what keeps the excuse
@@ -1328,6 +1332,7 @@ func TestQueryChainWipeInsideTheRetentionWindowIsABreak(t *testing.T) {
 	require.NotNil(t, result.Break, "a session too young for the sweep cannot blame it")
 	require.Contains(t, result.Break.Reason, "retention window")
 	require.False(t, result.TruncatedPrefix)
+	require.False(t, result.EmptiedByRetention)
 }
 
 // TestQueryChainWipedUnkeyedSessionBreaksForItsStamp keeps the unkeyed stamp
@@ -1927,7 +1932,7 @@ func TestRowChainRetentionCascadeIsNotABreak(t *testing.T) {
 		`UPDATE connections SET disconnected_at = NOW() - INTERVAL '30 days' WHERE uid = ?`, oldConn.UID)
 	require.NoError(t, err)
 
-	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour, 24*time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), swept.Connections)
 
@@ -2593,7 +2598,7 @@ func TestQueryChainRefreshSurvivesRetentionReapingTheStampedStatement(t *testing
 		queries[0].UID, queries[1].UID)
 	require.NoError(t, err)
 
-	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour, 24*time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), swept.Queries)
 

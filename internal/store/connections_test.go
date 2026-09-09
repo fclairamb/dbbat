@@ -1003,7 +1003,7 @@ func TestCloseOrphanedConnectionsAreReapedByRetention(t *testing.T) {
 
 	// Before the reconcile the row still looks live, so the sweep leaves it
 	// alone however old it is — that is exactly the leak.
-	result, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	result, err := store.CleanupOldQueryRows(ctx, 24*time.Hour, 24*time.Hour)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), result.Connections, "an open connection is never reaped")
 
@@ -1015,7 +1015,7 @@ func TestCloseOrphanedConnectionsAreReapedByRetention(t *testing.T) {
 	require.Equal(t, int64(1), closed.Own)
 
 	// Now it is past the cutoff and closed, so the next sweep takes it.
-	result, err = store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	result, err = store.CleanupOldQueryRows(ctx, 24*time.Hour, 24*time.Hour)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), result.Connections)
 
