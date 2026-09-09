@@ -62,6 +62,18 @@ database name. Resolution order (`internal/proxy/mongodb/auth.go`):
 
 The connection-string builder emits `authSource=<dbbat database name>`.
 
+Rung 2 is no longer Mongo-specific. The `user#server` parse now lives in
+`internal/proxy/shared` (`shared.ParseUsername`, `shared.UsernameServerSeparator`)
+and MongoDB calls it, so the separator and the "split on the **last** `#`" rule
+are defined in exactly one place. PostgreSQL, MySQL/MariaDB and SQL Server go
+one step further and share the whole ladder, `shared.ResolveTarget`: entry name
+first, then the `user#server` selector, then the upstream `database_name`
+matched against the caller's own active grants. MongoDB keeps its own entry
+point because `authSource` has to be consulted before any of that, and because
+its "single active grant" rung has no equivalent on a protocol whose startup
+packet always carries a database field. See
+`website/docs/configuration/servers.md` for the user-facing version.
+
 ## TLS Handling: Termination at the Proxy
 
 MongoDB TLS is implicit-from-byte-0 (no STARTTLS dance). The session peeks the

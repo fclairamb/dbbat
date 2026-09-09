@@ -115,13 +115,13 @@ curl -X POST http://localhost:4200/api/v1/servers \
   }'
 ```
 
-Clients name this entry in the LOGIN7 *Database* field — that is, the `database=` / `Initial Catalog=` part of the connection string carries the **DBBat entry name**, not a database on the target. Only SQL authentication is accepted; integrated (NTLM/Kerberos) and Entra ID logins are refused.
+Clients name this entry in the LOGIN7 *Database* field, or select it from the login name as `User Id=alice#mssql-reporting` and put the real upstream database in *Database* — see [Naming the server from a client](#naming-the-server-from-a-client). Only SQL authentication is accepted; integrated (NTLM/Kerberos) and Entra ID logins are refused.
 
 ## Fields
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
-| `name` | string | DBBat server name (used by clients in their connection string) | Yes |
+| `name` | string | DBBat server name — the **selector** clients use to pick this entry, never sent to the target. See [Naming the server from a client](#naming-the-server-from-a-client). | Yes |
 | `protocol` | enum | `postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `mssql`, `ssh` | No (default: `postgresql`) |
 | `host` | string | Target database host | Yes |
 | `port` | integer | Target database port. Suggested defaults: 5432 / 1521 / 3306 / 27017 / 1433. | Yes |
@@ -265,11 +265,79 @@ Deleting a server configuration:
 - Does not affect existing active connections
 - Preserves all logged queries and connection history (for audit)
 
+## Naming the server from a client
+
+`name` is the **selector**: it is how a client says which DBBat entry it wants,
+and it is never sent to the target. `database_name` is the real database on the
+target, and it is what DBBat actually opens. The two are usually different — the
+same upstream database is routinely registered twice, `demo_datalake_ro` and
+`demo_datalake_rw`, both with `database_name: demo_datalake`.
+
+For PostgreSQL, MySQL/MariaDB and SQL Server there are **three ways** to provide
+the selector, tried in this order:
+
+1. **Put the entry name in the database field.** The original form, and still
+   the one that wins: `database=demo_datalake_ro`. Every connection string
+   issued before this feature keeps working unchanged, and an exact entry-name
+   match always beats an upstream database name — an entry can never be shadowed
+   by somebody else's `database_name`.
+
+2. **Put the entry name in the username, after a `#`.** The database field then
+   carries the real upstream name:
+
+   ```
+   postgresql://alice%23demo_datalake_ro:$DBBAT_KEY@db.example.com:5432/demo_datalake
+   ```
+
+   `%23` is `#` inside a URL's userinfo; in a GUI where the user field is
+   separate, type `alice#demo_datalake_ro` as-is. This is the form the UI hands
+   out, because the username is the one field every driver and IDE preserves
+   verbatim on every connection it opens. If the database field names something
+   the entry does not expose, the connection is refused with a message saying
+   which database that entry does expose — DBBat never silently redirects you to
+   a different database than the one you asked for.
+
+3. **Give the upstream database name alone.** DBBat matches it against the
+   entries **you currently hold an active grant on**, on that protocol. Exactly
+   one match connects. Several — the `_ro` / `_rw` twins — is refused, naming
+   the candidates and telling you to pick one with `user#entry`. This rung can
+   never reach an entry you were not already granted.
+
+Oracle and MongoDB keep their own selectors: Oracle matches the connect
+descriptor's `SERVICE_NAME` against `oracle_service_name` (falling back to
+`name`), and MongoDB reads the SASL `authSource` first. MongoDB shares the
+`user#entry` username parse — see [`docs/mongodb.md`](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md).
+
+## IDEs (DataGrip, DBeaver)
+
+A JetBrains data source is a *server*, not a database. DataGrip lists
+`pg_database`, reads the current database from `current_database()` — which
+returns the **upstream** name, `demo_datalake`, not the DBBat entry name — and
+then opens a dedicated connection per database with `database=<that name>`.
+DBBat is a transparent proxy and does not rewrite catalog queries, so a data
+source configured with only the entry name in the database field ends up
+reconnecting to a name DBBat cannot resolve, and the tree stays empty.
+
+Use form 2 above: put `alice#demo_datalake_ro` in **User**, and the real
+`demo_datalake` in **Database**. The username survives every per-database
+reconnect, so the entry stays selected. A reconnect to a database the entry does
+not expose (`postgres`, `template1`) is refused with an explanatory message
+rather than silently landing somewhere else.
+
+DBeaver works the same way — user field, `#` suffix, real database name.
+
+:::tip Older DBBat deployments
+Against a DBBat that predates the `user#entry` selector, use JetBrains' **Single
+database mode** (data source → Options). It exists for PgBouncer, whose pool
+aliases have exactly these semantics, and it stops DataGrip from opening a
+connection per database.
+:::
+
 ## Connection Flow
 
 When a user connects with `database=production`:
 
-1. **PostgreSQL / MySQL / SQL Server**: DBBat looks up the entry by `name` (the database name in the client's connection string).
+1. **PostgreSQL / MySQL / SQL Server**: DBBat resolves the entry through the three-rung ladder above — entry `name`, then the `user#entry` username selector, then the upstream `database_name` among the caller's active grants.
 2. **Oracle**: DBBat matches the TNS connect descriptor's `SERVICE_NAME` against `oracle_service_name` (falls back to `name`).
 3. **MongoDB**: DBBat resolves the entry from the SASL `authSource` (the DBBat database name), a `dbbatuser#name` username, or the user's single active MongoDB grant.
 4. DBBat decrypts the stored credentials.
