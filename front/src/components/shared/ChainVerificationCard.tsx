@@ -144,7 +144,12 @@ export function ChainVerificationCard() {
                   <Fact
                     label="Truncated prefixes"
                     value={d.chains_with_truncated_prefix.toLocaleString()}
-                    hint="Chains missing their oldest statements — what query retention leaves behind. Expected housekeeping, not tampering."
+                    hint="Chains missing their oldest statements but still holding some — what query retention leaves behind on a long-lived session. Expected housekeeping, not tampering."
+                  />
+                  <Fact
+                    label="Emptied by retention"
+                    value={d.chains_emptied_by_retention.toLocaleString()}
+                    hint="Sessions with no statement left at all, accounted for by the query retention window. Every closed session between the query window and a longer connection window is in this state by design."
                   />
                 </>
               );

@@ -347,6 +347,7 @@ function ConnectionDetailPage() {
       <ConnectionQueryFeed
         connectionUid={uid}
         active={!connection.disconnected_at}
+        statementsRetained={connection.statements_retained}
       />
     </div>
   );
