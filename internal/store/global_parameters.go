@@ -231,10 +231,15 @@ type ResolvedEndpoints struct {
 	OraHost   string
 	MySQLHost string
 	MongoHost string
+	// MSSQLHost has no per-protocol override yet — it always falls back to the
+	// shared public host. See specs/todos for the follow-up that adds the
+	// override alongside the other four.
+	MSSQLHost string
 	PGPort    int // 0 = protocol disabled
 	OraPort   int
 	MySQLPort int
 	MongoPort int
+	MSSQLPort int
 	// WebUIURL is the effective Web UI / public base URL: pe.WebUIURL when
 	// set, else cfg.PublicURL (the DBB_PUBLIC_URL env var).
 	WebUIURL string
@@ -277,10 +282,12 @@ func ResolvePublicEndpoints(pe PublicEndpoints, cfg *config.Config) ResolvedEndp
 		OraHost:   resolve(pe.OraHost, pe.Host),
 		MySQLHost: resolve(pe.MySQLHost, pe.Host),
 		MongoHost: resolve(pe.MongoHost, pe.Host),
+		MSSQLHost: pe.Host,
 		PGPort:    resolvePort(pe.PGPort, cfg.ListenPG),
 		OraPort:   resolvePort(pe.OraPort, cfg.ListenOracle),
 		MySQLPort: resolvePort(pe.MySQLPort, cfg.ListenMySQL),
 		MongoPort: resolvePort(pe.MongoPort, cfg.ListenMongo),
+		MSSQLPort: resolvePort(nil, cfg.ListenMSSQL),
 		WebUIURL:  webUIURL,
 	}
 }

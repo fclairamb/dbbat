@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -15,11 +16,36 @@ type ConnectionInfo struct {
 	DatabaseUID  uuid.UUID `json:"database_uid"`
 	DatabaseName string    `json:"database_name"`
 	Protocol     string    `json:"protocol"`
-	Format       string    `json:"format"` // "uri" or "ez-connect"
+	Format       string    `json:"format"` // "uri", "ez-connect" or "connection-string"
 	URL          string    `json:"url"`
 }
 
 const keyPlaceholder = "{DBBAT_KEY}"
+
+// proxyUsername renders the login name a client must present: the dbbat user,
+// then the `#` selector naming the dbbat server entry.
+//
+// The username is the one field every client, driver and IDE preserves verbatim
+// on every connection it opens — the database field is not: DataGrip and
+// DBeaver treat a data source as a *server* and reconnect per database with
+// whatever name the catalog gave them. Carrying the selector in the username is
+// what frees the database field to hold the real upstream name, which is what
+// those catalogs hand back. See internal/proxy/shared.ResolveTarget.
+func proxyUsername(user *store.User, db *store.Server) string {
+	return user.Username + shared.UsernameServerSeparator + db.Name
+}
+
+// upstreamDatabase is the database name a client should ask for: the real one
+// on the target. Servers registered without one (rare, and meaningless for the
+// protocols that need a database) fall back to the dbbat entry name, which the
+// resolver still accepts as an exact match.
+func upstreamDatabase(db *store.Server) string {
+	if db.DatabaseName != "" {
+		return db.DatabaseName
+	}
+
+	return db.Name
+}
 
 // BuildConnectionURL builds a connection URL for the given database, user, and key.
 // When apiKey is "", the placeholder "{DBBAT_KEY}" is substituted in the password slot.
@@ -49,11 +75,13 @@ func BuildConnectionURL(
 		if endpoints.PGPort == 0 {
 			return ConnectionInfo{}, false
 		}
+		// The '#' becomes %23 inside a URL userinfo; libpq and pgjdbc decode
+		// it, and an IDE with a separate user field takes it typed as-is.
 		rawURL := fmt.Sprintf("postgresql://%s:%s@%s/%s",
-			url.PathEscape(user.Username),
+			url.PathEscape(proxyUsername(user, db)),
 			encodeKey(key),
 			net.JoinHostPort(endpoints.PGHost, fmt.Sprintf("%d", endpoints.PGPort)),
-			url.PathEscape(db.DatabaseName),
+			url.PathEscape(upstreamDatabase(db)),
 		)
 		if db.SSLMode != "" && db.SSLMode != "prefer" {
 			rawURL += "?sslmode=" + url.QueryEscape(db.SSLMode)
@@ -71,10 +99,10 @@ func BuildConnectionURL(
 			return ConnectionInfo{}, false
 		}
 		rawURL := fmt.Sprintf("mysql://%s:%s@%s/%s",
-			url.PathEscape(user.Username),
+			url.PathEscape(proxyUsername(user, db)),
 			encodeKey(key),
 			net.JoinHostPort(endpoints.MySQLHost, fmt.Sprintf("%d", endpoints.MySQLPort)),
-			url.PathEscape(db.DatabaseName),
+			url.PathEscape(upstreamDatabase(db)),
 		)
 		return ConnectionInfo{
 			DatabaseUID:  db.UID,
@@ -105,6 +133,31 @@ func BuildConnectionURL(
 			DatabaseName: db.Name,
 			Protocol:     db.Protocol,
 			Format:       "uri",
+			URL:          rawURL,
+		}, true
+
+	case store.ProtocolMSSQL:
+		if endpoints.MSSQLPort == 0 {
+			return ConnectionInfo{}, false
+		}
+		// ADO.NET / ODBC keyword syntax rather than a URI: it is what SSMS,
+		// Azure Data Studio and sqlcmd take, and what every SQL Server driver
+		// documents. The host and port are comma-separated, TDS-style. No
+		// escaping is applied — a value containing ';' or '=' would need
+		// quoting, which dbbat entry names and usernames do not use.
+		rawURL := fmt.Sprintf("Server=%s,%d;Database=%s;User Id=%s;Password=%s;Encrypt=true",
+			endpoints.MSSQLHost,
+			endpoints.MSSQLPort,
+			upstreamDatabase(db),
+			proxyUsername(user, db),
+			key,
+		)
+
+		return ConnectionInfo{
+			DatabaseUID:  db.UID,
+			DatabaseName: db.Name,
+			Protocol:     db.Protocol,
+			Format:       "connection-string",
 			URL:          rawURL,
 		}, true
 
