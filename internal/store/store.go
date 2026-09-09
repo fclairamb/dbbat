@@ -33,10 +33,12 @@ type Store struct {
 	// never written anywhere. Empty disables chaining. See chain.go.
 	chainKey []byte
 
-	// queryRetention is the configured DBB_QUERY_STORAGE_RETENTION. The sweep
-	// itself takes its window as an argument (CleanupOldQueryRows), so this is
-	// not what drives deletion; it is what lets *verification* tell a session
-	// retention emptied from one somebody emptied. See checkEmptiedChain.
+	// queryRetention is the configured DBB_QUERY_STORAGE_RETENTION — the
+	// *statement* window, never the ledger window DBB_CONNECTION_RETENTION
+	// governs. The sweep itself takes both windows as arguments
+	// (CleanupOldQueryRows), so this is not what drives deletion; it is what
+	// lets a reader tell a session retention emptied from one somebody emptied.
+	// See StatementsPastRetention.
 	queryRetention time.Duration
 
 	// auditChain caches the head of the store-wide audit chain; queryChains
@@ -72,6 +74,11 @@ type Options struct {
 	// are *all* gone: retention can only account for that when the session ran
 	// entirely before the retention cutoff. Zero therefore means "nothing
 	// legitimately deletes statements here", which is the strictest reading.
+	//
+	// It is emphatically the **query** window, not the connection one: the
+	// ledger window (DBB_CONNECTION_RETENTION) decides whether the session row
+	// still exists, never how many of its statements survive. Feeding it the
+	// longer of the two would excuse sessions nothing legitimately emptied.
 	QueryRetention time.Duration
 }
 
