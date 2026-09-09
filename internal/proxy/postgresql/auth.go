@@ -38,11 +38,17 @@ func (s *Session) authenticate() error {
 		return ErrExpectedStartupMessage
 	}
 
-	username := startup.Parameters["user"]
+	// The username may carry a "user#server" selector: the database field is
+	// the one an IDE rewrites per database as it walks the catalog, the
+	// username is the one it preserves verbatim. Only the bare name is looked
+	// up, so the connection row, the audit log, Slack and the approval gate
+	// all keep recording the plain user.
+	rawUsername := startup.Parameters["user"]
+	username, serverHint := shared.ParseUsername(rawUsername)
 	databaseName := startup.Parameters["database"]
 	s.clientApplicationName = startup.Parameters["application_name"]
 
-	if username == "" || databaseName == "" {
+	if username == "" || (databaseName == "" && serverHint == "") {
 		s.sendError("username and database required")
 
 		return ErrMissingCredentials
@@ -58,10 +64,41 @@ func (s *Session) authenticate() error {
 
 	s.user = user
 
+	// The password comes first, before anything is resolved and before a word
+	// about the fleet is said back.
+	//
+	// Everything below this line can only answer with facts about registered
+	// servers — which name selected which entry, the upstream database it
+	// exposes, the twins that share a database name — and the identity the
+	// startup packet claimed is just a claim until the password verifies it.
+	// Answering earlier turned `user=victim#some_entry` into a pre-auth read of
+	// that entry's upstream database name, and the "no valid grant" refusal
+	// into a pre-auth oracle for the same name. MySQL resolves in
+	// OnAuthSuccess and SQL Server after its credential check for exactly this
+	// reason; this is PostgreSQL doing the same.
+	//
+	// The cost is that a mistyped database name is now reported one round trip
+	// later, after the client has been asked for a password — which is what
+	// keeps the explicit "server X exposes database Y, not Z" message (the
+	// whole point of the selector, and what an IDE's per-database reconnect
+	// needs to see) reaching the legitimate grant holder and no one else.
+	if err := s.verifyPassword(); err != nil {
+		return err
+	}
+
+	s.authenticated = true
+
 	// Look up database configuration
-	database, err := s.store.GetServerByName(s.ctx, databaseName)
+	database, err := shared.ResolveTarget(s.ctx, s.store, shared.TargetRequest{
+		UserID:      user.UID,
+		ServerHint:  serverHint,
+		RequestedDB: databaseName,
+		ProtocolAccepted: func(protocol string) bool {
+			return protocol == store.ProtocolPostgreSQL
+		},
+	})
 	if err != nil {
-		s.sendError("database not found")
+		s.sendError(err.Error())
 
 		return fmt.Errorf("database not found: %w", err)
 	}
@@ -85,6 +122,16 @@ func (s *Session) authenticate() error {
 		return err
 	}
 
+	return nil
+}
+
+// verifyPassword runs the cleartext-password exchange and proves the client is
+// the user the startup packet named. It reports only "authentication failed",
+// on every branch: which of the API-key path or the password path was taken,
+// and why either refused, is not the client's business.
+//
+// s.user must already be set; nothing else on the session is touched.
+func (s *Session) verifyPassword() error {
 	// Request password from client (cleartext for simplicity)
 	authRequest := &pgproto3.AuthenticationCleartextPassword{}
 
@@ -111,25 +158,23 @@ func (s *Session) authenticate() error {
 			return ErrInvalidPassword
 		}
 
-		s.authenticated = true
-
 		return nil
 	}
 
 	// Verify password (using cache if available)
 	var valid bool
 	if s.authCache != nil {
-		valid, err = s.authCache.VerifyPassword(s.ctx, user.UID.String(), passwordMsg.Password, user.PasswordHash)
+		valid, err = s.authCache.VerifyPassword(
+			s.ctx, s.user.UID.String(), passwordMsg.Password, s.user.PasswordHash)
 	} else {
-		valid, err = crypto.VerifyPassword(user.PasswordHash, passwordMsg.Password)
+		valid, err = crypto.VerifyPassword(s.user.PasswordHash, passwordMsg.Password)
 	}
+
 	if err != nil || !valid {
 		s.sendError("authentication failed")
 
 		return ErrInvalidPassword
 	}
-
-	s.authenticated = true
 
 	return nil
 }

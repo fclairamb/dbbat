@@ -58,7 +58,7 @@ func (s *Session) handlePlainStart(responseTo int32, body bson.Raw) (bool, error
 	}
 
 	// A username may carry a "user#database" hint (resolution order #2).
-	bareUser, userDBHint := splitUserDBHint(rawUser)
+	bareUser, userDBHint := shared.ParseUsername(rawUser)
 
 	user, err := s.verifyCredentials(bareUser, password)
 	if err != nil {
@@ -179,16 +179,6 @@ func parsePlainPayload(body bson.Raw) (string, string, bool) {
 	}
 
 	return username, password, true
-}
-
-// splitUserDBHint splits a "user#database" username into its parts. When there
-// is no '#', the hint is empty.
-func splitUserDBHint(raw string) (string, string) {
-	if idx := strings.LastIndex(raw, "#"); idx >= 0 {
-		return raw[:idx], raw[idx+1:]
-	}
-
-	return raw, ""
 }
 
 // verifyCredentials checks the cleartext against the user's Argon2id hash, or

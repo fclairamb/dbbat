@@ -356,6 +356,37 @@ func (s *Store) GetServerByName(ctx context.Context, name string) (*Server, erro
 	return db, nil
 }
 
+// ListServersByDatabaseName returns every database *target* whose upstream
+// `database_name` equals the given name, ordered by dbbat name.
+//
+// Unlike GetServerByName this is deliberately not unique: the same upstream
+// database is routinely registered several times under different dbbat names
+// (a `_ro` / `_rw` pair pointing at one datalake). Callers must disambiguate —
+// the proxy resolver keeps only the candidates the caller currently holds an
+// active grant on, and refuses when more than one survives.
+//
+// SSH bastions and Kubernetes clusters are excluded, same as GetServerByName:
+// they are dial paths, never connectable targets.
+func (s *Store) ListServersByDatabaseName(ctx context.Context, databaseName string) ([]Server, error) {
+	var servers []Server
+
+	err := s.db.NewSelect().
+		Model(&servers).
+		Where("database_name = ?", databaseName).
+		Where("protocol NOT IN (?)", bun.List([]string{ProtocolSSH, ProtocolKubernetes})).
+		Order("name ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list databases by database name: %w", err)
+	}
+
+	if servers == nil {
+		servers = []Server{}
+	}
+
+	return servers, nil
+}
+
 // GetServerByOracleServiceName retrieves an Oracle database by its service name.
 //
 // CAUTION: several dbbat databases may share one upstream service name (a
