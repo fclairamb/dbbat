@@ -69,6 +69,10 @@ func (f *fakeTargetStore) grant(userID uuid.UUID, servers ...*store.Server) {
 	}
 }
 
+// errFakeStore is the canonical failure a fake store returns; a static error
+// keeps the linter happy and makes the intent ("the store is down") explicit.
+var errFakeStore = errors.New("fake store failure")
+
 func srv(name, dbName, protocol string) store.Server {
 	return store.Server{UID: uuid.New(), Name: name, DatabaseName: dbName, Protocol: protocol}
 }
@@ -328,7 +332,7 @@ func TestResolveTarget_Rung3Grants(t *testing.T) {
 	t.Run("a store failure is not-found, never an open door", func(t *testing.T) {
 		t.Parallel()
 
-		st := &fakeTargetStore{servers: []store.Server{ro}, listErr: errors.New("boom")}
+		st := &fakeTargetStore{servers: []store.Server{ro}, listErr: errFakeStore}
 		user := uuid.New()
 		st.grant(user, &ro)
 
