@@ -164,21 +164,26 @@ func TestResolvePublicEndpoints(t *testing.T) {
 		ListenPG:     ":5433",
 		ListenOracle: ":1522",
 		ListenMySQL:  ":3307",
+		ListenMSSQL:  ":1434",
 	}
 
 	t.Run("protocol override takes priority", func(t *testing.T) {
 		t.Parallel()
 
 		pe := PublicEndpoints{
-			Host:   "default.example.com",
-			PGHost: "pg.example.com",
-			PGPort: &port9999,
+			Host:      "default.example.com",
+			PGHost:    "pg.example.com",
+			PGPort:    &port9999,
+			MSSQLHost: "mssql.example.com",
+			MSSQLPort: &port9999,
 		}
 
 		r := ResolvePublicEndpoints(pe, cfg)
 		assert.Equal(t, "pg.example.com", r.PGHost)
 		assert.Equal(t, 9999, r.PGPort)
 		assert.Equal(t, "default.example.com", r.OraHost)
+		assert.Equal(t, "mssql.example.com", r.MSSQLHost)
+		assert.Equal(t, 9999, r.MSSQLPort)
 	})
 
 	t.Run("falls back to default host", func(t *testing.T) {
@@ -189,6 +194,7 @@ func TestResolvePublicEndpoints(t *testing.T) {
 		assert.Equal(t, "fallback.example.com", r.PGHost)
 		assert.Equal(t, "fallback.example.com", r.OraHost)
 		assert.Equal(t, "fallback.example.com", r.MySQLHost)
+		assert.Equal(t, "fallback.example.com", r.MSSQLHost)
 	})
 
 	t.Run("port falls back to local listen port", func(t *testing.T) {
@@ -199,6 +205,7 @@ func TestResolvePublicEndpoints(t *testing.T) {
 		assert.Equal(t, 5433, r.PGPort)
 		assert.Equal(t, 1522, r.OraPort)
 		assert.Equal(t, 3307, r.MySQLPort)
+		assert.Equal(t, 1434, r.MSSQLPort)
 	})
 
 	t.Run("empty listen address resolves to port 0", func(t *testing.T) {
@@ -208,11 +215,13 @@ func TestResolvePublicEndpoints(t *testing.T) {
 			ListenOracle: "",
 			ListenMySQL:  "",
 			ListenPG:     ":5433",
+			ListenMSSQL:  "",
 		}
 		r := ResolvePublicEndpoints(PublicEndpoints{}, emptyCfg)
 		assert.Equal(t, 0, r.OraPort)
 		assert.Equal(t, 0, r.MySQLPort)
 		assert.Equal(t, 5433, r.PGPort)
+		assert.Equal(t, 0, r.MSSQLPort)
 	})
 
 	t.Run("web_ui_url override takes priority over cfg.PublicURL", func(t *testing.T) {
