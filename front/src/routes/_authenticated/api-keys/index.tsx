@@ -130,16 +130,17 @@ function APIKeysPage() {
     {
       key: "key_prefix",
       header: "Key",
-      cell: (k) => (
-        <span className="font-mono text-sm">{k.key_prefix}...</span>
-      ),
+      cell: (k) => <span className="font-mono text-sm">{k.key_prefix}...</span>,
     },
     {
       key: "status",
       header: "Status",
       cell: (k) => {
         const status = getStatus(k);
-        const variants: Record<string, "default" | "secondary" | "destructive"> = {
+        const variants: Record<
+          string,
+          "default" | "secondary" | "destructive"
+        > = {
           active: "default",
           expired: "secondary",
           revoked: "destructive",
@@ -268,7 +269,10 @@ function APIKeysPage() {
               <DialogTrigger asChild>
                 <PermissionButton
                   disabled={!canCreate}
-                  disabledReason={getDisabledReason("create-api-key", user?.roles)}
+                  disabledReason={getDisabledReason(
+                    "create-api-key",
+                    user?.roles,
+                  )}
                   enabledTooltip={getActionTooltip("create-api-key")}
                 >
                   <Plus className="mr-2 h-4 w-4" />
@@ -472,6 +476,12 @@ function ShowKeyDialog({
 
           <div data-testid="connections-section" className="space-y-2">
             <h3 className="font-medium text-sm">Connection URLs</h3>
+            <p className="text-xs text-muted-foreground">
+              Database is the real upstream name; the{" "}
+              <code className="font-mono">#server</code> suffix on the username
+              selects the dbbat server (Oracle and MongoDB carry the selector
+              elsewhere).
+            </p>
             {connections.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 No active grants yet — ask an admin to grant you database access
@@ -483,8 +493,8 @@ function ShowKeyDialog({
                   <Alert>
                     <AlertCircle className="h-4 w-4" />
                     <AlertDescription>
-                      Showing first 50 databases. Use an existing grant to see all
-                      connection details.
+                      Showing first 50 databases. Use an existing grant to see
+                      all connection details.
                     </AlertDescription>
                   </Alert>
                 )}
