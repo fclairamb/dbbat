@@ -5,12 +5,63 @@
 
 ### Features
 
-* **store:** server names accept hyphens. `IsValidServerName` enforced `^[a-z0-9_]{1,63}$`, so `prod-eu-1` — the dominant convention for host and service naming — was a 400 at both create and rename. The underscore-only rule came from an earlier spec that feared an unquoted `-` acting as an operator in identifier positions; that risk does not apply, because a dbbat server name is never a parsed upstream identifier but the opaque client-facing selector in the connect handshake, on all five protocols. `isEZConnectSafeName` already listed `-` as safe, so the codebase held two rules that disagreed. The charset is now `^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$`: interior hyphens only, since a leading `-` would make the name untypeable (`psql -d -prod` parses as a flag). `.` stays rejected — it is the qualifier separator in SQL and in MongoDB namespaces, so it gets its own reasoning rather than riding along. This only widens what is accepted: no migration, and no stored name becomes invalid. Note the `\-` escape is load-bearing rather than redundant — browsers compile the HTML `pattern=` attribute under the `v` (unicodeSets) flag, where an unescaped `-` in that class position is a compile error, and per the HTML spec a `pattern` that fails to compile is *silently ignored*, which switches client-side validation off with no visible error. ([#367](https://github.com/fclairamb/dbbat/issues/367)) ([6e645ac](https://github.com/fclairamb/dbbat/commit/6e645ac7379eba61217f227d51d89138bfa4e899))
+* **store:** server names accept hyphens
+
+  `IsValidServerName` enforced `^[a-z0-9_]{1,63}$`, so `prod-eu-1` — the dominant
+  convention for host and service naming — was a 400 at both create and rename.
+
+  The underscore-only rule came from an earlier spec that feared an unquoted `-`
+  acting as an operator in identifier positions. That risk does not apply: a dbbat
+  server name is never a parsed upstream identifier, but the opaque client-facing
+  selector in the connect handshake, on all five protocols. `isEZConnectSafeName`
+  already listed `-` as safe, so the codebase held two rules that disagreed.
+
+  The charset is now `^[a-z0-9_][a-z0-9_\-]{0,61}[a-z0-9_]$|^[a-z0-9_]$`: interior
+  hyphens only, since a leading `-` would make the name untypeable (`psql -d -prod`
+  parses as a flag). `.` stays rejected — it is the qualifier separator in SQL and in
+  MongoDB namespaces, so it gets its own reasoning rather than riding along.
+
+  This only widens what is accepted: no migration, and no stored name becomes invalid.
+
+  Note the `\-` escape is load-bearing rather than redundant: browsers compile the HTML
+  `pattern=` attribute under the `v` (unicodeSets) flag, where an unescaped `-` in that
+  class position is a compile error, and per the HTML spec a `pattern` that fails to
+  compile is *silently ignored* — which switches client-side validation off with no
+  visible error.
+
+  ([#367](https://github.com/fclairamb/dbbat/issues/367)) ([6e645ac](https://github.com/fclairamb/dbbat/commit/6e645ac7379eba61217f227d51d89138bfa4e899))
 
 
 ### Bug Fixes
 
-* **api:** a send on a closed channel in the event broker — a real panic, not merely a race-detector complaint. `Subscriber.offer` read `s.closed` under the read lock, released it, and only then sent on the channel, while `Close` set `s.closed` and closed the channel with no lock held at all. A publisher descheduled between the check and the send woke up on a closed channel and panicked on whichever goroutine called `Publish` — proxy sessions, the approval gate, the MCP server — and `Publish` is documented as never blocking and never erroring. The window opened on something routine: a subscriber's channel is closed exactly when an SSE client disconnects or an MCP `watchHold` returns. `safe.RunGuarded` caught it on some paths but not all, and even where it did the event was lost and the goroutine died. `offer` now holds the read lock across the send, which is non-blocking by construction so the lock is never held across a block, and concurrent publishers sending under a shared read lock is safe; `Close` closes the channel inside the write-locked section that sets `s.closed`. The broker detach stays outside `s.mu`, so the `s.mu -> b.mu` ordering is unchanged and no cycle is introduced. Covered by a regression test that hammers `Publish` from eight goroutines while a subscriber closes, across both a droppable and the drop-exempt topic. Also fixes a flaky test harness that shared the symptom: the fake SSH relay answered one direction's EOF with a full close of the other end, truncating an in-flight Oracle TNS refusal into a bare EOF; it now half-closes and tears down only once both directions finish. ([#367](https://github.com/fclairamb/dbbat/issues/367)) ([6e645ac](https://github.com/fclairamb/dbbat/commit/6e645ac7379eba61217f227d51d89138bfa4e899))
+* **api:** a send on a closed channel in the event broker — a real panic, not merely a
+  race-detector complaint
+
+  `Subscriber.offer` read `s.closed` under the read lock, released it, and only then sent
+  on the channel, while `Close` set `s.closed` and closed the channel with no lock held at
+  all. A publisher descheduled between the check and the send woke up on a closed channel
+  and panicked on whichever goroutine called `Publish` — proxy sessions, the approval gate,
+  the MCP server — and `Publish` is documented as never blocking and never erroring.
+
+  The window opened on something routine: a subscriber's channel is closed exactly when an
+  SSE client disconnects or an MCP `watchHold` returns. `safe.RunGuarded` caught it on some
+  paths but not all, and even where it did the event was lost and the goroutine died.
+
+  `offer` now holds the read lock across the send, which is non-blocking by construction so
+  the lock is never held across a block, and concurrent publishers sending under a shared
+  read lock is safe. `Close` closes the channel inside the write-locked section that sets
+  `s.closed`. The broker detach stays outside `s.mu`, so the `s.mu -> b.mu` ordering is
+  unchanged and no cycle is introduced.
+
+  Covered by a regression test that hammers `Publish` from eight goroutines while a
+  subscriber closes, across both a droppable and the drop-exempt topic.
+
+  Also fixes a flaky test harness that shared the symptom: the fake SSH relay answered one
+  direction's EOF with a full close of the other end, truncating an in-flight Oracle TNS
+  refusal into a bare EOF. It now half-closes and tears down only once both directions
+  finish.
+
+  ([#367](https://github.com/fclairamb/dbbat/issues/367)) ([6e645ac](https://github.com/fclairamb/dbbat/commit/6e645ac7379eba61217f227d51d89138bfa4e899))
 * **deps:** update module github.com/coreos/go-oidc/v3 to v3.21.0 ([#357](https://github.com/fclairamb/dbbat/issues/357)) ([fecd488](https://github.com/fclairamb/dbbat/commit/fecd48850a3525095a076a54138955174da0c17d))
 * **deps:** update module github.com/go-sql-driver/mysql to v1.10.1 ([#354](https://github.com/fclairamb/dbbat/issues/354)) ([b802316](https://github.com/fclairamb/dbbat/commit/b80231609d48f44e5f46fac81078422b66e37501))
 * **deps:** update module github.com/jackc/pgx/v5 to v5.11.0 ([#366](https://github.com/fclairamb/dbbat/issues/366)) ([848bef1](https://github.com/fclairamb/dbbat/commit/848bef158ecdbeb59a8fac1736aab6036f1156b8))
@@ -24,7 +75,33 @@
 
 ### Bug Fixes
 
-* **oracle:** a SQL verb that is merely a *word in a comment* is no longer read as a statement's verb. 0.26.1 taught the header-anchored decode to step over leading comments, but the last-resort keyword scan it used to fall through to was left unchanged — and that scan is still reached whenever an exec header is unreadable, including on the unnameable-piggyback path where a false reading ends the session rather than refusing a call. There, `-- MERGE s'execute` still read as a statement opening at `MERGE`; with the `--` dropped, the apostrophe two words later opened a quoted run that never closed, and a statement that had arrived whole was refused as unreadable. Production shows the same scan gating French prose as SQL: `/queries` recorded `UPDATE d’instances ne pouvait faire le travail --` and `TRUNCATE : la table peut porter le mapping…`. The scan now re-anchors on the comment's opener, so the text handed to the gate is the run the *server* would read. Three bounds keep it from becoming the backward extension the extraction survey rejected: the search never leaves the keyword's own printable run (a `--` on the far side of TTC framing bytes is not a comment over this text), the opener has to be free-standing (`a--b` in an expression is not one), and a run that is comment all the way down falls back to the previous reading — which is refused, because handing the gate verbless text would forward the frame unexamined and a keyword in a comment must not become the way past a control. ([#348](https://github.com/fclairamb/dbbat/issues/348)) ([c8ac89c](https://github.com/fclairamb/dbbat/commit/c8ac89ccf2e5d60702dfca1cb17cb89a0d8ecde0))
+* **oracle:** a SQL verb that is merely a *word in a comment* is no longer read as a
+  statement's verb
+
+  0.26.1 taught the header-anchored decode to step over leading comments, but the
+  last-resort keyword scan it used to fall through to was left unchanged — and that scan is
+  still reached whenever an exec header is unreadable, including on the unnameable-piggyback
+  path where a false reading ends the session rather than refusing a call.
+
+  There, `-- MERGE s'execute` still read as a statement opening at `MERGE`; with the `--`
+  dropped, the apostrophe two words later opened a quoted run that never closed, and a
+  statement that had arrived whole was refused as unreadable. Production shows the same scan
+  gating French prose as SQL: `/queries` recorded
+  `UPDATE d’instances ne pouvait faire le travail --` and
+  `TRUNCATE : la table peut porter le mapping…`.
+
+  The scan now re-anchors on the comment's opener, so the text handed to the gate is the run
+  the *server* would read. Three bounds keep it from becoming the backward extension the
+  extraction survey rejected:
+
+  - the search never leaves the keyword's own printable run (a `--` on the far side of TTC
+    framing bytes is not a comment over this text);
+  - the opener has to be free-standing (`a--b` in an expression is not one);
+  - a run that is comment all the way down falls back to the previous reading — which is
+    refused, because handing the gate verbless text would forward the frame unexamined, and
+    a keyword in a comment must not become the way past a control.
+
+  ([#348](https://github.com/fclairamb/dbbat/issues/348)) ([c8ac89c](https://github.com/fclairamb/dbbat/commit/c8ac89ccf2e5d60702dfca1cb17cb89a0d8ecde0))
 * **deps:** update kubernetes monorepo to v0.37.0 ([#346](https://github.com/fclairamb/dbbat/issues/346)) ([cb577bd](https://github.com/fclairamb/dbbat/commit/cb577bdeab250b9f3e0439aff4c619b978719169))
 
 ## [0.26.1](https://github.com/fclairamb/dbbat/compare/v0.26.0...v0.26.1) (2026-09-01)
@@ -32,20 +109,118 @@
 
 ### Bug Fixes
 
-* **oracle:** two ways the statement extractor rejected the very run its exec header named — both verified byte-for-byte in production captures from a python-oracledb thin client, and both funnelling into the same misbehavior: the decode fell back to the last-resort keyword scan and the gate (and `/queries`) got a fragment. First, a statement opening with a SQL comment failed the leading-verb check, so `-- MERGE s'execute` was re-read from the `MERGE` *inside* the comment; with the `--` gone, the apostrophe opened a quoted run that never closed and the client was refused with "a quoted run was left open" for a statement that arrived whole, whatever the grant. The verb check now steps over leading `--` and `/* … */` comments, exactly as the server does. Second, a statement past 32767 bytes travels in the CLR long form — `0xFE` marker, 32767-byte chunks, a compressed-int length prefix *in the middle of the text* — so the contiguous run of exactly `sqlLen` bytes structurally does not exist, and the reported failure boundary sat at exactly 32768: refused when the keyword scan's cut landed inside a string literal, silently gated-and-recorded short otherwise, which also left blocked/approval patterns past the first chunk unseen. The locate now walks the long form in both chunk-length encodings (the same pair the AUTH leg reads), accepting only chunks that concatenate to exactly `sqlLen` printable bytes behind a verb, and reports where the statement's wire bytes end so bind capture keeps its floor on a statement that can no longer be anchored by byte search. Replayed against the captured frames (37 B repro up to a 117 KB MERGE): all decode whole; large generated statements no longer need splitting into batches. ([#344](https://github.com/fclairamb/dbbat/issues/344)) ([748606a](https://github.com/fclairamb/dbbat/commit/748606a0d71fc063cbf2c730fcd0eb7f9986e605))
+* **oracle:** two ways the statement extractor rejected the very run its exec header named
+
+  Both were verified byte-for-byte in production captures from a python-oracledb thin
+  client, and both funnelled into the same misbehavior: the decode fell back to the
+  last-resort keyword scan, and the gate (and `/queries`) got a fragment.
+
+  **A statement opening with a SQL comment failed the leading-verb check.** So
+  `-- MERGE s'execute` was re-read from the `MERGE` *inside* the comment; with the `--`
+  gone, the apostrophe opened a quoted run that never closed and the client was refused with
+  "a quoted run was left open" for a statement that arrived whole, whatever the grant. The
+  verb check now steps over leading `--` and `/* … */` comments, exactly as the server does.
+
+  **A statement past 32767 bytes travels in the CLR long form** — `0xFE` marker, 32767-byte
+  chunks, a compressed-int length prefix *in the middle of the text* — so the contiguous run
+  of exactly `sqlLen` bytes structurally does not exist. The reported failure boundary sat at
+  exactly 32768: refused when the keyword scan's cut landed inside a string literal, silently
+  gated-and-recorded short otherwise, which also left blocked/approval patterns past the
+  first chunk unseen. The locate now walks the long form in both chunk-length encodings (the
+  same pair the AUTH leg reads), accepting only chunks that concatenate to exactly `sqlLen`
+  printable bytes behind a verb, and reports where the statement's wire bytes end so bind
+  capture keeps its floor on a statement that can no longer be anchored by byte search.
+
+  Replayed against the captured frames (37 B repro up to a 117 KB MERGE): all decode whole,
+  and large generated statements no longer need splitting into batches.
+
+  ([#344](https://github.com/fclairamb/dbbat/issues/344)) ([748606a](https://github.com/fclairamb/dbbat/commit/748606a0d71fc063cbf2c730fcd0eb7f9986e605))
 
 ## [0.26.0](https://github.com/fclairamb/dbbat/compare/v0.25.2...v0.26.0) (2026-08-31)
 
 
 ### Features
 
-* **api, ui:** connections and queries filter server-side on the dimensions people actually investigate by — `server_group_uid` (live membership, so an empty group yields zero rows rather than everything), `grant_uid`, `grant_definition_uid` (matched across the definition's `lineage_uid`, so an edit-archival no longer splits a grant's history in two), and `grant_provenance` (`approved`/`auto`/`direct`, where a connection with no grant matches *no* value; `direct` means "no approval on record", not "provably admin-issued"). `/queries` additionally filters on `approval_status`, kept deliberately distinct from grant provenance. Both listings share one filter builder so they cannot drift apart, malformed UUIDs on the new params are a 400 while the legacy `user_id`/`database_id` keep their silent-ignore, and the connector scoping overwrite still runs strictly last so a connector cannot widen its own scope with a crafted `user_id`. The users view gains `last_login_at` — stamped on interactive logins only (password and both OAuth paths, never a JWT refresh, API key or MCP call) and never able to fail a login — plus a bulk DB-computed `GET /users/last-connections`. Filter state lives in URL search params and resets the pagination cursor on change. ([#337](https://github.com/fclairamb/dbbat/issues/337)) ([de3f57f](https://github.com/fclairamb/dbbat/commit/de3f57fcd2d26764e4ae86f21d2262118ffe1038))
+* **api, ui:** connections and queries filter server-side on the dimensions people actually
+  investigate by
+
+  The new filters are `server_group_uid` (live membership, so an empty group yields zero rows
+  rather than everything), `grant_uid`, `grant_definition_uid` (matched across the
+  definition's `lineage_uid`, so an edit-archival no longer splits a grant's history in two),
+  and `grant_provenance` (`approved`/`auto`/`direct`, where a connection with no grant matches
+  *no* value; `direct` means "no approval on record", not "provably admin-issued"). `/queries`
+  additionally filters on `approval_status`, kept deliberately distinct from grant provenance.
+
+  Both listings share one filter builder so they cannot drift apart. Malformed UUIDs on the
+  new params are a 400, while the legacy `user_id`/`database_id` keep their silent-ignore, and
+  the connector scoping overwrite still runs strictly last so a connector cannot widen its own
+  scope with a crafted `user_id`.
+
+  The users view gains `last_login_at` — stamped on interactive logins only (password and both
+  OAuth paths, never a JWT refresh, API key or MCP call) and never able to fail a login — plus
+  a bulk DB-computed `GET /users/last-connections`.
+
+  Filter state lives in URL search params and resets the pagination cursor on change.
+
+  ([#337](https://github.com/fclairamb/dbbat/issues/337)) ([de3f57f](https://github.com/fclairamb/dbbat/commit/de3f57fcd2d26764e4ae86f21d2262118ffe1038))
 
 
 ### Bug Fixes
 
-* **security (oracle):** an Oracle statement larger than the negotiated SDU (~8.1 KB of SQL at the 8192 default) was gated on its **first TNS fragment only**. TTC carries no message-length field and, unlike the AUTH phase, the data phase never reassembled — so everything the gate matches beyond the leading verb was evadable by padding a statement past the SDU: `oracleBlockedPatterns` (`UTL_HTTP`, `DBMS_SCHEDULER`, …), approval-hold patterns, and the dynamic-SQL scan. Under a `read_only` grant, `BEGIN NULL; /* ~8 KB of padding */ EXECUTE IMMEDIATE 'DROP ...'; END;` reached the upstream whole, because the controls only ever saw the padding. The same truncation was an audit hole — `/queries` stored the prefix as if it were the statement, and the per-connection chain MACs sealed it — and, when the prefix happened to end inside a string literal, the cause of the reported incident: a misleading `ORA-01031 … dynamic SQL that is itself built from dynamic SQL` refusal for statements containing none, after which the orphaned continuation packet was forwarded upstream alone and desynced the session. Statement-carrying messages are now reassembled before gating; an allowed statement's original packets are forwarded byte-unchanged, and a refused one has every fragment dropped and exactly one OER answered, so the session survives and the next call proceeds. Reassembly is bounded and fails closed — capped at `execMaxSQLLen` plus slack, bounded by a read deadline, and grown as packets actually arrive, since the declared length is attacker-controlled input. A statement dbbat still cannot read to its end is no longer validated as if complete: it is refused honestly under statement-shaped controls and recorded as partial otherwise, the fallback extractor no longer mutilates non-ASCII statements at the first byte above `0x7E`, and "the scan fell off the end of the text" is now its own error instead of being reported as nested dynamic SQL. ([#341](https://github.com/fclairamb/dbbat/issues/341)) ([36c88df](https://github.com/fclairamb/dbbat/commit/36c88dfb6d6b18cf8ff77f74079df7a01c3acce6))
-* **dump:** session captures now contain the refusal frames dbbat synthesizes itself, not only the bytes relayed from the upstream. A capture is forensic evidence and a refusal is precisely the event an investigator replays one to see, yet a refused statement showed the statement and then silence — which reads as a dropped connection rather than an enforced control. Oracle, MongoDB and PostgreSQL all had the gap, each now recorded through the dump tap with exactly one recording point per direction; PostgreSQL was additionally recording every relayed frame twice, and its previous tap wiring silently dropped client bytes that were already buffered when the capture opened. MySQL and SQL Server were already correct. Captures are confirmed to record plaintext above TLS — a claim that had rested on one reading of a dependency's internals, and that a comment in the MySQL proxy asserted backwards, steering operators away from capturing exactly the sessions they most want captured; it is now pinned by tests driving real TLS handshakes. Frames written before authentication succeeds remain uncaptured by construction on all five protocols: the capture file is named after a connection UID that does not exist until then, so a refused login has no capture at all. ([#341](https://github.com/fclairamb/dbbat/issues/341)) ([36c88df](https://github.com/fclairamb/dbbat/commit/36c88dfb6d6b18cf8ff77f74079df7a01c3acce6))
+* **security (oracle):** an Oracle statement larger than the negotiated SDU was gated on its
+  **first TNS fragment only**
+
+  At the 8192 default that is ~8.1 KB of SQL. TTC carries no message-length field and, unlike
+  the AUTH phase, the data phase never reassembled — so everything the gate matches beyond the
+  leading verb was evadable by padding a statement past the SDU: `oracleBlockedPatterns`
+  (`UTL_HTTP`, `DBMS_SCHEDULER`, …), approval-hold patterns, and the dynamic-SQL scan. Under a
+  `read_only` grant, `BEGIN NULL; /* ~8 KB of padding */ EXECUTE IMMEDIATE 'DROP ...'; END;`
+  reached the upstream whole, because the controls only ever saw the padding.
+
+  The same truncation was an audit hole — `/queries` stored the prefix as if it were the
+  statement, and the per-connection chain MACs sealed it. When the prefix happened to end
+  inside a string literal it was also the cause of the reported incident: a misleading
+  `ORA-01031 … dynamic SQL that is itself built from dynamic SQL` refusal for statements
+  containing none, after which the orphaned continuation packet was forwarded upstream alone
+  and desynced the session.
+
+  Statement-carrying messages are now reassembled before gating. An allowed statement's
+  original packets are forwarded byte-unchanged, and a refused one has every fragment dropped
+  and exactly one OER answered, so the session survives and the next call proceeds.
+
+  Reassembly is bounded and fails closed: capped at `execMaxSQLLen` plus slack, bounded by a
+  read deadline, and grown as packets actually arrive, since the declared length is
+  attacker-controlled input.
+
+  A statement dbbat still cannot read to its end is no longer validated as if complete — it is
+  refused honestly under statement-shaped controls and recorded as partial otherwise. The
+  fallback extractor no longer mutilates non-ASCII statements at the first byte above `0x7E`,
+  and "the scan fell off the end of the text" is now its own error instead of being reported
+  as nested dynamic SQL.
+
+  ([#341](https://github.com/fclairamb/dbbat/issues/341)) ([36c88df](https://github.com/fclairamb/dbbat/commit/36c88dfb6d6b18cf8ff77f74079df7a01c3acce6))
+* **dump:** session captures now contain the refusal frames dbbat synthesizes itself, not only
+  the bytes relayed from the upstream
+
+  A capture is forensic evidence and a refusal is precisely the event an investigator replays
+  one to see, yet a refused statement showed the statement and then silence — which reads as a
+  dropped connection rather than an enforced control.
+
+  Oracle, MongoDB and PostgreSQL all had the gap, each now recorded through the dump tap with
+  exactly one recording point per direction. PostgreSQL was additionally recording every
+  relayed frame twice, and its previous tap wiring silently dropped client bytes that were
+  already buffered when the capture opened. MySQL and SQL Server were already correct.
+
+  Captures are confirmed to record plaintext above TLS — a claim that had rested on one
+  reading of a dependency's internals, and that a comment in the MySQL proxy asserted
+  backwards, steering operators away from capturing exactly the sessions they most want
+  captured. It is now pinned by tests driving real TLS handshakes.
+
+  Frames written before authentication succeeds remain uncaptured by construction on all five
+  protocols: the capture file is named after a connection UID that does not exist until then,
+  so a refused login has no capture at all.
+
+  ([#341](https://github.com/fclairamb/dbbat/issues/341)) ([36c88df](https://github.com/fclairamb/dbbat/commit/36c88dfb6d6b18cf8ff77f74079df7a01c3acce6))
 * **deps:** update module github.com/stretchr/testify to v1.12.1 ([#334](https://github.com/fclairamb/dbbat/issues/334)) ([4424f3a](https://github.com/fclairamb/dbbat/commit/4424f3af4bbab29463f4b7613f4627d668d482a0))
 * **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.8.2 ([#338](https://github.com/fclairamb/dbbat/issues/338)) ([30c9e9c](https://github.com/fclairamb/dbbat/commit/30c9e9c0ce267f436fbfab325899e8ad032df4af))
 
@@ -54,7 +229,25 @@
 
 ### Bug Fixes
 
-* **proxy:** a load balancer's TCP health check — open the socket, close it without sending a byte — is no longer logged as a session failure on any of the five listeners. Behind an NLB the PostgreSQL listener alone produced ~22 identical `ERROR "Session error"` lines every 3 minutes, which is exactly how a reader learns to ignore the `ERROR` level. A shared sentinel now marks the one demoted case, and it is deliberately narrow: the demotion is keyed on the session's own client-read counter being **zero**, so a client that hung up halfway through its startup packet is a truncated client and keeps its loud line. Every quieted probe stays observable at `DEBUG` with its remote address, and the paired "session ended" line is replaced rather than doubled. Oracle gains the most: its previous `strings.Contains(err, "EOF")` demotion also swallowed `unexpected EOF` and every connect-packet read failure whatever the cause — those are errors again. ([#332](https://github.com/fclairamb/dbbat/issues/332)) ([6bf0b96](https://github.com/fclairamb/dbbat/commit/6bf0b961df489c47ca625326a0abaefc486bf098))
+* **proxy:** a load balancer's TCP health check is no longer logged as a session failure
+
+  Opening the socket and closing it without sending a byte is what an NLB health check does,
+  and on any of the five listeners it used to produce a session-failure line. Behind an NLB
+  the PostgreSQL listener alone produced ~22 identical `ERROR "Session error"` lines every
+  3 minutes — which is exactly how a reader learns to ignore the `ERROR` level.
+
+  A shared sentinel now marks the one demoted case, and it is deliberately narrow: the
+  demotion is keyed on the session's own client-read counter being **zero**, so a client that
+  hung up halfway through its startup packet is a truncated client and keeps its loud line.
+
+  Every quieted probe stays observable at `DEBUG` with its remote address, and the paired
+  "session ended" line is replaced rather than doubled.
+
+  Oracle gains the most: its previous `strings.Contains(err, "EOF")` demotion also swallowed
+  `unexpected EOF` and every connect-packet read failure whatever the cause. Those are errors
+  again.
+
+  ([#332](https://github.com/fclairamb/dbbat/issues/332)) ([6bf0b96](https://github.com/fclairamb/dbbat/commit/6bf0b961df489c47ca625326a0abaefc486bf098))
 * **deps:** update kubernetes monorepo to v0.36.3 ([#319](https://github.com/fclairamb/dbbat/issues/319)) ([4fb5a69](https://github.com/fclairamb/dbbat/commit/4fb5a6993117266dce7b733c509a9d5a9c19ce2b))
 * **deps:** update module github.com/slack-go/slack to v0.29.0 ([#327](https://github.com/fclairamb/dbbat/issues/327)) ([2d1fc5f](https://github.com/fclairamb/dbbat/commit/2d1fc5fbc688a739df5e988a508a3ac31f15d2c5))
 * **deps:** update module github.com/stretchr/testify to v1.12.0 ([#331](https://github.com/fclairamb/dbbat/issues/331)) ([f02bceb](https://github.com/fclairamb/dbbat/commit/f02bceb4d11afd4c50904502d13d4ad31bbc8ec6))
@@ -65,7 +258,20 @@
 
 ### Bug Fixes
 
-* **store:** a demo instance no longer reports its own query chain as broken. The demo seeder closed its sessions with a raw `UPDATE`, bypassing the only writer that seals a session's chain head — and a closed session holding statements but no head stamp is, by design, indistinguishable from someone deleting the stamp to hide trailing deletions, so it verified as a break on every boot. Seeding now goes through `CreateConnectionAt` / `CloseConnectionAt`, which share the real create and close routines rather than reimplementing them, so the chain is sealed exactly as a live session's is and both the `connection.opened` and `connection.closed` evidence entries carry the session's staged historical timestamp instead of disagreeing with the row on wall-clock time. ([#325](https://github.com/fclairamb/dbbat/issues/325)) ([a72ff74](https://github.com/fclairamb/dbbat/commit/a72ff748e4000e511ce42d9195ad77bb34f61326))
+* **store:** a demo instance no longer reports its own query chain as broken
+
+  The demo seeder closed its sessions with a raw `UPDATE`, bypassing the only writer that
+  seals a session's chain head — and a closed session holding statements but no head stamp is,
+  by design, indistinguishable from someone deleting the stamp to hide trailing deletions, so
+  it verified as a break on every boot.
+
+  Seeding now goes through `CreateConnectionAt` / `CloseConnectionAt`, which share the real
+  create and close routines rather than reimplementing them. The chain is sealed exactly as a
+  live session's is, and both the `connection.opened` and `connection.closed` evidence entries
+  carry the session's staged historical timestamp instead of disagreeing with the row on
+  wall-clock time.
+
+  ([#325](https://github.com/fclairamb/dbbat/issues/325)) ([a72ff74](https://github.com/fclairamb/dbbat/commit/a72ff748e4000e511ce42d9195ad77bb34f61326))
 
 ## [0.25.0](https://github.com/fclairamb/dbbat/compare/v0.24.0...v0.25.0) (2026-08-15)
 
@@ -105,54 +311,716 @@ Everything below landed as one squashed batch ([#320](https://github.com/fclaira
 
 ### ⚠ BREAKING CHANGES
 
-* **grants:** a grant definition scopes on server groups instead of enumerating databases, and a bare "group" no longer exists in the API. `database_uids` becomes `server_group_uids`: a definition names stable sets of servers, so adding a server to the fleet stops meaning "edit every relevant definition" — and, because definitions are immutably versioned, "archive and re-insert every one of them". Membership resolves live, exactly as the user-group scope already did, so a server added to a scoped group is requestable immediately with no edit and therefore no new definition version; empty still means every database. Because two kinds of group now exist, `group_uids` and `approver_group_uids` are renamed `user_group_uids` and `approver_user_group_uids` on grant definitions, `group_uids` becomes `user_group_uids` on the update-user body, and the user detail response's `groups` key becomes `user_groups`. Every retired spelling, `database_uids` included, is refused with a 400 naming its replacement rather than silently ignored, because dropping a scope restriction on the floor would fail open. A migration mirrors every existing per-database scope into a real server group — one per *distinct* set of databases, named after the definition that first used it — and is idempotent and reversible.
+* **grants:** a grant definition scopes on server groups instead of enumerating databases, and
+  a bare "group" no longer exists in the API
+
+  `database_uids` becomes `server_group_uids`: a definition names stable sets of servers, so
+  adding a server to the fleet stops meaning "edit every relevant definition" — and, because
+  definitions are immutably versioned, "archive and re-insert every one of them". Membership
+  resolves live, exactly as the user-group scope already did, so a server added to a scoped
+  group is requestable immediately with no edit and therefore no new definition version; empty
+  still means every database.
+
+  Because two kinds of group now exist, `group_uids` and `approver_group_uids` are renamed
+  `user_group_uids` and `approver_user_group_uids` on grant definitions, `group_uids` becomes
+  `user_group_uids` on the update-user body, and the user detail response's `groups` key
+  becomes `user_groups`.
+
+  Every retired spelling, `database_uids` included, is refused with a 400 naming its
+  replacement rather than silently ignored, because dropping a scope restriction on the floor
+  would fail open.
+
+  A migration mirrors every existing per-database scope into a real server group — one per
+  *distinct* set of databases, named after the definition that first used it — and is
+  idempotent and reversible.
 
 ### Features
 
-* **api:** AI agents can query through dbbat over MCP, governed exactly like a human session. A Streamable-HTTP Model Context Protocol server is mounted at `POST /api/v1/mcp`, authenticated with an ordinary `dbb_` API key, offering `list_databases`, `query`, `describe` and `await_approval`. Every statement an agent runs is executed by dialing dbbat's *own* proxy listener over loopback as the key's owner — there is deliberately no internal execution path, so auth, grants, `read_only` / `block_ddl` / `block_copy`, quotas, query logging and the mid-flight approval gate are the same code reached over the same wire and this endpoint cannot drift from them. All five protocols are covered; on MongoDB the statement is `<command> <extended JSON>` rather than SQL, which keeps the tool surface at four and keeps an approval pattern meaning one thing whether the command came from mongosh or from an agent. A statement still parked after a short grace window returns a structured `approval_pending` result naming the held query, and `await_approval` long-polls it, so an agent never silently times out on a hold — every return names the next action. `DBB_MCP_ENABLED` defaults to true; `false` removes the routes entirely. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **api:** all three HMAC chains can be verified over the REST API and from the admin UI. `GET /api/v1/audit/verify`, `/audit/verify/queries` and `/audit/verify/rows` are admin-only and return the same numbers as the CLI — counts, the head MAC in hex, the pre-anchor unverifiable count and the first break — and never the key or the content of an audited record; the row endpoint narrows on `?connection=` or `?query=`, which cannot be combined. A walk is O(rows), so each scope's outcome is cached for a minute and one walk at a time is admitted per instance; a windowed resume was rejected because starting from a caller-supplied position trusts a `prev_mac` an attacker controls. The audit page gains a Chain verification panel that walks all three, renders a break loudly with its `chain_seq`, uid and reason, and offers the head MAC with a copy button because the head is meant to be recorded outside the database. The panel also says what the answer is worth: it is served by the process under audit, the result may be up to a minute old, and `dbbat audit verify` is what someone who does not trust this server runs. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **api:** the two kinds of approver live on the fleet, not on the policy. Servers and server groups each carry an access-approver list (who may decide **grant requests** for that database) and a query-approver list (who may release **approval holds** on statements against it); neither implies the other, and an org wanting overlap lists the same user group in both. Resolution is one fallback chain implemented in one place, because a second SQL-shaped copy of it is exactly the drift that would be an authorization bug: for a grant request, the server's list, then the union of its server groups' lists, then admins; for a hold, the definition's own approver list wins outright when non-empty, then the same chain. Empty everywhere is admin-only, which is precisely the previous behaviour, so nothing changes until an approver group is named. The lists are read at decision time and never snapshotted, so an edit — or moving a server between groups — immediately changes who may decide requests already filed and statements already parked; a departed lead's replacement is effective now. Self-approval is refused on every path, both Slack transports included, and each pending item reports which hat the caller wears (`admin`, `definition_approver`, `server_approver`) so the UI can say why they may decide it. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **auth:** any OIDC issuer can be dbbat's identity provider, not just Slack. `DBB_OIDC_ISSUER` plus a client id and secret enables a generic provider that works against Google Workspace, Okta, Microsoft Entra, Keycloak or Authentik, registered under the `oidc` provider key with its own callback. Unlike the Slack provider, which trusts a userInfo endpoint, this one only accepts an identity carried by an ID token whose signature, issuer, audience and expiry were verified against the issuer's JWKS, and the optional `DBB_OIDC_EMAIL_DOMAINS` allowlist is checked against that verified email claim — which matters on a multi-tenant issuer, where "any account the issuer vouches for" means any account on the internet. PKCE (S256) is used on every flow, with the verifier carried on the existing OAuth state row so a callback landing on another replica still works. Discovery is lazy, so an unreachable IdP delays the first login instead of blocking startup, and the login screen renders one button per configured provider with the label the operator chose. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **auth:** dbbat roles can follow directory group membership, resolved on every login. `DBB_OIDC_ROLE_MAPPING` binds roles to the groups in the ID token's groups claim (`admin=db-admins,viewer=analysts`), and because it is applied at every sign-in rather than only at account creation, an admin who leaves the directory group loses the role at their next login with nobody remembering to click. It is authoritative only for the roles it names — a role granted by hand in the UI is never revoked by a login — the default role is the floor when nothing matches, and the last remaining admin is retained exactly as user management already refuses to strip it. Values match exactly, case included, because Entra sends group object ids rather than names, and both claim encodings are accepted while a lone string is one group and never a delimited list. A token that delegates the groups claim through `_claim_names` — Entra's groups overage, past roughly 200 memberships — is read as membership *unknown* rather than empty: the login succeeds, the mapping is skipped entirely, roles are left untouched with no default-role floor, and a WARN names the user and the claim. dbbat never follows the pointer to Microsoft Graph. Every resolved change writes a `user.roles_synced` audit entry carrying the groups that caused it, the users page badges a directory-managed role and warns before editing one, and a dedicated endpoint reports the last sync per user exactly — the page used to derive it from the newest 200 audit entries, so a user whose sync had aged out rendered as "Never synced", indistinguishable from one the directory never touched. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **config:** OAuth auto-provisioning is provider-agnostic, and can be overridden per provider. `DBB_AUTH_AUTO_CREATE_USERS` and `DBB_AUTH_DEFAULT_ROLE` replace the Slack-shaped names an OIDC-only operator had to discover; the legacy `DBB_SLACK_AUTH_*` spellings stay accepted as instance-wide aliases, with the canonical setting winning against whichever source each was actually configured from. `DBB_AUTH_AUTO_CREATE_USERS_<PROVIDER>` and `DBB_AUTH_DEFAULT_ROLE_<PROVIDER>` then override both per provider, resolving per-provider, then instance-wide, then the default — which is what lets a deployment trust a tightly-gated Entra tenant to mint accounts while refusing the same from a Slack workspace full of contractors. Gating a provider blocks account *creation* only; an account that already exists can still sign in through it. Two things fail closed at startup rather than becoming an override that quietly does not apply: a default role is validated against the known roles exactly, `Admin` refused rather than folded to `admin`, and a provider name outside the known set is a startup error. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **grants:** a grant binds to a server group, and its quotas and priority span that group. A grant keeps an anchor, the database it was issued for, but when its definition scopes on server groups it binds to whichever of those groups currently holds that database and then covers exactly what the group holds right now — so adding a server extends every already-live grant bound to it, with no re-issuance and no new grant row, and removing one narrows them, the anchor included. Membership is read live and never snapshotted: the deliberate exception to "a live grant's behaviour never changes under it", accepted because group membership is operational data, with the admin UI warning about the blast radius at the point of edit. One `max_query_counts` and one `max_bytes_transferred` budget is consumed across the whole group, and `priority` ranks group-bound grants against each other where their groups overlap. The auth path changes in exactly one place — the single function all five protocols resolve their session's grant through — so PostgreSQL, Oracle, MySQL, MongoDB and SQL Server are covered at once, and the listing endpoint shares the same predicate so the UI cannot list grants the proxy would not pick. The anchor keeps two jobs: it is what an *unbound* grant covers, and it is the fallback if the group is deleted outright, which narrows access back to where it started and never widens it. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **grants:** a grant definition scopes on server groups instead of enumerating databases, and a bare "group" no longer exists in the API. `database_uids` becomes `server_group_uids`: a definition names stable sets of servers, so adding a server to the fleet stops meaning "edit every relevant definition" — and, because definitions are immutably versioned, "archive and re-insert every one of them". Membership resolves live, exactly as the user-group scope already did, so a server added to a scoped group is requestable immediately with no edit and therefore no new definition version; empty still means every database. Because two kinds of group now exist, `group_uids` and `approver_group_uids` are renamed `user_group_uids` and `approver_user_group_uids` on grant definitions, `group_uids` becomes `user_group_uids` on the update-user body, and the user detail response's `groups` key becomes `user_groups`. Every retired spelling, `database_uids` included, is refused with a 400 naming its replacement rather than silently ignored, because dropping a scope restriction on the floor would fail open. A migration mirrors every existing per-database scope into a real server group — one per *distinct* set of databases, named after the definition that first used it — and is idempotent and reversible. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **oracle:** a held mid-reply refusal records what its handoff actually cost, and names the case where its two fail-safes cross. Every exit now logs the two quantities the bounds exist to cap — the bytes relayed since the hold began, and how long the client took to announce its boundary — where both were previously inferred from a client's row count, which can say neither. The bounds themselves meet at about 280 KiB/s: below that the flat 30-second grace runs out before the byte bound can, so on a slow link a handoff that was going to succeed is cut by the clock, and the symptom was indistinguishable from the three other fail-safes firing. Nothing is cut differently — no bound moves, this is report-only — but the grace-expiry path now emits a WARN naming the crossover, and only when the abandoned hold was still being fed right up to the deadline and the byte bound was out of reach at the observed rate. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **oracle:** the synthetic AUTH fallback covers wide/OCI clients, and every AUTH path speaks the session's negotiated chunk form. The synthetic builders emitted only the thin, compressed encoding, but an OCI client — sqlplus, the Instant Client — negotiates a different dialect during the pre-auth relay and the upstream parses AUTH at those capabilities, so a thin body handed to an OCI-conditioned upstream is unreadable and draws two break markers and `ORA-03120`; the fallback was a safety net for thin clients only. The wide form is built from a real capture rather than from first principles, because two of its five differences cannot be derived: every key and value length is a 4-byte little-endian field carrying a UTF-8 max-expansion buffer size on the Instant Client but a plain length on the DB-bundled client (mixing the two conventions draws `ORA-28041`), and an empty value is four zero bytes followed straight by the flag with no character-set byte at all. The data flags, the pointer-run preamble and a logon mode carrying client-specific high bits are taken from the client rather than invented. Separately, the client challenge, both rewrite fallbacks, the thin and wide synthetic builders and the Phase 2 finders now all read and write the long chunk form when the session negotiated it, which is read from the capability byte clients actually read. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **proxy:** a connection-setup `ALTER SESSION SET …` is allowed under `read_only` and `block_ddl` when every parameter it sets is allowlisted. Once the Oracle gate could see a full statement rather than a fragment, DBeaver's connection setup — `ALTER SESSION SET CURRENT_SCHEMA=…` and its `NLS_…` siblings — started tripping both controls, because `ALTER` is in the write and the DDL keyword lists. A multi-parameter statement is refused whole unless every parameter on it is on the list, and `CONTAINER` is deliberately not on it and is separately blocked outright, so the allowlist and the block cannot disagree. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **proxy:** a database running in a Kubernetes pod can be proxied without exposing it, through a new `kubernetes` tunnel protocol. A server row with protocol `kubernetes` carries the API server, a ServiceAccount bearer token and a namespace, and — exactly like an `ssh` bastion row — is a `via` dial path rather than something a grant can ever be issued on. The target row's host is a pod name or `svc/<name>` and its port is the container port, because the tunnel is a `pods/portforward` stream to the pod's *own* port: a database that is merely routable from the cluster network is out of scope, and the server form states that where an operator will read it. Tunnels are pooled per server exactly as SSH clients are, upstream TLS still applies inside, and a cluster whose API server itself sits behind an SSH bastion is supported (forcing the SPDY transport, the only one that takes a dial function) while the reverse nesting is refused explicitly. The CA bundle is optional: with none supplied the API server's CA is pinned on first connect and persisted separately from an operator-supplied one, the connectivity check reports both the learned pin and a CA that has since changed, and the UI surfaces the pin, the new protocol and a Tunnel Servers table listing both kinds of dial path. The whole path is exercised end to end against a real k3s cluster, including a pod deleted mid-suite. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **store:** `audit_log` and per-connection query history are sealed with an HMAC chain, so a deletion or an edit cannot go unnoticed. Every audit entry and every `queries` row carries a MAC over its own content plus the previous record's MAC, keyed by an HKDF subkey of `DBB_KEY` that is derived per purpose and never stored in the database — so an attacker holding the store cannot recompute a chain. `audit_log` is one chain; `queries` is one chain per connection, a scope chosen so `DBB_QUERY_STORAGE_RETENTION` can never sever a chain by deleting exactly what it is meant to delete. `dbbat audit verify` walks the audit chain and `dbbat audit verify --queries` the per-connection ones, reporting counts, the head MAC and the first break, with a non-zero exit on a break. An append whose cached head a peer replica has since moved retries rather than failing, so replicas sharing a store stay correct. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **store:** a session's query-chain head stamp is a keyed, versioned seal that is refreshed on live sessions, and a cleared one is a break. The stamp is what catches a deletion from the *end* of a session's history, and a verbatim head MAC is readable out of the table it came from, so copying one after a trailing deletion needed no key: it is now a keyed MAC over the head, carrying a format version inside its own MAC so a sealed row cannot be relabelled to earn a weaker rule. The reconcile seals a crash-orphaned session in the same transaction that writes `disconnected_at`, and a third writer sweeps this run's still-open sessions on the reclaim tick, which is what bounds how long a live session's tail goes unsealed; verification follows that distinction, judging an open session's stamp as a prefix and going back to exact the moment it closes. Clearing the stamp used to be cheaper than forging one — a single `UPDATE … SET query_chain_mac = NULL` read as "never stamped" and the session verified — so a NULL stamp is now judged rather than skipped: not a break for a session that logged nothing or one younger than a sweep, a break for a closed session whose chained statements survive, and a break with its own reason when a chain length outlived its MAC. The walk enumerates stamped connections rather than only connections still present in `queries`, so a session whose statements were deleted *in full* is judged instead of skipped, excused only when its `connected_at` precedes the configured retention cutoff. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **store:** captured result rows are chained too, one chain per capture. `query_rows` carries the same HMAC construction, positioned by `row_number` — an ordering rather than a dense sequence, because dropped or unencodable rows leave gaps — and the chain is sealed at the flush barrier when the capture finishes, so what the proxy stored of a result set is as tamper-evident as the statement that produced it. The batched writer still lands ~1000 rows in a single bulk `INSERT` inside one transaction, so the hottest write path keeps amortising its round trip. Verify with `dbbat audit verify --rows`, optionally narrowed to one connection. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **store:** every session open and close is recorded in the audit chain, so deleting a whole session leaves evidence. `connections` carries no MAC and deliberately never will — retention deletes from it, and a chain over it would report a truncated prefix after every sweep — which left `DELETE FROM connections WHERE uid = …` removing a session, every statement it ran and every row it captured, cascading through both child tables and breaking nothing a chain walk checks. It was the last uncovered deletion and the cheapest attack on query history. The evidence now goes where the delete cannot reach it: a `connection.opened` entry at creation and a `connection.closed` entry from whichever writer closes the session — the normal path or the crash reconcile, recorded as `closed_by` — carrying the row's immutable identity (connection uid, user, database, source IP, `connected_at`, instance and run, grant) plus, on close, `disconnected_at` and the session's sealed query-chain head. Mutable counters stay out. The write is never fatal to a live session and never joins the caller's transaction. Volume being what it is, both event types are excluded from an unfiltered `GET /api/v1/audit` and reached with `?event_type=`. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **ui:** deactivated grant definitions are hidden behind a toggle. The admin list fetches active definitions by default and a "Show deactivated" switch in the page header flips it back, keeping the existing badge for the mixed view — so a long-lived instance's list reflects what can actually be assigned today rather than everything it has ever withdrawn. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **ui:** the access-request dialog offers only the databases a definition actually covers, for every requester rather than only for admins. It resolved scope through an admin-only endpoint, which returned nothing to a non-admin and therefore offered them every database in the fleet — a picker full of choices the server would reject on submit. Grant definitions now carry the concrete set of database uids their scoped server groups currently hold, resolved in one batched query per response, with `null` meaning unscoped. This is a convenience only: the server still re-resolves scope on submit and remains the gate. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **api:** AI agents can query through dbbat over MCP, governed exactly like a human session
+
+  A Streamable-HTTP Model Context Protocol server is mounted at `POST /api/v1/mcp`,
+  authenticated with an ordinary `dbb_` API key, offering `list_databases`, `query`, `describe`
+  and `await_approval`.
+
+  Every statement an agent runs is executed by dialing dbbat's *own* proxy listener over
+  loopback as the key's owner. There is deliberately no internal execution path, so auth,
+  grants, `read_only` / `block_ddl` / `block_copy`, quotas, query logging and the mid-flight
+  approval gate are the same code reached over the same wire — and this endpoint cannot drift
+  from them.
+
+  All five protocols are covered. On MongoDB the statement is `<command> <extended JSON>`
+  rather than SQL, which keeps the tool surface at four and keeps an approval pattern meaning
+  one thing whether the command came from mongosh or from an agent.
+
+  A statement still parked after a short grace window returns a structured `approval_pending`
+  result naming the held query, and `await_approval` long-polls it, so an agent never silently
+  times out on a hold — every return names the next action.
+
+  `DBB_MCP_ENABLED` defaults to true; `false` removes the routes entirely.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **api:** all three HMAC chains can be verified over the REST API and from the admin UI
+
+  `GET /api/v1/audit/verify`, `/audit/verify/queries` and `/audit/verify/rows` are admin-only
+  and return the same numbers as the CLI — counts, the head MAC in hex, the pre-anchor
+  unverifiable count and the first break — and never the key or the content of an audited
+  record. The row endpoint narrows on `?connection=` or `?query=`, which cannot be combined.
+
+  A walk is O(rows), so each scope's outcome is cached for a minute and one walk at a time is
+  admitted per instance. A windowed resume was rejected because starting from a caller-supplied
+  position trusts a `prev_mac` an attacker controls.
+
+  The audit page gains a Chain verification panel that walks all three, renders a break loudly
+  with its `chain_seq`, uid and reason, and offers the head MAC with a copy button because the
+  head is meant to be recorded outside the database.
+
+  The panel also says what the answer is worth: it is served by the process under audit, the
+  result may be up to a minute old, and `dbbat audit verify` is what someone who does not trust
+  this server runs.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **api:** the two kinds of approver live on the fleet, not on the policy
+
+  Servers and server groups each carry an access-approver list (who may decide **grant
+  requests** for that database) and a query-approver list (who may release **approval holds**
+  on statements against it). Neither implies the other, and an org wanting overlap lists the
+  same user group in both.
+
+  Resolution is one fallback chain implemented in one place, because a second SQL-shaped copy
+  of it is exactly the drift that would be an authorization bug: for a grant request, the
+  server's list, then the union of its server groups' lists, then admins; for a hold, the
+  definition's own approver list wins outright when non-empty, then the same chain. Empty
+  everywhere is admin-only, which is precisely the previous behaviour, so nothing changes until
+  an approver group is named.
+
+  The lists are read at decision time and never snapshotted, so an edit — or moving a server
+  between groups — immediately changes who may decide requests already filed and statements
+  already parked. A departed lead's replacement is effective now.
+
+  Self-approval is refused on every path, both Slack transports included, and each pending item
+  reports which hat the caller wears (`admin`, `definition_approver`, `server_approver`) so the
+  UI can say why they may decide it.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **auth:** any OIDC issuer can be dbbat's identity provider, not just Slack
+
+  `DBB_OIDC_ISSUER` plus a client id and secret enables a generic provider that works against
+  Google Workspace, Okta, Microsoft Entra, Keycloak or Authentik, registered under the `oidc`
+  provider key with its own callback.
+
+  Unlike the Slack provider, which trusts a userInfo endpoint, this one only accepts an
+  identity carried by an ID token whose signature, issuer, audience and expiry were verified
+  against the issuer's JWKS. The optional `DBB_OIDC_EMAIL_DOMAINS` allowlist is checked against
+  that verified email claim — which matters on a multi-tenant issuer, where "any account the
+  issuer vouches for" means any account on the internet.
+
+  PKCE (S256) is used on every flow, with the verifier carried on the existing OAuth state row
+  so a callback landing on another replica still works.
+
+  Discovery is lazy, so an unreachable IdP delays the first login instead of blocking startup,
+  and the login screen renders one button per configured provider with the label the operator
+  chose.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **auth:** dbbat roles can follow directory group membership, resolved on every login
+
+  `DBB_OIDC_ROLE_MAPPING` binds roles to the groups in the ID token's groups claim
+  (`admin=db-admins,viewer=analysts`), and because it is applied at every sign-in rather than
+  only at account creation, an admin who leaves the directory group loses the role at their
+  next login with nobody remembering to click.
+
+  It is authoritative only for the roles it names — a role granted by hand in the UI is never
+  revoked by a login — the default role is the floor when nothing matches, and the last
+  remaining admin is retained exactly as user management already refuses to strip it.
+
+  Values match exactly, case included, because Entra sends group object ids rather than names,
+  and both claim encodings are accepted while a lone string is one group and never a delimited
+  list.
+
+  A token that delegates the groups claim through `_claim_names` — Entra's groups overage, past
+  roughly 200 memberships — is read as membership *unknown* rather than empty: the login
+  succeeds, the mapping is skipped entirely, roles are left untouched with no default-role
+  floor, and a WARN names the user and the claim. dbbat never follows the pointer to Microsoft
+  Graph.
+
+  Every resolved change writes a `user.roles_synced` audit entry carrying the groups that
+  caused it, the users page badges a directory-managed role and warns before editing one, and a
+  dedicated endpoint reports the last sync per user exactly — the page used to derive it from
+  the newest 200 audit entries, so a user whose sync had aged out rendered as "Never synced",
+  indistinguishable from one the directory never touched.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **config:** OAuth auto-provisioning is provider-agnostic, and can be overridden per provider
+
+  `DBB_AUTH_AUTO_CREATE_USERS` and `DBB_AUTH_DEFAULT_ROLE` replace the Slack-shaped names an
+  OIDC-only operator had to discover. The legacy `DBB_SLACK_AUTH_*` spellings stay accepted as
+  instance-wide aliases, with the canonical setting winning against whichever source each was
+  actually configured from.
+
+  `DBB_AUTH_AUTO_CREATE_USERS_<PROVIDER>` and `DBB_AUTH_DEFAULT_ROLE_<PROVIDER>` then override
+  both per provider, resolving per-provider, then instance-wide, then the default — which is
+  what lets a deployment trust a tightly-gated Entra tenant to mint accounts while refusing the
+  same from a Slack workspace full of contractors.
+
+  Gating a provider blocks account *creation* only; an account that already exists can still
+  sign in through it.
+
+  Two things fail closed at startup rather than becoming an override that quietly does not
+  apply: a default role is validated against the known roles exactly, `Admin` refused rather
+  than folded to `admin`, and a provider name outside the known set is a startup error.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **grants:** a grant binds to a server group, and its quotas and priority span that group
+
+  A grant keeps an anchor, the database it was issued for, but when its definition scopes on
+  server groups it binds to whichever of those groups currently holds that database and then
+  covers exactly what the group holds right now — so adding a server extends every already-live
+  grant bound to it, with no re-issuance and no new grant row, and removing one narrows them,
+  the anchor included.
+
+  Membership is read live and never snapshotted: the deliberate exception to "a live grant's
+  behaviour never changes under it", accepted because group membership is operational data,
+  with the admin UI warning about the blast radius at the point of edit.
+
+  One `max_query_counts` and one `max_bytes_transferred` budget is consumed across the whole
+  group, and `priority` ranks group-bound grants against each other where their groups overlap.
+
+  The auth path changes in exactly one place — the single function all five protocols resolve
+  their session's grant through — so PostgreSQL, Oracle, MySQL, MongoDB and SQL Server are
+  covered at once, and the listing endpoint shares the same predicate so the UI cannot list
+  grants the proxy would not pick.
+
+  The anchor keeps two jobs: it is what an *unbound* grant covers, and it is the fallback if
+  the group is deleted outright, which narrows access back to where it started and never widens
+  it.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **grants:** a grant definition scopes on server groups instead of enumerating databases, and
+  a bare "group" no longer exists in the API
+
+  `database_uids` becomes `server_group_uids`: a definition names stable sets of servers, so
+  adding a server to the fleet stops meaning "edit every relevant definition" — and, because
+  definitions are immutably versioned, "archive and re-insert every one of them". Membership
+  resolves live, exactly as the user-group scope already did, so a server added to a scoped
+  group is requestable immediately with no edit and therefore no new definition version; empty
+  still means every database.
+
+  Because two kinds of group now exist, `group_uids` and `approver_group_uids` are renamed
+  `user_group_uids` and `approver_user_group_uids` on grant definitions, `group_uids` becomes
+  `user_group_uids` on the update-user body, and the user detail response's `groups` key
+  becomes `user_groups`.
+
+  Every retired spelling, `database_uids` included, is refused with a 400 naming its
+  replacement rather than silently ignored, because dropping a scope restriction on the floor
+  would fail open.
+
+  A migration mirrors every existing per-database scope into a real server group — one per
+  *distinct* set of databases, named after the definition that first used it — and is
+  idempotent and reversible.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **oracle:** a held mid-reply refusal records what its handoff actually cost, and names the
+  case where its two fail-safes cross
+
+  Every exit now logs the two quantities the bounds exist to cap — the bytes relayed since the
+  hold began, and how long the client took to announce its boundary — where both were
+  previously inferred from a client's row count, which can say neither.
+
+  The bounds themselves meet at about 280 KiB/s: below that the flat 30-second grace runs out
+  before the byte bound can, so on a slow link a handoff that was going to succeed is cut by
+  the clock, and the symptom was indistinguishable from the three other fail-safes firing.
+
+  Nothing is cut differently — no bound moves, this is report-only — but the grace-expiry path
+  now emits a WARN naming the crossover, and only when the abandoned hold was still being fed
+  right up to the deadline and the byte bound was out of reach at the observed rate.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **oracle:** the synthetic AUTH fallback covers wide/OCI clients, and every AUTH path speaks
+  the session's negotiated chunk form
+
+  The synthetic builders emitted only the thin, compressed encoding, but an OCI client —
+  sqlplus, the Instant Client — negotiates a different dialect during the pre-auth relay and
+  the upstream parses AUTH at those capabilities. A thin body handed to an OCI-conditioned
+  upstream is unreadable and draws two break markers and `ORA-03120`, so the fallback was a
+  safety net for thin clients only.
+
+  The wide form is built from a real capture rather than from first principles, because two of
+  its five differences cannot be derived: every key and value length is a 4-byte little-endian
+  field carrying a UTF-8 max-expansion buffer size on the Instant Client but a plain length on
+  the DB-bundled client (mixing the two conventions draws `ORA-28041`), and an empty value is
+  four zero bytes followed straight by the flag with no character-set byte at all. The data
+  flags, the pointer-run preamble and a logon mode carrying client-specific high bits are taken
+  from the client rather than invented.
+
+  Separately, the client challenge, both rewrite fallbacks, the thin and wide synthetic
+  builders and the Phase 2 finders now all read and write the long chunk form when the session
+  negotiated it, which is read from the capability byte clients actually read.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **proxy:** a connection-setup `ALTER SESSION SET …` is allowed under `read_only` and
+  `block_ddl` when every parameter it sets is allowlisted
+
+  Once the Oracle gate could see a full statement rather than a fragment, DBeaver's connection
+  setup — `ALTER SESSION SET CURRENT_SCHEMA=…` and its `NLS_…` siblings — started tripping both
+  controls, because `ALTER` is in the write and the DDL keyword lists.
+
+  A multi-parameter statement is refused whole unless every parameter on it is on the list.
+  `CONTAINER` is deliberately not on it and is separately blocked outright, so the allowlist
+  and the block cannot disagree.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **proxy:** a database running in a Kubernetes pod can be proxied without exposing it, through
+  a new `kubernetes` tunnel protocol
+
+  A server row with protocol `kubernetes` carries the API server, a ServiceAccount bearer token
+  and a namespace, and — exactly like an `ssh` bastion row — is a `via` dial path rather than
+  something a grant can ever be issued on.
+
+  The target row's host is a pod name or `svc/<name>` and its port is the container port,
+  because the tunnel is a `pods/portforward` stream to the pod's *own* port: a database that is
+  merely routable from the cluster network is out of scope, and the server form states that
+  where an operator will read it.
+
+  Tunnels are pooled per server exactly as SSH clients are, upstream TLS still applies inside,
+  and a cluster whose API server itself sits behind an SSH bastion is supported (forcing the
+  SPDY transport, the only one that takes a dial function) while the reverse nesting is refused
+  explicitly.
+
+  The CA bundle is optional: with none supplied the API server's CA is pinned on first connect
+  and persisted separately from an operator-supplied one, the connectivity check reports both
+  the learned pin and a CA that has since changed, and the UI surfaces the pin, the new
+  protocol and a Tunnel Servers table listing both kinds of dial path.
+
+  The whole path is exercised end to end against a real k3s cluster, including a pod deleted
+  mid-suite.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **store:** `audit_log` and per-connection query history are sealed with an HMAC chain, so a
+  deletion or an edit cannot go unnoticed
+
+  Every audit entry and every `queries` row carries a MAC over its own content plus the
+  previous record's MAC, keyed by an HKDF subkey of `DBB_KEY` that is derived per purpose and
+  never stored in the database — so an attacker holding the store cannot recompute a chain.
+
+  `audit_log` is one chain; `queries` is one chain per connection, a scope chosen so
+  `DBB_QUERY_STORAGE_RETENTION` can never sever a chain by deleting exactly what it is meant to
+  delete.
+
+  `dbbat audit verify` walks the audit chain and `dbbat audit verify --queries` the
+  per-connection ones, reporting counts, the head MAC and the first break, with a non-zero exit
+  on a break.
+
+  An append whose cached head a peer replica has since moved retries rather than failing, so
+  replicas sharing a store stay correct.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **store:** a session's query-chain head stamp is a keyed, versioned seal that is refreshed on
+  live sessions, and a cleared one is a break
+
+  The stamp is what catches a deletion from the *end* of a session's history, and a verbatim
+  head MAC is readable out of the table it came from, so copying one after a trailing deletion
+  needed no key. It is now a keyed MAC over the head, carrying a format version inside its own
+  MAC so a sealed row cannot be relabelled to earn a weaker rule.
+
+  The reconcile seals a crash-orphaned session in the same transaction that writes
+  `disconnected_at`, and a third writer sweeps this run's still-open sessions on the reclaim
+  tick, which is what bounds how long a live session's tail goes unsealed. Verification follows
+  that distinction, judging an open session's stamp as a prefix and going back to exact the
+  moment it closes.
+
+  Clearing the stamp used to be cheaper than forging one — a single
+  `UPDATE … SET query_chain_mac = NULL` read as "never stamped" and the session verified — so a
+  NULL stamp is now judged rather than skipped: not a break for a session that logged nothing
+  or one younger than a sweep, a break for a closed session whose chained statements survive,
+  and a break with its own reason when a chain length outlived its MAC.
+
+  The walk enumerates stamped connections rather than only connections still present in
+  `queries`, so a session whose statements were deleted *in full* is judged instead of skipped,
+  excused only when its `connected_at` precedes the configured retention cutoff.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **store:** captured result rows are chained too, one chain per capture
+
+  `query_rows` carries the same HMAC construction, positioned by `row_number` — an ordering
+  rather than a dense sequence, because dropped or unencodable rows leave gaps — and the chain
+  is sealed at the flush barrier when the capture finishes, so what the proxy stored of a
+  result set is as tamper-evident as the statement that produced it.
+
+  The batched writer still lands ~1000 rows in a single bulk `INSERT` inside one transaction,
+  so the hottest write path keeps amortising its round trip.
+
+  Verify with `dbbat audit verify --rows`, optionally narrowed to one connection.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **store:** every session open and close is recorded in the audit chain, so deleting a whole
+  session leaves evidence
+
+  `connections` carries no MAC and deliberately never will — retention deletes from it, and a
+  chain over it would report a truncated prefix after every sweep — which left
+  `DELETE FROM connections WHERE uid = …` removing a session, every statement it ran and every
+  row it captured, cascading through both child tables and breaking nothing a chain walk
+  checks. It was the last uncovered deletion and the cheapest attack on query history.
+
+  The evidence now goes where the delete cannot reach it: a `connection.opened` entry at
+  creation and a `connection.closed` entry from whichever writer closes the session — the
+  normal path or the crash reconcile, recorded as `closed_by` — carrying the row's immutable
+  identity (connection uid, user, database, source IP, `connected_at`, instance and run, grant)
+  plus, on close, `disconnected_at` and the session's sealed query-chain head. Mutable counters
+  stay out.
+
+  The write is never fatal to a live session and never joins the caller's transaction. Volume
+  being what it is, both event types are excluded from an unfiltered `GET /api/v1/audit` and
+  reached with `?event_type=`.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **ui:** deactivated grant definitions are hidden behind a toggle
+
+  The admin list fetches active definitions by default and a "Show deactivated" switch in the
+  page header flips it back, keeping the existing badge for the mixed view — so a long-lived
+  instance's list reflects what can actually be assigned today rather than everything it has
+  ever withdrawn.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **ui:** the access-request dialog offers only the databases a definition actually covers, for
+  every requester rather than only for admins
+
+  It resolved scope through an admin-only endpoint, which returned nothing to a non-admin and
+  therefore offered them every database in the fleet — a picker full of choices the server
+  would reject on submit.
+
+  Grant definitions now carry the concrete set of database uids their scoped server groups
+  currently hold, resolved in one batched query per response, with `null` meaning unscoped.
+
+  This is a convenience only: the server still re-resolves scope on submit and remains the gate.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
 
 
 ### Bug Fixes
 
 * **deps:** update module github.com/gopacket/gopacket to v1.7.1 ([#310](https://github.com/fclairamb/dbbat/issues/310)) ([7b1c83e](https://github.com/fclairamb/dbbat/commit/7b1c83e9f48e3cc926c521d8875f0ddd2393ba6e))
 * **deps:** update module golang.org/x/crypto to v0.55.0 ([#312](https://github.com/fclairamb/dbbat/issues/312)) ([97e049b](https://github.com/fclairamb/dbbat/commit/97e049b64b4fa41577df93f19ef66c4d66667d6b))
-* **mongodb:** an aggregation pipeline can no longer reach a database the grant does not cover, and one dbbat cannot fully read now fails closed. `$out` and `$merge` accept an explicit `{db, coll}` target that the message's `$db` never reveals, so under any grant that is not `read_only` a write landed in a database the grant does not cover while the `$db` check passed honestly and `queries` attributed it to the granted database; `$lookup`, `$graphLookup` and `$unionWith` take the same shape on the read side, where `read_only` never looked at all. Every one of them is now held to the same per-message database policy and refused with the usual Unauthorized (13). More seriously, the nested-pipeline scan gave up at its depth cap and on any parse failure and reported an empty result — and the same walk is what decides whether a command writes, so a `$merge` nested past the cap was classified as a *read* and ran under `read_only` (measured at depths 9 through 12). Every give-up path now yields a refusal, the scan runs once up front before any grant control is consulted, so no grant can permit a command whose effect could not be established, and `explain`, which wraps a whole command in a nested document, is descended into. A benign pipeline within the cap is unaffected, and the string forms of those stages, which name the same database, stay allowed. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **mongodb:** legacy wire opcodes are refused after authentication. Anything that was not `OP_MSG` was forwarded verbatim, so a hand-crafted `OP_QUERY` against `otherdb.$cmd` never reached validation at all — no database check, no `read_only` check, and nothing shaped like a statement in the query log. `OP_QUERY` and `OP_GET_MORE` now receive an Unauthorized (13) `OP_REPLY`, the fire-and-forget legacy writes are dropped, and the attempt is recorded as a query; the refusal is independent of grant controls, like the database check itself, and the pre-auth handshake, which legitimately uses `OP_QUERY` for the first `hello`, is untouched. This is a deliberate compatibility change rather than a pure fix: MongoDB removed these opcodes in 5.1 and a modern driver against a supported server never sends them, but a hand-crafted legacy client talking to a MongoDB older than 5.1 through the proxy will now be refused. Parsing a path MongoDB itself deleted was weighed and rejected. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **mongodb:** tearing down a relay no longer races the pump that is still running. When either direction of a MongoDB session ended, the teardown closed the upstream connection and then cleared the pointer to it, while the opposite pump was still reading that same field to service its own traffic — a data race on every session close, latent since the relay was written and reachable on any session, not just a failing one. The pointer is no longer cleared: the upstream close is already idempotent, so the second close on the session's own teardown path was always harmless, and the field is now written once at connect time before either pump exists. The equivalent teardown on the other four proxies was checked and does not share the shape. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **mssql:** a `USE` that leaves the granted database is refused, and dynamic SQL is checked instead of stepped over. TDS pins nothing — the LOGIN7 database field sets the initial context only — and batch validation ran the shared checks plus a bulk-copy pattern and nothing else, with no SQL Server blocked-pattern list at all, so `USE otherdb` was an ordinary batch that moved the session. The check now scans the whole batch rather than its leading statement (a T-SQL batch needs no separator), steps over string literals and quoted identifiers, skips the `OPTION (USE PLAN …)` and `OPTION (USE HINT …)` query hints, and refuses whatever the grant says. `EXEC('…')` made "no statement begins inside a string literal" — the invariant every prefix-shaped validator rests on — false: measured before the fix, `EXEC('USE otherdb; SELECT * FROM secret')` passed with `read_only`, `block_ddl` and `block_copy` all set, and `EXECUTE('DROP TABLE t')` passed `block_ddl`. The inner statement now runs through exactly the same checks as the outer one, one level deep, because a laxer rule set inside would turn every control into a suggestion. `sp_executesql` is found whichever way T-SQL names its statement argument — `[@stmt](https://github.com/stmt)`, `[@statement](https://github.com/statement)`, `[@tsql](https://github.com/tsql)`, `EXEC sys.sp_executesql`, in any argument order — where before only the positional form was recognised and every named spelling walked past as an inert literal. `EXEC dbo.p` still falls through as ordinary text and `EXEC('SELECT 1')` still runs under a read-only grant; `EXEC([@sql](https://github.com/sql))` is not statically decidable and is documented as the undecidable case. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **mysql:** a text `USE otherdb` is refused instead of forwarded. `COM_INIT_DB` had always been checked, but go-mysql routes `COM_QUERY` straight to the query handler, so the SQL text `USE otherdb` — which is what `mysql -e` and most drivers' `Exec` send — never reached that check; `USE` matches no write keyword, no DDL keyword and no blocked pattern, so it was forwarded under every grant, read-only included, and every subsequent `queries` row named the granted database rather than the one the statement actually ran against. Both paths now share one decision, taken against the comment-normalised text so a version-gated or `#` line comment between the keyword and the name cannot slip through, and `USE <the granted database>` is still allowed and answered without an upstream round trip. `PREPARE s FROM 'USE otherdb'` earns the same refusal: the literal is unwrapped one level and put through the same decision, since `PREPARE` matches no control and the switch scan used to read only the outer statement. A nested `PREPARE`, an unterminated literal or adjacent literals fail closed; `PREPARE s FROM [@sql](https://github.com/sql)` and `CONCAT(...)` remain undecidable and are documented as such rather than implied to be covered. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **oracle:** `ALTER SESSION SET CONTAINER` is refused outright, whatever the grant says. Switching pluggable database steps outside the one server row the grant covers, so every `queries` row written after the switch names the wrong database — but because the statement merely starts with `ALTER`, only `read_only` and `block_ddl` refused it and the default full-write grant allowed the escape. It now joins `ALTER SYSTEM` in the Oracle blocked patterns, and the pattern scans to the end of the statement rather than anchoring on `SET CONTAINER`, so `ALTER SESSION SET CURRENT_SCHEMA=X CONTAINER=Y` is the same refusal. `CURRENT_SCHEMA` on its own stays allowed: it moves name resolution, not the database the session is talking to. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **oracle:** a refused statement no longer hangs sqlplus and the DB-bundled OCI client. Under a grant carrying statement controls, the refusal was written in an encoding and framing those clients do not wait for, so the call never ended and the client simply sat there — a refusal that hangs the session is worse than one that is denied. The refusal now ends the client's call with a real OER frame, in the dialect the session negotiated, in the shape learned from what the server itself sent, and stamped with the client's own call number; the learned shape is guarded against concurrent access and every learned field is carried through the fallback rather than partially. The 64-bit OCI close-cursors header and the thick client's wide-encoded close list are walked in full instead of a sequence number being read out of them, so a refusal ends the right call, a cursor id is never read out of a piggyback dbbat cannot walk, and a frame dbbat cannot read is not allowed to travel under a held refusal. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **oracle:** a statement that failed on an OCI client is recorded as a failure instead of a success. The OER decoder read TTC compressed integers only, so on sqlplus, the Instant Client and SQL*Developer over OCI every summary object the server sent was refused — and *every* failing statement on those sessions was written to `queries` as a success, while cursor-id learning went blind on the same connections. The fixed-width layout dbbat could already write is now also read, at the very offsets that encoder writes, anchored on the error number repeated as the trailing return code plus a non-zero call status rather than on a trusted length, with the layout asked of the session's learned shape and both tried under that anchor until something has been learned. A failure raised *mid-fetch*, after rows have already started flowing, likewise left a query row carrying no error text at all; its ORA text is now recorded, on thin, JDBC and OCI clients alike. This is an audit-record correctness fix: rows already stored are not repaired. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **oracle:** cursor-id learning no longer dies after a session's 255th call, and a re-execution dbbat cannot resolve is refused under statement controls. The field the learner reads is the end-to-end ECID sequence, a uint16 counting up across the whole session, but it was bounded at 255 on the belief that TTC numbers calls with a wrapping byte; measured against Oracle 23ai Free, a session crosses 255 after a few dozen statements and from that point every OER was rejected. Because Oracle recycles cursor ids, that did not surface as an untracked cursor — the re-executions that followed resolved to whatever stale statement last held the id, so the gate ran the wrong SQL and `/queries` recorded the wrong SQL, silently. Captured mid-churn: five runs of `SELECT 1 AS n FROM dual`, all gated as `SELECT 35 AS churn FROM dual`. All three frames that name a cursor and carry no SQL — the SQL-less `OALL8`, a fresh-query `OFETCH`, and the piggyback re-execution every modern thin client actually sends — now answer an untracked cursor identically: `ORA-01031` under a grant carrying a statement-shaped control, forwarded with a WARN under one carrying none. The wire op a client picks is no longer a cheaper way past the same grant, and the three share one table so they cannot drift apart again. Licensed by measurement rather than argument: 124 live re-executions from go-ora v3 and python-oracledb thin, across prepared loops, bind-heavy statements, interleaved cursors, DML, PL/SQL, a REF cursor and a churned statement cache, none of them naming a cursor dbbat could not resolve. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **oracle:** the connectivity check reports a rejected password as an auth failure rather than a network fault. go-ora enables Oracle 23ai's one-round-trip fast login by default, and its fast path reads the login reply as a protocol-negotiation message without first checking whether it is a TTC error, so a perfectly readable `ORA-01017` was rendered as "message code error: received code 4 and expected code is 1" and classified as `db_handshake_failed` — sending the admin to look at the network instead of at the credentials. Fast login is now disabled on the probe's connect string, which costs one round trip on a check that only runs when someone presses "test connection"; pre-23ai servers never offered it, so nothing changes against them. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **oracle:** the statement gate reads the execute header's declared SQL length instead of guessing at it. A window-and-keyword scan returned a mid-statement fragment for 48 of the 137 execute ops in the test corpus — `ALTER SESSION SET CURRENT_SCHEMA=TESTADM` read as `SET CURRENT_SCHEMA=TESTADM` among them — so `read_only`, `block_ddl` and every approval pattern were judged against text that was not what the upstream ran, and query history recorded the fragment. Three further defects in the decode are closed with it: a length shorter than the statement returned a silent prefix while reporting success, so the gate enforced against truncated text believing it was precise; a twelve-byte payload could slice past the end of the buffer, and the recover that contained the panic meant the frame was forwarded ungated; and capping statement text at `0x7e` truncated non-ASCII SQL at the first accented byte, losing any blocked or approval pattern in the tail for the WE8ISO8859P1 client population the Oracle notes themselves call the common European case. Statement text is now admitted under the same sanitisation already shipped for OER diagnostics, and bind capture anchors on the wire bytes rather than the repaired text, so a repaired multi-byte character cannot make the tail scan walk back into the statement and report its own text as a bind value. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **proxy:** a panic on a proxy goroutine ends the session it belongs to, not the whole process. Every protocol starts relay and bookkeeping goroutines whose panics the recover on the connection handler cannot reach — a different goroutine catches nothing they raise — so packet framing, the dump writer, the mid-stream limit check, a held refusal's teardown, and the detached goroutines that write a query record, a completion or an API-key usage bump were each a process-wide fault on one malformed session: every live session on every database, on every protocol, dropped. All of them now run under shared guards, and so do the retention sweeps, the batched row writer's drain loop, and package `main`'s maintenance loops, where a panic in one housekeeping tick had the same blast radius. The limit watchdog is guarded differently on purpose: it owns nothing it closes and enforces by calling back into the session, so a recover that merely let it exit would leave the session running with no expiry, no byte quota and no revocation check — and on MongoDB, SQL Server and MySQL that watchdog is the whole of mid-stream enforcement. Its guard therefore performs the teardown explicitly, because trading a loud process death for a quietly unmetered session is not a trade an access-control proxy should make. The listener accept loops stay deliberately unguarded, and the reasoning is recorded where the next reader will find it. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **proxy:** a statement refused by access control is written to query history on Oracle and PostgreSQL. MySQL/MariaDB, MongoDB and SQL Server have always recorded one, but on those two protocols a refusal by `read_only`, `block_copy` or `block_ddl` left nothing behind but an slog WARN — and, if capture happened to be on, the pcapng — so the UI and any log-based alerting saw what ran and never what was attempted. Refusals now go through the same store path as any other query row, with `duration_ms` and `rows_affected` at 0 and the refusal text as `error`. On Oracle this covers every gated path (the `OALL8`, the v315+ piggyback exec, the JDBC thin driver's dedicated exec, and a re-execution re-gated against its cursor's SQL) and also quota exhaustion, expiry and mid-session revocation, which had been checked too early in the pipeline to have a statement to record the refusal against. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **proxy:** an inline SQL comment no longer walks a statement past the blocked-pattern lists. Every check in the shared validator is regex- or prefix-shaped and matched the raw statement, while a database ignores a comment wherever whitespace is allowed — so `ALTER/**/SESSION SET CONTAINER=PDB2` and `SET/**/ROLE postgres` went straight through blocks the un-commented spelling is refused by, and a comment before the leading keyword changed what `read_only` and `block_ddl` believed a statement was. Matching now runs against a normalised scratch copy in which every comment becomes a single space; the statement relayed upstream stays byte-identical, so optimizer hints still reach the database exactly as the client wrote them and simply stop being an evasion channel. The stripper is literal-aware — `'…'` with `''` escaping, `"…"`, Oracle's `q'[…]'` quote-operator forms, MySQL backticks and backslash escapes — and fails closed onto the raw text on an unterminated literal, because a `/*` inside a literal is not a comment and getting that wrong turns a parser bug into an authorization bug. MySQL's version-gated executable comments are consumed the way the server consumes them, marker digits and closing delimiter included, so a write wrapped in `/*!50000 … */` cannot read as a non-write. The PostgreSQL read-only bypass list and its `COPY` prefix check, and the SQL Server bulk-copy pattern, are routed through the same normalisation rather than left matching raw text one line away from a validator that no longer does. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
-* **store:** grant windows and short-lived TTLs are stamped from the database clock instead of the process clock. A grant is admitted with `starts_at <= NOW()`, which PostgreSQL evaluates against its *own* clock, but both issuance paths — the approval transaction and the admin `POST /grants` default — stamped that window from the process clock; dbbat and its store are two machines, so a process running even a few milliseconds ahead issued grants that all five proxies refused until the skew elapsed: approved, visible in the UI, and unusable. Device authorization requests, login code exchanges and OAuth CSRF states had the mirror-image problem, writing `expires_at` locally and reading it back SQL-side, so their real lifetime was the TTL plus or minus the skew — a process ahead of its store made a device authorization, and the API key it mints, redeemable past its intended life, while one behind could produce a login code born expired. All of them now take their clock from the store, the TTLs stamped inside the insert itself. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **mongodb:** an aggregation pipeline can no longer reach a database the grant does not cover,
+  and one dbbat cannot fully read now fails closed
 
+  `$out` and `$merge` accept an explicit `{db, coll}` target that the message's `$db` never
+  reveals, so under any grant that is not `read_only` a write landed in a database the grant
+  does not cover while the `$db` check passed honestly and `queries` attributed it to the
+  granted database. `$lookup`, `$graphLookup` and `$unionWith` take the same shape on the read
+  side, where `read_only` never looked at all. Every one of them is now held to the same
+  per-message database policy and refused with the usual Unauthorized (13).
+
+  More seriously, the nested-pipeline scan gave up at its depth cap and on any parse failure
+  and reported an empty result — and the same walk is what decides whether a command writes, so
+  a `$merge` nested past the cap was classified as a *read* and ran under `read_only` (measured
+  at depths 9 through 12).
+
+  Every give-up path now yields a refusal, the scan runs once up front before any grant control
+  is consulted so no grant can permit a command whose effect could not be established, and
+  `explain`, which wraps a whole command in a nested document, is descended into.
+
+  A benign pipeline within the cap is unaffected, and the string forms of those stages, which
+  name the same database, stay allowed.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **mongodb:** legacy wire opcodes are refused after authentication
+
+  Anything that was not `OP_MSG` was forwarded verbatim, so a hand-crafted `OP_QUERY` against
+  `otherdb.$cmd` never reached validation at all — no database check, no `read_only` check, and
+  nothing shaped like a statement in the query log.
+
+  `OP_QUERY` and `OP_GET_MORE` now receive an Unauthorized (13) `OP_REPLY`, the fire-and-forget
+  legacy writes are dropped, and the attempt is recorded as a query. The refusal is independent
+  of grant controls, like the database check itself, and the pre-auth handshake, which
+  legitimately uses `OP_QUERY` for the first `hello`, is untouched.
+
+  This is a deliberate compatibility change rather than a pure fix: MongoDB removed these
+  opcodes in 5.1 and a modern driver against a supported server never sends them, but a
+  hand-crafted legacy client talking to a MongoDB older than 5.1 through the proxy will now be
+  refused. Parsing a path MongoDB itself deleted was weighed and rejected.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **mongodb:** tearing down a relay no longer races the pump that is still running
+
+  When either direction of a MongoDB session ended, the teardown closed the upstream connection
+  and then cleared the pointer to it, while the opposite pump was still reading that same field
+  to service its own traffic — a data race on every session close, latent since the relay was
+  written and reachable on any session, not just a failing one.
+
+  The pointer is no longer cleared: the upstream close is already idempotent, so the second
+  close on the session's own teardown path was always harmless, and the field is now written
+  once at connect time before either pump exists.
+
+  The equivalent teardown on the other four proxies was checked and does not share the shape.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **mssql:** a `USE` that leaves the granted database is refused, and dynamic SQL is checked
+  instead of stepped over
+
+  TDS pins nothing — the LOGIN7 database field sets the initial context only — and batch
+  validation ran the shared checks plus a bulk-copy pattern and nothing else, with no SQL Server
+  blocked-pattern list at all, so `USE otherdb` was an ordinary batch that moved the session.
+
+  The check now scans the whole batch rather than its leading statement (a T-SQL batch needs no
+  separator), steps over string literals and quoted identifiers, skips the `OPTION (USE PLAN …)`
+  and `OPTION (USE HINT …)` query hints, and refuses whatever the grant says.
+
+  `EXEC('…')` made "no statement begins inside a string literal" — the invariant every
+  prefix-shaped validator rests on — false. Measured before the fix:
+  `EXEC('USE otherdb; SELECT * FROM secret')` passed with `read_only`, `block_ddl` and
+  `block_copy` all set, and `EXECUTE('DROP TABLE t')` passed `block_ddl`. The inner statement
+  now runs through exactly the same checks as the outer one, one level deep, because a laxer
+  rule set inside would turn every control into a suggestion.
+
+  `sp_executesql` is found whichever way T-SQL names its statement argument — `@stmt`,
+  `@statement`, `@tsql`, `EXEC sys.sp_executesql`, in any argument order — where before only
+  the positional form was recognised and every named spelling walked past as an inert literal.
+
+  `EXEC dbo.p` still falls through as ordinary text and `EXEC('SELECT 1')` still runs under a
+  read-only grant; `EXEC(@sql)` is not statically decidable and is documented as the undecidable
+  case.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **mysql:** a text `USE otherdb` is refused instead of forwarded
+
+  `COM_INIT_DB` had always been checked, but go-mysql routes `COM_QUERY` straight to the query
+  handler, so the SQL text `USE otherdb` — which is what `mysql -e` and most drivers' `Exec`
+  send — never reached that check. `USE` matches no write keyword, no DDL keyword and no blocked
+  pattern, so it was forwarded under every grant, read-only included, and every subsequent
+  `queries` row named the granted database rather than the one the statement actually ran
+  against.
+
+  Both paths now share one decision, taken against the comment-normalised text so a
+  version-gated or `#` line comment between the keyword and the name cannot slip through, and
+  `USE <the granted database>` is still allowed and answered without an upstream round trip.
+
+  `PREPARE s FROM 'USE otherdb'` earns the same refusal: the literal is unwrapped one level and
+  put through the same decision, since `PREPARE` matches no control and the switch scan used to
+  read only the outer statement.
+
+  A nested `PREPARE`, an unterminated literal or adjacent literals fail closed;
+  `PREPARE s FROM @sql` and `CONCAT(...)` remain undecidable and are documented as such rather
+  than implied to be covered.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **oracle:** `ALTER SESSION SET CONTAINER` is refused outright, whatever the grant says
+
+  Switching pluggable database steps outside the one server row the grant covers, so every
+  `queries` row written after the switch names the wrong database — but because the statement
+  merely starts with `ALTER`, only `read_only` and `block_ddl` refused it and the default
+  full-write grant allowed the escape.
+
+  It now joins `ALTER SYSTEM` in the Oracle blocked patterns, and the pattern scans to the end
+  of the statement rather than anchoring on `SET CONTAINER`, so
+  `ALTER SESSION SET CURRENT_SCHEMA=X CONTAINER=Y` is the same refusal.
+
+  `CURRENT_SCHEMA` on its own stays allowed: it moves name resolution, not the database the
+  session is talking to.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **oracle:** a refused statement no longer hangs sqlplus and the DB-bundled OCI client
+
+  Under a grant carrying statement controls, the refusal was written in an encoding and framing
+  those clients do not wait for, so the call never ended and the client simply sat there — a
+  refusal that hangs the session is worse than one that is denied.
+
+  The refusal now ends the client's call with a real OER frame, in the dialect the session
+  negotiated, in the shape learned from what the server itself sent, and stamped with the
+  client's own call number. The learned shape is guarded against concurrent access and every
+  learned field is carried through the fallback rather than partially.
+
+  The 64-bit OCI close-cursors header and the thick client's wide-encoded close list are walked
+  in full instead of a sequence number being read out of them, so a refusal ends the right call,
+  a cursor id is never read out of a piggyback dbbat cannot walk, and a frame dbbat cannot read
+  is not allowed to travel under a held refusal.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **oracle:** a statement that failed on an OCI client is recorded as a failure instead of a
+  success
+
+  The OER decoder read TTC compressed integers only, so on sqlplus, the Instant Client and
+  SQL*Developer over OCI every summary object the server sent was refused — and *every* failing
+  statement on those sessions was written to `queries` as a success, while cursor-id learning
+  went blind on the same connections.
+
+  The fixed-width layout dbbat could already write is now also read, at the very offsets that
+  encoder writes, anchored on the error number repeated as the trailing return code plus a
+  non-zero call status rather than on a trusted length, with the layout asked of the session's
+  learned shape and both tried under that anchor until something has been learned.
+
+  A failure raised *mid-fetch*, after rows have already started flowing, likewise left a query
+  row carrying no error text at all; its ORA text is now recorded, on thin, JDBC and OCI clients
+  alike.
+
+  This is an audit-record correctness fix: rows already stored are not repaired.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **oracle:** cursor-id learning no longer dies after a session's 255th call, and a
+  re-execution dbbat cannot resolve is refused under statement controls
+
+  The field the learner reads is the end-to-end ECID sequence, a uint16 counting up across the
+  whole session, but it was bounded at 255 on the belief that TTC numbers calls with a wrapping
+  byte. Measured against Oracle 23ai Free, a session crosses 255 after a few dozen statements
+  and from that point every OER was rejected.
+
+  Because Oracle recycles cursor ids, that did not surface as an untracked cursor — the
+  re-executions that followed resolved to whatever stale statement last held the id, so the gate
+  ran the wrong SQL and `/queries` recorded the wrong SQL, silently. Captured mid-churn: five
+  runs of `SELECT 1 AS n FROM dual`, all gated as `SELECT 35 AS churn FROM dual`.
+
+  All three frames that name a cursor and carry no SQL — the SQL-less `OALL8`, a fresh-query
+  `OFETCH`, and the piggyback re-execution every modern thin client actually sends — now answer
+  an untracked cursor identically: `ORA-01031` under a grant carrying a statement-shaped
+  control, forwarded with a WARN under one carrying none. The wire op a client picks is no
+  longer a cheaper way past the same grant, and the three share one table so they cannot drift
+  apart again.
+
+  Licensed by measurement rather than argument: 124 live re-executions from go-ora v3 and
+  python-oracledb thin, across prepared loops, bind-heavy statements, interleaved cursors, DML,
+  PL/SQL, a REF cursor and a churned statement cache, none of them naming a cursor dbbat could
+  not resolve.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **oracle:** the connectivity check reports a rejected password as an auth failure rather than
+  a network fault
+
+  go-ora enables Oracle 23ai's one-round-trip fast login by default, and its fast path reads the
+  login reply as a protocol-negotiation message without first checking whether it is a TTC
+  error. A perfectly readable `ORA-01017` was rendered as "message code error: received code 4
+  and expected code is 1" and classified as `db_handshake_failed` — sending the admin to look at
+  the network instead of at the credentials.
+
+  Fast login is now disabled on the probe's connect string, which costs one round trip on a
+  check that only runs when someone presses "test connection". Pre-23ai servers never offered
+  it, so nothing changes against them.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **oracle:** the statement gate reads the execute header's declared SQL length instead of
+  guessing at it
+
+  A window-and-keyword scan returned a mid-statement fragment for 48 of the 137 execute ops in
+  the test corpus — `ALTER SESSION SET CURRENT_SCHEMA=TESTADM` read as
+  `SET CURRENT_SCHEMA=TESTADM` among them — so `read_only`, `block_ddl` and every approval
+  pattern were judged against text that was not what the upstream ran, and query history
+  recorded the fragment.
+
+  Three further defects in the decode are closed with it:
+
+  - a length shorter than the statement returned a silent prefix while reporting success, so the
+    gate enforced against truncated text believing it was precise;
+  - a twelve-byte payload could slice past the end of the buffer, and the recover that contained
+    the panic meant the frame was forwarded ungated;
+  - capping statement text at `0x7e` truncated non-ASCII SQL at the first accented byte, losing
+    any blocked or approval pattern in the tail for the WE8ISO8859P1 client population the
+    Oracle notes themselves call the common European case.
+
+  Statement text is now admitted under the same sanitisation already shipped for OER
+  diagnostics, and bind capture anchors on the wire bytes rather than the repaired text, so a
+  repaired multi-byte character cannot make the tail scan walk back into the statement and
+  report its own text as a bind value.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **proxy:** a panic on a proxy goroutine ends the session it belongs to, not the whole process
+
+  Every protocol starts relay and bookkeeping goroutines whose panics the recover on the
+  connection handler cannot reach — a different goroutine catches nothing they raise. So packet
+  framing, the dump writer, the mid-stream limit check, a held refusal's teardown, and the
+  detached goroutines that write a query record, a completion or an API-key usage bump were each
+  a process-wide fault on one malformed session: every live session on every database, on every
+  protocol, dropped.
+
+  All of them now run under shared guards, and so do the retention sweeps, the batched row
+  writer's drain loop, and package `main`'s maintenance loops, where a panic in one housekeeping
+  tick had the same blast radius.
+
+  The limit watchdog is guarded differently on purpose: it owns nothing it closes and enforces
+  by calling back into the session, so a recover that merely let it exit would leave the session
+  running with no expiry, no byte quota and no revocation check — and on MongoDB, SQL Server and
+  MySQL that watchdog is the whole of mid-stream enforcement. Its guard therefore performs the
+  teardown explicitly, because trading a loud process death for a quietly unmetered session is
+  not a trade an access-control proxy should make.
+
+  The listener accept loops stay deliberately unguarded, and the reasoning is recorded where the
+  next reader will find it.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **proxy:** a statement refused by access control is written to query history on Oracle and
+  PostgreSQL
+
+  MySQL/MariaDB, MongoDB and SQL Server have always recorded one, but on those two protocols a
+  refusal by `read_only`, `block_copy` or `block_ddl` left nothing behind but an slog WARN —
+  and, if capture happened to be on, the pcapng — so the UI and any log-based alerting saw what
+  ran and never what was attempted.
+
+  Refusals now go through the same store path as any other query row, with `duration_ms` and
+  `rows_affected` at 0 and the refusal text as `error`.
+
+  On Oracle this covers every gated path (the `OALL8`, the v315+ piggyback exec, the JDBC thin
+  driver's dedicated exec, and a re-execution re-gated against its cursor's SQL) and also quota
+  exhaustion, expiry and mid-session revocation, which had been checked too early in the
+  pipeline to have a statement to record the refusal against.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **proxy:** an inline SQL comment no longer walks a statement past the blocked-pattern lists
+
+  Every check in the shared validator is regex- or prefix-shaped and matched the raw statement,
+  while a database ignores a comment wherever whitespace is allowed — so
+  `ALTER/**/SESSION SET CONTAINER=PDB2` and `SET/**/ROLE postgres` went straight through blocks
+  the un-commented spelling is refused by, and a comment before the leading keyword changed what
+  `read_only` and `block_ddl` believed a statement was.
+
+  Matching now runs against a normalised scratch copy in which every comment becomes a single
+  space. The statement relayed upstream stays byte-identical, so optimizer hints still reach the
+  database exactly as the client wrote them and simply stop being an evasion channel.
+
+  The stripper is literal-aware — `'…'` with `''` escaping, `"…"`, Oracle's `q'[…]'`
+  quote-operator forms, MySQL backticks and backslash escapes — and fails closed onto the raw
+  text on an unterminated literal, because a `/*` inside a literal is not a comment and getting
+  that wrong turns a parser bug into an authorization bug.
+
+  MySQL's version-gated executable comments are consumed the way the server consumes them,
+  marker digits and closing delimiter included, so a write wrapped in `/*!50000 … */` cannot
+  read as a non-write.
+
+  The PostgreSQL read-only bypass list and its `COPY` prefix check, and the SQL Server bulk-copy
+  pattern, are routed through the same normalisation rather than left matching raw text one line
+  away from a validator that no longer does.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **store:** grant windows and short-lived TTLs are stamped from the database clock instead of
+  the process clock
+
+  A grant is admitted with `starts_at <= NOW()`, which PostgreSQL evaluates against its *own*
+  clock, but both issuance paths — the approval transaction and the admin `POST /grants` default
+  — stamped that window from the process clock. dbbat and its store are two machines, so a
+  process running even a few milliseconds ahead issued grants that all five proxies refused
+  until the skew elapsed: approved, visible in the UI, and unusable.
+
+  Device authorization requests, login code exchanges and OAuth CSRF states had the mirror-image
+  problem, writing `expires_at` locally and reading it back SQL-side, so their real lifetime was
+  the TTL plus or minus the skew — a process ahead of its store made a device authorization, and
+  the API key it mints, redeemable past its intended life, while one behind could produce a
+  login code born expired.
+
+  All of them now take their clock from the store, the TTLs stamped inside the insert itself.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
 
 ### Performance Improvements
 
-* **api:** the pending-approvals and grant-request listings resolve approvers and grants once per page instead of once per row. Both walked the approver fallback chain twice per row and looked up each row's grant individually, so a page's cost grew with the number of distinct databases on it. They now prefetch the caller's user groups, the approver groups of every distinct database on the page and the grants behind it, then decide every row — and compute every approver hat — against that one answer, in a fixed number of queries. Same chain, same rule, self-approval refusal included. ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
+* **api:** the pending-approvals and grant-request listings resolve approvers and grants once
+  per page instead of once per row
+
+  Both walked the approver fallback chain twice per row and looked up each row's grant
+  individually, so a page's cost grew with the number of distinct databases on it.
+
+  They now prefetch the caller's user groups, the approver groups of every distinct database on
+  the page and the grants behind it, then decide every row — and compute every approver hat —
+  against that one answer, in a fixed number of queries.
+
+  Same chain, same rule, self-approval refusal included.
+
+  ([01314ac](https://github.com/fclairamb/dbbat/commit/01314ac9aefa5ef4ea92ebc8b391f04f5decc535))
 
 ### Upgrade notes
 
@@ -178,31 +1046,108 @@ Everything below landed as one squashed batch ([#320](https://github.com/fclaira
 
 **Approval holds remain evadable by comment.** The statement validators now match against a comment-normalised copy, so `ALTER/**/SESSION SET CONTAINER=PDB2` no longer walks past the blocked-pattern lists. Approval-hold patterns are matched separately, against the raw statement, so that `DELETE/**/FROM t` still dodges a `(?i)^DELETE` hold. That path is unchanged in this release because the pattern-preview UI mirrors the same normalisation and changing one without the other would misrepresent what a pattern matches.
 
-
 ## [0.23.2](https://github.com/fclairamb/dbbat/compare/v0.23.1...v0.23.2) (2026-08-08)
 
 
 ### Bug Fixes
 
-* **oracle:** re-executing a cached cursor no longer skips the approval gate and the static controls. An Oracle client can re-run a statement it already parsed by naming the cursor id alone, with no SQL text on the wire — a SQL-less `OALL8`, or an `OFETCH` arriving when no query is in flight. Both were forwarded ungated, so an approval decision applied to the *parse* rather than to each execution: a client that parsed once and re-executed many times got one hold and then a free run. Both are now validated and held against the SQL the cursor was parsed with, on every execution. A fetch that merely continues a query already in flight is untouched — nothing holds mid-result-set.
-* **oracle:** a SQL-less `OALL8` naming a cursor dbbat never saw parsed now fails closed — but only under a grant carrying statement-shaped controls (approval patterns, `read_only` or `block_ddl`), where it is refused with `ORA-01031`. Under a grant with none of those it is forwarded and logged. An untracked cursor is not by itself an attack (dbbat may have attached mid-session), so refusing unconditionally would break permissive sessions for no security gain. `docs/approvals.md` documents the asymmetry, the two enforcement gaps that remain, and the fact that the real-world re-execution rate is unmeasured — this is hardening against a shape the TTC decoder accepts, not a response to an observed exploit.
-* **api:** `429` is documented as the ambient outcome it actually is. It was declared on 33 of 77 operations, arbitrarily — `createDatabase`, `listUsers` and `getQuery` had it while `approveQuery` and `POST /auth/logout` did not — which invited readers to infer that the operations *without* it could not rate-limit. Since every endpoint sits behind a rate limiter, the convention is now stated once in the spec description and declared per-operation only on the six session-validation endpoints where a client must *branch* on a 429 rather than simply retry (`login`, `logout`, `getCurrentUser`, `changePasswordPreLogin`, `oauthExchange`, `deviceAuthorization`). A parity test pins that set, so a seventh has to be argued for in review. No runtime behaviour changes — every endpoint still answers 429 with the same `Error` body. ([#308](https://github.com/fclairamb/dbbat/issues/308)) ([62d9451](https://github.com/fclairamb/dbbat/commit/62d94515b5bd1b7e8c76770dc58d1c85a00ad6c9))
+* **oracle:** re-executing a cached cursor no longer skips the approval gate and the static
+  controls
+
+  An Oracle client can re-run a statement it already parsed by naming the cursor id alone, with
+  no SQL text on the wire — a SQL-less `OALL8`, or an `OFETCH` arriving when no query is in
+  flight. Both were forwarded ungated, so an approval decision applied to the *parse* rather
+  than to each execution: a client that parsed once and re-executed many times got one hold and
+  then a free run.
+
+  Both are now validated and held against the SQL the cursor was parsed with, on every
+  execution. A fetch that merely continues a query already in flight is untouched — nothing
+  holds mid-result-set.
+* **oracle:** a SQL-less `OALL8` naming a cursor dbbat never saw parsed now fails closed
+
+  The refusal applies only under a grant carrying statement-shaped controls (approval patterns,
+  `read_only` or `block_ddl`), where it is refused with `ORA-01031`. Under a grant with none of
+  those it is forwarded and logged.
+
+  An untracked cursor is not by itself an attack (dbbat may have attached mid-session), so
+  refusing unconditionally would break permissive sessions for no security gain.
+
+  `docs/approvals.md` documents the asymmetry, the two enforcement gaps that remain, and the
+  fact that the real-world re-execution rate is unmeasured — this is hardening against a shape
+  the TTC decoder accepts, not a response to an observed exploit.
+* **api:** `429` is documented as the ambient outcome it actually is
+
+  It was declared on 33 of 77 operations, arbitrarily — `createDatabase`, `listUsers` and
+  `getQuery` had it while `approveQuery` and `POST /auth/logout` did not — which invited readers
+  to infer that the operations *without* it could not rate-limit.
+
+  Since every endpoint sits behind a rate limiter, the convention is now stated once in the spec
+  description and declared per-operation only on the six session-validation endpoints where a
+  client must *branch* on a 429 rather than simply retry (`login`, `logout`, `getCurrentUser`,
+  `changePasswordPreLogin`, `oauthExchange`, `deviceAuthorization`). A parity test pins that
+  set, so a seventh has to be argued for in review.
+
+  No runtime behaviour changes — every endpoint still answers 429 with the same `Error` body.
+
+  ([#308](https://github.com/fclairamb/dbbat/issues/308)) ([62d9451](https://github.com/fclairamb/dbbat/commit/62d94515b5bd1b7e8c76770dc58d1c85a00ad6c9))
 
 ## [0.23.1](https://github.com/fclairamb/dbbat/compare/v0.23.0...v0.23.1) (2026-08-08)
 
 
 ### Features
 
-* **ui:** the connection detail page is one live query table instead of three disconnected surfaces. The stream, pending approval holds and the REST history are merged into a single table that is live from the moment an active connection is opened — no "Watch live" click, no `?watch=1` required. The toggle survives as a pause. Held rows are amber, sit at the top, and carry Approve / Deny inline alongside the held-for counter and the matched pattern, so a hold that predates the page load is visible and actionable immediately. A streamed query and its historical row are now the same row.
+* **ui:** the connection detail page is one live query table instead of three disconnected
+  surfaces
+
+  The stream, pending approval holds and the REST history are merged into a single table that is
+  live from the moment an active connection is opened — no "Watch live" click, no `?watch=1`
+  required. The toggle survives as a pause.
+
+  Held rows are amber, sit at the top, and carry Approve / Deny inline alongside the held-for
+  counter and the matched pattern, so a hold that predates the page load is visible and
+  actionable immediately.
+
+  A streamed query and its historical row are now the same row.
 
 ### Bug Fixes
 
-* **oracle:** the JDBC thin driver's dedicated exec op forwarded statements without ever consulting the approval gate or the `read_only` / `block_ddl` controls. It recorded a query row and passed the statement upstream ungated, so a hold pattern that matched simply never fired for that client. Every statement-carrying TTC op now runs the same normalize → validate → hold → record sequence, and fails closed. `docs/approvals.md`'s no-bypass claim is corrected to describe what the gate actually guarantees.
-* **ui:** a rate-limited session check no longer destroys a valid session. `GET /auth/me` answering 429 was treated as "this token is invalid", so hitting the rate limit — several tabs booting at once, or noise from the same source address — deleted the stored token and dropped the user on the login screen. Only a 401 is now definitive; a 429, a 5xx or a network error keeps the session, shows a retry notice, and honours `Retry-After` with a single automatic re-check.
+* **oracle:** the JDBC thin driver's dedicated exec op forwarded statements without ever
+  consulting the approval gate or the `read_only` / `block_ddl` controls
+
+  It recorded a query row and passed the statement upstream ungated, so a hold pattern that
+  matched simply never fired for that client.
+
+  Every statement-carrying TTC op now runs the same normalize → validate → hold → record
+  sequence, and fails closed. `docs/approvals.md`'s no-bypass claim is corrected to describe what
+  the gate actually guarantees.
+* **ui:** a rate-limited session check no longer destroys a valid session
+
+  `GET /auth/me` answering 429 was treated as "this token is invalid", so hitting the rate limit
+  — several tabs booting at once, or noise from the same source address — deleted the stored
+  token and dropped the user on the login screen.
+
+  Only a 401 is now definitive; a 429, a 5xx or a network error keeps the session, shows a retry
+  notice, and honours `Retry-After` with a single automatic re-check.
 * **ui:** a 429 on login says "too many login attempts" instead of a generic "Login failed", for both of the rate limiters that guard the endpoint.
 * **ui:** the "Active only" toggle on the connections list updates in place. It assigned `window.location.search`, forcing a full document reload that re-bootstrapped the SPA and rebuilt the auth and query caches — for a filter that is applied client-side anyway.
-* **api:** every rate limiter answers 429 with the same body. Three middlewares hand-rolled an ad-hoc `{error, message, retry_after}` envelope while the rest of the API used the canonical `Error` schema, so anything matching on `code == "RATE_LIMITED"` silently never matched behind them. `GET /auth/me` also now declares the 429 it has always been able to return.
-* **test:** `TestCheck_OracleTarget_ThroughTunnel` no longer flakes. The fake TNS listener's refusal write raced its own teardown, so go-ora saw EOF before the ORA-01017 packet and the probe degraded to the same code a genuine connectivity fault produces — indistinguishable from a real regression, and it blocked an unrelated dependency bump twice ([#305](https://github.com/fclairamb/dbbat/issues/305)). The refusal is now ordered via half-close, and both Oracle probe tests additionally assert on what the classifier actually saw. ([#306](https://github.com/fclairamb/dbbat/issues/306)) ([88f3d6c](https://github.com/fclairamb/dbbat/commit/88f3d6c6aa09d94c6f68e5a63624010d4591595b))
+* **api:** every rate limiter answers 429 with the same body
+
+  Three middlewares hand-rolled an ad-hoc `{error, message, retry_after}` envelope while the rest
+  of the API used the canonical `Error` schema, so anything matching on `code == "RATE_LIMITED"`
+  silently never matched behind them.
+
+  `GET /auth/me` also now declares the 429 it has always been able to return.
+* **test:** `TestCheck_OracleTarget_ThroughTunnel` no longer flakes
+
+  The fake TNS listener's refusal write raced its own teardown, so go-ora saw EOF before the
+  ORA-01017 packet and the probe degraded to the same code a genuine connectivity fault produces
+  — indistinguishable from a real regression, and it blocked an unrelated dependency bump twice
+  ([#305](https://github.com/fclairamb/dbbat/issues/305)).
+
+  The refusal is now ordered via half-close, and both Oracle probe tests additionally assert on
+  what the classifier actually saw.
+
+  ([#306](https://github.com/fclairamb/dbbat/issues/306)) ([88f3d6c](https://github.com/fclairamb/dbbat/commit/88f3d6c6aa09d94c6f68e5a63624010d4591595b))
 
 ## [0.23.0](https://github.com/fclairamb/dbbat/compare/v0.22.0...v0.23.0) (2026-08-07)
 
@@ -214,12 +1159,34 @@ Everything below landed as one squashed batch ([#320](https://github.com/fclaira
 
 ### Features
 
-* **mssql:** Microsoft SQL Server is now a fully proxied protocol, the fifth after PostgreSQL, Oracle, MySQL/MariaDB and MongoDB. Hand-rolled TDS: packet framing, PRELOGIN negotiation, the TLS handshake encapsulated in TDS packets, LOGIN7 parsing and password descramble, client auth against dbbat, and relay to a real upstream. Statements are intercepted and logged, grants enforced (including inside RPC batches), result rows accounted against quotas, and approval holds honoured — including releasing a hold when the client sends an ATTENTION. Listens on `:1434` by default (`DBB_LISTEN_MSSQL`). ([#301](https://github.com/fclairamb/dbbat/issues/301)) ([85209da](https://github.com/fclairamb/dbbat/commit/85209da031e83b5cb0b4b5ef095236e12d279294))
+* **mssql:** Microsoft SQL Server is now a fully proxied protocol, the fifth after PostgreSQL,
+  Oracle, MySQL/MariaDB and MongoDB
+
+  Hand-rolled TDS: packet framing, PRELOGIN negotiation, the TLS handshake encapsulated in TDS
+  packets, LOGIN7 parsing and password descramble, client auth against dbbat, and relay to a
+  real upstream.
+
+  Statements are intercepted and logged, grants enforced (including inside RPC batches), result
+  rows accounted against quotas, and approval holds honoured — including releasing a hold when
+  the client sends an ATTENTION.
+
+  Listens on `:1434` by default (`DBB_LISTEN_MSSQL`).
+
+  ([#301](https://github.com/fclairamb/dbbat/issues/301)) ([85209da](https://github.com/fclairamb/dbbat/commit/85209da031e83b5cb0b4b5ef095236e12d279294))
 * **mssql:** the client leg can be raised to TLS 1.3 with `DBB_MSSQL_TLS_MAX_VERSION=1.3`. Off by default and verified against `go-mssqldb` only, because TDS un-wraps the handshake the moment it completes and drivers disagree on whether the client's last flight is still framed. ([#301](https://github.com/fclairamb/dbbat/issues/301))
 * **grants:** grants are instances of an immutably versioned grant definition. Editing a definition archives the current row and inserts a successor sharing its lineage, so a live grant's behaviour never changes under it. Deactivating a definition withdraws the whole lineage and fails closed at auth time. ([#301](https://github.com/fclairamb/dbbat/issues/301))
 * **grants:** an explicit `priority` column decides which grant wins when several are active for the same user and database. It is auto-derived from the selected controls (a stricter grant outranks a looser one) and can be pinned by hand from the API or the UI. ([#301](https://github.com/fclairamb/dbbat/issues/301))
 * **connections:** every connection is now stamped with the grant it authenticated under, surfaced through the API and shown in the UI, so quota attribution and approval resolution are traceable back to a specific grant. ([#301](https://github.com/fclairamb/dbbat/issues/301))
-* **dump:** session captures can live in blob storage. They still spool to local disk and upload on session close via `gocloud.dev/blob` (`s3://`, `gs://`, `azblob://`, `file://`), never streamed mid-session, with the object key recorded on the connection row so reads never need a bucket LIST. New `DBB_DUMP_UPLOAD_URL`; empty keeps the local-only behaviour exactly. A startup sweep uploads captures left finished-but-not-uploaded by a crash. ([#300](https://github.com/fclairamb/dbbat/issues/300)) ([f83e511](https://github.com/fclairamb/dbbat/commit/f83e5117efbdd488443ee6aceac53a286a16f57e))
+* **dump:** session captures can live in blob storage
+
+  They still spool to local disk and upload on session close via `gocloud.dev/blob` (`s3://`,
+  `gs://`, `azblob://`, `file://`), never streamed mid-session, with the object key recorded on
+  the connection row so reads never need a bucket LIST.
+
+  New `DBB_DUMP_UPLOAD_URL`; empty keeps the local-only behaviour exactly. A startup sweep
+  uploads captures left finished-but-not-uploaded by a crash.
+
+  ([#300](https://github.com/fclairamb/dbbat/issues/300)) ([f83e511](https://github.com/fclairamb/dbbat/commit/f83e5117efbdd488443ee6aceac53a286a16f57e))
 * **ui:** the raw session capture can be downloaded from the connection detail page. `GET /connections/{uid}` carries `dump: { available, size_bytes }`, resolved through a single locator that checks the local spool then blob storage. ([#300](https://github.com/fclairamb/dbbat/issues/300))
 * **ui:** upstream TLS is visible on the connections screen — quiet when encrypted, an amber badge when the leg fell back to plaintext, paired with the server's `ssl_mode` policy for admins. Oracle sessions, always plaintext because the proxy never upgrades that leg, are labelled not-applicable rather than flagged. ([#300](https://github.com/fclairamb/dbbat/issues/300))
 * **grant-definitions:** definitions carry sample queries, so a control pattern can be authored against realistic SQL. ([#301](https://github.com/fclairamb/dbbat/issues/301))
@@ -302,7 +1269,15 @@ Everything below landed as one squashed batch ([#320](https://github.com/fclaira
 
 ### ⚠ BREAKING CHANGES
 
-* **proxy:** the instances registry primary key becomes (instance_id, run_id). A v0.20.x replica's heartbeat upserts ON CONFLICT (instance_id) and starts failing the moment this migration runs; after the 15-minute grace period a new-build replica reclaims the connections it is still serving, and a reclaimed connection immediately becomes eligible for the retention sweep. Complete the upgrade from v0.20.x within 15 minutes, and do not roll back to v0.20.x once migrated. Only affects deployments with replicaCount > 1.
+* **proxy:** the instances registry primary key becomes (instance_id, run_id)
+
+  A v0.20.x replica's heartbeat upserts ON CONFLICT (instance_id) and starts failing the moment
+  this migration runs. After the 15-minute grace period a new-build replica reclaims the
+  connections it is still serving, and a reclaimed connection immediately becomes eligible for
+  the retention sweep.
+
+  Complete the upgrade from v0.20.x within 15 minutes, and do not roll back to v0.20.x once
+  migrated. Only affects deployments with replicaCount > 1.
 
 ### Features
 
@@ -330,11 +1305,31 @@ Lands the batch of specs accumulated in `specs/todos/` in one squash-merged PR (
 ### Features
 
 * **api,proxy,ui:** live query stream over WebSocket. `GET /api/v1/stream` carries topic subscriptions (`connection/<uid>/queries`, `approvals/pending`, `connections`), with per-topic authorization evaluated at subscribe time *and* re-checked before every send, so the stream is never a wider read path than `GET /api/v1/queries`. Backed by an in-process broker with a bounded per-subscriber buffer, `lagged` notices on overflow, and PostgreSQL `LISTEN`/`NOTIFY` fan-out across replicas.
-* **grants,proxy:** pattern-triggered approval holds. Grant definitions carry RE2 patterns that suspend a matching statement mid-flight until an admin or approver-group member decides. There is no timeout — a hold ends on approve, deny, or client disconnect (recorded as `abandoned`, distinctly from `denied`). Self-approval is always rejected, the approver is persisted and broadcast, and quotas, expiry and revocation keep running while a query is parked. Ships behind `DBB_APPROVAL_ENABLED`, off by default.
+* **grants,proxy:** pattern-triggered approval holds
+
+  Grant definitions carry RE2 patterns that suspend a matching statement mid-flight until an
+  admin or approver-group member decides. There is no timeout — a hold ends on approve, deny, or
+  client disconnect (recorded as `abandoned`, distinctly from `denied`).
+
+  Self-approval is always rejected, the approver is persisted and broadcast, and quotas, expiry
+  and revocation keep running while a query is parked.
+
+  Ships behind `DBB_APPROVAL_ENABLED`, off by default.
 * **api:** approval endpoints — `POST /queries/{uid}/approve`, `POST /queries/{uid}/deny`, `GET /queries/pending`, and a `POST /queries/pending/deny-all` safety valve. Every decision writes an audit-log entry and publishes a resolution event.
 * **auth:** Slack escalation for pending holds, on a 30 s timer (`DBB_APPROVAL_SLACK_DELAY`), with the message updated in place the moment the hold resolves by any route — no stale Approve button. SQL text is truncated and can be switched off (`DBB_APPROVAL_SLACK_SQL`).
 * **dump:** tcpdump-compatible pcapng session captures via pure-Go `gopacket/pcapgo` — session metadata in the Section Header Block comment, per-packet direction in `epb_flags`, nanosecond timestamps, and synthesized Ethernet/IP/TCP framing so Wireshark's dissectors fire.
-* **proxy,store:** batched result-row persistence. One process-wide writer replaces both extremes — Oracle was issuing a synchronous `INSERT` per captured row (up to 100k round-trips on a single query), while PostgreSQL and MySQL held the whole capture in RAM until the query ended. A bounded channel drained opportunistically batches to load (1000 rows or 8 MB, whichever trips first), and sends are non-blocking, so dbbat's own storage can never stall a proxied query. Rows lost because the writer fell behind are recorded as `results_dropped`, distinct from `results_truncated`.
+* **proxy,store:** batched result-row persistence
+
+  One process-wide writer replaces both extremes — Oracle was issuing a synchronous `INSERT` per
+  captured row (up to 100k round-trips on a single query), while PostgreSQL and MySQL held the
+  whole capture in RAM until the query ended.
+
+  A bounded channel drained opportunistically batches to load (1000 rows or 8 MB, whichever
+  trips first), and sends are non-blocking, so dbbat's own storage can never stall a proxied
+  query.
+
+  Rows lost because the writer fell behind are recorded as `results_dropped`, distinct from
+  `results_truncated`.
 * **docs:** auto-generated `llms.txt` and `llms-full.txt` on dbbat.com, built from the docs tree with a rot guard that fails the build if a generated URL no longer resolves. Every instance also serves an unauthenticated `GET /llms.txt` describing itself — a local response, never a redirect, carrying no instance topology.
 * **store:** crash-orphaned connections are reconciled at startup. `disconnected_at` was only ever written on clean teardown, so a crash or pod reschedule left rows open forever — invisible to the retention sweep and still counted as "currently connected". Reconciliation is scoped by an `instances` liveness registry (`DBB_INSTANCE_ID`, heartbeat plus deregister-on-shutdown) so one replica can never close another live replica's connections.
 
@@ -352,7 +1347,16 @@ Lands the batch of specs accumulated in `specs/todos/` in one squash-merged PR (
 
 ### Bug Fixes
 
-* **deps:** complete the `go-ora` v2→v3 migration — the earlier version bumps ([#268](https://github.com/fclairamb/dbbat/issues/268), [#276](https://github.com/fclairamb/dbbat/issues/276)) only added the `v3` module requirement without touching any `.../v2` imports, which left the build broken; this rewrites the Oracle conncheck probe and test suite to import `v3` and drops the now-unused `v2` requirement ([#272](https://github.com/fclairamb/dbbat/issues/272)) ([43b1aba](https://github.com/fclairamb/dbbat/commit/43b1abab7e071938d08433d614550809b3188a25))
+* **deps:** complete the `go-ora` v2→v3 migration
+
+  The earlier version bumps ([#268](https://github.com/fclairamb/dbbat/issues/268),
+  [#276](https://github.com/fclairamb/dbbat/issues/276)) only added the `v3` module requirement
+  without touching any `.../v2` imports, which left the build broken.
+
+  This rewrites the Oracle conncheck probe and test suite to import `v3` and drops the
+  now-unused `v2` requirement.
+
+  ([#272](https://github.com/fclairamb/dbbat/issues/272)) ([43b1aba](https://github.com/fclairamb/dbbat/commit/43b1abab7e071938d08433d614550809b3188a25))
 * **ui:** show full query columns on the home page ([#274](https://github.com/fclairamb/dbbat/issues/274)) ([ab7f879](https://github.com/fclairamb/dbbat/commit/ab7f87961acdb99e17f862696a8bb04ec981641b))
 
 ## [0.19.0](https://github.com/fclairamb/dbbat/compare/v0.18.0...v0.19.0) (2026-07-22)
@@ -360,7 +1364,17 @@ Lands the batch of specs accumulated in `specs/todos/` in one squash-merged PR (
 
 ### Features
 
-* **auth:** add a device authorization flow for API key provisioning, following the OAuth 2.0 Device Authorization Grant (RFC 8628). A CLI or desktop app opens a request (`POST /auth/device`), the user approves it in the browser on a consent page (with a manual code-entry fallback), and the app polls the token endpoint (`POST /auth/device/token`) for a `dbb_` key — no manual copy/paste from the web UI. Approval mints a key owned by the approving user; the key is delivered exactly once and never transits a browser URL, and the flow works over SSH/headless ([#269](https://github.com/fclairamb/dbbat/issues/269)) ([5fa16ee](https://github.com/fclairamb/dbbat/commit/5fa16ee2a919f5e397f8b60bfeea8d148b9eaf99)).
+* **auth:** add a device authorization flow for API key provisioning, following the OAuth 2.0
+  Device Authorization Grant (RFC 8628)
+
+  A CLI or desktop app opens a request (`POST /auth/device`), the user approves it in the
+  browser on a consent page (with a manual code-entry fallback), and the app polls the token
+  endpoint (`POST /auth/device/token`) for a `dbb_` key — no manual copy/paste from the web UI.
+
+  Approval mints a key owned by the approving user; the key is delivered exactly once and never
+  transits a browser URL, and the flow works over SSH/headless.
+
+  ([#269](https://github.com/fclairamb/dbbat/issues/269)) ([5fa16ee](https://github.com/fclairamb/dbbat/commit/5fa16ee2a919f5e397f8b60bfeea8d148b9eaf99))
 * **auth:** the login redirect now preserves the originally requested URL, so opening a deep link (such as the device consent page) while logged out returns you to that page after signing in instead of dropping you on the dashboard ([#269](https://github.com/fclairamb/dbbat/issues/269)).
 
 ## [0.18.0](https://github.com/fclairamb/dbbat/compare/v0.17.0...v0.18.0) (2026-07-21)
@@ -391,7 +1405,16 @@ Lands the batch of work accumulated on local `main` in one squash-merged PR ([#2
 
 * **grants:** grant definitions can be flagged `auto_approve` — matching requests are instantly approved with no admin decision needed, with a required justification, a Slack notification without action buttons, and a dedicated audit trail ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
 * **ui:** inline auto-approve toggle on the grant-definitions table, plus an "approve & enable auto-approve" action on pending grant requests ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
-* **proxy,store,api,ui:** SSH tunnel support for upstream connections across all four proxied protocols (PostgreSQL, Oracle, MySQL, MongoDB) — the `databases` table/model is renamed to `servers`, gains a self-referencing `via_uid` for SSH bastions, and a shared pooled dialer with host-key TOFU routes upstream connections through the tunnel when configured ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **proxy,store,api,ui:** SSH tunnel support for upstream connections across all four proxied
+  protocols (PostgreSQL, Oracle, MySQL, MongoDB)
+
+  The `databases` table/model is renamed to `servers` and gains a self-referencing `via_uid` for
+  SSH bastions.
+
+  A shared pooled dialer with host-key TOFU routes upstream connections through the tunnel when
+  configured.
+
+  ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
 * **ui:** the "Databases" page becomes `/servers`, listing SSH bastions alongside database servers, with create/edit UI for SSH servers; `/databases` redirects to `/servers` ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
 * **api:** creating a server, grant definition, or user with a name that already exists now returns `409 DUPLICATE_NAME` instead of a generic error ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
 * **ui:** the query detail breadcrumb now shows the connection it belongs to ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
