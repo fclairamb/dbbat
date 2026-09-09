@@ -19,54 +19,64 @@ const queryHistorySweepInterval = 1 * time.Hour
 // goroutineNameQueryRetentionSweep is what a panic in one sweep is logged under.
 const goroutineNameQueryRetentionSweep = "query history retention sweep"
 
-// queryRetentionSweeper deletes query history (and the result rows captured for
-// it) older than the configured retention.
+// queryRetentionSweeper deletes history past its retention window: statements
+// (and the result rows captured for them) on one window, the closed-session
+// ledger they hang off on another.
 //
 // There is exactly one sweeper per process, started next to the API server: the
 // data lives in the shared store, not in any one protocol, so the proxies do
 // not own a copy of this the way they each own a dump-file cleanup ticker.
 type queryRetentionSweeper struct {
-	store     *store.Store
-	logger    *slog.Logger
-	retention time.Duration
-	stop      chan struct{}
-	stopOnce  sync.Once
+	store    *store.Store
+	logger   *slog.Logger
+	windows  config.RetentionWindows
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // startQueryRetentionSweep starts the retention sweeper and returns it, or
-// returns nil when retention is disabled — which is the default. Disabled means
-// no goroutine and no ticker at all, not a sweep that finds nothing.
+// returns nil when both windows are disabled — which is the default. Disabled
+// means no goroutine and no ticker at all, not a sweep that finds nothing.
+//
+// An incoherent pair of windows lands here too: config.Config.RetentionWindows
+// reports it and zeroes both, so a retention typo keeps everything and warns
+// rather than deleting more than the operator asked for or refusing to start.
 func startQueryRetentionSweep(
 	ctx context.Context,
 	cfg *config.Config,
 	dataStore *store.Store,
 	logger *slog.Logger,
 ) *queryRetentionSweeper {
-	retention := cfg.QueryStorage.RetentionDuration()
-	if retention <= 0 {
-		if cfg.QueryStorage.RetentionMisconfigured() {
-			logger.WarnContext(ctx, "Invalid query history retention, history is kept forever",
-				slog.String("retention", cfg.QueryStorage.Retention),
-				slog.String("expected", "a Go duration such as 720h"))
+	windows := cfg.RetentionWindows()
+
+	if !windows.Enabled() {
+		if windows.Misconfiguration != "" {
+			logger.WarnContext(ctx, "Invalid history retention, history is kept forever",
+				slog.String("problem", windows.Misconfiguration),
+				slog.String("query_retention", cfg.QueryStorage.Retention),
+				slog.String("connection_retention", cfg.Connection.Retention))
 		}
 
-		logger.InfoContext(ctx, "Query history retention disabled, history is kept forever",
-			slog.String("hint", "set DBB_QUERY_STORAGE_RETENTION (e.g. 720h) to enable"))
+		logger.InfoContext(ctx, "History retention disabled, history is kept forever",
+			slog.String("hint", "set DBB_QUERY_STORAGE_RETENTION (e.g. 720h) to enable; "+
+				"DBB_CONNECTION_RETENTION (e.g. 8760h) keeps the session ledger longer"))
 
 		return nil
 	}
 
 	sweeper := &queryRetentionSweeper{
-		store:     dataStore,
-		logger:    logger,
-		retention: retention,
-		stop:      make(chan struct{}),
+		store:   dataStore,
+		logger:  logger,
+		windows: windows,
+		stop:    make(chan struct{}),
 	}
 
 	go sweeper.run(ctx)
 
-	logger.InfoContext(ctx, "Query history retention enabled",
-		slog.Duration("retention", retention),
+	logger.InfoContext(ctx, "History retention enabled",
+		slog.Duration("query_retention", windows.Query),
+		slog.Duration("connection_retention", windows.Connection),
+		slog.Bool("connections_kept_forever", windows.Connection <= 0),
 		slog.Duration("sweep_interval", queryHistorySweepInterval))
 
 	return sweeper
@@ -105,9 +115,9 @@ func (s *queryRetentionSweeper) guardedSweep(ctx context.Context) {
 }
 
 func (s *queryRetentionSweeper) sweep(ctx context.Context) {
-	result, err := s.store.CleanupOldQueryRows(ctx, s.retention)
+	result, err := s.store.CleanupOldQueryRows(ctx, s.windows.Query, s.windows.Connection)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "query history retention sweep failed",
+		s.logger.ErrorContext(ctx, "history retention sweep failed",
 			slog.Any("error", err),
 			slog.Int64("queries_deleted", result.Queries),
 			slog.Int64("connections_deleted", result.Connections))
@@ -116,10 +126,11 @@ func (s *queryRetentionSweeper) sweep(ctx context.Context) {
 	}
 
 	if result.Queries > 0 || result.Connections > 0 {
-		s.logger.InfoContext(ctx, "deleted query history past retention",
+		s.logger.InfoContext(ctx, "deleted history past retention",
 			slog.Int64("queries", result.Queries),
 			slog.Int64("connections", result.Connections),
-			slog.Duration("retention", s.retention))
+			slog.Duration("query_retention", s.windows.Query),
+			slog.Duration("connection_retention", s.windows.Connection))
 	}
 }
 

@@ -172,6 +172,15 @@ func waitForTemplateIdle(ctx context.Context) error {
 func newIsolatedStore(t *testing.T) *store.Store {
 	t.Helper()
 
+	return newIsolatedStoreWithOptions(t, store.Options{})
+}
+
+// newIsolatedStoreWithOptions is newIsolatedStore for a test that needs the
+// store configured — the retention window a connection detail reports
+// `statements_retained` from, say.
+func newIsolatedStoreWithOptions(t *testing.T, opts store.Options) *store.Store {
+	t.Helper()
+
 	setupPostgresContainer(t)
 
 	ctx := context.Background()
@@ -184,7 +193,7 @@ func newIsolatedStore(t *testing.T) *store.Store {
 		t.Fatalf("failed to create test database %s: %v", name, err)
 	}
 
-	dataStore, err := store.New(ctx, testDatabaseDSN(name))
+	dataStore, err := store.New(ctx, testDatabaseDSN(name), opts)
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -210,7 +219,14 @@ func newIsolatedStore(t *testing.T) *store.Store {
 func setupTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 
-	dataStore := newIsolatedStore(t)
+	return setupTestServerWithStoreOptions(t, store.Options{})
+}
+
+// setupTestServerWithStoreOptions is setupTestServer with the store configured.
+func setupTestServerWithStoreOptions(t *testing.T, opts store.Options) (*Server, *store.Store) {
+	t.Helper()
+
+	dataStore := newIsolatedStoreWithOptions(t, opts)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cfg := &config.Config{

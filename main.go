@@ -258,9 +258,12 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		// subkey of this; see docs/audit-chain.md.
 		EncryptionKey: cfg.EncryptionKey,
 		// Not what drives the sweep (startQueryRetentionSweep owns that) —
-		// what lets chain verification tell a session retention emptied from
-		// one somebody emptied.
-		QueryRetention: cfg.QueryStorage.RetentionDuration(),
+		// what lets chain verification and the connection detail API tell a
+		// session retention emptied from one somebody emptied. The **query**
+		// window, resolved: the ledger window only decides whether the session
+		// row survives, and an incoherent pair resolves both to zero, which is
+		// also what the sweep does.
+		QueryRetention: cfg.RetentionWindows().Query,
 	}
 	if cfg.RunMode == config.RunModeTest {
 		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
@@ -1667,9 +1670,11 @@ func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) erro
 	dataStore, err := store.New(ctx, cfg.DSN, store.Options{
 		EncryptionKey: cfg.EncryptionKey,
 		// A session with no statement left is only excusable inside the window
-		// the sweep deletes from, so the verifier has to be told what that
-		// window is — from the same configuration the sweep reads.
-		QueryRetention: cfg.QueryStorage.RetentionDuration(),
+		// the sweep deletes *statements* from, so the verifier has to be told
+		// what that window is — from the same configuration the sweep reads,
+		// through the same resolver, so a misconfigured pair excuses nothing
+		// here either.
+		QueryRetention: cfg.RetentionWindows().Query,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize store: %w", err)
@@ -1736,7 +1741,12 @@ func verifyQueryChains(
 		// A chain missing its oldest statements is what
 		// DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session,
 		// so it is counted rather than treated as tampering.
-		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated))
+		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated),
+		// And a session with *no* statement left is what a
+		// DBB_CONNECTION_RETENTION longer than the statement window leaves
+		// behind on every closed session between the two: by design, and
+		// counted apart so it cannot drown the number above.
+		slog.Int64("chains_emptied_by_retention", result.Emptied))
 
 	return nil
 }
