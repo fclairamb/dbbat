@@ -66,7 +66,7 @@ func TestBuildConnectionsForUser_Truncation(t *testing.T) {
 	// Build more than 50 ConnectionInfo items.
 	var all []ConnectionInfo
 	for i := 0; i < 60; i++ {
-		db := makeDB(store.ProtocolPostgreSQL, "db", "prefer")
+		db := makeDB(store.ProtocolPostgreSQL, "db", "db_upstream", "prefer")
 		info, ok := BuildConnectionURL(db, user, endpoints, "key")
 		require.True(t, ok)
 		all = append(all, info)
