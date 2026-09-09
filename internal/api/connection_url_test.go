@@ -210,6 +210,19 @@ func TestBuildConnectionURL_MSSQL(t *testing.T) {
 		_, ok := BuildConnectionURL(db, user, e, "key")
 		assert.False(t, ok)
 	})
+
+	t.Run("honours an mssql_host override", func(t *testing.T) {
+		t.Parallel()
+		e := makeEndpoints()
+		e.MSSQLHost = "mssql.example.com"
+		db := makeDB(store.ProtocolMSSQL, "reporting_ro", "Reporting", "")
+		info, ok := BuildConnectionURL(db, user, e, "")
+		require.True(t, ok)
+		assert.Equal(t,
+			"Server=mssql.example.com,1434;Database=Reporting;User Id=alice#reporting_ro;"+
+				"Password={DBBAT_KEY};Encrypt=true",
+			info.URL)
+	})
 }
 
 func TestBuildConnectionURL_Oracle(t *testing.T) {
