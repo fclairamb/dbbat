@@ -5,10 +5,97 @@
 
 ### Features
 
-* **api:** report the blast radius when a server joins a server group ([#374](https://github.com/fclairamb/dbbat/issues/374)) ([460fdb4](https://github.com/fclairamb/dbbat/commit/460fdb450833757dc4eef6b11a88b33df4a05e46))
-* **deploy:** expose externalTrafficPolicy and loadBalancerSourceRanges on the proxy service ([#368](https://github.com/fclairamb/dbbat/issues/368)) ([f3abf4d](https://github.com/fclairamb/dbbat/commit/f3abf4de373458dfaec9f0be9a1a53322f573990))
-* **proxy:** select the dbbat server from the username so the database field can carry the real name ([#373](https://github.com/fclairamb/dbbat/issues/373)) ([a69fff5](https://github.com/fclairamb/dbbat/commit/a69fff55240b23aa69a09694b1b961d234ddedd8))
-* **store:** give the session ledger its own retention window ([#372](https://github.com/fclairamb/dbbat/issues/372)) ([1d5bef7](https://github.com/fclairamb/dbbat/commit/1d5bef7845b46b84669c1a3939258b17f034826e))
+* **api:** report the blast radius when a server joins a server group
+
+  `PUT /api/v1/server-groups/{uid}/members/{server_uid}` returned
+  `{"message":"member added"}` and nothing else. Server-group membership is live and never
+  snapshotted, so adding a server extends every grant bound to that group — sessions already
+  running included, with no separate approval.
+
+  The admin UI warns about that at the point of edit; the REST API did not, and the API is what
+  automation and CLI callers use. An authorization side effect that only one of two front doors
+  announces is a place where the safe path depends on which door you used.
+
+  The response now quantifies it with `live_grants_widened` and the distinct `users` holding
+  those grants, and the membership audit entry carries the same two fields. The DELETE half is
+  deliberately not symmetric: removing a member narrows, which surprises nobody.
+
+  Liveness is the auth path's own predicate rather than a second spelling of it —
+  `applyGrantLiveness` is now shared by `GetActiveGrant`, `CountActiveGrantsForServerGroup` and
+  the new blast-radius query, because a number that disagreed with what the proxy admits would
+  be worse than no number. One consequence: `active_grant_count` previously omitted
+  `starts_at <= NOW()` and counted not-yet-started grants as live, so it is now strictly
+  stricter.
+
+  ([#374](https://github.com/fclairamb/dbbat/issues/374)) ([460fdb4](https://github.com/fclairamb/dbbat/commit/460fdb450833757dc4eef6b11a88b33df4a05e46))
+* **deploy:** expose `externalTrafficPolicy` and `loadBalancerSourceRanges` on the proxy service
+
+  The proxy `Service` rendered only `type` / `annotations` / `externalIPs` / `ports`, which is
+  enough on AWS, where the load-balancer controller takes client-IP preservation and the source
+  allow-list from annotations.
+
+  GCP/GKE has no annotation form for either — they are plain `Service` spec fields.
+  `externalTrafficPolicy: Local` is the only way to preserve the real client IP on a GCP L4 load
+  balancer, and attributing queries to a client is the point of the product.
+  `loadBalancerSourceRanges` is what GKE derives its `k8s-fw-*` rules from: without the field,
+  GKE still emits its own rule opening `0.0.0.0/0`, and a firewall rule managed outside the
+  cluster cannot substitute for it.
+
+  ([#368](https://github.com/fclairamb/dbbat/issues/368)) ([f3abf4d](https://github.com/fclairamb/dbbat/commit/f3abf4de373458dfaec9f0be9a1a53322f573990))
+* **proxy:** select the dbbat server from the username, so the database field can carry the real
+  upstream name
+
+  The URL the UI handed out was refused by the proxy: `BuildConnectionURL` put the *upstream*
+  `database_name` in the path, while every proxy resolves the client's database field against
+  the dbbat server **`name`**. The existing test masked it — the fixture set both to the same
+  string.
+
+  Even the accepted form did not work in DataGrip, which treats a PostgreSQL data source as a
+  *server*: it takes the current database from `current_database()` and opens a dedicated
+  connection per database, none of which the proxy could resolve, so the tree stayed empty. And
+  resolving the real name through the caller's grants cannot be the primary mechanism, because a
+  datalake registered twice (`_ro` and `_rw` over one `database_name`) is ambiguous for anyone
+  holding both.
+
+  The selector moves into the **username** — the one slot every client and driver preserves on
+  every connection it opens — leaving the database field to carry the real upstream name:
+  `postgresql://user%23server_ro:{DBBAT_KEY}@host:5432/real_database`. The MongoDB proxy's
+  existing ladder is now shared and used by PostgreSQL, MySQL and SQL Server: an exact server
+  `name` wins first, then a `user#server` hint, then — among the caller's **active grants** only,
+  so it can never widen access — a unique `database_name` match, with ambiguity refused by name.
+  The bare username is what reaches `connections`, `audit_log`, Slack and the approval gate, and
+  `#` never reaches the upstream credential.
+
+  SQL Server gains the connection-string builder it never had, plus the per-protocol
+  public-endpoint override (`mssql_host` / `mssql_port`) it was the only protocol missing.
+
+  ([#373](https://github.com/fclairamb/dbbat/issues/373)) ([a69fff5](https://github.com/fclairamb/dbbat/commit/a69fff55240b23aa69a09694b1b961d234ddedd8))
+* **store:** give the session ledger its own retention window
+
+  `DBB_QUERY_STORAGE_RETENTION` was the only history TTL, and it reaped two very different
+  things on one cutoff: the **statements** (`queries` + `query_rows`, the bulk of the store, and
+  where captured customer data lives) and the **session ledger** (`connections` — one small row
+  per session recording who connected from where, to which database, under which grant).
+
+  An operator could not have both: `720h` deleted the ledger along with the statements, and `0`
+  kept every captured row forever.
+
+  `DBB_CONNECTION_RETENTION` is now an independent TTL for closed connections. Unset, it
+  inherits the query window, so an upgrade sweeps exactly what it swept before; an explicit `0`
+  keeps the ledger forever while statements still expire, which is the point of the split. A
+  value *shorter* than the query window would delete statements sooner than configured, so it —
+  like a malformed value on either side, or a non-zero window with queries kept forever —
+  disables both sweeps with a startup WARN naming both values, never a startup failure.
+
+  This inverts an assumption: a **closed** connection can now outlive all of its statements,
+  where previously only an open session could. So "statements reaped by design" gets its own
+  counter, `chains_emptied_by_retention`, kept disjoint from
+  `chains_with_retention_truncated_prefix` — between the two windows the first state is now the
+  norm, and one number would have buried the other. The connection detail page says statements
+  are past retention instead of showing an ambiguous empty feed, driven by `statements_retained`
+  on the connection resource, computed by the same rule the chain walk uses.
+
+  ([#372](https://github.com/fclairamb/dbbat/issues/372)) ([1d5bef7](https://github.com/fclairamb/dbbat/commit/1d5bef7845b46b84669c1a3939258b17f034826e))
 
 
 ### Bug Fixes
