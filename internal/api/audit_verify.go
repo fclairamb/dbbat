@@ -219,10 +219,17 @@ type queryChainVerifyResponse struct {
 	Connections int64 `json:"connections"`
 	// Statements is how many chained statements were checked across them.
 	Statements int64 `json:"statements"`
-	// ChainsWithTruncatedPrefix counts chains missing their oldest statements.
-	// That is what DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived
-	// session, so it is reported rather than treated as tampering.
+	// ChainsWithTruncatedPrefix counts chains missing their oldest statements
+	// but still holding some. That is what DBB_QUERY_STORAGE_RETENTION leaves
+	// behind on a long-lived session, so it is reported rather than treated as
+	// tampering.
 	ChainsWithTruncatedPrefix int64 `json:"chains_with_truncated_prefix"`
+	// ChainsEmptiedByRetention counts sessions with no statement left at all,
+	// accounted for by the same window. Reported apart from the count above
+	// rather than folded into it: with DBB_CONNECTION_RETENTION longer than
+	// DBB_QUERY_STORAGE_RETENTION every closed session between the two windows
+	// is in this state by design, so one number would drown the other.
+	ChainsEmptiedByRetention int64 `json:"chains_emptied_by_retention"`
 	// There is deliberately no unkeyed-stamp counter. A session carrying the
 	// unkeyed head stamp is a break, everywhere and with no opt-out, so there is
 	// nothing tolerated to count. This endpoint is served by the process under
@@ -361,9 +368,14 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 
 		headSeq := one.HeadSeq
 		truncated := int64(0)
+		emptied := int64(0)
 
 		if one.TruncatedPrefix {
 			truncated = 1
+		}
+
+		if one.EmptiedByRetention {
+			emptied = 1
 		}
 
 		return queryChainVerifyResponse{
@@ -373,6 +385,7 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 			Connections:               1,
 			Statements:                one.Verified,
 			ChainsWithTruncatedPrefix: truncated,
+			ChainsEmptiedByRetention:  emptied,
 			HeadSeq:                   &headSeq,
 			HeadMAC:                   hexMAC(one.HeadMAC),
 			Break:                     newChainBreakBody(one.Break),
@@ -391,6 +404,7 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 		Connections:               result.Connections,
 		Statements:                result.Verified,
 		ChainsWithTruncatedPrefix: result.Truncated,
+		ChainsEmptiedByRetention:  result.Emptied,
 		Break:                     newChainBreakBody(result.Break),
 		CheckedAt:                 time.Now().UTC(),
 	}, nil
