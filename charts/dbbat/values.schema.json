@@ -207,6 +207,18 @@
               },
               "description": "External IPs bound to the proxy service"
             },
+            "externalTrafficPolicy": {
+              "type": "string",
+              "enum": ["", "Cluster", "Local"],
+              "description": "External traffic policy; Local preserves the client source IP"
+            },
+            "loadBalancerSourceRanges": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Source CIDRs allowed to reach the proxy LoadBalancer"
+            },
             "annotations": {
               "type": "object",
               "description": "Service annotations"

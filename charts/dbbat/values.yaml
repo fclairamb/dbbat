@@ -117,6 +117,16 @@ service:
     # -- External IPs to attach to the proxy service. On bare-metal / k3s this is
     # how a fixed node IP is bound to a LoadBalancer service.
     externalIPs: []
+    # -- Proxy service external traffic policy (Cluster, Local). `Local` is what
+    # preserves the real client IP on a LoadBalancer service; on GCP/GKE it is the
+    # only way to get it, as there is no annotation equivalent. Empty leaves the
+    # field out, so Kubernetes applies its `Cluster` default.
+    externalTrafficPolicy: ""
+    # -- Source CIDRs allowed to reach the proxy LoadBalancer. Empty means "any
+    # source". This is the cloud-agnostic allow-list: AWS also accepts the
+    # `service.beta.kubernetes.io/load-balancer-source-ranges` annotation, but GCP/GKE
+    # has no annotation form and derives its firewall rules from this field alone.
+    loadBalancerSourceRanges: []
     # -- Proxy service annotations (e.g., cloud LB configuration, external-dns)
     annotations: {}
     # Example for AWS NLB with external-dns:

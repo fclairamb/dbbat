@@ -482,6 +482,8 @@ psql -h localhost -p 5433 -U <username> -d <database>
 | `service.proxy.nameSuffix` | Suffix of the proxy service name | `proxy` |
 | `service.proxy.portName` | Name of the proxy port | `postgres` |
 | `service.proxy.externalIPs` | External IPs bound to the proxy service | `[]` |
+| `service.proxy.externalTrafficPolicy` | Proxy service external traffic policy; `Local` preserves the client source IP | `""` |
+| `service.proxy.loadBalancerSourceRanges` | Source CIDRs allowed to reach the proxy LoadBalancer | `[]` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `ingress.className` | Ingress class name | `""` |
 | `extraIngresses` | Additional Ingress objects (`<fullname>-<nameSuffix>`) | `[]` |
