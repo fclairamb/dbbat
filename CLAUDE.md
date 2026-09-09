@@ -199,7 +199,8 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session in bytes (default: 10MB) | No |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (default: `24h`). Applies to the **local spool only** — dbbat never expires objects it uploaded | No |
 | `DBB_DUMP_UPLOAD_URL` | Blob bucket finished captures are uploaded to on session close, e.g. `s3://bucket/prefix` (also `file://`, `gs://`, `azblob://` via `gocloud.dev/blob`). Empty = local disk only, the default. Requires `DBB_DUMP_DIR`, which becomes the spool: captures are always written locally and uploaded once complete, never streamed live. Object key `<prefix>/YYYY/MM/DD/<instance-id>/<connection-uid>.pcapng`, recorded on the connection row so downloads never LIST the bucket. Remote retention is the bucket lifecycle policy. See `docs/dump-format.md` | No |
-| `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history (and captured result rows) older than this Go duration. Default `0` = keep forever; `720h` (30 days) is a reasonable opt-in value | No |
+| `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history (and captured result rows) older than this Go duration. Default `0` = keep forever; `720h` (30 days) is a reasonable opt-in value. The **statement** window, and the one `store.Options.QueryRetention` is fed from | No |
+| `DBB_CONNECTION_RETENTION` | Auto-delete **closed** connections — the session ledger (who, from where, to which database, under which grant) — once `disconnected_at` is older than this Go duration, cascading to whatever queries and rows they still have. **Unset = inherit the query window**, so an upgrade sweeps exactly what it swept before; explicit `0` keeps the ledger forever while statements still expire, which is the point of the split. It must be **≥** the query window: a shorter one would delete statements sooner than configured, so it — like a value shorter than the query window, a malformed value on either side, or a non-zero value with queries kept forever — **disables both sweeps** with a startup WARN naming both values, never a startup failure. All four rules live in `config.Config.RetentionWindows()`. Note the object key of an uploaded capture lives on the connection row, so a ledger window shorter than the bucket lifecycle orphans those objects | No |
 | `DBB_MYSQL_TLS_DISABLE` | Refuse TLS upgrade on the MySQL listener (default: `false`) | No |
 | `DBB_MYSQL_TLS_CERT_FILE` | PEM cert for MySQL TLS termination (auto self-signed if empty) | No |
 | `DBB_MYSQL_TLS_KEY_FILE` | PEM RSA key for MySQL TLS termination (auto-generated if empty) | No |
@@ -476,7 +477,15 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   `DBB_QUERY_STORAGE_RETENTION` (`store.Options.QueryRetention`) and excuses
   only a session that **connected before the cutoff**, since every statement
   runs at or after `connected_at` — with retention off, the default, nothing is
-  excused, and an excused session is counted as a truncated prefix. Raising or
+  excused, and an excused session is counted as **emptied by retention**
+  (`chains_emptied_by_retention`), a count kept disjoint from
+  `chains_with_retention_truncated_prefix` ("lost its oldest statements, some
+  survive") because a `DBB_CONNECTION_RETENTION` longer than the statement
+  window puts *every* closed session between the two windows in the emptied
+  state by design, and one number would bury the other. The same rule, exported
+  as `store.StatementsPastRetention`, is what feeds `statements_retained` on
+  `GET /api/v1/connections/{uid}` so the UI can say "past retention" instead of
+  "no queries". Raising or
   disabling retention moves that cutoff backwards, so previously reaped sessions
   can start reading as breaks; lowering it never does. Verify with
   `dbbat audit verify [--queries|--rows]`, or over REST with

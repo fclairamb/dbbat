@@ -418,22 +418,40 @@ no stamp and is still skipped.
 That leaves the judgment. A stamped session with zero surviving statements has
 two possible causes, and `queries` alone cannot tell them apart:
 
-1. `DBB_QUERY_STORAGE_RETENTION` reaped them all. The connection sweep only
-   reaps rows whose `disconnected_at` is already past the cutoff, so a session
-   that went quiet long before it closed — a pooled connection, an idle
-   `psql` — keeps its row while the query sweep empties it. A session still
-   **open** is the same story: the sweep never reaps a live connection row.
+1. `DBB_QUERY_STORAGE_RETENTION` reaped them all while the session's own row
+   survived. Three ways that happens, and the third is now the common one:
+   a session that went quiet long before it closed — a pooled connection, an
+   idle `psql` — keeps its row because the connection sweep only reaps rows
+   whose `disconnected_at` is already past *its* cutoff; a session still
+   **open**, which the sweep never reaps however old; and, since the two
+   windows were split, **every closed session between them** when
+   `DBB_CONNECTION_RETENTION` is set longer than `DBB_QUERY_STORAGE_RETENTION`.
+   Under a 30-day statement window and a one-year ledger window, eleven months
+   of sessions are in this state at any time, by design.
 2. Someone deleted them.
 
 What separates them is time, and the only thing that says where the line runs is
 the configured retention window itself, which the store is given at startup
 (`store.Options.QueryRetention`, from the same `DBB_QUERY_STORAGE_RETENTION` the
-sweep reads). The sweep deletes by `executed_at < now - retention`, and every
-statement of a session ran at or after its `connected_at` — so a session that
-**connected at or after the cutoff** cannot have had a single statement reaped,
-and an empty one is a break. With retention disabled, which is the default, the
-cutoff is the beginning of time and nothing is excused. An excused session is
-reported as a truncated prefix (the extreme of one), never silently skipped.
+sweep reads). It is the **statement** window and never the ledger window:
+`DBB_CONNECTION_RETENTION` decides whether the connection row still exists, not
+how many of its statements survive, so feeding the longer of the two here would
+excuse sessions nothing legitimately emptied. The sweep deletes by
+`executed_at < now - retention`, and every statement of a session ran at or
+after its `connected_at` — so a session that **connected at or after the
+cutoff** cannot have had a single statement reaped, and an empty one is a break.
+With retention disabled, which is the default, the cutoff is the beginning of
+time and nothing is excused.
+
+An excused session is counted as **emptied by retention**
+(`chains_emptied_by_retention`), never silently skipped — and deliberately not
+as a truncated prefix, which now means only "lost its oldest statements, some
+survive". The two were one number before the windows were split; keeping them
+merged would have buried the handful of chains that lost part of themselves
+under the eleven months of sessions that lose all of theirs by design. The same
+rule, exported as `Store.StatementsPastRetention`, is what the connection detail
+page reads (`statements_retained` on `GET /connections/{uid}`) to say "these
+statements are past retention" instead of "no queries recorded".
 
 Two consequences worth stating plainly:
 
@@ -637,12 +655,19 @@ A `--queries` run reports the same way, plus a count that is *not* a failure:
 
 ```json
 {"level":"INFO","msg":"Query chains verified","connections":412,"statements":9871,
- "chains_with_retention_truncated_prefix":3}
+ "chains_with_retention_truncated_prefix":3,"chains_emptied_by_retention":128}
 ```
 
-`chains_with_retention_truncated_prefix` is what `DBB_QUERY_STORAGE_RETENTION`
-leaves behind on a long-lived session — housekeeping, and everything after the
-truncation is still verified.
+Neither count is a failure. `chains_with_retention_truncated_prefix` is what
+`DBB_QUERY_STORAGE_RETENTION` leaves behind on a long-lived session that still
+has statements left — housekeeping, and everything after the truncation is
+still verified. `chains_emptied_by_retention` is the sessions that window
+emptied completely: under a `DBB_CONNECTION_RETENTION` longer than the
+statement window, that is simply how many closed sessions have aged out of
+statement history while their ledger row is kept, and it is expected to be
+large. The two are separate numbers precisely so the second cannot hide the
+first. Over REST the same fields appear as `chains_with_truncated_prefix` and
+`chains_emptied_by_retention`.
 
 ### Over the API
 
