@@ -3449,6 +3449,23 @@ paths:
       summary: Get connection URL template for a database
       description: |
         Returns a connection URL with `{DBBAT_KEY}` placeholder for the specified database.
+
+        For PostgreSQL, MySQL/MariaDB and SQL Server the URL names the **real
+        upstream database** and selects the dbbat server entry through the
+        username, as `user#entry` (`%23` inside a URL's userinfo):
+
+        ```
+        postgresql://alice%23demo_datalake_ro:{DBBAT_KEY}@db.example.com:5432/demo_datalake
+        ```
+
+        The username is the one field every driver and IDE preserves verbatim on
+        every connection it opens, so a client such as DataGrip that reconnects
+        per database keeps selecting the right dbbat entry. The dbbat entry name
+        is still accepted in the database field on its own — every previously
+        issued connection string keeps working.
+
+        Oracle keeps its EZ-Connect form and MongoDB keeps `authSource`.
+
         - Admin callers: always 200.
         - Non-admin callers: 200 if they have at least one active grant; 404 otherwise (to avoid leaking database existence).
         - If the protocol proxy is disabled (resolved port = 0): returns 409.
@@ -6849,10 +6866,13 @@ components:
           type: string
         format:
           type: string
-          description: '"uri" or "ez-connect"'
+          description: >
+            `uri` (PostgreSQL, MySQL/MariaDB, MongoDB), `ez-connect` (Oracle) or
+            `connection-string` (SQL Server, ADO.NET/ODBC keyword syntax).
           enum:
             - uri
             - ez-connect
+            - connection-string
         url:
           type: string
           description: Ready-to-paste connection URL
