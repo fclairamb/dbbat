@@ -99,10 +99,12 @@ type instancePublicInfo struct {
 	OraHost   string `json:"ora_host"`
 	MySQLHost string `json:"mysql_host"`
 	MongoHost string `json:"mongo_host"`
+	MSSQLHost string `json:"mssql_host"`
 	PGPort    *int   `json:"pg_port"`
 	OraPort   *int   `json:"ora_port"`
 	MySQLPort *int   `json:"mysql_port"`
 	MongoPort *int   `json:"mongo_port"`
+	MSSQLPort *int   `json:"mssql_port"`
 	// WebUIURL is the raw operator-configured Web UI / public base URL
 	// override (empty = falling back to DBB_PUBLIC_URL).
 	WebUIURL string `json:"web_ui_url"`
@@ -118,6 +120,8 @@ type instanceResolvedInfo struct {
 	MySQLPort int    `json:"mysql_port"`
 	MongoHost string `json:"mongo_host"`
 	MongoPort int    `json:"mongo_port"`
+	MSSQLHost string `json:"mssql_host"`
+	MSSQLPort int    `json:"mssql_port"`
 	// WebUIURL is the effective Web UI / public base URL (public.web_ui_url
 	// parameter, falling back to DBB_PUBLIC_URL).
 	WebUIURL string `json:"web_ui_url"`
@@ -177,6 +181,8 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			MySQLPort: resolved.MySQLPort,
 			MongoHost: resolved.MongoHost,
 			MongoPort: resolved.MongoPort,
+			MSSQLHost: resolved.MSSQLHost,
+			MSSQLPort: resolved.MSSQLPort,
 			WebUIURL:  resolved.WebUIURL,
 		},
 	}
@@ -188,10 +194,12 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			OraHost:   pe.OraHost,
 			MySQLHost: pe.MySQLHost,
 			MongoHost: pe.MongoHost,
+			MSSQLHost: pe.MSSQLHost,
 			PGPort:    pe.PGPort,
 			OraPort:   pe.OraPort,
 			MySQLPort: pe.MySQLPort,
 			MongoPort: pe.MongoPort,
+			MSSQLPort: pe.MSSQLPort,
 			WebUIURL:  pe.WebUIURL,
 		}
 	}
@@ -206,10 +214,12 @@ type updateInstancePublicRequest struct {
 	OraHost   string `json:"ora_host"`
 	MySQLHost string `json:"mysql_host"`
 	MongoHost string `json:"mongo_host"`
+	MSSQLHost string `json:"mssql_host"`
 	PGPort    *int   `json:"pg_port"`
 	OraPort   *int   `json:"ora_port"`
 	MySQLPort *int   `json:"mysql_port"`
 	MongoPort *int   `json:"mongo_port"`
+	MSSQLPort *int   `json:"mssql_port"`
 	// WebUIURL sets the Web UI / public base URL override (empty leaves it
 	// unset, falling back to DBB_PUBLIC_URL). Distinct from Host: this is
 	// where the browser/API is reached (HTTP ingress), not where SQL
@@ -231,10 +241,12 @@ func (s *Server) handleUpdateInstancePublic(c *gin.Context) {
 		OraHost:   req.OraHost,
 		MySQLHost: req.MySQLHost,
 		MongoHost: req.MongoHost,
+		MSSQLHost: req.MSSQLHost,
 		PGPort:    req.PGPort,
 		OraPort:   req.OraPort,
 		MySQLPort: req.MySQLPort,
 		MongoPort: req.MongoPort,
+		MSSQLPort: req.MSSQLPort,
 		WebUIURL:  req.WebUIURL,
 	}
 
