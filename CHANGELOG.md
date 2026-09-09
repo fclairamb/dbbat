@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.28.0](https://github.com/fclairamb/dbbat/compare/v0.27.0...v0.28.0) (2026-09-09)
+
+
+### Features
+
+* **api:** report the blast radius when a server joins a server group ([#374](https://github.com/fclairamb/dbbat/issues/374)) ([460fdb4](https://github.com/fclairamb/dbbat/commit/460fdb450833757dc4eef6b11a88b33df4a05e46))
+* **deploy:** expose externalTrafficPolicy and loadBalancerSourceRanges on the proxy service ([#368](https://github.com/fclairamb/dbbat/issues/368)) ([f3abf4d](https://github.com/fclairamb/dbbat/commit/f3abf4de373458dfaec9f0be9a1a53322f573990))
+* **proxy:** select the dbbat server from the username so the database field can carry the real name ([#373](https://github.com/fclairamb/dbbat/issues/373)) ([a69fff5](https://github.com/fclairamb/dbbat/commit/a69fff55240b23aa69a09694b1b961d234ddedd8))
+* **store:** give the session ledger its own retention window ([#372](https://github.com/fclairamb/dbbat/issues/372)) ([1d5bef7](https://github.com/fclairamb/dbbat/commit/1d5bef7845b46b84669c1a3939258b17f034826e))
+
+
+### Bug Fixes
+
+* **deps:** update module golang.org/x/crypto to v0.57.0 ([#371](https://github.com/fclairamb/dbbat/issues/371)) ([0fe6b0e](https://github.com/fclairamb/dbbat/commit/0fe6b0e2404a00e1f209085d568da184cd623817))
+* **deps:** update module golang.org/x/oauth2 to v0.37.0 ([#369](https://github.com/fclairamb/dbbat/issues/369)) ([8dd1d37](https://github.com/fclairamb/dbbat/commit/8dd1d3720af5bd310779c800e68971fd5ab609fb))
+
 ## [0.27.0](https://github.com/fclairamb/dbbat/compare/v0.26.2...v0.27.0) (2026-09-08)
 
 
