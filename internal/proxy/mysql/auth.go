@@ -61,7 +61,9 @@ func (p *dbbatAuthProvider) Validate(plugin string) bool {
 // auth response. We dispatch on the negotiated plugin; both supported
 // plugins ultimately yield a cleartext password we verify against Argon2id.
 func (p *dbbatAuthProvider) Authenticate(c *gomysqlserver.Conn, plugin string, authData []byte) error {
-	username := c.GetUser()
+	// The username may carry a "user#server" selector; only the bare name
+	// names a dbbat user (see shared.ParseUsername).
+	username, _ := shared.ParseUsername(c.GetUser())
 
 	password, err := p.extractPlaintext(c, plugin, authData)
 	if err != nil {
@@ -160,7 +162,13 @@ type dbbatAuthHandler struct {
 }
 
 func (h *dbbatAuthHandler) GetCredential(username string) (gomysqlserver.Credential, bool, error) {
-	user, err := h.session.server.store.GetUserByUsername(h.session.ctx, username)
+	// A "user#server" username selects the dbbat server explicitly; the
+	// database field then carries the real upstream name. Stash the selector
+	// for OnAuthSuccess and look the user up under its bare name.
+	bare, serverHint := shared.ParseUsername(username)
+	h.session.serverHint = serverHint
+
+	user, err := h.session.server.store.GetUserByUsername(h.session.ctx, bare)
 	if err != nil {
 		// Any lookup failure is reported to the client as ER_NO_SUCH_USER.
 		// Underlying store errors are deliberately swallowed to avoid
@@ -182,17 +190,18 @@ func (h *dbbatAuthHandler) GetCredential(username string) (gomysqlserver.Credent
 func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 	s := h.session
 
-	if s.requestedDB == "" {
+	if s.requestedDB == "" && s.serverHint == "" {
 		return ErrServerNotFound
 	}
 
-	db, err := s.server.store.GetServerByName(s.ctx, s.requestedDB)
+	db, err := shared.ResolveTarget(s.ctx, s.server.store, shared.TargetRequest{
+		UserID:           s.user.UID,
+		ServerHint:       s.serverHint,
+		RequestedDB:      s.requestedDB,
+		ProtocolAccepted: store.IsMySQLFamily,
+	})
 	if err != nil {
-		return ErrServerNotFound
-	}
-
-	if !store.IsMySQLFamily(db.Protocol) {
-		return ErrServerNotFound
+		return err
 	}
 
 	s.database = db
