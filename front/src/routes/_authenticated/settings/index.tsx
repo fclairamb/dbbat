@@ -239,6 +239,13 @@ function PublicAdvertisementForm({
   const [mongoOverrideEnabled, setMongoOverrideEnabled] = useState(
     !!(pub?.mongo_host || pub?.mongo_port != null)
   );
+  const [mssqlHostOverride, setMssqlHostOverride] = useState(pub?.mssql_host ?? "");
+  const [mssqlPortOverride, setMssqlPortOverride] = useState(
+    pub?.mssql_port != null ? String(pub.mssql_port) : ""
+  );
+  const [mssqlOverrideEnabled, setMssqlOverrideEnabled] = useState(
+    !!(pub?.mssql_host || pub?.mssql_port != null)
+  );
 
   const handleSave = () => {
     const body: PublicEndpoints = {
@@ -251,6 +258,8 @@ function PublicAdvertisementForm({
       mysql_port: mysqlOverrideEnabled && mysqlPortOverride ? parseInt(mysqlPortOverride, 10) : null,
       mongo_host: mongoOverrideEnabled ? mongoHostOverride : "",
       mongo_port: mongoOverrideEnabled && mongoPortOverride ? parseInt(mongoPortOverride, 10) : null,
+      mssql_host: mssqlOverrideEnabled ? mssqlHostOverride : "",
+      mssql_port: mssqlOverrideEnabled && mssqlPortOverride ? parseInt(mssqlPortOverride, 10) : null,
       web_ui_url: webUIURL,
     };
     updatePublic.mutate(body);
@@ -362,6 +371,20 @@ function PublicAdvertisementForm({
             onPortChange={setMongoPortOverride}
             hostTestId="public-mongo-host-input"
             portTestId="public-mongo-port-input"
+          />
+
+          <ProtocolOverrideRow
+            protocol="SQL Server"
+            listenAddr={listen?.mssql}
+            defaultHost={host}
+            enabled={mssqlOverrideEnabled}
+            onEnabledChange={setMssqlOverrideEnabled}
+            hostValue={mssqlHostOverride}
+            onHostChange={setMssqlHostOverride}
+            portValue={mssqlPortOverride}
+            onPortChange={setMssqlPortOverride}
+            hostTestId="public-mssql-host-input"
+            portTestId="public-mssql-port-input"
           />
         </CardContent>
       </Card>
