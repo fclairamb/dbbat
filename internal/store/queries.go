@@ -927,9 +927,19 @@ type RetentionSweepResult struct {
 	Queries int64
 }
 
-// CleanupOldQueryRows deletes query history older than olderThan, together with
-// the result rows captured for it. A zero or negative duration is a no-op:
-// retention is opt-in, and the default is to keep history forever.
+// CleanupOldQueryRows deletes history past its retention window, together with
+// the result rows captured for it. There are two independent windows and each
+// is opt-in: a zero or negative duration skips that half of the sweep, and both
+// at zero is a no-op — the default is to keep everything forever.
+//
+//   - queryOlderThan (DBB_QUERY_STORAGE_RETENTION) governs statements and their
+//     captured rows: the bulk of the store, and the part that can hold customer
+//     data.
+//   - connectionOlderThan (DBB_CONNECTION_RETENTION) governs the session ledger:
+//     one small row per session saying who connected from where, to which
+//     database, under which grant. Configuration guarantees it is never shorter
+//     than the query window (see config.Config.RetentionWindows), because
+//     deleting a session cascades to its statements.
 //
 // The delete is driven from the parent rows, not from query_rows: both
 // query_rows.query_id -> queries.uid and queries.connection_id ->
@@ -938,48 +948,58 @@ type RetentionSweepResult struct {
 //
 // Two sweeps run, in this order:
 //
-//  1. connections closed before the cutoff — cascading to their queries and
-//     rows. This keeps the UI consistent: a closed connection never survives as
-//     an empty shell whose queries have all been reaped.
-//  2. queries executed before the cutoff that are still attached to a
-//     connection the first sweep left alone (an open, long-lived session).
+//  1. connections closed before the connection cutoff — cascading to whatever
+//     queries and rows they still have. First, so a session past the ledger
+//     window is reaped whole rather than being emptied by the query sweep and
+//     left as a shell for an hour.
+//  2. queries executed before the query cutoff that are still attached to a
+//     connection the first sweep left alone.
+//
+// With two windows, a **closed** connection can now outlive all of its queries
+// — that is the normal state of every session between the two cutoffs, not an
+// anomaly. Before the split only an *open* session could be in that state.
+// Anything reasoning "closed connection with no queries => somebody deleted
+// them" is wrong; see Store.StatementsPastRetention, which is what tells the
+// chain verifier and the UI otherwise.
 //
 // Connections that are still open (disconnected_at IS NULL) are never reaped,
 // however old they are: the session may still be live, and deleting its record
-// would break the foreign key for the next query it logs. Such a connection can
-// therefore outlive all of its queries and show up in the UI with none left —
-// its `queries` counter is a lifetime counter, not a count of retained rows.
-func (s *Store) CleanupOldQueryRows(ctx context.Context, olderThan time.Duration) (RetentionSweepResult, error) {
+// would break the foreign key for the next query it logs. Either way, a
+// connection's `queries` counter is a lifetime counter, not a count of
+// retained rows.
+func (s *Store) CleanupOldQueryRows(
+	ctx context.Context, queryOlderThan, connectionOlderThan time.Duration,
+) (RetentionSweepResult, error) {
 	var result RetentionSweepResult
 
-	if olderThan <= 0 {
-		return result, nil
-	}
+	now := time.Now()
 
-	cutoff := time.Now().Add(-olderThan)
-
-	connections, err := s.deleteInBatches(ctx,
-		`DELETE FROM connections WHERE uid IN (
+	if connectionOlderThan > 0 {
+		connections, err := s.deleteInBatches(ctx,
+			`DELETE FROM connections WHERE uid IN (
 			SELECT uid FROM connections
 			WHERE disconnected_at IS NOT NULL AND disconnected_at < ?
 			LIMIT ?
-		)`, cutoff)
-	result.Connections = connections
+		)`, now.Add(-connectionOlderThan))
+		result.Connections = connections
 
-	if err != nil {
-		return result, fmt.Errorf("failed to delete old connections: %w", err)
+		if err != nil {
+			return result, fmt.Errorf("failed to delete old connections: %w", err)
+		}
 	}
 
-	queries, err := s.deleteInBatches(ctx,
-		`DELETE FROM queries WHERE uid IN (
+	if queryOlderThan > 0 {
+		queries, err := s.deleteInBatches(ctx,
+			`DELETE FROM queries WHERE uid IN (
 			SELECT uid FROM queries
 			WHERE executed_at < ?
 			LIMIT ?
-		)`, cutoff)
-	result.Queries = queries
+		)`, now.Add(-queryOlderThan))
+		result.Queries = queries
 
-	if err != nil {
-		return result, fmt.Errorf("failed to delete old queries: %w", err)
+		if err != nil {
+			return result, fmt.Errorf("failed to delete old queries: %w", err)
+		}
 	}
 
 	return result, nil

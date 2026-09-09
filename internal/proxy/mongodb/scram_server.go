@@ -9,6 +9,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -89,7 +90,7 @@ func scramReply(payload string, done bool) bson.D {
 // user is recorded so the continue step can authorize the session. Any failure
 // returns an error, which the library surfaces as an authentication failure.
 func (s *Session) scramCredentialLookup(username string) (scram.StoredCredentials, error) {
-	bareUser, hint := splitUserDBHint(username)
+	bareUser, hint := shared.ParseUsername(username)
 
 	user, err := s.server.store.GetUserByUsername(s.ctx, bareUser)
 	if err != nil {

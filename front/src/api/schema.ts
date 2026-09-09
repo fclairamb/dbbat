@@ -1766,10 +1766,13 @@ export interface paths {
          *     `chains_with_truncated_prefix` counts chains missing their oldest
          *     statements — what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a
          *     long-lived session. That is expected housekeeping, not tampering, and
-         *     everything after the truncation is still verified. A session retention
-         *     emptied *entirely* is counted there too; one emptied while it was too
-         *     young for the sweep to have reached it is a **break**, because the
-         *     stamp on the connection row still attests to statements that are gone.
+         *     everything after the truncation is still verified.
+         *     `chains_emptied_by_retention` counts the sessions that window emptied
+         *     *entirely*, which is the ordinary state of every closed session between
+         *     `DBB_QUERY_STORAGE_RETENTION` and a longer `DBB_CONNECTION_RETENTION`.
+         *     A session emptied while it was too young for the sweep to have reached
+         *     it is a **break** rather than either count, because the stamp on the
+         *     connection row still attests to statements that are gone.
          *
          *     A session carrying an unkeyed head stamp — a verbatim copy of the last
          *     statement's MAC, forgeable by anyone who can write to the store — is a
@@ -1849,6 +1852,23 @@ export interface paths {
         /**
          * Get connection URL template for a database
          * @description Returns a connection URL with `{DBBAT_KEY}` placeholder for the specified database.
+         *
+         *     For PostgreSQL, MySQL/MariaDB and SQL Server the URL names the **real
+         *     upstream database** and selects the dbbat server entry through the
+         *     username, as `user#entry` (`%23` inside a URL's userinfo):
+         *
+         *     ```
+         *     postgresql://alice%23demo_datalake_ro:{DBBAT_KEY}@db.example.com:5432/demo_datalake
+         *     ```
+         *
+         *     The username is the one field every driver and IDE preserves verbatim on
+         *     every connection it opens, so a client such as DataGrip that reconnects
+         *     per database keeps selecting the right dbbat entry. The dbbat entry name
+         *     is still accepted in the database field on its own — every previously
+         *     issued connection string keeps working.
+         *
+         *     Oracle keeps its EZ-Connect form and MongoDB keeps `authSource`.
+         *
          *     - Admin callers: always 200.
          *     - Non-admin callers: 200 if they have at least one active grant; 404 otherwise (to avoid leaking database existence).
          *     - If the protocol proxy is disabled (resolved port = 0): returns 409.
@@ -3522,6 +3542,22 @@ export interface components {
             dump: components["schemas"]["DumpMetadata"];
             /** @description The grant named by `grant_uid`, or null when `grant_uid` is null or the grant it names could not be resolved. */
             grant: components["schemas"]["GrantSummary"] | null;
+            /**
+             * @description False when `DBB_QUERY_STORAGE_RETENTION` can account for this
+             *     session having fewer statements in the store than it ran — i.e.
+             *     the session started before the statement cutoff, so the sweep
+             *     could have reaped some or all of them.
+             *
+             *     It exists because `DBB_CONNECTION_RETENTION` can be longer than
+             *     `DBB_QUERY_STORAGE_RETENTION`: every closed session between the
+             *     two windows keeps its ledger row and loses its statements, so
+             *     an empty statement list is the expected state rather than a
+             *     session that ran nothing. The `queries` counter on the row is a
+             *     lifetime count and does not settle it either. True means
+             *     retention cannot explain a missing statement — with retention
+             *     disabled, the default, it is always true.
+             */
+            statements_retained: boolean;
         };
         GrantSummary: {
             /**
@@ -3893,14 +3929,24 @@ export interface components {
             statements: number;
             /**
              * Format: int64
-             * @description Chains missing their oldest statements — what
-             *     DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session.
-             *     Expected housekeeping, not tampering; everything after the
-             *     truncation is still verified. A session the sweep emptied of every
-             *     statement is counted here as well; an emptied session the sweep
-             *     cannot account for is a break instead.
+             * @description Chains missing their oldest statements but still holding some —
+             *     what DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived
+             *     session. Expected housekeeping, not tampering; everything after the
+             *     truncation is still verified.
              */
             chains_with_truncated_prefix: number;
+            /**
+             * Format: int64
+             * @description Sessions with no statement left at all, accounted for by
+             *     DBB_QUERY_STORAGE_RETENTION. Counted apart from
+             *     `chains_with_truncated_prefix` rather than folded into it: with
+             *     DBB_CONNECTION_RETENTION set longer than the statement window,
+             *     every closed session between the two windows is in this state by
+             *     design, so one number would drown the other. An emptied session the
+             *     statement window cannot account for is a **break** instead of a
+             *     count here.
+             */
+            chains_emptied_by_retention: number;
             /**
              * Format: int64
              * @description Chain position the walk ended on. Reported only for a
@@ -3984,10 +4030,10 @@ export interface components {
             database_name: string;
             protocol: string;
             /**
-             * @description "uri" or "ez-connect"
+             * @description `uri` (PostgreSQL, MySQL/MariaDB, MongoDB), `ez-connect` (Oracle) or `connection-string` (SQL Server, ADO.NET/ODBC keyword syntax).
              * @enum {string}
              */
-            format: "uri" | "ez-connect";
+            format: "uri" | "ez-connect" | "connection-string";
             /** @description Ready-to-paste connection URL */
             url: string;
         };
@@ -4006,7 +4052,7 @@ export interface components {
         SetParameterRequest: {
             value: string;
         };
-        /** @description Public endpoint advertisement settings. Covers two independent network paths: the *connection* host (host/pg_host/ora_host/ mysql_host/*_port — where SQL clients reach the PG/Oracle/MySQL proxies, via direct or TCP-load-balancer access) and the *Web UI* host (web_ui_url — where the browser and REST API are reached, behind an HTTP ingress / reverse proxy). These are typically two different DNS names on two different network paths. */
+        /** @description Public endpoint advertisement settings. Covers two independent network paths: the *connection* host (host/pg_host/ora_host/ mysql_host/mongo_host/mssql_host/*_port — where SQL clients reach the PG/Oracle/MySQL/MongoDB/SQL Server proxies, via direct or TCP-load-balancer access) and the *Web UI* host (web_ui_url — where the browser and REST API are reached, behind an HTTP ingress / reverse proxy). These are typically two different DNS names on two different network paths. */
         PublicEndpoints: {
             /** @description Default public hostname for all protocols (the connection host, e.g. db.company.com) */
             host?: string;
@@ -4018,6 +4064,8 @@ export interface components {
             mysql_host?: string;
             /** @description MongoDB-specific host override (empty = use host) */
             mongo_host?: string;
+            /** @description SQL Server-specific host override (empty = use host) */
+            mssql_host?: string;
             /** @description PostgreSQL port override (null = use local listen port) */
             pg_port?: number | null;
             /** @description Oracle port override (null = use local listen port) */
@@ -4026,6 +4074,8 @@ export interface components {
             mysql_port?: number | null;
             /** @description MongoDB port override (null = use local listen port) */
             mongo_port?: number | null;
+            /** @description SQL Server port override (null = use local listen port) */
+            mssql_port?: number | null;
             /** @description Web UI / public base URL override (e.g. https://dbbat.company.com), reached through an HTTP ingress / reverse proxy. Empty = fall back to the DBB_PUBLIC_URL environment variable. Used for Slack deep-links and other absolute-URL generation. Independent of `host`, which advertises the connection host instead. */
             web_ui_url?: string;
         };
@@ -4040,6 +4090,8 @@ export interface components {
             mysql_port: number;
             mongo_host: string;
             mongo_port: number;
+            mssql_host: string;
+            mssql_port: number;
             /** @description Effective Web UI / public base URL (web_ui_url parameter, falling back to DBB_PUBLIC_URL) */
             web_ui_url: string;
         };
