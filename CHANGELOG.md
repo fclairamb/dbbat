@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.1](https://github.com/fclairamb/dbbat/compare/v0.28.0...v0.28.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.9.1 ([#377](https://github.com/fclairamb/dbbat/issues/377)) ([e49d833](https://github.com/fclairamb/dbbat/commit/e49d833a055cb494b247f2b6ee21f817a0a65c1b))
+
 ## [0.28.0](https://github.com/fclairamb/dbbat/compare/v0.27.0...v0.28.0) (2026-09-09)
 
 
