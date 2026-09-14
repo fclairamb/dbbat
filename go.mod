@@ -27,7 +27,7 @@ require (
 	github.com/knadh/koanf/v2 v2.3.6
 	github.com/microsoft/go-mssqldb v1.11.0
 	github.com/moby/moby/api v1.56.0
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/sijms/go-ora/v3 v3.0.1
 	github.com/slack-go/slack v0.29.0
 	github.com/stretchr/testify v1.12.1
