@@ -547,7 +547,15 @@ func (s *Store) orphanCloseQuery(db bun.IDB) *bun.UpdateQuery {
 		// last_activity_at, not now(): retention should measure from when the
 		// session actually stopped talking, and a crashed session must not get
 		// its clock reset by every subsequent restart.
-		Set("disconnected_at = last_activity_at")
+		Set("disconnected_at = last_activity_at").
+		// Why the row is closed, so termination_reason has no unexplained NULLs
+		// on closed rows: without it a crash-orphaned session reads exactly like
+		// a client that hung up politely, which is the one thing a reader of
+		// that column must not be left guessing about. COALESCE is defensive:
+		// nothing writes termination_reason while a row is still open today
+		// (it lands in the same UPDATE as disconnected_at), and if anything
+		// ever does, the more specific reason must survive this one.
+		Set("termination_reason = COALESCE(termination_reason, ?)", TerminationInstanceLost)
 }
 
 // orphanChainHead is one connection's recoverable chain head, as read back by
@@ -884,7 +892,8 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 		Model(conn).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
 			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, "+
-			"dump_key, grant_uid, query_chain_mac, query_chain_len, query_chain_stamp_version").
+			"dump_key, grant_uid, terminate_requested_at, terminate_requested_by, terminate_reason, "+
+			"query_chain_mac, query_chain_len, query_chain_stamp_version").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {
@@ -920,7 +929,8 @@ func (s *Store) GetConnectionsByUIDs(ctx context.Context, uids []uuid.UUID) (map
 		Model(&connections).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
 			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, "+
-			"dump_key, grant_uid, query_chain_mac, query_chain_len, query_chain_stamp_version").
+			"dump_key, grant_uid, terminate_requested_at, terminate_requested_by, terminate_reason, "+
+			"query_chain_mac, query_chain_len, query_chain_stamp_version").
 		Where("uid IN (?)", bun.List(uids)).
 		Scan(ctx)
 	if err != nil {
@@ -968,7 +978,7 @@ func (s *Store) buildListConnectionsQuery(
 		Model(dest).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, " +
 			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, " +
-			"dump_key, grant_uid")
+			"dump_key, grant_uid, terminate_requested_at, terminate_requested_by, terminate_reason")
 
 	if filter.UserID != nil {
 		q = q.Where("user_id = ?", *filter.UserID)
