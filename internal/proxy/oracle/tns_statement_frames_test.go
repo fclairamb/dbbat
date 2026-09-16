@@ -41,13 +41,13 @@ func TestEncodeDataPacketLikeKeepsTheClientsHeaderForm(t *testing.T) {
 	assert.Equal(t, uint16(len(legacy)), binary.BigEndian.Uint16(legacy[0:2]))
 	assert.Equal(t, payload, legacy[tnsHeaderSize:])
 
-	// And the two really are different bytes, which is the point of modelling
+	// And the two really are different bytes, which is the point of modeling
 	// the header on the client's own instead of re-encoding it.
 	assert.NotEqual(t, v315[:4], legacy[:4])
 }
 
 // TestEncodeDataPacketLikeGrowsTheLength pins that a rewritten packet declares
-// its own size and not the size of the packet it was modelled on — the failure
+// its own size and not the size of the packet it was modeled on — the failure
 // that would desynchronize the upstream on the first tagged statement.
 func TestEncodeDataPacketLikeGrowsTheLength(t *testing.T) {
 	t.Parallel()

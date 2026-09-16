@@ -112,11 +112,11 @@ func TestQueryTaggingOracleRejectsAnythingElse(t *testing.T) {
 
 	for _, value := range []string{"conn", "connection", "on", "true", "yes", "1"} {
 		_, err := QueryTaggingConfig{Oracle: value}.ResolveOracle()
-		assert.ErrorIs(t, err, ErrQueryTaggingOracleInvalid, "value %q", value)
+		require.ErrorIs(t, err, ErrQueryTaggingOracleInvalid, "value %q", value)
 	}
 
 	for _, value := range []string{"", "off", "OFF", " off ", "User", "USER"} {
 		_, err := QueryTaggingConfig{Oracle: value}.ResolveOracle()
-		assert.NoError(t, err, "value %q", value)
+		require.NoError(t, err, "value %q", value)
 	}
 }

@@ -229,7 +229,7 @@ func execSQLLengthField(body []byte) (execSQLLenField, bool) {
 	return execSQLLenField{value: sqlLen, at: pos, width: n, kind: stmtLenCompressed}, true
 }
 
-// execSQLLengthWide reads the statement length out of the OCI wide exec header.
+// execSQLLengthWideField reads the statement length out of the OCI wide exec header.
 // The `[0x01][seq+1]` pad plus the 8-byte pointer sentinel is the same shape
 // isCloseCursorsWideHeader validates, so a payload that does not fit it is read
 // as the thin encoding instead of guessed at.
@@ -243,19 +243,13 @@ func execSQLLengthField(body []byte) (execSQLLenField, bool) {
 // that is not a multiple of three is refused rather than rounded, so a header
 // shape this reading does not fit falls through to the legacy scan instead of
 // producing a length that would slice the statement.
-func execSQLLengthWide(body []byte) (int, bool) {
-	field, ok := execSQLLengthWideField(body)
-
-	return field.value, ok
-}
-
 // wideCharWidth is the multiplier the OCI exec header applies to the statement
 // length: the client sizes the buffer for its widest character encoding rather
 // than reporting the byte count.
 const wideCharWidth = 3
 
-// execSQLLengthWideField is execSQLLengthWide keeping the field's position, for
-// the same reason execSQLLengthField exists.
+// It keeps the field's position as well as its value, for the same reason
+// execSQLLengthField does: a decoder needs the number, an encoder needs the span.
 func execSQLLengthWideField(body []byte) (execSQLLenField, bool) {
 	const (
 		optionsLen   = 8

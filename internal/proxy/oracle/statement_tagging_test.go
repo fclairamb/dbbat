@@ -305,3 +305,29 @@ func TestStatementTaggingReexecutionKeepsTheClientsTextInTheTracker(t *testing.T
 	assert.Equal(t, sql, s.tracker.pendingQuery.cursor.sql,
 		"the re-execution is gated on the statement the client sent, untagged")
 }
+
+// TestStatementTaggingRecutsPastTheNegotiatedUnit exercises the growth axis the
+// SDU imposes: sqlplus negotiates 2048, so a statement that already filled its
+// packets cannot absorb the tag in place and the outgoing message has to be cut
+// into more packets than arrived.
+func TestStatementTaggingRecutsPastTheNegotiatedUnit(t *testing.T) {
+	t.Parallel()
+
+	sql := "SELECT " + strings.Repeat("r", 6000) + " FROM dual"
+	ttc := thinExecFrame(sql, encodeChunkedCLR([]byte(sql), len(sql), true))
+
+	s := taggedSession(t, 2048)
+	s.clientBigClrChunks = true
+
+	frames, ok := s.rewriteStatementMessage(messageOf(ttc))
+	require.True(t, ok)
+	require.GreaterOrEqual(t, len(frames), 3, "a 6KB statement cannot fit 2048-byte packets")
+
+	for _, frame := range frames {
+		assert.LessOrEqual(t, len(frame), 2048, "no packet may exceed the negotiated unit")
+	}
+
+	stmt, ok := decodeExecStatementText(upstreamTTC(t, frames))
+	require.True(t, ok, "the fragments must reassemble to a readable message")
+	assert.Equal(t, taggingTagPrefix+sql, stmt.Text)
+}

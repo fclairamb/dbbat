@@ -120,7 +120,7 @@ func TestExecStatementLengthSources(t *testing.T) {
 //
 // readCompressedInt can consume the buffer exactly, so stepping over the
 // cursor-id flag byte unchecked sliced past the end. This payload is twelve
-// bytes and clears every other guard: execSQLLengthWide wants 25 and declines,
+// bytes and clears every other guard: execSQLLengthWideField wants 25 and declines,
 // execHeaderMinLen is 12, and the options/cursor-id walk lands the cursor
 // exactly on the final byte. interceptClientMessage's recover would have
 // contained the panic, but a contained panic forwards the frame ungated.

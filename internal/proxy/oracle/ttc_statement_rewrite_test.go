@@ -23,11 +23,12 @@ import (
 // The filler is the al8i4 array and the pointer words; their contents do not
 // matter to the locator, only that they are not text.
 func thinExecFrame(sql string, value []byte) []byte {
-	body := []byte{0x03, 0x5e, 0x00}
-	body = append(body, ttcCompressedUint(0x8021)...)          // options
-	body = append(body, ttcCompressedUint(0)...)               // cursor id
-	body = append(body, 0x01)                                  // "cursor id is zero"
-	body = append(body, ttcCompressedUint(uint64(len(sql)))...) // sqlLen
+	body := make([]byte, 0, 48+len(value))
+	body = append(body, 0x03, 0x5e, 0x00)
+	body = append(body, ttcCompressedUint(0x8021)...) // options
+	body = append(body, ttcCompressedUint(0)...)      // cursor id
+	body = append(body, 0x01)                         // "cursor id is zero"
+	body = append(body, ttcCompressedUint(uint64(len(sql)))...)
 	body = append(body, 0x01, 0x01, 0x0d)
 	body = append(body, make([]byte, 15)...)
 	body = append(body, value...)
@@ -50,7 +51,8 @@ func thinExecBare(sql string) []byte {
 // wideExecFrame builds the OCI exec header: the `01 seq+1` pad, eight option
 // bytes, the `fe x8` pointer sentinel and the `sqlLen * 3` little-endian ub4.
 func wideExecFrame(run []byte) []byte {
-	body := []byte{0x03, 0x5e, 0x06, 0x01, 0x07}
+	body := make([]byte, 0, 64+len(run))
+	body = append(body, 0x03, 0x5e, 0x06, 0x01, 0x07)
 	body = append(body, make([]byte, 8)...)
 	body = append(body, closeCursorsWideSentinel...)
 
@@ -332,7 +334,7 @@ func TestLocatorRefusesAFrameItCannotReproduce(t *testing.T) {
 	t.Parallel()
 
 	sql := "SELECT " + strings.Repeat("f", 235) + " FROM dual"
-	require.Equal(t, 0xFC, len(sql), "exactly the byte the short form may not carry")
+	require.Len(t, sql, 0xFC, "exactly the byte the short form may not carry")
 
 	body := thinExecCLR(sql)
 
@@ -351,4 +353,48 @@ func TestLocatorRefusesANonStatementRun(t *testing.T) {
 
 	_, ok := locateStatementRewrite(body, false)
 	assert.False(t, ok, "a run that does not open with a SQL verb is not a statement")
+}
+
+// TestRewriteSingleChunkLongFormIsNotReadAsABareRun is the regression for the
+// one failure a real 23ai found that no byte-level check could: a client whose
+// chunk size exceeds the statement writes it as *one* chunk, so its text sits
+// contiguously in the payload and the contiguous scan finds it — as a bare run,
+// with the chunk's own length prefix left outside the span the rewriter touches.
+//
+// Rewriting that leaves a chunk header still declaring the old length in front
+// of a longer statement, and Oracle answers `ORA-03120: two-task conversion
+// routine: integer overflow`. Note that the identity check passes on such a
+// frame: re-encoding the *same* value reproduces it either way. Only reading the
+// framing first catches it.
+func TestRewriteSingleChunkLongFormIsNotReadAsABareRun(t *testing.T) {
+	t.Parallel()
+
+	// go-ora chunks at 32767 bytes once the server advertises UseBigClrChunks, so
+	// anything under that is one chunk; without the capability the chunk size is
+	// small enough that only a statement at the long form's own floor fits in one.
+	for _, tc := range []struct {
+		name      string
+		sql       string
+		bigChunks bool
+	}{
+		{"big chunks, 20KB in one chunk", "SELECT " + strings.Repeat("g", 20000) + " FROM dual", true},
+		{"single-byte chunk lengths", "SELECT " + strings.Repeat("g", 235) + " FROM dual", false},
+	} {
+		body := thinExecFrame(tc.sql, encodeChunkedCLR([]byte(tc.sql), len(tc.sql), tc.bigChunks))
+
+		rw, ok := locateStatementRewrite(body, tc.bigChunks)
+		require.True(t, ok, tc.name)
+		require.Equal(t, stmtClrChunked, rw.clrKind,
+			"%s: a single-chunk long form is still the long form", tc.name)
+		require.Equal(t, byte(0xFE), body[rw.valueAt],
+			"%s: the span being rewritten must start at the chunk marker, not inside it", tc.name)
+		assert.Equal(t, tc.sql, rw.text(), tc.name)
+
+		out := rewriteWith(t, body, tagOf(52), tc.bigChunks)
+
+		back, ok := locateStatementRewrite(out, tc.bigChunks)
+		require.True(t, ok, tc.name)
+		assert.Equal(t, tagOf(52)+tc.sql, back.text(),
+			"%s: the chunk header must declare the new length, not the old one", tc.name)
+	}
 }
