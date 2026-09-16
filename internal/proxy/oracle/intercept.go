@@ -629,9 +629,21 @@ func (s *session) learnCursorID(ttcPayload []byte) {
 //
 // Callers hold trackerMu.
 func (s *session) flushPendingQuery() {
-	if s.tracker.pendingQuery != nil {
-		s.completeQuery(nil, nil)
+	if s.tracker.pendingQuery == nil {
+		return
 	}
+
+	// When dbbat is what ended the session, say so on the row: the call that
+	// was in flight is the one an operator goes looking for afterwards, and a
+	// row with no error reads as one that simply finished.
+	if t := s.recordedTermination(); t.Set() {
+		message := t.Message()
+		s.completeQuery(nil, &message)
+
+		return
+	}
+
+	s.completeQuery(nil, nil)
 }
 
 // handlePiggybackExec intercepts a v315+ piggyback execute-with-SQL message.

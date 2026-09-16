@@ -664,6 +664,14 @@ func (s *session) recordDisconnect(ctx context.Context) {
 
 	termination := s.recordedTermination()
 	if termination.Set() {
+		// The statement that was in flight never got a response, so nothing
+		// else will ever complete its row. Say why here, before the session
+		// record closes.
+		if pending := s.takePending(); pending != nil {
+			errText := termination.Message()
+			s.recordQuery(ctx, pending, queryOutcome{queryError: &errText})
+		}
+
 		// "terminated" before "closed": why, then that.
 		s.publisher.ConnectionWithReason(ctx, shared.ConnectionTerminated, termination.Reason)
 	}
