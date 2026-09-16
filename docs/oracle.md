@@ -2314,7 +2314,80 @@ front of the value — and it is pinned by
 The bytes of the tag itself are `shared.NewUserQueryTagger`'s and are pinned by
 `internal/proxy/shared`: `/*dbbat='0.28.1',user='florent',grant='diag'*/ `, no
 `conn=`, ASCII only — dbbat does not know the session charset, so byte length has
-to equal character length.
+to equal character length. It is **58 bytes** for the integration fixture
+(`user='cursorprobe'` and a generated grant slug), which is the figure the
+boundary probe below places itself from rather than assuming.
+
+### How long a statement Oracle will actually parse
+
+The tag makes a statement ~50 bytes longer, and the rewriter accounts for every
+consequence of that except one it does not own: the server's own limit on
+statement length. If there were a band just under it, an operator turning
+`DBB_QUERY_TAGGING_ORACLE=user` on would stop a statement that ran yesterday —
+and the error would come from Oracle, about a statement whose `queries` row
+holds the client's own untagged text, which is the hardest kind of failure to
+attribute.
+
+**There is no such band, and this is the measurement.**
+`TestIntegration_OracleStatementLengthCeiling` sends statements of an exact byte
+length (`SELECT 1 AS <marker> /* <pad> */ FROM dual`) through a proxy with
+tagging **off**, so what is exercised is Oracle and not dbbat, doubling the
+length from 32 KB and bisecting on the first refusal.
+
+| image | walked to | refusals |
+|---|---|---|
+| `gvenzl/oracle-free:23-slim` (23.26.3.0.0, `FREEPDB1`) | **128 MB** (`CEILING_WALK_CAP=134217728`, 13 probes, ~49 s) | **none** |
+| `gvenzl/oracle-xe:18.4.0-slim` | not measured | — |
+
+- **23ai parsed and executed a 128 MB statement.** Every probe returned its row;
+  the walk never found a length to bisect against. Whatever Oracle's real
+  ceiling is, it is at least four orders of magnitude above the "64K" this
+  package's own `execMaxSQLLen` comment used to quote as fact. That comment is
+  now the measurement instead.
+- **18c XE has no number here**, and it is not for want of trying: the image is
+  published for linux/amd64 only, and started under emulation on an Apple
+  Silicon host it brings the listener up and then dies with `ORA-00442: Oracle
+  Database Express Edition (XE) single instance violation error` /
+  `ORA-27300 … failure occurred at: sxecheck4` (re-confirmed 2026-09-16 — it is
+  the same failure that made `defaultOracleImage` the 23ai one).
+  The test is image-agnostic, so the **nightly `18c XE (pinned)` leg of
+  `.github/workflows/integration.yml`** (ubuntu-24.04, amd64) is what will
+  actually produce that number — and, if 18c turns out to have a ceiling below
+  1 MB where 23ai has none, is what will say so by failing. That leg has not run
+  since this test landed, so treat 18c as unverified rather than as agreeing.
+- The committed cap is `2 * execMaxSQLLen`, which is the assertion rather than a
+  budget: everything dbbat is willing to tag sits at or below `execMaxSQLLen`, so
+  a walk that clears twice it without a refusal has shown that no statement dbbat
+  tags can be one Oracle declines for its length. `CEILING_WALK_CAP` raises it.
+
+**So the ceiling that binds is dbbat's own** (`maxTaggableStatementBytes`, which
+*is* `execMaxSQLLen`), and the rule reads: a statement is tagged only while the
+tagged text stays inside the length this package's own decoders will believe.
+That is not a formality. Measured on the same fixture before the rule existed, a
+statement of exactly `execMaxSQLLen` bytes **was** tagged, putting a TTC length
+field declaring 1 048 634 bytes on the upstream wire — a length dbbat itself
+calls implausible and would refuse to read back. Oracle did not mind. The
+invariant "dbbat never writes a statement dbbat would not read" is worth more
+than the tag on a 1 MB statement, and the band it costs is the last 58 bytes
+under 1 MB.
+
+The refusal is **per frame, logged once per session** — deliberately, and for
+the same reason the locator's own frame-level skip is not a session demotion:
+demoting the session would untag every ordinary statement that followed,
+splitting each across a tagged and an untagged SQL_ID, which is the cursor
+doubling the whole per-user design was measured to avoid. A statement within a
+tag's width of 1 MB is a rare outlier and the session issuing one is usually
+issuing a hundred normal statements too. It stays per-statement deterministic —
+the verdict is a pure function of the statement's length and the session's tag —
+and it is never silent: the WARN names `statement_bytes`, `tag_bytes` and
+`max_bytes`, under its own message rather than the locator's, so an operator
+hunting a statement missing from `V$SQL` can tell "too long to grow" from "a
+client shape dbbat cannot model". Pinned by
+`TestRewriteRefusesToGrowAStatementPastWhatDbbatReads` and
+`TestStatementTaggingLogsTheLengthRefusalOnce` in unit tests, and to the byte on
+a live server by `TestIntegration_StatementTagStopsAtDbbatsOwnBound`: at
+`maxTaggableStatementBytes - 58` the statement is tagged, at one byte more it is
+not, and both run and are recorded verbatim either way.
 
 ## Testing
 
