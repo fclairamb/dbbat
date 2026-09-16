@@ -17,6 +17,8 @@ import (
 // claimed to be a dbbat-initiated termination of a kind we can name.
 func TerminationReasonFor(err error) string {
 	switch {
+	case errors.Is(err, ErrAdminTerminated):
+		return store.TerminationAdminTerminated
 	case errors.Is(err, ErrStatementTimeout):
 		return store.TerminationStatementTimeout
 	case errors.Is(err, ErrGrantRevoked):
@@ -40,6 +42,23 @@ func TerminationFor(err error, guard *LimitGuard, queryUID uuid.UUID) store.Term
 	t := store.Termination{
 		Reason:   TerminationReasonFor(err),
 		QueryUID: queryUID,
+	}
+
+	// A termination signalled from outside the session carries its own reason,
+	// which is not always `admin_terminated`: the cross-instance poller relays
+	// a grant revoked on another replica through the very same flag, and that
+	// session must still record `grant_revoked`. The handle is therefore the
+	// authority whenever it says anything, and the sentinel only the default.
+	if errors.Is(err, ErrAdminTerminated) {
+		req := guard.TerminationRequest()
+		if req.Reason != "" {
+			t.Reason = req.Reason
+		}
+
+		t.By = req.By
+		t.Detail = req.Detail
+
+		return t
 	}
 
 	if t.Reason != store.TerminationStatementTimeout {

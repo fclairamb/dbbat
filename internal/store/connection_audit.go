@@ -71,9 +71,22 @@ const (
 	TerminationQuotaExceeded = "quota_exceeded"
 	// TerminationGrantRevoked — an admin revoked the grant mid-session.
 	TerminationGrantRevoked = "grant_revoked"
-	// TerminationAdminTerminated — an admin ended this specific session.
-	// Reserved by the terminate-connection work; nothing writes it yet.
+	// TerminationAdminTerminated — an admin ended this specific session,
+	// through POST /connections/{uid}/terminate.
+	//
+	// Not the same thing as TerminationGrantRevoked, and deliberately: the
+	// grant is untouched, so the user may reconnect immediately. It ends one
+	// session, not an access.
 	TerminationAdminTerminated = "admin_terminated"
+	// TerminationInstanceLost — nobody ended this session; the process serving
+	// it died, and the reconcile closed the row on its behalf.
+	//
+	// It is what keeps termination_reason from having unexplained NULLs on
+	// closed rows: without it a crash-orphaned session reads exactly like a
+	// client that hung up politely. It is never written by a session — by
+	// definition there is none left to write it — only by
+	// Store.closeOrphans.
+	TerminationInstanceLost = "instance_lost"
 )
 
 // ValidTerminationReasons is the closed vocabulary above, for validation and
@@ -84,6 +97,7 @@ var ValidTerminationReasons = []string{
 	TerminationQuotaExceeded,
 	TerminationGrantRevoked,
 	TerminationAdminTerminated,
+	TerminationInstanceLost,
 }
 
 // SessionAuditEventTypes are the audit events one *session* produces, as opposed
@@ -147,6 +161,7 @@ type connectionAuditDetails struct {
 	// flight when it did, and — for a statement timeout — the limit that was
 	// crossed and how long the statement had actually been running.
 	TerminationReason      string `json:"termination_reason,omitempty"`
+	TerminatedBy           string `json:"terminated_by,omitempty"`
 	QueryUID               string `json:"query_uid,omitempty"`
 	LimitSeconds           string `json:"limit,omitempty"`
 	ObservedDuration       string `json:"observed_duration,omitempty"`
@@ -410,6 +425,12 @@ type Termination struct {
 	// Detail is free text for the audit entry when the three fields above do
 	// not say enough. Never shown to the client.
 	Detail string
+
+	// By is the username of the human who asked for this termination, empty
+	// when no human did (every watchdog-driven reason). It is what makes the
+	// audit entry and the in-flight statement's row name a person rather than
+	// "dbbat".
+	By string
 }
 
 // Set reports whether this record describes an actual dbbat-initiated
@@ -426,6 +447,13 @@ func (t Termination) Message() string {
 	switch {
 	case !t.Set():
 		return ""
+	// A named human first: "session terminated by alice" is the whole answer to
+	// "what happened to my connection?", and prefixing it with the vocabulary
+	// value would only bury it.
+	case t.By != "" && t.Detail != "":
+		return "session terminated by " + t.By + ": " + t.Detail
+	case t.By != "":
+		return "session terminated by " + t.By
 	case t.Reason == TerminationStatementTimeout && t.Limit > 0 && t.Observed > 0:
 		return fmt.Sprintf("statement timeout: limit %s, ran %s, session terminated by dbbat",
 			t.Limit, t.Observed.Round(100*time.Millisecond))
@@ -458,6 +486,7 @@ func (s *Store) recordConnectionTerminated(ctx context.Context, conn *Connection
 		RunID:              derefString(conn.RunID),
 		GrantUID:           optionalUUIDString(conn.GrantUID),
 		TerminationReason:  t.Reason,
+		TerminatedBy:       t.By,
 		TerminationDetails: t.Detail,
 	}
 
