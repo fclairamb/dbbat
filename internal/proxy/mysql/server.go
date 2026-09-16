@@ -72,6 +72,10 @@ type Server struct {
 	// every session's auth. nil — the default — means no limit is imposed
 	// beyond whatever the grant definition carries.
 	statementTimeouts *shared.StatementTimeoutResolver
+
+	// queryTagging prepends the dbbat identity comment to every statement text
+	// handed to the upstream (DBB_QUERY_TAGGING). Off by default.
+	queryTagging bool
 }
 
 // NewServer creates a new MySQL proxy server.
@@ -305,6 +309,13 @@ func (s *Server) SetStatementTimeouts(r *shared.StatementTimeoutResolver) {
 // them never holds anything.
 func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
 	s.approvalDeps = deps
+}
+
+// SetQueryTagging turns the sqlcommenter-style statement tag on. Called by the
+// wiring in main from DBB_QUERY_TAGGING; a server without it forwards every
+// statement byte-for-byte as it always did.
+func (s *Server) SetQueryTagging(enabled bool) {
+	s.queryTagging = enabled
 }
 
 // SetRowWriter installs the process-wide result-row writer, replacing (and

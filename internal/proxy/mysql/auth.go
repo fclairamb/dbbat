@@ -13,6 +13,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
+	"github.com/fclairamb/dbbat/internal/version"
 )
 
 // newGoMySQLServer builds the shared go-mysql server config.
@@ -234,6 +235,16 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
+
+	// The statement tag, built once, here, because every component of it is
+	// known exactly now and none of them changes for the rest of the session —
+	// which is what keeps repeated executions of one statement byte-identical
+	// and the MySQL digest aggregating them. Left at its inert zero value when
+	// DBB_QUERY_TAGGING is off.
+	if s.server.queryTagging {
+		s.queryTag = shared.NewQueryTagger(
+			version.Version, s.user.Username, s.connUID, grant.DefinitionSlug())
+	}
 
 	s.authComplete = true
 

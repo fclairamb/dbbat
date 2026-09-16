@@ -95,9 +95,15 @@ func (h *handler) namesSessionDatabase(dbName string) bool {
 }
 
 // HandleQuery handles COM_QUERY (text protocol).
+//
+// runIntercepted is handed the *client's* text — it is what every control
+// matches on and what the queries row and the audit chain record. Only the
+// closure, which runs after all of them have passed, sees the tagged text, so
+// the tag exists on the wire to the upstream and nowhere else. Inert unless
+// DBB_QUERY_TAGGING is on.
 func (h *handler) HandleQuery(query string) (*gomysql.Result, error) {
 	return h.runIntercepted(query, nil, func() (*gomysql.Result, error) {
-		return h.session.upstreamConn.Execute(query)
+		return h.session.upstreamConn.Execute(h.session.queryTag.Apply(query))
 	})
 }
 
@@ -129,7 +135,14 @@ func (h *handler) HandleStmtPrepare(query string) (int, int, any, error) {
 		return 0, 0, nil, ErrSwitchDatabaseDenied
 	}
 
-	stmt, err := h.session.upstreamConn.Prepare(query)
+	// Tagged once, here, on the text the upstream actually parses. Every later
+	// COM_STMT_EXECUTE runs that same prepared statement, so it inherits the
+	// tag for free — which is just as well, since COM_STMT_EXECUTE is a binary
+	// payload with no statement text to tag.
+	//
+	// syntheticSQL above, and everything recordQuery writes, keep the client's
+	// text.
+	stmt, err := h.session.upstreamConn.Prepare(h.session.queryTag.Apply(query))
 	if err != nil {
 		errStr := err.Error()
 		h.recordQuery(syntheticSQL, nil, start, &errStr)
