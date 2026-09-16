@@ -60,7 +60,7 @@ func TestWithComment_InjectsAndPreservesEverythingElse(t *testing.T) {
 
 	in := mustRaw(t, bson.D{
 		{Key: "find", Value: "widgets"},
-		{Key: "filter", Value: bson.D{{Key: "colour", Value: "red"}}},
+		{Key: "filter", Value: bson.D{{Key: "color", Value: "red"}}},
 		{Key: "$db", Value: "app"},
 	})
 

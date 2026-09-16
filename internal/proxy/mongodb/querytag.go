@@ -44,7 +44,7 @@ const commentKey = "comment"
 // It is an allowlist rather than the exemption list maxTimeMS uses, and
 // deliberately so: `comment` is documented on the data-bearing commands (the
 // ones MongoDB profiles and the ones a DBA hunting load is looking at), while
-// several other commands reject fields they do not recognise. A tag is an
+// several other commands reject fields they do not recognize. A tag is an
 // observability nicety — it must never be the reason a command fails — so the
 // set is exactly the commands whose `comment` support MongoDB documents, which
 // is also the set whose entries in `system.profile` are worth attributing.
@@ -85,7 +85,7 @@ var commentTaggableCommands = map[string]bool{
 // this protocol the profiler *also* records `appName`, which dbbat already tags
 // with `dbbat/<version> @<user> c=<uid suffix>` on every session
 // (shared.BuildUpstreamName). So a command dbbat declines to tag is still
-// attributable; it just takes the neighbouring column.
+// attributable; it just takes the neighboring column.
 func (s *Session) applyQueryTag(body bson.Raw, cmd string) (bson.Raw, bool, error) {
 	if !s.queryTag.Active() || !commentTaggableCommands[cmd] {
 		return body, false, nil
