@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -139,6 +140,34 @@ func parseSessionFilters(
 		parseGrantProvenanceQuery(c, provenance)
 }
 
+// uidSuffixPattern matches the "c=" tag shared.BuildUpstreamName stamps on
+// the upstream application/program name: the last 12 hex characters of a
+// connection uuid. Case-insensitive on input (a DBA may paste it from a
+// tool that upper-cases hex); normalized to lowercase before it reaches the
+// store, matching the lowercase text form right(uid::text, 12) produces.
+var uidSuffixPattern = regexp.MustCompile(`^[0-9a-fA-F]{12}$`)
+
+// parseUIDSuffixQuery reads the uid_suffix filter, answering 400 rather than
+// silently dropping it on a malformed value — the same "fail closed" rule
+// parseStrictUUIDQuery documents for every filter added since.
+func parseUIDSuffixQuery(c *gin.Context, out *string) bool {
+	raw := c.Query("uid_suffix")
+	if raw == "" {
+		return true
+	}
+
+	if !uidSuffixPattern.MatchString(raw) {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+			"invalid uid_suffix: must be 12 hex characters")
+
+		return false
+	}
+
+	*out = strings.ToLower(raw)
+
+	return true
+}
+
 // handleListConnections lists connections based on user role
 func (s *Server) handleListConnections(c *gin.Context) {
 	currentUser := getCurrentUser(c)
@@ -173,6 +202,10 @@ func (s *Server) handleListConnections(c *gin.Context) {
 		if uid, err := uuid.Parse(before); err == nil {
 			filter.BeforeUID = &uid
 		}
+	}
+
+	if !parseUIDSuffixQuery(c, &filter.UIDSuffix) {
+		return
 	}
 
 	if limit := c.Query("limit"); limit != "" {

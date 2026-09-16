@@ -598,6 +598,18 @@ type ConnectionFilter struct {
 	// asks for, and if it ever is it gets its own field rather than a nil that
 	// means one thing on this filter and another on the next.
 	ActiveOnly bool
+
+	// UIDSuffix narrows to the connection whose uid ends in these 12 lowercase
+	// hex characters — the "c=" tag shared.BuildUpstreamName stamps on the
+	// upstream application/program name, so a DBA staring at
+	// pg_stat_activity.application_name (or the MySQL/Oracle/MSSQL/Mongo
+	// equivalent) can paste it straight into this filter and land on the
+	// session. Matched with `right(uid::text, 12) = ?` (see
+	// idx_connections_uid_suffix), never a prefix or substring: the point of
+	// taking the *last* 12 hex characters of a UUIDv7 is that they are pure
+	// randomness, unlike the leading, time-ordered ones every connection
+	// opened in the same millisecond shares.
+	UIDSuffix string
 }
 
 // GrantProvenance says how the grant a session ran under came to exist. The

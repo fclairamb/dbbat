@@ -1023,6 +1023,10 @@ func (s *Store) buildListConnectionsQuery(
 		q = q.Where("uid < ?", *filter.BeforeUID)
 	}
 
+	if filter.UIDSuffix != "" {
+		q = q.Where("right(uid::text, 12) = ?", filter.UIDSuffix)
+	}
+
 	q = q.Order("uid DESC")
 
 	if filter.Limit > 0 {
