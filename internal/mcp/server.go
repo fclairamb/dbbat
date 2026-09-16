@@ -93,6 +93,15 @@ type Deps struct {
 	Broker func() *events.Broker
 	// Executor runs statements through the loopback proxy listeners.
 	Executor Executor
+	// StatementTimeout resolves the instance-wide per-statement limit at call
+	// time — a function rather than a value because an operator can change the
+	// parameter while the process runs. nil means "no instance-wide limit",
+	// which is also what a test server gets.
+	//
+	// The MCP layer never *enforces* it: the statement runs through the proxy
+	// listener like any other, and the proxy's own watchdog is what cancels it.
+	// This is only so the failure can be named to the agent.
+	StatementTimeout func(context.Context) time.Duration
 	// GraceWindow / AwaitWindow override the defaults; zero means default.
 	// Test seams, and the knobs an operator would want first if the shape
 	// ever needs tuning.
@@ -365,6 +374,7 @@ func (s *Server) start(ctx context.Context, caller *Caller, a accessible, sqlTex
 			APIKey:           caller.APIKey,
 			SQL:              sqlText,
 			Params:           params,
+			StatementTimeout: s.statementTimeout(execCtx, a.grant),
 			MaxRows:          maxRows,
 		})
 
@@ -407,4 +417,24 @@ func (s *Server) brokerOrNil() *events.Broker {
 	}
 
 	return s.deps.Broker()
+}
+
+// statementTimeout resolves the per-statement limit that applies to one
+// execution: the grant definition's value when it has one, otherwise the
+// instance-wide default. Zero means no limit.
+//
+// Resolved here rather than inside the executor because the grant is already in
+// hand — the authorization step found it — and re-reading it per statement
+// would be a database round trip for a number the caller already knows.
+func (s *Server) statementTimeout(ctx context.Context, grant *store.Grant) time.Duration {
+	if grant == nil {
+		return 0
+	}
+
+	global := time.Duration(0)
+	if s.deps.StatementTimeout != nil {
+		global = s.deps.StatementTimeout(ctx)
+	}
+
+	return grant.StatementTimeout(global)
 }

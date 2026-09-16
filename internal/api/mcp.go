@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -43,6 +44,12 @@ func (s *Server) newMCPServer() *mcp.Server {
 		Logger:   s.logger,
 		Broker:   func() *events.Broker { return s.broker },
 		Executor: mcp.NewLoopbackExecutor(listeners),
+		// Resolved per call, not captured: an operator can change
+		// limits.statement_timeout from the Settings page while the process
+		// runs, and the store memoizes the read.
+		StatementTimeout: func(ctx context.Context) time.Duration {
+			return s.store.ResolveStatementTimeoutCached(ctx, s.config)
+		},
 	})
 }
 
