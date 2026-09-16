@@ -32,6 +32,17 @@ func WithGrantUID(grantUID uuid.UUID) ConnectionOption {
 	return func(c *Connection) { c.GrantUID = &grantUID }
 }
 
+// WithUID pins the connection row's uid to one generated ahead of time
+// (store.NewConnectionUID), instead of the UUIDv7 createConnection would
+// otherwise generate itself. Every protocol tags the upstream-facing
+// application/program name with the connection uid
+// (shared.BuildUpstreamName's "c=" field), and that tag has to be composed
+// before — sometimes long before — this insert runs, so the uid it carries
+// must be decided by the caller rather than read back afterward.
+func WithUID(uid uuid.UUID) ConnectionOption {
+	return func(c *Connection) { c.UID = uid }
+}
+
 // CreateConnection creates a new connection record, stamping connected_at
 // from time.Now().
 func (s *Store) CreateConnection(
