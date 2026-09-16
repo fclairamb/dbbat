@@ -141,7 +141,7 @@ func (s *Store) PendingTerminations(ctx context.Context) ([]PendingTermination, 
 		       '' AS requested_by,
 		       '' AS detail
 		  FROM connections c
-		  JOIN grants g ON g.uid = c.grant_uid
+		  JOIN access_grants g ON g.uid = c.grant_uid
 		 WHERE c.run_id = ?
 		   AND c.disconnected_at IS NULL
 		   AND g.revoked_at IS NOT NULL`
