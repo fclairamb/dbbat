@@ -359,6 +359,15 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		MaxSize:    cfg.AuthCache.MaxSize,
 	})
 
+	// A malformed statement timeout disables the limit rather than shortening
+	// it (see Config.StatementTimeout), so it has to be said out loud: the
+	// operator asked for a bound and silently has none.
+	if cfg.StatementTimeoutMisconfigured() {
+		logger.WarnContext(ctx, "Invalid DBB_STATEMENT_TIMEOUT, no instance-wide statement limit is applied",
+			slog.String("value", cfg.StatementTimeout),
+			slog.String("hint", "use a Go duration such as 30s or 5m"))
+	}
+
 	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader, logger)
 
 	// One retention sweep for the whole process (nil when disabled, the default).

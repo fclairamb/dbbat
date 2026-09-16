@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/fclairamb/dbbat/internal/config"
 )
@@ -325,4 +326,107 @@ func (s *Store) ResolveWebUIURL(ctx context.Context, cfg *config.Config) string 
 		return pe.WebUIURL
 	}
 	return fallback
+}
+
+// Instance-wide limit parameter group and keys. Same shape as the public.*
+// group above, and the same precedence rule: an operator-set parameter wins
+// over the deployment's environment variable.
+const (
+	// GroupLimits holds the instance-wide limits an operator edits from the
+	// Settings page, as opposed to the per-grant-definition ones.
+	GroupLimits = "limits"
+
+	// KeyLimitsStatementTimeout is a Go duration string ("30s", "5m") bounding
+	// how long any single statement may run. Empty or "0" = no limit.
+	KeyLimitsStatementTimeout = "statement_timeout"
+)
+
+// Limits holds the operator-configured instance-wide limits.
+type Limits struct {
+	// StatementTimeout is the raw parameter value — a Go duration string, or
+	// empty when the operator never set one. Kept as text rather than a
+	// time.Duration so "unset" and "explicitly zero" stay distinguishable,
+	// which is what the env-var fallback below needs.
+	StatementTimeout string
+}
+
+// GetLimits reads every limits.* parameter and returns the typed struct.
+func (s *Store) GetLimits(ctx context.Context) (Limits, error) {
+	params, err := s.GetParameters(ctx, GroupLimits)
+	if err != nil {
+		return Limits{}, err
+	}
+
+	var l Limits
+
+	for _, p := range params {
+		if p.Key == KeyLimitsStatementTimeout {
+			l.StatementTimeout = p.Value
+		}
+	}
+
+	return l, nil
+}
+
+// SetLimits writes the limits.* parameters. An empty StatementTimeout deletes
+// the parameter rather than storing a blank one, so "unset" really does fall
+// back to the environment variable instead of pinning "no limit" in the store.
+func (s *Store) SetLimits(ctx context.Context, l Limits) error {
+	if l.StatementTimeout == "" {
+		if err := s.DeleteParameter(ctx, GroupLimits, KeyLimitsStatementTimeout); err != nil &&
+			!errors.Is(err, ErrParameterNotFound) {
+			return err
+		}
+
+		return nil
+	}
+
+	return s.SetParameter(ctx, GroupLimits, KeyLimitsStatementTimeout, l.StatementTimeout)
+}
+
+// ParseStatementTimeout turns a duration string into the limit it names. An
+// empty, malformed or non-positive value means "no limit".
+//
+// Malformed is deliberately folded into "no limit" rather than into some
+// built-in default: this value kills live database sessions, so a typo must
+// never be read as "kill sooner". Callers that want to warn about it compare
+// against the raw string.
+func ParseStatementTimeout(raw string) time.Duration {
+	if raw == "" {
+		return 0
+	}
+
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0
+	}
+
+	return d
+}
+
+// StatementTimeoutMisconfigured reports that raw is neither empty nor "0" nor a
+// usable positive duration — i.e. the limit silently ends up disabled and the
+// operator probably did not mean that. Same contract as
+// QueryStorageConfig.RetentionMisconfigured.
+func StatementTimeoutMisconfigured(raw string) bool {
+	return raw != "" && raw != "0" && ParseStatementTimeout(raw) <= 0
+}
+
+// ResolveStatementTimeout applies the global fallback chain: the operator-set
+// limits.statement_timeout parameter wins when set, otherwise the deployment's
+// DBB_STATEMENT_TIMEOUT. Zero means no instance-wide limit, which is the
+// default and what every pre-existing deployment gets.
+//
+// This is only the *global* half. A grant definition may still override it in
+// either direction — see AccessGrant.StatementTimeout.
+func ResolveStatementTimeout(l Limits, cfg *config.Config) time.Duration {
+	if l.StatementTimeout != "" {
+		return ParseStatementTimeout(l.StatementTimeout)
+	}
+
+	if cfg != nil {
+		return ParseStatementTimeout(cfg.StatementTimeout)
+	}
+
+	return 0
 }
