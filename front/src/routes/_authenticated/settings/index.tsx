@@ -131,11 +131,11 @@ function LimitsForm({
 
   const [value, setValue] = useState(statementTimeout);
 
-  const effective =
-    resolvedSeconds > 0
-      ? `${resolvedSeconds}s`
-      : "no limit";
+  const effective = resolvedSeconds > 0 ? `${resolvedSeconds}s` : "no limit";
 
+  // "no limit because an admin set 0" and "no limit because nobody set
+  // anything" are different facts, and the source is the only thing that tells
+  // them apart.
   const sourceLabel =
     resolvedSource === "parameter"
       ? "from this setting"

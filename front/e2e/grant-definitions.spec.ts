@@ -469,3 +469,98 @@ test.describe("Grant definition deactivated visibility toggle", () => {
     await expect(row).toHaveCount(0);
   });
 });
+
+/**
+ * The per-definition statement timeout is the one numeric field on this form
+ * where an empty input and a `0` mean different things: empty inherits the
+ * instance-wide default, `0` means "no limit" and *overrides* it. A form that
+ * folded one into the other would silently change access policy — either
+ * un-bounding a definition that was meant to inherit a limit, or bounding the
+ * dump/ETL definition the `0` exists for.
+ *
+ * These tests drive the three states through the dialog and back.
+ */
+test.describe("Grant Definition statement timeout", () => {
+  test("empty, zero and a positive value are three distinct saved states", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto(DEFS_URL);
+    await page.waitForLoadState("networkidle");
+
+    const stamp = Date.now();
+    const inheritName = `E2E Inherit ${stamp}`;
+    const noLimitName = `E2E No Limit ${stamp}`;
+    const boundedName = `E2E Bounded ${stamp}`;
+
+    // 1. Left empty: inherits. The placeholder says so rather than leaving the
+    //    operator to guess what an empty field does.
+    await openCreateDialog(page);
+    await expect(
+      page.getByTestId("grant-definition-statement-timeout")
+    ).toHaveAttribute("placeholder", /Inherit/i);
+    await fillDefinition(page, {
+      name: inheritName,
+      description: "inherits the instance-wide limit",
+      durationValue: "1",
+      durationUnitLabel: "Hours",
+      controls: ["read_only"],
+    });
+    await submitDialog(page);
+
+    await openEditDialog(page, inheritName);
+    await expect(
+      page.getByTestId("grant-definition-statement-timeout")
+    ).toHaveValue("");
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[role="dialog"]')).toBeHidden();
+
+    // 2. An explicit 0: no limit, overriding the global one. It must come back
+    //    as "0" and not as an empty field.
+    await openCreateDialog(page);
+    await fillDefinition(page, {
+      name: noLimitName,
+      description: "no limit, on purpose",
+      durationValue: "1",
+      durationUnitLabel: "Hours",
+      controls: ["read_only"],
+    });
+    await page.getByTestId("grant-definition-statement-timeout").fill("0");
+    await submitDialog(page);
+
+    await openEditDialog(page, noLimitName);
+    await expect(
+      page.getByTestId("grant-definition-statement-timeout")
+    ).toHaveValue("0");
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[role="dialog"]')).toBeHidden();
+
+    // 3. A positive value round-trips as itself.
+    await openCreateDialog(page);
+    await fillDefinition(page, {
+      name: boundedName,
+      description: "bounded at 30 seconds",
+      durationValue: "1",
+      durationUnitLabel: "Hours",
+      controls: ["read_only"],
+    });
+    await page.getByTestId("grant-definition-statement-timeout").fill("30");
+    await submitDialog(page);
+
+    await openEditDialog(page, boundedName);
+    await expect(
+      page.getByTestId("grant-definition-statement-timeout")
+    ).toHaveValue("30");
+
+    // Clearing it in an edit restores inheritance — the path that needs the
+    // clear flag on the wire, because a bare null cannot express it.
+    await page.getByTestId("grant-definition-statement-timeout").fill("");
+    await submitDialog(page);
+
+    await openEditDialog(page, boundedName);
+    await expect(
+      page.getByTestId("grant-definition-statement-timeout")
+    ).toHaveValue("");
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[role="dialog"]')).toBeHidden();
+  });
+});
