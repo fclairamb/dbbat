@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -387,6 +388,103 @@ func TestStatementTaggingCertifiedSessionSkipsOneFrameAndKeepsGoing(t *testing.T
 	assert.Equal(t, wire, again,
 		"the same statement must go upstream as the same bytes every time, or it costs "+
 			"two shared-pool cursors instead of one")
+}
+
+// TestStatementTaggingRefusesAStatementItCannotGrow is the length rule at the
+// session level: a statement dbbat can read but cannot grow is forwarded as it
+// arrived, the session keeps tagging everything else, and the reason is said
+// once.
+//
+// The band is narrow by construction — only the last tag-width of statements
+// under maxTaggableStatementBytes falls in it — which is exactly why it needs a
+// test: nothing a client does by accident lands here, so a regression would be
+// invisible until a 1 MB statement showed up in production missing its tag, or
+// (before this rule) showed up upstream declaring a length dbbat itself calls
+// implausible.
+func TestStatementTaggingRefusesAStatementItCannotGrow(t *testing.T) {
+	t.Parallel()
+
+	const (
+		head = "SELECT "
+		tail = " FROM dual"
+	)
+
+	tooLong := head + strings.Repeat("a", maxTaggableStatementBytes-len(head)-len(tail)) + tail
+	require.Len(t, tooLong, maxTaggableStatementBytes)
+
+	oversize := thinExecBare(tooLong)
+	require.True(t, frameCarriesStatement(oversize))
+
+	_, ok := locateStatementRewrite(oversize, false)
+	require.True(t, ok,
+		"the frame is locatable — what follows is the length rule, not the locator refusing a shape")
+
+	ordinary := firstCorpusStatementFrame(t, "go_ora.pcapng")
+
+	s := taggedSession(t, 8192)
+
+	// Frame 1 certifies the session and is tagged.
+	first, ok := s.rewriteStatementMessage(messageOf(ordinary))
+	require.True(t, ok)
+	require.True(t, s.tagging.certified)
+
+	wire, ok := decodeExecStatement(upstreamTTC(t, first))
+	require.True(t, ok)
+	require.Contains(t, wire, "/*dbbat='")
+
+	// Frame 2 is the one that cannot grow.
+	_, ok = s.rewriteStatementMessage(messageOf(oversize))
+	assert.False(t, ok, "a statement that cannot absorb the tag is forwarded as it arrived")
+	assert.True(t, s.tagging.warnedTooLong, "and the reason is logged")
+	assert.False(t, s.tagging.warnedFrame,
+		"under its own reason, not the locator's — an operator reading the log has to be able to "+
+			"tell a statement that is too long from a client shape dbbat cannot model")
+	assert.True(t, s.tagging.certified,
+		"the session is NOT demoted: demoting it would untag statements that were tagged a "+
+			"moment ago, which is the two-SQL_IDs bug this design prevents")
+
+	// Frame 3 is ordinary again, and is tagged — the same bytes frame 1 produced.
+	third, ok := s.rewriteStatementMessage(messageOf(ordinary))
+	require.True(t, ok, "the session keeps tagging")
+
+	again, ok := decodeExecStatement(upstreamTTC(t, third))
+	require.True(t, ok)
+	assert.Equal(t, wire, again)
+}
+
+// TestStatementTaggingLogsTheLengthRefusalOnce is the other half of the claim
+// the log line makes. A batch job runs its one oversized statement in a loop, so
+// a line per execution would be a log flood rather than an explanation — and a
+// latch that never fired would be a silent hole, which is the thing this whole
+// rule exists not to be.
+func TestStatementTaggingLogsTheLengthRefusalOnce(t *testing.T) {
+	t.Parallel()
+
+	const (
+		head = "SELECT "
+		tail = " FROM dual"
+	)
+
+	tooLong := head + strings.Repeat("a", maxTaggableStatementBytes-len(head)-len(tail)) + tail
+	oversize := thinExecBare(tooLong)
+
+	logs := newCountingHandler()
+
+	s := taggedSession(t, 8192)
+	s.logger = slog.New(logs)
+
+	// The session certifies on an ordinary frame first, so what is counted below
+	// is the length refusal and not the certification verdict.
+	_, ok := s.rewriteStatementMessage(messageOf(firstCorpusStatementFrame(t, "go_ora.pcapng")))
+	require.True(t, ok)
+
+	for range 5 {
+		_, ok := s.rewriteStatementMessage(messageOf(oversize))
+		require.False(t, ok)
+	}
+
+	assert.Equal(t, 1, logs.count(logMsgStatementTooLongToTag),
+		"five executions of one oversized statement, one line — the latch is the point")
 }
 
 // TestStatementTaggingRecutsPastTheNegotiatedUnit exercises the growth axis the

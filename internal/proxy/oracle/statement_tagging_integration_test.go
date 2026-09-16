@@ -221,6 +221,243 @@ func TestIntegration_StatementTaggingOffLeavesVSQLAlone(t *testing.T) {
 	}
 }
 
+// --- how long a statement may be --------------------------------------------
+//
+// The tag grows a statement by ~50 bytes, and everything in the rewriter
+// accounts for that growth except the one thing dbbat does not own: how long a
+// statement the *server* will parse. If there were a band just under Oracle's
+// limit, turning `DBB_QUERY_TAGGING_ORACLE=user` on would stop a statement that
+// ran yesterday — and the error would come from Oracle, about a statement whose
+// `queries` row is the client's own untagged text.
+//
+// The two tests below are that question and its answer. The first walks the
+// length up against a real server and finds **no such band**: 23ai parses far
+// more than dbbat will ever hand it (128 MB in the exploratory run; see
+// docs/oracle.md). The second pins the bound that does bind, which is dbbat's
+// own — `maxTaggableStatementBytes`, so that a statement dbbat tags never
+// declares a length dbbat itself would refuse to read.
+
+// ceilingWalkCap bounds the doubling walk.
+//
+// Twice `execMaxSQLLen` is the assertion's whole point rather than a budget:
+// everything dbbat can tag is at or below that bound, so a walk that gets past
+// it without a refusal has shown that no statement dbbat tags can be one Oracle
+// declines for its length. CEILING_WALK_CAP raises it for a one-off
+// exploration — that is how the 128 MB figure was taken, and each doubling past
+// here costs real seconds.
+var ceilingWalkCap = 2 * execMaxSQLLen
+
+// statementOfLength builds a statement of exactly n bytes carrying marker near
+// the front, so V$SQL's 1000-character SQL_TEXT still shows it.
+func statementOfLength(marker string, n int) string {
+	head := fmt.Sprintf("SELECT 1 AS %s /* ", marker)
+
+	const tail = " */ FROM dual"
+
+	pad := n - len(head) - len(tail)
+	if pad < 0 {
+		panic("statementOfLength: n below the fixed part")
+	}
+
+	return head + strings.Repeat("q", pad) + tail
+}
+
+// runsAtLength executes a statement of exactly n bytes and reports whether the
+// server accepted it, plus whatever it said when it did not.
+func runsAtLength(t *testing.T, db *sql.DB, marker string, n int) (bool, error) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var got int
+
+	err := db.QueryRowContext(ctx, statementOfLength(marker, n)).Scan(&got)
+	if err != nil {
+		return false, err
+	}
+
+	require.Equal(t, 1, got)
+
+	return true, nil
+}
+
+// measureStatementCeiling walks statement length upward against the live server
+// — doubling until one is refused, then bisecting to the byte — and returns the
+// longest statement accepted, the shortest refused (0 when none was) and the
+// server's own words for the refusal.
+//
+// Every statement goes through a proxy with tagging **off**, so what is measured
+// is Oracle's limit and not dbbat's.
+func measureStatementCeiling(t *testing.T, db *sql.DB) (accepted, refused int, refusal error) {
+	t.Helper()
+
+	// 20 KB is what TestIntegration_StatementTagPastTheSDU already runs, so the
+	// walk starts from a length known to work rather than from nothing.
+	accepted = 20480
+	probe := 0
+
+	for n := 32768; n <= ceilingWalkCap; n *= 2 {
+		probe++
+
+		ok, err := runsAtLength(t, db, fmt.Sprintf("dbbat_ceil_up_%d", probe), n)
+		t.Logf("ceiling walk: %d bytes -> accepted=%v err=%v", n, ok, err)
+
+		if !ok {
+			refused, refusal = n, err
+
+			break
+		}
+
+		accepted = n
+	}
+
+	if refused == 0 {
+		return accepted, 0, nil
+	}
+
+	for refused-accepted > 1 {
+		mid := accepted + (refused-accepted)/2
+		probe++
+
+		ok, err := runsAtLength(t, db, fmt.Sprintf("dbbat_ceil_bis_%d", probe), mid)
+		if ok {
+			accepted = mid
+		} else {
+			refused, refusal = mid, err
+		}
+	}
+
+	return accepted, refused, refusal
+}
+
+// TestIntegration_OracleStatementLengthCeiling is the measurement that settled
+// the question, kept as a test rather than run once and written down.
+//
+// What it found is a negative, and the negative is the useful part: there is no
+// statement-length band where prepending the tag turns a working statement into
+// an Oracle error, because Oracle's limit is nowhere near anything dbbat will
+// ever send. The walk is capped at twice dbbat's own reading bound for run time;
+// with CEILING_WALK_CAP raised it went to **128 MB on 23ai Free without a single
+// refusal**, which is the figure docs/oracle.md records.
+//
+// So this test fails in exactly one situation: a server — a future release, a
+// different edition, an Oracle-compatible thing behind the proxy — that refuses
+// a statement dbbat would have been willing to tag. That is the day
+// maxTaggableStatementBytes stops being dbbat's number and has to become the
+// server's.
+func TestIntegration_OracleStatementLengthCeiling(t *testing.T) {
+	env := startOracleThroughProxy(t, nil)
+
+	if v := os.Getenv("CEILING_WALK_CAP"); v != "" {
+		n, err := strconv.Atoi(v)
+		require.NoError(t, err)
+
+		ceilingWalkCap = n
+	}
+
+	accepted, refused, refusal := measureStatementCeiling(t, env.db)
+
+	t.Logf("image=%s: longest statement accepted %d bytes, shortest refused %d (0 = none under the "+
+		"%d-byte cap), refusal: %v", oracleTestImage(), accepted, refused, ceilingWalkCap, refusal)
+
+	assert.GreaterOrEqual(t, accepted, maxTaggableStatementBytes,
+		"this server parses less than dbbat is willing to tag (%d bytes), so tagging can turn a "+
+			"working statement into an error Oracle attributes to the client: "+
+			"maxTaggableStatementBytes has to come down to the server's ceiling. First refusal at "+
+			"%d bytes: %v", maxTaggableStatementBytes, refused, refusal)
+}
+
+// taggedPrefixLength reads the tag's own width off a live session, rather than
+// recomputing it here from the version, the username and the grant slug — the
+// point of the probes below is *where* the boundary falls, so the width that
+// places it has to be the one this fixture actually emits.
+func taggedPrefixLength(t *testing.T, env *oracleThroughProxy) int {
+	t.Helper()
+
+	const marker = "dbbat_tagwidth_probe"
+
+	var n int
+
+	require.NoError(t, env.db.QueryRowContext(context.Background(),
+		fmt.Sprintf("SELECT 1 AS %s FROM dual", marker)).Scan(&n))
+
+	texts := vsqlTextsLike(t, env.db, marker)
+	require.NotEmpty(t, texts)
+
+	end := strings.Index(texts[0], "*/ ")
+	require.Positive(t, end, "the tagged text must carry a closed comment: %q", texts[0])
+
+	return end + len("*/ ")
+}
+
+// TestIntegration_StatementTagStopsAtDbbatsOwnBound is the rule, live and to the
+// byte: the longest statement that can absorb the tag is tagged, and the very
+// next one is forwarded untagged — while still running, and still being recorded
+// verbatim.
+//
+// Before the rule existed this band was a real hole rather than a theoretical
+// one. Measured on this same fixture: a statement of exactly execMaxSQLLen bytes
+// was tagged, which put a TTC length field declaring 1 048 634 bytes on the
+// upstream wire — a length dbbat's own decoders call implausible and would
+// refuse to read back. Oracle did not mind; dbbat's invariant is the thing that
+// was broken.
+func TestIntegration_StatementTagStopsAtDbbatsOwnBound(t *testing.T) {
+	env := startOracleThroughProxyWith(t, oracleFixtureOptions{statementTagging: true})
+
+	tagLen := taggedPrefixLength(t, env)
+	t.Logf("this fixture's tag is %d bytes", tagLen)
+
+	for _, tc := range []struct {
+		name      string
+		length    int
+		wantTag   bool
+		assertion string
+	}{
+		{
+			name:      "the last statement that fits tagged",
+			length:    maxTaggableStatementBytes - tagLen,
+			wantTag:   true,
+			assertion: "a statement whose tagged length lands exactly on the bound must still be tagged",
+		},
+		{
+			name:    "one byte further",
+			length:  maxTaggableStatementBytes - tagLen + 1,
+			wantTag: false,
+			assertion: "one byte past it must not be — tagging it would declare a length dbbat " +
+				"itself would refuse to read",
+		},
+	} {
+		marker := fmt.Sprintf("dbbat_bound_probe_%d", tc.length)
+
+		probe := statementOfLength(marker, tc.length)
+		require.Len(t, probe, tc.length)
+
+		var n int
+
+		require.NoErrorf(t, env.db.QueryRowContext(context.Background(), probe).Scan(&n),
+			"%s: the statement must run either way — the rule changes the tag, never the outcome", tc.name)
+		assert.Equal(t, 1, n)
+
+		texts := vsqlTextsLike(t, env.db, marker)
+		require.NotEmptyf(t, texts, "%s: the statement must be in V$SQL", tc.name)
+
+		assert.Equalf(t, tc.wantTag, strings.HasPrefix(texts[0], "/*dbbat='"),
+			"%s (%d bytes): %s — V$SQL shows %q", tc.name, tc.length, tc.assertion,
+			truncateSQL(texts[0], 80))
+
+		// And either way the statement dbbat recorded is the client's own, which
+		// is what makes the untagged case forgivable: the `queries` row and the
+		// audit chain do not change with the tag.
+		recorded := recordedStatements(t, env)
+		require.NotEmpty(t, recorded)
+
+		for _, sqlText := range recorded {
+			assert.NotContains(t, sqlText, "/*dbbat='", "%s: no recorded statement may carry the tag", tc.name)
+		}
+	}
+}
+
 // --- the other client shapes ------------------------------------------------
 //
 // The tests above drive go-ora, which is one of the three on-wire shapes the

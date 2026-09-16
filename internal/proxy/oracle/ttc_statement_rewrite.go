@@ -102,6 +102,51 @@ const (
 // direction.
 const clrShortMaxLen = 0xFB
 
+// maxTaggableStatementBytes is the longest statement dbbat will grow by a tag.
+//
+// The question this answers was asked about the *server*: a ~50-byte tag is
+// prepended to the statement text, and everywhere else that growth is accounted
+// for (the TTC length field is re-encoded and may widen, the CLR value may
+// change format, the TNS packets are re-cut to the negotiated SDU) — but nothing
+// accounted for Oracle's own limit on how long a statement may be, so there
+// could be a band where turning `DBB_QUERY_TAGGING_ORACLE=user` on stops a
+// statement that ran yesterday, with the error coming from Oracle about a
+// statement whose `queries` row is the client's own untagged text.
+//
+// **That band does not exist, and the measurement is what says so.**
+// `TestIntegration_OracleStatementLengthCeiling` doubles a statement's length
+// through an *untagged* proxy looking for the refusal: Oracle 23ai Free
+// (`gvenzl/oracle-free:23-slim`, 23.26.3.0.0) parsed and executed **128 MB** of
+// SQL text without one. The 64K figure this package's own `execMaxSQLLen`
+// comment used to quote is folklore, and it is wrong by four orders of
+// magnitude. See docs/oracle.md.
+//
+// So the ceiling that actually binds is **dbbat's**, not Oracle's, and this
+// constant is `execMaxSQLLen` rather than a number of Oracle's: the largest
+// length this package's own decoders will believe a length field when they
+// *read* one. Past it `locateStatementRewrite` already refuses, so the only band
+// this adds is the last tag-width of statements below it — and that band was a
+// real hole. Measured live before this check existed: a statement of exactly
+// `execMaxSQLLen` bytes was tagged, putting a TTC length field declaring
+// 1 048 634 on the upstream wire, a value dbbat itself calls implausible. dbbat
+// must not write a statement dbbat would not read; the invariant is worth more
+// than the tag on a 1 MB statement.
+//
+// Enforced per frame and logged once per session — see
+// `session.warnStatementTooLongToTag` for why it is not a session demotion.
+const maxTaggableStatementBytes = execMaxSQLLen
+
+// fitsTagged reports whether this statement can absorb a prefix of prefixLen
+// bytes and stay inside maxTaggableStatementBytes.
+//
+// len(run) is used rather than len(text()): an OCI client counts a trailing NUL
+// in the length it declares, and the declared length is exactly what the bound
+// is about, so counting the NUL is the right reading rather than a conservative
+// one.
+func (r stmtRewrite) fitsTagged(prefixLen int) bool {
+	return len(r.run)+prefixLen <= maxTaggableStatementBytes
+}
+
 // stmtRewrite is everything needed to put a different statement in a TTC
 // message, and nothing else. Offsets are into the TTC body it was located in.
 type stmtRewrite struct {

@@ -44,6 +44,17 @@ import (
 // the time `clientToUpstream` calls in here, and the `.pcapng` capture is
 // written by the reader. The tag exists on the upstream wire and nowhere else.
 
+// logMsgStatementTooLongToTag is the line warnStatementTooLongToTag emits.
+//
+// It is a constant rather than a literal for the reason
+// TestCountingHandlerWatchesTheMessagesTheGateEmits spells out: a test that
+// counts a log message by copying its text goes quietly vacuous the day the text
+// is reworded, and a refusal whose only evidence is a log line is exactly the
+// kind that must not lose its test.
+const logMsgStatementTooLongToTag = "oracle: forwarding a statement untagged because tagging it " +
+	"would push it past what dbbat itself will read back; the statement runs and is recorded, " +
+	"and it will be missing its dbbat tag in V$SQL"
+
 // statementTagging is one session's tagging state.
 type statementTagging struct {
 	// tagger is inert (zero value) unless the per-user tag is configured, in
@@ -63,6 +74,12 @@ type statementTagging struct {
 	// warnedFrame records that a post-decision frame was refused, so the
 	// anomaly is logged once rather than once per statement.
 	warnedFrame bool
+
+	// warnedTooLong is the same once-per-session latch for the length refusal.
+	// It is separate from warnedFrame because the two say different things: one
+	// is a client shape dbbat cannot model, the other a statement dbbat models
+	// perfectly well and declines to grow.
+	warnedTooLong bool
 }
 
 // active reports whether this session might tag anything at all.
@@ -112,6 +129,16 @@ func (s *session) rewriteStatementMessage(msg *statementFragments) ([][]byte, bo
 	}
 
 	prefix := s.tagging.tagger.Prefix()
+
+	// The one growth the rewriter must not absorb: past this the tagged
+	// statement is longer than dbbat's own decoders will believe a length field
+	// can be. Refused per frame rather than per session — see
+	// warnStatementTooLongToTag.
+	if !rw.fitsTagged(len(prefix)) {
+		s.warnStatementTooLongToTag(ttc, len(rw.run), len(prefix))
+
+		return nil, false
+	}
 
 	tagged := make([]byte, 0, len(prefix)+len(rw.run))
 	tagged = append(tagged, prefix...)
@@ -169,6 +196,46 @@ func (s *session) warnStatementFrameSkipped(ttc []byte) {
 
 	s.logger.WarnContext(s.ctx, "oracle: forwarding a statement untagged on a session that tags; "+
 		"its shape is not one the exact locator covers",
+		slog.String("op", ttcOpFunction(ttc)),
+		slog.String("func", TTCFunctionCode(ttc[0]).String()))
+}
+
+// warnStatementTooLongToTag reports a statement dbbat declines to grow, once per
+// session.
+//
+// **The refusal is per frame, and the session keeps tagging.** The alternative —
+// demoting the session, the way a client shape that cannot be certified is
+// demoted — was considered and rejected for the same reason the frame-level skip
+// above is not a demotion: it would untag every *ordinary* statement that
+// followed, splitting each of them across a tagged and an untagged SQL_ID, which
+// is the exact cursor doubling the per-user tag was measured to avoid. A
+// statement within a tag's width of 1 MB is a rare outlier, and the session that
+// issues one is usually issuing a hundred ordinary statements too; demoting it
+// trades a bounded loss (this statement's tag) for an unbounded one (every
+// later statement's, plus a second cursor for each).
+//
+// It stays per-statement deterministic, which is the property the SQL_ID
+// argument actually needs: the verdict is a pure function of the statement's own
+// length and the session's tag, so the same statement from the same user always
+// lands the same way.
+//
+// Logging is not optional — a refusal nobody can see is a hole rather than a
+// rule, and an operator who notices one statement missing from V$SQL has no
+// other way to learn why. The once-per-session latch is the pattern
+// `decideStatementTagging` and `warnStatementFrameSkipped` already use: enough to
+// explain the gap, not enough to flood a log with one line per execution of a
+// statement a batch job runs in a loop.
+func (s *session) warnStatementTooLongToTag(ttc []byte, runLen, prefixLen int) {
+	if s.tagging.warnedTooLong {
+		return
+	}
+
+	s.tagging.warnedTooLong = true
+
+	s.logger.WarnContext(s.ctx, logMsgStatementTooLongToTag,
+		slog.Int("statement_bytes", runLen),
+		slog.Int("tag_bytes", prefixLen),
+		slog.Int("max_bytes", maxTaggableStatementBytes),
 		slog.String("op", ttcOpFunction(ttc)),
 		slog.String("func", TTCFunctionCode(ttc[0]).String()))
 }

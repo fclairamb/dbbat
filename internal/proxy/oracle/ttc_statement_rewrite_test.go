@@ -367,6 +367,62 @@ func TestLocatorRefusesAnAmbiguousFrame(t *testing.T) {
 	assert.False(t, ok, "a frame carrying the statement twice must be refused, not guessed at")
 }
 
+// TestRewriteRefusesToGrowAStatementPastWhatDbbatReads pins the length rule, and
+// pins which side of it each byte falls on.
+//
+// The frame itself is perfectly locatable — this refusal is about *growth*, not
+// about shape, which is what makes it different from every other refusal in this
+// file. A statement of exactly maxTaggableStatementBytes is one the locator
+// answers for and one dbbat must still not tag: the tagged text would declare a
+// length past what this package's own decoders will believe (execMaxSQLLen), so
+// dbbat would be writing upstream a frame dbbat would refuse to read.
+func TestRewriteRefusesToGrowAStatementPastWhatDbbatReads(t *testing.T) {
+	t.Parallel()
+
+	const (
+		head = "SELECT "
+		tail = " FROM dual"
+		tag  = 53 // the fixture tag's width; see taggingTagPrefix
+	)
+
+	atLimit := head + strings.Repeat("a", maxTaggableStatementBytes-len(head)-len(tail)) + tail
+	require.Len(t, atLimit, maxTaggableStatementBytes)
+
+	rw, ok := locateStatementRewrite(thinExecBare(atLimit), false)
+	require.True(t, ok,
+		"the frame is locatable: the refusal below is about how long it would become, not about its shape")
+	require.Equal(t, atLimit, rw.text())
+
+	assert.True(t, rw.fitsTagged(0), "untagged, it is exactly what the decoders will read")
+	assert.False(t, rw.fitsTagged(1), "one byte of tag already crosses the bound")
+	assert.False(t, rw.fitsTagged(tag))
+
+	// One tag's width below the bound is the last statement that still tags, and
+	// it does — a rule that refused here would be a margin, and a margin untags
+	// statements for no reason at all.
+	justUnder := head + strings.Repeat("a", maxTaggableStatementBytes-len(head)-len(tail)-tag) + tail
+	require.Len(t, justUnder, maxTaggableStatementBytes-tag)
+
+	rw, ok = locateStatementRewrite(thinExecBare(justUnder), false)
+	require.True(t, ok)
+	assert.True(t, rw.fitsTagged(tag), "the last statement under the bound must still be tagged")
+	assert.False(t, rw.fitsTagged(tag+1))
+}
+
+// TestTaggableBoundIsTheReadingBound keeps the two numbers tied together. They
+// are the same bound seen from either side — what dbbat will read, and what
+// dbbat will write — and a change to one that is not a change to the other
+// reintroduces the hole: a statement dbbat tagged into a length dbbat itself
+// calls implausible.
+func TestTaggableBoundIsTheReadingBound(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, execMaxSQLLen, maxTaggableStatementBytes,
+		"dbbat must not write a statement longer than dbbat will read")
+	assert.Less(t, maxTaggableStatementBytes, maxStatementReassembly,
+		"and the reassembly bound must stay above it, or a taggable statement could not be collected")
+}
+
 // TestLocatorRefusesAFrameItCannotReproduce is the round-trip guard, forced: a
 // CLR prefix the encoder would not have written that way means the model of the
 // frame is wrong, whatever else looks right.
