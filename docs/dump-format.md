@@ -238,6 +238,16 @@ path added later to answer the client without landing in the capture — which i
 how PostgreSQL's `sendQueryError` and Oracle's `writeTTCError` went uncaptured
 for as long as they did.
 
+### A capture shows the client's statement, not dbbat's tag
+
+Every recording point above is on the **client** leg, which is what makes a
+blocked statement and a synthesized refusal land in the capture at all. It also
+means that with `DBB_QUERY_TAGGING` on — where dbbat prepends a
+sqlcommenter-style `/*dbbat='…',user='…',conn='…',grant='…'*/` comment to what
+it forwards — the capture holds the statement as the client sent it, without
+the tag. The tag is added after the last recording point, on the way to the
+upstream, and dbbat records no upstream leg.
+
 ### Captures are plaintext, above TLS
 
 The client-leg tap sits **above** the TLS layer, so a capture of an encrypted
