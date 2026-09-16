@@ -79,6 +79,12 @@ type CreateGrantDefinitionRequest struct {
 	Controls            []string `json:"controls"`
 	MaxQueryCounts      *int64   `json:"max_query_counts"`
 	MaxBytesTransferred *int64   `json:"max_bytes_transferred"`
+	// StatementTimeoutSeconds bounds how long a single statement issued under
+	// this definition may run. Three states, and 0 is not "omitted":
+	// null/omitted inherits the instance-wide default, 0 means explicitly no
+	// limit (overriding a global one — the escape hatch for a dump or ETL
+	// definition), and a positive value is the limit in seconds.
+	StatementTimeoutSeconds *int64 `json:"statement_timeout_seconds"`
 	// Priority, when supplied, is stamped verbatim on every grant
 	// materialized from this definition instead of the tier its controls
 	// would earn. null/omitted — the normal case — leaves it auto.
@@ -146,23 +152,29 @@ type CreateGrantDefinitionRequest struct {
 // pointer. Each gets a companion Clear* flag instead, mirroring
 // UpdateDatabaseRequest.ClearViaUID.
 type UpdateGrantDefinitionRequest struct {
-	Name                     *string     `json:"name"`
-	Slug                     *string     `json:"slug"`
-	Description              *string     `json:"description"`
-	DurationSeconds          *int64      `json:"duration_seconds"`
-	Controls                 []string    `json:"controls"`
-	MaxQueryCounts           *int64      `json:"max_query_counts"`
-	ClearMaxQueryCounts      bool        `json:"clear_max_query_counts"`
-	MaxBytesTransferred      *int64      `json:"max_bytes_transferred"`
-	ClearMaxBytesTransferred bool        `json:"clear_max_bytes_transferred"`
-	Priority                 *int16      `json:"priority"`
-	ClearPriority            bool        `json:"clear_priority"`
-	AutoApprove              *bool       `json:"auto_approve"`
-	UserGroupUIDs            []uuid.UUID `json:"user_group_uids"`
-	ServerGroupUIDs          []uuid.UUID `json:"server_group_uids"`
-	ApprovalPatterns         []string    `json:"approval_patterns"`
-	SampleQueries            []string    `json:"sample_queries"`
-	ApproverUserGroupUIDs    []uuid.UUID `json:"approver_user_group_uids"`
+	Name                     *string  `json:"name"`
+	Slug                     *string  `json:"slug"`
+	Description              *string  `json:"description"`
+	DurationSeconds          *int64   `json:"duration_seconds"`
+	Controls                 []string `json:"controls"`
+	MaxQueryCounts           *int64   `json:"max_query_counts"`
+	ClearMaxQueryCounts      bool     `json:"clear_max_query_counts"`
+	MaxBytesTransferred      *int64   `json:"max_bytes_transferred"`
+	ClearMaxBytesTransferred bool     `json:"clear_max_bytes_transferred"`
+	// StatementTimeoutSeconds is nullable in the domain the same way the two
+	// quotas are, but with a twist: here null and 0 mean *different* things
+	// ("inherit the global" vs "no limit at all"), so the companion Clear flag
+	// is not a convenience — without it a PATCH could never restore inheritance.
+	StatementTimeoutSeconds      *int64      `json:"statement_timeout_seconds"`
+	ClearStatementTimeoutSeconds bool        `json:"clear_statement_timeout_seconds"`
+	Priority                     *int16      `json:"priority"`
+	ClearPriority                bool        `json:"clear_priority"`
+	AutoApprove                  *bool       `json:"auto_approve"`
+	UserGroupUIDs                []uuid.UUID `json:"user_group_uids"`
+	ServerGroupUIDs              []uuid.UUID `json:"server_group_uids"`
+	ApprovalPatterns             []string    `json:"approval_patterns"`
+	SampleQueries                []string    `json:"sample_queries"`
+	ApproverUserGroupUIDs        []uuid.UUID `json:"approver_user_group_uids"`
 
 	// RetiredDatabaseUIDs is refused rather than folded; see
 	// CreateGrantDefinitionRequest.RetiredDatabaseUIDs.
@@ -210,6 +222,13 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 		def.MaxBytesTransferred = nil
 	case req.MaxBytesTransferred != nil:
 		def.MaxBytesTransferred = req.MaxBytesTransferred
+	}
+
+	switch {
+	case req.ClearStatementTimeoutSeconds:
+		def.StatementTimeoutSeconds = nil
+	case req.StatementTimeoutSeconds != nil:
+		def.StatementTimeoutSeconds = req.StatementTimeoutSeconds
 	}
 
 	switch {
@@ -326,6 +345,18 @@ func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 		return "max_bytes_transferred must be > 0 or omitted"
 	}
 
+	// >= 0, not > 0: unlike the quotas above, 0 is a meaningful value here —
+	// "no limit, overriding the global one". Omitting the field is what means
+	// "inherit".
+	if req.StatementTimeoutSeconds != nil && *req.StatementTimeoutSeconds < 0 {
+		return "statement_timeout_seconds must be >= 0 or omitted (0 = no limit)"
+	}
+
+	const maxStatementTimeout = int64(24 * 3600) // 24 hours
+	if req.StatementTimeoutSeconds != nil && *req.StatementTimeoutSeconds > maxStatementTimeout {
+		return "statement_timeout_seconds must be at most 24 hours (86400)"
+	}
+
 	if err := store.ValidateApprovalPatterns(req.ApprovalPatterns); err != nil {
 		return err.Error()
 	}
@@ -380,21 +411,22 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 
 	def := &store.GrantDefinition{
-		Name:                  req.Name,
-		Slug:                  req.Slug,
-		Description:           req.Description,
-		DurationSeconds:       req.DurationSeconds,
-		Controls:              req.Controls,
-		MaxQueryCounts:        req.MaxQueryCounts,
-		MaxBytesTransferred:   req.MaxBytesTransferred,
-		Priority:              req.Priority,
-		AutoApprove:           req.AutoApprove,
-		UserGroupUIDs:         req.UserGroupUIDs,
-		ServerGroupUIDs:       req.ServerGroupUIDs,
-		ApprovalPatterns:      normalizeStrings(req.ApprovalPatterns),
-		SampleQueries:         normalizeStrings(req.SampleQueries),
-		ApproverUserGroupUIDs: normalizeUUIDs(req.ApproverUserGroupUIDs),
-		CreatedBy:             currentUser.UID,
+		Name:                    req.Name,
+		Slug:                    req.Slug,
+		Description:             req.Description,
+		DurationSeconds:         req.DurationSeconds,
+		Controls:                req.Controls,
+		MaxQueryCounts:          req.MaxQueryCounts,
+		MaxBytesTransferred:     req.MaxBytesTransferred,
+		StatementTimeoutSeconds: req.StatementTimeoutSeconds,
+		Priority:                req.Priority,
+		AutoApprove:             req.AutoApprove,
+		UserGroupUIDs:           req.UserGroupUIDs,
+		ServerGroupUIDs:         req.ServerGroupUIDs,
+		ApprovalPatterns:        normalizeStrings(req.ApprovalPatterns),
+		SampleQueries:           normalizeStrings(req.SampleQueries),
+		ApproverUserGroupUIDs:   normalizeUUIDs(req.ApproverUserGroupUIDs),
+		CreatedBy:               currentUser.UID,
 	}
 
 	created, err := s.store.CreateGrantDefinition(c.Request.Context(), def)
@@ -629,20 +661,21 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	// definition. This keeps validation logic in one place regardless of
 	// which fields the PATCH actually touched.
 	merged := &CreateGrantDefinitionRequest{
-		Name:                  def.Name,
-		Slug:                  def.Slug,
-		Description:           def.Description,
-		DurationSeconds:       def.DurationSeconds,
-		Controls:              def.Controls,
-		MaxQueryCounts:        def.MaxQueryCounts,
-		MaxBytesTransferred:   def.MaxBytesTransferred,
-		Priority:              def.Priority,
-		AutoApprove:           def.AutoApprove,
-		UserGroupUIDs:         def.UserGroupUIDs,
-		ServerGroupUIDs:       def.ServerGroupUIDs,
-		ApprovalPatterns:      def.ApprovalPatterns,
-		SampleQueries:         def.SampleQueries,
-		ApproverUserGroupUIDs: def.ApproverUserGroupUIDs,
+		Name:                    def.Name,
+		Slug:                    def.Slug,
+		Description:             def.Description,
+		DurationSeconds:         def.DurationSeconds,
+		Controls:                def.Controls,
+		MaxQueryCounts:          def.MaxQueryCounts,
+		MaxBytesTransferred:     def.MaxBytesTransferred,
+		StatementTimeoutSeconds: def.StatementTimeoutSeconds,
+		Priority:                def.Priority,
+		AutoApprove:             def.AutoApprove,
+		UserGroupUIDs:           def.UserGroupUIDs,
+		ServerGroupUIDs:         def.ServerGroupUIDs,
+		ApprovalPatterns:        def.ApprovalPatterns,
+		SampleQueries:           def.SampleQueries,
+		ApproverUserGroupUIDs:   def.ApproverUserGroupUIDs,
 	}
 
 	if msg := validateDefinitionRequest(merged); msg != "" {

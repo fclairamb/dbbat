@@ -3,9 +3,11 @@ package api
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -127,11 +129,60 @@ type instanceResolvedInfo struct {
 	WebUIURL string `json:"web_ui_url"`
 }
 
+// instanceLimitsInfo holds the raw operator-configured instance-wide limits.
+type instanceLimitsInfo struct {
+	// StatementTimeout is the raw limits.statement_timeout parameter — a Go
+	// duration string, or empty when the operator never set one and the
+	// deployment's DBB_STATEMENT_TIMEOUT is what applies.
+	StatementTimeout string `json:"statement_timeout"`
+}
+
+// instanceResolvedLimits holds the effective instance-wide limits, after the
+// parameter-over-environment fallback.
+type instanceResolvedLimits struct {
+	// StatementTimeoutSeconds is the effective per-statement limit in seconds,
+	// 0 when there is no instance-wide limit. Seconds rather than a duration
+	// string because the grant-definition field it is shown next to is in
+	// seconds, and the UI compares the two.
+	StatementTimeoutSeconds int64 `json:"statement_timeout_seconds"`
+	// StatementTimeoutSource says where the effective value came from:
+	// "parameter", "env", or "" when there is no limit. It is what lets the
+	// Settings page explain why clearing the field does not disable the limit.
+	StatementTimeoutSource string `json:"statement_timeout_source"`
+}
+
 // instanceInfoResponse is the full GET /instance response.
 type instanceInfoResponse struct {
-	Listen   instanceListenInfo   `json:"listen"`
-	Public   *instancePublicInfo  `json:"public,omitempty"`
-	Resolved instanceResolvedInfo `json:"resolved"`
+	Listen instanceListenInfo  `json:"listen"`
+	Public *instancePublicInfo `json:"public,omitempty"`
+	// Limits is admin-only, like Public: it is an operator setting, not
+	// something a connector needs.
+	Limits         *instanceLimitsInfo    `json:"limits,omitempty"`
+	Resolved       instanceResolvedInfo   `json:"resolved"`
+	ResolvedLimits instanceResolvedLimits `json:"resolved_limits"`
+}
+
+// resolveInstanceLimits turns the stored parameter plus the environment
+// default into what actually applies, and says which of the two won.
+func resolveInstanceLimits(limits store.Limits, cfg *config.Config) instanceResolvedLimits {
+	effective := store.ResolveStatementTimeout(limits, cfg)
+
+	source := ""
+
+	switch {
+	case effective <= 0:
+		// Nothing applies — including the case where the parameter is an
+		// explicit "0" that turns the environment default off.
+	case limits.StatementTimeout != "":
+		source = "parameter"
+	default:
+		source = "env"
+	}
+
+	return instanceResolvedLimits{
+		StatementTimeoutSeconds: int64(effective / time.Second),
+		StatementTimeoutSource:  source,
+	}
 }
 
 // handleGetInstance returns live instance info (listen addrs + public endpoints).
@@ -147,6 +198,12 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 	}
 
 	resolved := store.ResolvePublicEndpoints(pe, s.config)
+
+	limits, err := s.store.GetLimits(ctx)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to get instance limits")
+		return
+	}
 
 	listenPG := ""
 	listenOra := ""
@@ -185,6 +242,7 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			MSSQLPort: resolved.MSSQLPort,
 			WebUIURL:  resolved.WebUIURL,
 		},
+		ResolvedLimits: resolveInstanceLimits(limits, s.config),
 	}
 
 	if isAdmin {
@@ -202,6 +260,7 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			MSSQLPort: pe.MSSQLPort,
 			WebUIURL:  pe.WebUIURL,
 		}
+		resp.Limits = &instanceLimitsInfo{StatementTimeout: limits.StatementTimeout}
 	}
 
 	c.JSON(http.StatusOK, resp)
@@ -254,6 +313,47 @@ func (s *Server) handleUpdateInstancePublic(c *gin.Context) {
 		writeInternalError(c, s.logger, err, "failed to update instance public endpoints")
 		return
 	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// updateInstanceLimitsRequest is the body for PUT /instance/limits.
+type updateInstanceLimitsRequest struct {
+	// StatementTimeout is a Go duration string ("30s", "5m"). An empty value
+	// *clears* the parameter, which falls back to DBB_STATEMENT_TIMEOUT rather
+	// than disabling the limit — "0" is how an operator disables it outright.
+	StatementTimeout string `json:"statement_timeout"`
+}
+
+// handleUpdateInstanceLimits writes the limits.* parameters. Admin-only.
+func (s *Server) handleUpdateInstanceLimits(c *gin.Context) {
+	var req updateInstanceLimitsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
+		return
+	}
+
+	// Refused at the edge rather than folded to "no limit" the way the proxy
+	// path has to: here there is a human to tell. A typo that silently
+	// disabled the limit is exactly the failure this endpoint exists to
+	// prevent.
+	if store.StatementTimeoutMisconfigured(req.StatementTimeout) {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+			"statement_timeout must be a Go duration such as 30s or 5m, \"0\" for no limit, "+
+				"or empty to fall back to DBB_STATEMENT_TIMEOUT")
+		return
+	}
+
+	if err := s.store.SetLimits(c.Request.Context(), store.Limits{StatementTimeout: req.StatementTimeout}); err != nil {
+		writeInternalError(c, s.logger, err, "failed to update instance limits")
+		return
+	}
+
+	// The limits parameter group is memoized on the store for a few seconds
+	// (it is read once per connection on five protocols); drop this process's
+	// copy so the operator sees the change take effect immediately on the
+	// replica they are talking to. Other replicas pick it up on their own TTL.
+	s.store.InvalidateLimits()
 
 	c.Status(http.StatusNoContent)
 }
