@@ -131,6 +131,10 @@ type session struct {
 	terminationMu sync.Mutex
 	termination   store.Termination
 	revocation    *cache.RevocationHandle
+	// liveSession is signaled when an admin ends *this* session. Registered in
+	// recordConnection rather than next to the revocation handle, because it is
+	// keyed by the connection uid, which does not exist until the row does.
+	liveSession *cache.SessionHandle
 
 	// approvalGate implements pattern-triggered approval holds; publisher
 	// pushes this session's activity onto the live event stream. (The plain
@@ -569,8 +573,13 @@ func closeSessionConns(up *UpstreamConn, clientConn net.Conn) {
 	}
 }
 
-// deregisterRevocation drops this session's revocation handle.
+// deregisterRevocation drops this session's revocation handle, and its
+// live-session handle with it.
 func (s *session) deregisterRevocation() {
+	if s.connection != nil {
+		s.server.store.Sessions().Deregister(s.connection.UID, s.liveSession)
+	}
+
 	if s.grant == nil || s.revocation == nil {
 		return
 	}
@@ -634,6 +643,12 @@ func (s *session) recordConnection(ctx context.Context) error {
 	}
 
 	s.connection = conn
+
+	// Now that the session has a uid an admin can name, register it and let the
+	// guard watch the flag. Still on the session's own goroutine, before the
+	// watchdog starts, so attaching to the already-built guard races nothing.
+	s.liveSession = s.server.store.Sessions().Register(conn.UID)
+	s.guard.WithTermination(s.liveSession)
 
 	//nolint:contextcheck // the gate holds no context of its own; each Hold gets the caller's
 	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, s.grant, conn.UID, s.user, s.database.Name)

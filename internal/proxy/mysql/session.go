@@ -94,6 +94,11 @@ type Session struct {
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
+	// liveSession is signaled when an admin ends *this* session. Registered in
+	// recordConnection rather than next to the revocation handle at auth,
+	// because it is keyed by the connection uid, which does not exist until the
+	// row does.
+	liveSession *cache.SessionHandle
 
 	// watched sits below the counting conn so an approval hold can keep
 	// reading the client socket while the command goroutine is parked.
@@ -406,6 +411,13 @@ func (s *Session) recordConnection() error {
 
 	s.connection = conn
 
+	// Now that the session has a uid an admin can name, register it and let the
+	// guard watch the flag. Still on the connection's own goroutine, before Run
+	// starts the watchdog, so attaching to the already-built guard races
+	// nothing.
+	s.liveSession = s.server.store.Sessions().Register(conn.UID)
+	s.guard.WithTermination(s.liveSession)
+
 	dbName := ""
 	if s.database != nil {
 		dbName = s.database.Name
@@ -420,8 +432,13 @@ func (s *Session) recordConnection() error {
 }
 
 // deregisterRevocation drops this session's handle from the store's revocation
-// registry. Safe to call when the session never registered (grant nil).
+// registry, and its live-session handle with it. Safe to call when the session
+// never registered either (grant nil, or no connection row).
 func (s *Session) deregisterRevocation() {
+	if s.connection != nil {
+		s.server.store.Sessions().Deregister(s.connection.UID, s.liveSession)
+	}
+
 	if s.grant == nil || s.revocation == nil {
 		return
 	}

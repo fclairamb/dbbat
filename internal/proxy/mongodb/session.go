@@ -107,6 +107,11 @@ type Session struct {
 	termination   store.Termination
 	// revocation is signaled when this session's grant is revoked mid-flight.
 	revocation *cache.RevocationHandle
+	// liveSession is signaled when an admin ends *this* session. Registered in
+	// recordConnection rather than in establishSession with the revocation
+	// handle, because it is keyed by the connection uid, which does not exist
+	// until the row does.
+	liveSession *cache.SessionHandle
 
 	// pending correlates upstream replies to the query that produced them
 	// (phase 3). Keyed by the client requestID.
@@ -652,6 +657,13 @@ func (s *Session) recordConnection() error {
 
 	s.connection = conn
 
+	// Now that the session has a uid an admin can name, register it and let
+	// the guard watch the flag. Still on the auth goroutine, before relay
+	// starts the watchdog, so attaching to the already-built guard races
+	// nothing.
+	s.liveSession = s.server.store.Sessions().Register(conn.UID)
+	s.guard.WithTermination(s.liveSession)
+
 	dbName := ""
 	if s.database != nil {
 		dbName = s.database.Name
@@ -665,8 +677,16 @@ func (s *Session) recordConnection() error {
 	return nil
 }
 
-// deregisterRevocation drops this session's revocation handle.
+// deregisterRevocation drops this session's revocation handle, and its
+// live-session handle with it: both are registered on the way in and must go on
+// the way out, including along the upstream-dial failure path that calls this
+// before a connection row ever exists (where the handle is nil and the
+// registry's nil-safety makes the call a no-op).
 func (s *Session) deregisterRevocation() {
+	if s.connection != nil {
+		s.server.store.Sessions().Deregister(s.connection.UID, s.liveSession)
+	}
+
 	if s.grant == nil || s.revocation == nil {
 		return
 	}
