@@ -205,6 +205,9 @@ func (s *Store) closeConnection(ctx context.Context, uid uuid.UUID, closedAt tim
 	s.recordConnectionTerminated(ctx, &closed[0], t)
 	s.recordConnectionClosed(ctx, &closed[0], connectionClosedBySession)
 
+	// Best-effort and off this call's critical path — see notifyTermination.
+	s.notifyTermination(ctx, &closed[0], t)
+
 	return nil
 }
 

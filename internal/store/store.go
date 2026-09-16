@@ -30,6 +30,13 @@ type Store struct {
 	instanceID  string                    // Identifies this process among the replicas sharing this store
 	runID       string                    // Identifies this *run*: minted here, never configurable
 
+	// terminationNotifier is fired, fire-and-forget, whenever dbbat ends a
+	// session for a reason worth a human's attention. Optional, mirroring
+	// shared.ApprovalEscalator: nil when Slack notifications are not
+	// configured or the operator turned terminations off. See
+	// termination_notify.go.
+	terminationNotifier TerminationNotifier
+
 	// chainKey is the HMAC key sealing the audit and query chains — an HKDF
 	// subkey of the master encryption key, never the master key itself and
 	// never written anywhere. Empty disables chaining. See chain.go.
@@ -258,6 +265,13 @@ func (s *Store) SetAuthCache(authCache *cache.AuthCache) {
 // opens. See Options.InstanceID.
 func (s *Store) SetInstanceID(instanceID string) {
 	s.instanceID = instanceID
+}
+
+// SetTerminationNotifier installs the optional collaborator fired after dbbat
+// ends a session on its own. Nil (the zero value, never explicitly set) is a
+// silent no-op — see TerminationNotifier.
+func (s *Store) SetTerminationNotifier(notifier TerminationNotifier) {
+	s.terminationNotifier = notifier
 }
 
 // InstanceID returns the identifier this process stamps on connection rows.
