@@ -19,10 +19,10 @@ const querytagConnUID = "0192f3a1-7c4d-7e2a-9b11-3f9a1c7b2e4d"
 
 // taggedSession is newTestSession plus an active statement tagger, i.e. a
 // session running with DBB_QUERY_TAGGING=true.
-func taggedSession(t *testing.T, accessLevel string) *Session {
+func taggedSession(t *testing.T) *Session {
 	t.Helper()
 
-	s := newTestSession(accessLevel)
+	s := newTestSession("write")
 	s.queryTagging = true
 	s.queryTag = shared.NewQueryTagger("0.28.1", "florent", uuid.MustParse(querytagConnUID), "diag-paris")
 
@@ -40,7 +40,7 @@ func wantPrefix() string {
 func TestQueryTag_SimplePathTagsTheWireAndNotTheRecord(t *testing.T) {
 	t.Parallel()
 
-	s := taggedSession(t, "write")
+	s := taggedSession(t)
 	msg := &pgproto3.Query{String: "SELECT 1"}
 
 	require.NoError(t, s.handleQuery(msg))
@@ -59,7 +59,7 @@ func TestQueryTag_SimplePathTagsTheWireAndNotTheRecord(t *testing.T) {
 func TestQueryTag_ExtendedPathTagsParseOnce(t *testing.T) {
 	t.Parallel()
 
-	s := taggedSession(t, "write")
+	s := taggedSession(t)
 	parse := &pgproto3.Parse{Name: "s1", Query: "SELECT * FROM t WHERE id = $1", ParameterOIDs: []uint32{23}}
 
 	require.NoError(t, s.handleParse(parse))
@@ -131,13 +131,13 @@ func TestQueryTag_ControlsRunOnTheClientText(t *testing.T) {
 				}
 
 				query := &pgproto3.Query{String: tt.sql}
-				assert.ErrorIs(t, s.handleQuery(query), tt.wantErr,
+				require.ErrorIs(t, s.handleQuery(query), tt.wantErr,
 					"the refusal must not depend on whether tagging is on")
 				assert.Equal(t, tt.sql, query.String,
 					"a refused statement is never tagged — it never reaches the upstream")
 
 				parse := &pgproto3.Parse{Query: tt.sql}
-				assert.ErrorIs(t, s.handleParse(parse), tt.wantErr)
+				require.ErrorIs(t, s.handleParse(parse), tt.wantErr)
 				assert.Equal(t, tt.sql, parse.Query)
 			}
 		})
@@ -150,7 +150,7 @@ func TestQueryTag_ControlsRunOnTheClientText(t *testing.T) {
 func TestQueryTag_CopyIsTaggedLikeAnyStatement(t *testing.T) {
 	t.Parallel()
 
-	s := taggedSession(t, "write")
+	s := taggedSession(t)
 	msg := &pgproto3.Query{String: "COPY t (a, b) FROM STDIN"}
 
 	require.NoError(t, s.handleQuery(msg))
@@ -165,9 +165,9 @@ func TestQueryTag_CopyIsTaggedLikeAnyStatement(t *testing.T) {
 func TestQueryTag_RepeatedExecutionsAreByteIdentical(t *testing.T) {
 	t.Parallel()
 
-	s := taggedSession(t, "write")
+	s := taggedSession(t)
 
-	var seen []string
+	seen := make([]string, 0, 3)
 
 	for range 3 {
 		msg := &pgproto3.Query{String: "SELECT count(*) FROM big"}
@@ -184,7 +184,7 @@ func TestQueryTag_RepeatedExecutionsAreByteIdentical(t *testing.T) {
 func TestQueryTag_EmptyStatementUntouched(t *testing.T) {
 	t.Parallel()
 
-	s := taggedSession(t, "write")
+	s := taggedSession(t)
 	msg := &pgproto3.Query{String: ""}
 
 	require.NoError(t, s.handleQuery(msg))

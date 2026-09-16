@@ -1258,37 +1258,21 @@ func authProviderOverrideKey(key string) (string, bool) {
 // DBB_AUTH_CACHE_ENABLED -> auth_cache.enabled
 func envTransform(k, v string) (string, any) {
 	key := strings.ToLower(strings.TrimPrefix(k, "DBB_"))
+	// Exact names first, before any prefix rule: every entry in the table is
+	// more specific than the prefix rule that would otherwise swallow it (and
+	// most are matched by no prefix rule at all), so "exact wins" is what keeps
+	// e.g. DBB_MSSQL_TLS_MAX_VERSION out of mssql.tls.*.
+	if exact, ok := envExactKeys[key]; ok {
+		return exact, v
+	}
 	// Map known prefixes to nested paths
 	// query_storage_* -> query_storage.*
 	if strings.HasPrefix(key, "query_storage_") {
 		return "query_storage." + strings.TrimPrefix(key, "query_storage_"), v
 	}
-	// connection_retention -> connection.retention
-	//
-	// An exact match rather than a connection_* prefix rule, because
-	// DBB_CONNECTION_RETENTION deliberately does not follow the <table>_storage
-	// shape its query counterpart has, and "connection" is a word too many
-	// future settings could start with for a blanket prefix to be safe. A
-	// silently unmapped value would read as "unset" and inherit the query
-	// window — exactly the outcome this setting exists to avoid — so there is a
-	// test pinning that this mapping happens.
-	if key == "connection_retention" {
-		return "connection.retention", v
-	}
-	// query_tagging -> query_tagging.enabled
-	//
-	// The documented variable is the bare DBB_QUERY_TAGGING, because the
-	// feature is one boolean and "DBB_QUERY_TAGGING_ENABLED=true" reads as a
-	// stutter. It has to be an exact match tested *before* the prefix rule
-	// below, which would otherwise leave "query_tagging" on a key the struct
-	// does not unmarshal — i.e. the operator turns tagging on and nothing
-	// happens.
-	if key == "query_tagging" {
-		return "query_tagging.enabled", v
-	}
-	// query_tagging_* -> query_tagging.* (the config-file-shaped spelling,
-	// DBB_QUERY_TAGGING_ENABLED, kept working for symmetry with every other
-	// nested section).
+	// query_tagging_* -> query_tagging.* (the config-file-shaped
+	// DBB_QUERY_TAGGING_ENABLED; the bare DBB_QUERY_TAGGING is in
+	// envExactKeys above).
 	if strings.HasPrefix(key, "query_tagging_") {
 		return "query_tagging." + strings.TrimPrefix(key, "query_tagging_"), v
 	}
@@ -1328,13 +1312,6 @@ func envTransform(k, v string) (string, any) {
 	if strings.HasPrefix(key, "oidc_") {
 		return "oidc." + strings.TrimPrefix(key, "oidc_"), v
 	}
-	// slack_signing_secret -> slack_notify.signing_secret
-	// DBB_SLACK_SIGNING_SECRET is the canonical, documented name; the
-	// slack_notify_* prefix rule below keeps the legacy
-	// DBB_SLACK_NOTIFY_SIGNING_SECRET working as an accepted alias.
-	if key == "slack_signing_secret" {
-		return "slack_notify.signing_secret", v
-	}
 	// slack_notify_* -> slack_notify.*
 	if strings.HasPrefix(key, "slack_notify_") {
 		return "slack_notify." + strings.TrimPrefix(key, "slack_notify_"), v
@@ -1350,15 +1327,6 @@ func envTransform(k, v string) (string, any) {
 	// mongo_tls_* -> mongo.tls.*
 	if strings.HasPrefix(key, "mongo_tls_") {
 		return "mongo.tls." + strings.TrimPrefix(key, "mongo_tls_"), v
-	}
-	// mssql_tls_max_version -> mssql.tls_max_version
-	//
-	// This one is deliberately *not* under mssql.tls.*: the ceiling is a TDS
-	// encapsulation setting on MSSQLConfig, not one of the cert/key/disable
-	// knobs the five proxies share. It has to be tested before the mssql_tls_
-	// prefix rule below, which would otherwise swallow it.
-	if key == "mssql_tls_max_version" {
-		return "mssql.tls_max_version", v
 	}
 	// mssql_tls_* -> mssql.tls.*
 	if strings.HasPrefix(key, "mssql_tls_") {
@@ -1377,6 +1345,38 @@ func envTransform(k, v string) (string, any) {
 		return "mcp." + strings.TrimPrefix(key, "mcp_"), v
 	}
 	return key, v
+}
+
+// envExactKeys maps environment-variable names that are *not* a simple
+// <section>_<setting> prefix onto the koanf key they configure. Each one is
+// here for its own reason:
+//
+//   - connection_retention: DBB_CONNECTION_RETENTION deliberately does not
+//     follow the <table>_storage shape its query counterpart has, and
+//     "connection" is a word too many future settings could start with for a
+//     blanket prefix rule to be safe. A silently unmapped value would read as
+//     "unset" and inherit the query window — exactly the outcome the setting
+//     exists to avoid.
+//   - slack_signing_secret: DBB_SLACK_SIGNING_SECRET is the canonical,
+//     documented name; the slack_notify_* prefix rule keeps the legacy
+//     DBB_SLACK_NOTIFY_SIGNING_SECRET working as an accepted alias.
+//   - mssql_tls_max_version: the TDS encapsulation ceiling lives on
+//     MSSQLConfig, not among the cert/key/disable knobs the five proxies share,
+//     so it must not be swallowed by the mssql_tls_ prefix rule.
+//   - query_tagging: the feature is one boolean, and
+//     "DBB_QUERY_TAGGING_ENABLED=true" reads as a stutter — so the documented
+//     variable is the bare name. Without this mapping the operator turns
+//     tagging on, gets no error, and nothing happens. The config-file-shaped
+//     DBB_QUERY_TAGGING_ENABLED still works, through the query_tagging_ prefix
+//     rule.
+//
+// Every entry is looked up before any prefix rule, which is what makes the last
+// two behave.
+var envExactKeys = map[string]string{
+	"connection_retention":  "connection.retention",
+	"slack_signing_secret":  "slack_notify.signing_secret",
+	"mssql_tls_max_version": "mssql.tls_max_version",
+	"query_tagging":         "query_tagging.enabled",
 }
 
 // authProvisioningAliases maps the pre-rename keys the two auto-provisioning
