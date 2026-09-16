@@ -2230,6 +2230,15 @@ The surface, all of it:
 | OCI wide exec | sqlplus, SQL\*Developer, Instant Client | `sqlLen * 3` as a little-endian ub4 behind the `fe x8` sentinel, fixed width | CLR short form, sometimes including a trailing NUL in the declared length |
 | `OALL8` (pre-v315) | legacy | `decodeVarLen`: 1 byte / `0xFE`+2BE / `0xFF`+4BE, width grows | none; the bind count sits immediately behind the text |
 
+**OALL8 is written but not wired** (`oall8RewriteEnabled = false`). No recording
+in `testdata/` carries one and no client the e2e suite drives sends one, so
+disabling it costs nothing — and what it removes is the least-defended of the
+three paths: it does not go through `locateStatementValue`, so it gets none of
+that function's guards, and with no CLR framing its round-trip check compares
+the run against itself and only the length half does any work. The encoder stays
+unit-tested as the specification of what to re-enable once a real OALL8 capture
+exists; see `specs/todos/2026-09-16-11-oracle-tag-oall8-rewrite.md`.
+
 Two of the three length encodings change *width* with their value, so growing a
 statement can shift every byte behind the field — which is why the rewriter
 rebuilds the message rather than patching it. The CLR format change at 252 bytes
@@ -2255,6 +2264,21 @@ cursor count the measurement was about. So the first statement-carrying frame of
 a session decides for the whole session. A client shape the locator cannot
 certify runs untagged start to finish and logs why once, rather than tagging the
 frames that happen to parse.
+
+A certified session that later meets a frame it cannot relocate forwards *that
+frame* untagged and keeps tagging the rest; it is deliberately **not** demoted,
+because demoting it would untag statements that were tagged a moment earlier —
+the very split the gate exists to prevent. What makes the frame-level skip safe
+is that the locator is a pure function of the frame, so the same statement always
+gets the same verdict.
+
+The gate has one second-order effect worth naming, since it is a small instance
+of the thing being bounded: two sessions from the *same* client whose **first**
+statements differ in certifiability end up on opposite sides of the decision, so
+a statement they both run can acquire a tagged SQL_ID from one and an untagged
+one from the other. It is bounded at one extra cursor rather than one per
+session, and it is not a correctness problem — but it is why the decision is
+taken on the first statement rather than renegotiated later.
 
 ### What is measured, and against what
 

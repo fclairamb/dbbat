@@ -194,16 +194,56 @@ func TestRewriteWideUB4Length(t *testing.T) {
 	}
 }
 
+// rewriteOALL8With is rewriteWith for the legacy OALL8 op, which
+// locateStatementRewrite deliberately does not answer for (oall8RewriteEnabled).
+// The encoder is still a specification of what to re-enable once a real OALL8
+// recording exists, so it is still tested — just not through the dispatcher.
+func rewriteOALL8With(t *testing.T, body []byte, prefix string) []byte {
+	t.Helper()
+
+	rw, ok := locateOALL8Rewrite(body, false)
+	require.True(t, ok, "the OALL8 encoder must still answer when asked directly")
+	require.Equal(t, body, rw.apply(body, rw.run, false),
+		"rewriting a statement to itself must reproduce the frame byte for byte")
+
+	return rw.apply(body, append([]byte(prefix), rw.run...), false)
+}
+
+// TestOALL8RewriteIsDisabled pins the gate rather than the encoder: no recording
+// in testdata/ carries an OALL8 statement and no client the e2e suite drives
+// sends one, so the least-defended of the three write paths is not wired in.
+// Removing this test without removing the reason is the regression to catch.
+func TestOALL8RewriteIsDisabled(t *testing.T) {
+	t.Parallel()
+
+	body := oall8Frame("SELECT 1 FROM dual", 3)
+
+	require.True(t, frameCarriesStatement(body),
+		"the frame really is a statement-carrying op, so the refusal below is the gate and not a miss")
+
+	_, ok := locateOALL8Rewrite(body, false)
+	require.True(t, ok, "the encoder itself still works; it is the dispatcher that declines")
+
+	_, ok = locateStatementRewrite(body, false)
+	assert.False(t, ok,
+		"an OALL8 frame must not be rewritten: see oall8RewriteEnabled and "+
+			"specs/todos/2026-09-16-11-oracle-tag-oall8-rewrite.md")
+}
+
 // TestRewriteOALL8VarLenWidens covers the third encoding, and the thing that
 // makes it different: the bind count sits immediately behind the text, so a
 // length field that grows moves it.
+//
+// It exercises the encoder directly, because the dispatcher declines this op —
+// see TestOALL8RewriteIsDisabled. Kept as the specification of what has to keep
+// working for that gate to be flippable.
 func TestRewriteOALL8VarLenWidens(t *testing.T) {
 	t.Parallel()
 
 	short := "SELECT 1 FROM dual"
 	body := oall8Frame(short, 3)
 
-	out := rewriteWith(t, body, tagOf(40), false)
+	out := rewriteOALL8With(t, body, tagOf(40))
 
 	res, err := decodeOALL8(out)
 	require.NoError(t, err)
@@ -217,7 +257,7 @@ func TestRewriteOALL8VarLenWidens(t *testing.T) {
 	require.Less(t, len(long), 0xFE)
 
 	body = oall8Frame(long, 3)
-	out = rewriteWith(t, body, tagOf(40), false)
+	out = rewriteOALL8With(t, body, tagOf(40))
 
 	require.Equal(t, byte(oall8LenShort), out[7], "the varlen escaped to its 0xFE form")
 	assert.Len(t, out, len(body)+40+2)
@@ -397,4 +437,38 @@ func TestRewriteSingleChunkLongFormIsNotReadAsABareRun(t *testing.T) {
 		assert.Equal(t, tagOf(52)+tc.sql, back.text(),
 			"%s: the chunk header must declare the new length, not the old one", tc.name)
 	}
+}
+
+// TestLocatorRefusesASubLimitLongForm is the residual instance of the bug a real
+// 23ai caught once: a CLR long form carrying a value *under* the 252-byte
+// short-form limit.
+//
+// Neither of the other two guards sees it. locateChunkedStatementValue bails out
+// under clrChunkedMinLen and never looks; valuePrecededByAnotherLength's length
+// encodings do not match either, because a compressed int of a value under 256
+// is `01 <n>` and not `FE <n>`. Left alone, the scan reads the 0xFE as framing it
+// does not own and the byte behind it as an ordinary short prefix — and a tag
+// pushing the value past the limit then nests a whole new `0xFE … 0x00` inside
+// the client's own.
+func TestLocatorRefusesASubLimitLongForm(t *testing.T) {
+	t.Parallel()
+
+	sql := "SELECT " + strings.Repeat("h", 200) + " FROM dual"
+	require.Less(t, len(sql), clrChunkedMinLen,
+		"the fixture's whole point is a long form under the limit the chunked locator looks above")
+
+	value := encodeChunkedCLR([]byte(sql), len(sql), false)
+	require.Equal(t, byte(0xFE), value[0])
+	require.Equal(t, byte(len(sql)), value[1])
+
+	body := thinExecFrame(sql, value)
+
+	_, ok := locateStatementRewrite(body, false)
+	assert.False(t, ok,
+		"a long form below the short-form limit must be refused, not read as a short prefix")
+
+	// And the shape it must not be confused with still works: the same statement
+	// in the short form the same clients normally write.
+	_, ok = locateStatementRewrite(thinExecCLR(sql), false)
+	assert.True(t, ok, "the ordinary short form must still be rewritable")
 }
