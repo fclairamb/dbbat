@@ -10,6 +10,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
+	"github.com/fclairamb/dbbat/internal/version"
 )
 
 // authenticate performs DBBat authentication.
@@ -121,6 +122,14 @@ func (s *Session) authenticate() error {
 	// The upstream SET and the watchdog both read this single resolved value,
 	// so they can never disagree about what the session is allowed.
 	s.statementLimit = s.statementTimeouts.For(s.ctx, grant)
+
+	// The statement tag, built once, here, because every component of it is
+	// known exactly now and none of them changes for the rest of the session —
+	// which is precisely what makes repeated executions of one statement stay
+	// byte-identical. Left at its inert zero value when the feature is off.
+	if s.queryTagging {
+		s.queryTag = shared.NewQueryTagger(version.Version, user.Username, s.connUID, grant.DefinitionSlug())
+	}
 
 	// Check quotas
 	if err := s.checkQuotas(); err != nil {

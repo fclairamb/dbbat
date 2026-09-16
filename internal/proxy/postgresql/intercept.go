@@ -139,7 +139,10 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 	// Start tracking query for logging. startTime is stamped here, *after* the
 	// hold resolved, which is what keeps time parked on a human out of the
 	// statement's own clock.
-	return s.book(func() error {
+	//
+	// sqlText — the *client's* text — is what is recorded, here and everywhere
+	// else. The tag below is applied to the outgoing message only.
+	if err := s.book(func() error {
 		s.currentQuery = &pendingQuery{
 			sql:         sqlText,
 			startTime:   time.Now(),
@@ -149,7 +152,17 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 		s.refreshStatementClock()
 
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Last thing before proxyClientToUpstream forwards this message: every
+	// control above ran on the client's text, and the pendingQuery that feeds
+	// the queries table and the audit chain holds the client's text. Only the
+	// bytes on the wire change. Inert unless DBB_QUERY_TAGGING is on.
+	query.String = s.queryTag.Apply(query.String)
+
+	return nil
 }
 
 // handleParse handles Parse messages (prepared statement creation) for Extended Query Protocol.
@@ -164,14 +177,22 @@ func (s *Session) handleParse(msg *pgproto3.Parse) error {
 		return s.book(func() error { return s.refuse(sqlText, nil, err) })
 	}
 
-	// Store the prepared statement with type OIDs. The OID slice is copied
-	// because pgproto3 reuses message buffers across Receive calls.
+	// Store the prepared statement with type OIDs — under the *client's* text,
+	// which is what every later Execute records and what the approval hold at
+	// Execute time matches against. The OID slice is copied because pgproto3
+	// reuses message buffers across Receive calls.
 	s.extendedState.mu.Lock()
 	s.extendedState.preparedStatements[msg.Name] = &preparedStatement{
 		sql:      sqlText,
 		typeOIDs: slices.Clone(msg.ParameterOIDs),
 	}
 	s.extendedState.mu.Unlock()
+
+	// Tagged once, here, on the Parse that goes upstream. A prepared statement
+	// is parsed once and executed many times, and the text upstream keeps is
+	// this one — so every later Bind/Execute inherits the tag for free, and
+	// Execute (which carries no text at all) needs no tagging of its own.
+	msg.Query = s.queryTag.Apply(msg.Query)
 
 	return nil
 }
