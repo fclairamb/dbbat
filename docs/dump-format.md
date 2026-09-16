@@ -244,8 +244,9 @@ Every recording point above is on the **client** leg, which is what makes a
 blocked statement and a synthesized refusal land in the capture at all. It also
 means that with `DBB_QUERY_TAGGING` on — where dbbat prepends a
 sqlcommenter-style `/*dbbat='…',user='…',conn='…',grant='…'*/` comment to what
-it forwards — the capture holds the statement as the client sent it, without
-the tag. The tag is added after the last recording point, on the way to the
+it forwards, or puts the same string in the MongoDB command's `comment` field —
+the capture holds the statement (or command) as the client sent it, without the
+tag. The tag is added after the last recording point, on the way to the
 upstream, and dbbat records no upstream leg.
 
 ### Captures are plaintext, above TLS

@@ -391,7 +391,11 @@ drives the real client→upstream pump against a session with **no upstream**, s
 a legacy opcode that was forwarded rather than refused fails the test by
 panicking. The pipeline target-database checks — write stages, read stages, the
 `explain`-wrapped form, the depth cap and the malformed shapes — are pinned in
-`internal/proxy/shared/validation_test.go`.
+`internal/proxy/shared/validation_test.go`. `querytag_test.go` covers the
+`comment` injection (the taggable set, the client-comment-wins rule, the
+absence of a timestamp, and its composition with the `maxTimeMS` rewrite);
+`querytag_integration_test.go`, behind the `integration` tag, reads the tag
+back out of `system.profile` and asserts the store holds the client's command.
 
 `internal/proxy/mongodb/integration_test.go` (build tag `integration`) dials a
 `mongo:7` testcontainer **through** the proxy with the official Go driver,
@@ -464,3 +468,63 @@ can do on every deployment, to buy a cancel the injected `maxTimeMS` already
 performs on the server's own side. The injection *is* the cancel here; the
 socket close is the backstop. A driver can pipeline several commands on one
 connection, so the clock tracks the oldest one still awaiting a reply.
+
+## Statement tagging (`DBB_QUERY_TAGGING`)
+
+`appName` above answers "which dbbat session is this?" for a session that is
+*currently connected*. The profiler answers a different question — "what ran,
+and who ran it?" — and `system.profile`, the Atlas Query Profiler and the slow
+query log line all show the **command**. Every dbbat session reaches the target
+as the same shared MongoDB user from the same host (the proxy), so without a
+tag the whole fleet's load reads as one client.
+
+With `DBB_QUERY_TAGGING=true` — the same opt-in flag PostgreSQL and MySQL read,
+not a MongoDB-specific one — dbbat puts the dbbat identity in the command's
+[`comment`](https://www.mongodb.com/docs/manual/reference/command/find/) field:
+
+```js
+{ find: "widgets", filter: { … }, comment: "dbbat='0.28.1',user='florent',conn='3f9a1c7b2e4d',grant='diag-paris-habitat'" }
+```
+
+The value is the body of the [sqlcommenter](https://google.github.io/sqlcommenter/)
+comment the SQL proxies emit, minus the `/* */` — a **string**, not a BSON
+sub-document, so it is what sqlcommenter consumers already parse, one grep
+finds a connection across all three protocols, and the Atlas profiler renders
+it inline rather than collapsing it. `conn=` is the same 12 hex characters as
+`appName`'s `c=` tag, so it feeds the same
+`GET /api/v1/connections?uid_suffix=` lookup.
+
+**A client-supplied `comment` wins, and that command is then forwarded
+untouched.** Unlike a SQL comment — dead text nothing else owns — `comment` is
+a single-valued field drivers and ORMs set for their own tracing, and whoever
+set it wrote the consumer that reads it. Appending dbbat's tag into the value
+(or promoting it to a sub-document) would hand that consumer something it never
+agreed to; overwriting it would lose their trace id. Skipping costs little
+here: the profiler *also* records `appName`, which dbbat tags on every session,
+so a command it declines to tag is still attributable — from the neighbouring
+column.
+
+**Which commands are tagged.** An allowlist: `find`, `aggregate`, `count`,
+`distinct`, `insert`, `update`, `delete`, `findAndModify`, `getMore`,
+`mapReduce`, `bulkWrite`. These are the commands whose `comment` support
+MongoDB documents, and the ones whose profiler entries are worth attributing.
+The handshake, auth and teardown chatter is absent for the same reason it is
+exempt from `maxTimeMS` — none of it is a statement a user wrote — and an
+allowlist rather than an exemption list because several other commands reject
+fields they do not recognise, and an observability nicety must never be why a
+command fails.
+
+**What it does not change.** The `queries` table, the tamper-evident audit
+chain and the UI's text search all hold the **client's** command; every control
+— `read_only`, `block_ddl`, the `$db` check, the pipeline scan, the quota,
+approval-hold patterns — runs before the tag exists; and the `.pcapng` capture
+taps the client leg, so the tag does not appear there either. It carries no
+timestamp and no per-command id, so two executions of the same command on one
+session stay byte-identical.
+
+The injection shares the `maxTimeMS` machinery: both rewrite the command
+document element by element on the raw BSON and the message is re-serialized
+**once** (`prepareForwarded` in `intercept.go`, `withComment` in
+`querytag.go`), so a command that carries both a deadline and a tag is rebuilt
+a single time and a command that needs neither is forwarded as the very bytes
+that arrived.
