@@ -98,7 +98,7 @@ func encodeDataPacketLike(model, payload []byte) []byte {
 }
 
 // refragmentStatementMessage cuts a rewritten TTC body into Data packets of at
-// most sdu bytes each, modelled on the client's own first packet.
+// most sdu bytes each, modeled on the client's own first packet.
 //
 // Every fragment carries the first packet's data-flags prefix and nothing else
 // of its own, which is exactly the shape collectStatementMessage requires when

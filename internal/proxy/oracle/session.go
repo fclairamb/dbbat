@@ -2130,49 +2130,8 @@ func (s *session) clientToUpstream() error {
 
 		// Only intercept Data packets
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
-			// A statement whose TTC message is larger than the negotiated SDU
-			// arrives as several packets, and gating the first one on its own is
-			// how the gate came to enforce against a fragment. Collect the whole
-			// message first; the gate reads the reassembly, the upstream gets the
-			// client's own packets. See reassembly.go.
-			msg, err := s.collectStatementMessage(pkt)
-			if err != nil {
+			if err := s.gateAndForwardDataMessage(pkt); err != nil {
 				return err
-			}
-
-			s.fragmentedMessage = msg
-
-			blocked := s.interceptClientMessage(msg.gate)
-
-			s.fragmentedMessage = nil
-
-			if blocked {
-				// Every fragment is dropped, not just the first: the refusal was
-				// answered once, and letting a continuation through on its own is
-				// what used to desynchronize the upstream and kill the session.
-				continue
-			}
-
-			// Everything above ran on the client's own text: the controls, the
-			// `queries` row, the audit chain, the capture and any approval hold.
-			// This is the one point where the bytes going upstream may differ
-			// from the bytes that arrived — see statement_tagging.go, which
-			// forwards the client's packets untouched unless the statement can
-			// be relocated exactly *and* this session was certified for it.
-			if tagged, ok := s.rewriteStatementMessage(msg); ok {
-				for _, frame := range tagged {
-					if _, err := s.upstreamConn.Write(frame); err != nil {
-						return fmt.Errorf("upstream write error: %w", err)
-					}
-				}
-
-				continue
-			}
-
-			for _, frag := range msg.packets {
-				if err := writeTNSPacket(s.upstreamConn, frag); err != nil {
-					return fmt.Errorf("upstream write error: %w", err)
-				}
 			}
 
 			continue
@@ -2183,6 +2142,58 @@ func (s *session) clientToUpstream() error {
 			return fmt.Errorf("upstream write error: %w", err)
 		}
 	}
+}
+
+// gateAndForwardDataMessage runs one client Data message through the gate and
+// writes what survives it upstream.
+//
+// A statement whose TTC message is larger than the negotiated SDU arrives as
+// several packets, and gating the first one on its own is how the gate came to
+// enforce against a fragment. So the whole message is collected first: the gate
+// reads the reassembly, and the upstream gets the client's own packets. See
+// reassembly.go.
+func (s *session) gateAndForwardDataMessage(pkt *TNSPacket) error {
+	msg, err := s.collectStatementMessage(pkt)
+	if err != nil {
+		return err
+	}
+
+	s.fragmentedMessage = msg
+
+	blocked := s.interceptClientMessage(msg.gate)
+
+	s.fragmentedMessage = nil
+
+	if blocked {
+		// Every fragment is dropped, not just the first: the refusal was
+		// answered once, and letting a continuation through on its own is what
+		// used to desynchronize the upstream and kill the session.
+		return nil
+	}
+
+	// Everything above ran on the client's own text: the controls, the `queries`
+	// row, the audit chain, the capture and any approval hold. This is the one
+	// point where the bytes going upstream may differ from the bytes that
+	// arrived — see statement_tagging.go, which forwards the client's packets
+	// untouched unless the statement can be relocated exactly *and* this session
+	// was certified for it.
+	if tagged, ok := s.rewriteStatementMessage(msg); ok {
+		for _, frame := range tagged {
+			if _, err := s.upstreamConn.Write(frame); err != nil {
+				return fmt.Errorf("upstream write error: %w", err)
+			}
+		}
+
+		return nil
+	}
+
+	for _, frag := range msg.packets {
+		if err := writeTNSPacket(s.upstreamConn, frag); err != nil {
+			return fmt.Errorf("upstream write error: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // interceptClientMessage examines a TNS Data packet from the client.

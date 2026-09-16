@@ -389,6 +389,20 @@ func locateOALL8Rewrite(ttcPayload []byte, bigChunks bool) (stmtRewrite, bool) {
 // which bytes the server will parse, and writing into the wrong one is the
 // ORA-03146 this whole file is arranged to avoid.
 func locateStatementValue(body []byte, field execSQLLenField) (stmtRewrite, bool) {
+	// The CLR long form is tried first, and that ordering is load-bearing rather
+	// than a preference. A client whose chunk size is larger than the statement
+	// writes it as *one* chunk, so its text sits contiguously in the payload and
+	// the scan below finds it — as a bare run, with the chunk's own length
+	// prefix left outside the span the rewriter touches. Rewriting that leaves a
+	// chunk header still declaring the old length in front of a longer
+	// statement, which a real 23ai answers with `ORA-03120: two-task conversion
+	// routine: integer overflow` (measured, 2026-09-16, on a 20KB go-ora
+	// statement). Reading the framing first is what stops the contiguous scan
+	// from ever seeing that frame.
+	if rw, ok := locateChunkedStatementValue(body, field); ok {
+		return rw, true
+	}
+
 	var (
 		found stmtRewrite
 		hits  int
@@ -404,6 +418,17 @@ func locateStatementValue(body []byte, field execSQLLenField) (stmtRewrite, bool
 
 		if !statementRunBoundedAt(body, i, field.value) {
 			continue
+		}
+
+		// Nothing but the framing this locator understands may sit between the
+		// header field and the statement. Another copy of the declared length
+		// immediately in front of the value is a second thing that would have to
+		// change with it, and the round-trip check cannot see it — re-encoding
+		// the *same* value reproduces the frame whether or not that copy is
+		// inside the span being rewritten. This is the generalization of the
+		// chunk-header case above.
+		if valuePrecededByAnotherLength(body, i, field.value) {
+			return stmtRewrite{}, false
 		}
 
 		hits++
@@ -442,11 +467,36 @@ func locateStatementValue(body []byte, field execSQLLenField) (stmtRewrite, bool
 		}
 	}
 
-	if hits == 1 {
-		return found, true
+	return found, hits == 1
+}
+
+// valuePrecededByAnotherLength reports whether the bytes immediately in front of
+// a statement run spell the declared length again, in any of the encodings this
+// package can write.
+//
+// One-byte encodings are excluded: that is the CLR short form's own prefix,
+// which the caller identifies and rewrites deliberately. What is being caught
+// here is a *second* length — a CLR chunk header, a repeated field — that the
+// rewriter would leave behind still declaring the old size.
+func valuePrecededByAnotherLength(body []byte, valueAt, declared int) bool {
+	ub4 := make([]byte, 4)
+	binary.LittleEndian.PutUint32(ub4, uint32(declared*wideCharWidth))
+
+	for _, enc := range [][]byte{
+		ttcCompressedUint(uint64(declared)),
+		encodeVarLenBytes(declared),
+		ub4,
+	} {
+		if len(enc) < 2 || valueAt-len(enc) < 0 {
+			continue
+		}
+
+		if bytes.Equal(body[valueAt-len(enc):valueAt], enc) {
+			return true
+		}
 	}
 
-	return locateChunkedStatementValue(body, field)
+	return false
 }
 
 // locateChunkedStatementValue finds a statement the client wrote in the CLR long
