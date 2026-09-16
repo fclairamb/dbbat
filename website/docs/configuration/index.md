@@ -293,6 +293,67 @@ seconds of the limit and cancels the statement upstream before closing the
 sockets. See
 [Access Control](/docs/features/access-control#per-statement-time-limits).
 
+### Statement tagging (optional)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DBB_QUERY_TAGGING` | Prepend a dbbat identity comment to every statement forwarded to the target | `false` |
+
+Every dbbat session logs in to the target as the **same shared database role**,
+from the **same host** — the proxy. So the target's own tooling attributes the
+whole fleet's load to one client: RDS Performance Insights shows one user and
+one host, `pg_stat_statements` has no `application_name` dimension at all, and
+the slow query log prints statement text and nothing else.
+
+What all of them do show is the statement text. Turn this on and dbbat prepends
+a [sqlcommenter](https://google.github.io/sqlcommenter/)-style comment:
+
+```sql
+/*dbbat='0.28.1',user='florent',conn='3f9a1c7b2e4d',grant='diag-paris-habitat'*/ SELECT ...
+```
+
+- `dbbat` — the dbbat version that forwarded the statement
+- `user` — the dbbat user, not the shared database role
+- `conn` — the last 12 hex characters of the dbbat connection uid, the same tag
+  the upstream `application_name` / `program_name` carries. Paste it into the
+  connections page search box, or call
+  `GET /api/v1/connections?uid_suffix=3f9a1c7b2e4d`
+- `grant` — the slug of the grant definition the session is running under
+
+**PostgreSQL and MySQL/MariaDB only.** Oracle is deliberately excluded: `V$SQL`
+deduplicates on statement text, so a per-connection tag would defeat its
+shared-cursor cache. SQL Server and MongoDB are follow-ups.
+
+**Off by default**, because it changes the bytes the database receives — a
+deployment that pins statement text (a `pg_stat_statements` allowlist, a query
+firewall, a per-statement plan cache) should turn it on knowingly. It is also
+the one setting here that makes a statement ~90 bytes longer, so a MySQL
+statement that was already within ~90 bytes of `max_allowed_packet` will start
+being rejected.
+
+The tag carries **no timestamp and no per-statement id**, on purpose: two
+executions of the same statement stay byte-identical, so `pg_stat_statements`
+and the MySQL digest keep aggregating them into one row instead of one row per
+execution.
+
+**It changes nothing dbbat stores or enforces.** Every grant control
+(`read_only`, `block_ddl`, `block_copy`), every bypass scan and every
+approval-hold pattern runs on the statement the **client** sent, before the tag
+exists — so a pattern author never has to account for it. The `queries` table,
+the tamper-evident audit chain, the UI's query-text search and the `.pcapng`
+session captures all hold the client's text too. The tag is a pure function of
+`(version, user, connection, grant)`, all of which the connection row already
+stores, so it is reconstructible without being persisted.
+
+**One known limit, not fixed on purpose.** `pg_stat_statements` keeps the text
+of the *first* execution of a digest, so two dbbat users running the same
+statement share a row whose tag names whichever of them ran it first. The
+numbers stay correct; the label is misleading. Performance Insights has the same
+property per digest, as does MySQL's `QUERY_SAMPLE_TEXT`. Making the digest
+per-user would mean varying the tag per user, which stops aggregation
+altogether — a worse outcome. `pg_stat_activity`, `events_statements_current`
+and the slow logs are exact.
+
 ### Rate Limiting
 
 | Variable | Description | Default |
@@ -553,6 +614,9 @@ query_storage:
   max_result_rows: 100000
   max_result_bytes: 104857600
   retention: "0" # keep forever; e.g. "720h" for 30 days
+
+query_tagging:
+  enabled: false # prepend /*dbbat=...,user=...,conn=...,grant=...*/ upstream
 
 rate_limit:
   enabled: true

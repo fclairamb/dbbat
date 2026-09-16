@@ -82,6 +82,70 @@ exact dbbat connection: its queries, its grant, and the Terminate button —
 rather than guessing from the username alone, which is ambiguous the moment a
 user has more than one session open.
 
+## Statement tagging (`DBB_QUERY_TAGGING`)
+
+`application_name` above answers "which dbbat session is this?" — but only in
+the views that *have* an `application_name` column. The three places a DBA
+actually looks when a database is slow do not:
+
+- **RDS Performance Insights** groups by SQL digest and shows the database
+  user and the client host. Every dbbat session logs in as the same shared
+  role from the same host (the proxy), so the whole fleet's load reads as one
+  client.
+- **`pg_stat_statements`** keys on `(userid, dbid, queryid)`. `application_name`
+  is not a dimension of it at all.
+- **The slow query log** (`log_min_duration_statement`) prints the statement
+  text and nothing else.
+
+What all three *do* show is the statement text. With `DBB_QUERY_TAGGING=true`,
+dbbat prepends a [sqlcommenter](https://google.github.io/sqlcommenter/)-style
+comment to every statement it forwards:
+
+```sql
+/*dbbat='0.28.1',user='florent',conn='3f9a1c7b2e4d',grant='diag-paris-habitat'*/ SELECT ...
+```
+
+`conn=` is the same 12 hex characters as `application_name`'s `c=` tag, so it
+feeds the same `GET /api/v1/connections?uid_suffix=` lookup.
+
+**Off by default.** It changes the bytes the database receives, so a
+deployment that pins statement text — a `pg_stat_statements` allowlist, a
+query firewall, a per-statement plan cache — turns it on knowingly.
+
+**Prepended, not appended.** sqlcommenter appends, but
+`pg_stat_activity.query` truncates at `track_activity_query_size` (1024 bytes
+by default) and so does the log. On exactly the long statements worth chasing,
+an appended tag is the part that gets cut.
+
+**Where it is applied.** The simple-query path tags `Query`; the extended one
+tags `Parse`, once, so every `Bind`/`Execute` of that prepared statement
+inherits it. `COPY ... FROM STDIN` is tagged like any other statement and the
+data stream after it is untouched.
+
+**What it does not change.** The tag exists on the wire to the upstream and
+nowhere else:
+
+- The `queries` table, the tamper-evident audit chain and the UI's query-text
+  search all hold the **client's** statement, untagged. The tag is a pure
+  function of `(version, user, connection, grant)` — all of which the
+  connection row already stores — so it is reconstructible without being
+  stored.
+- Every control runs on the client's text, before tagging: `read_only`,
+  `block_ddl`, `block_copy`, the read-only and statement-timeout bypass scans,
+  and approval-hold patterns. A pattern author never has to account for the
+  tag.
+- dbbat's own `.pcapng` captures tap the **client** leg only, so the tag does
+  not appear in them either.
+
+**Known limit: `pg_stat_statements` keeps the text of the *first* execution of
+a digest.** Two dbbat users running the same statement therefore share one row
+whose tag names whichever of them ran it first. The row's aggregate numbers
+stay correct; its tag is misleading. Performance Insights has the same
+property per digest. `pg_stat_activity`, the slow log and PI's per-sample text
+are exact. This is not fixed on purpose: the only way to make the digest
+per-user is to vary the tag per user, which stops repeated executions
+aggregating at all — a worse outcome than a misleading label.
+
 ## Testing
 
 ### Integration tests

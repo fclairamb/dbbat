@@ -209,6 +209,26 @@ There are **three** writers of that stamp, and only the first two are closes:
 | the reconcile (`CloseOrphanedConnections` / `ReclaimDeadInstanceConnections`) | a crashed session is closed | whatever survived at reconcile time |
 | `RefreshOpenChainStamps` | every reclaim tick, for sessions **still open** | the head as of that sweep — a *prefix* |
 
+#### The chain covers the client's statement, never dbbat's tag
+
+With `DBB_QUERY_TAGGING` on, dbbat prepends a sqlcommenter-style comment —
+`/*dbbat='0.28.1',user='florent',conn='3f9a1c7b2e4d',grant='diag-paris'*/` — to
+the statement it forwards to the target, so the target's own tooling can
+attribute it (see [PostgreSQL](postgresql.md) and [MySQL](mysql.md)).
+
+**That tag is never what the chain covers.** It is applied to the bytes going
+upstream and to nothing else: the `queries` row, and therefore the MAC over it,
+hold the statement text the *client* sent. Two consequences, both deliberate:
+
+- Turning tagging on or off changes nothing about verification. A store written
+  by an instance with tagging on verifies exactly like one written without it,
+  and the statement text an auditor reads back is the one the user actually
+  typed, not a proxy-rewritten version of it.
+- The tag is still reconstructible for any row: it is a pure function of
+  `(dbbat version, username, connection uid, grant definition slug)`, all of
+  which the connection row already carries. Storing it would add a derived
+  field to a MAC'd row for no evidentiary gain.
+
 #### An open session is stamped by a periodic sweep
 
 A close is a bad moment to be the only moment. A session that never ends — a

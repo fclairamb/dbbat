@@ -365,6 +365,52 @@ exact dbbat connection: its queries, its grant, and the Terminate button —
 rather than guessing from the username alone, which is ambiguous the moment a
 user has more than one session open.
 
+## Statement tagging (`DBB_QUERY_TAGGING`)
+
+`program_name` above answers "which dbbat session is this?", but the slow
+query log and `performance_schema.events_statements_*` show statement text,
+not connect attributes — and every dbbat session logs in to the target as the
+same shared MySQL account from the same host (the proxy). With
+`DBB_QUERY_TAGGING=true`, dbbat prepends a
+[sqlcommenter](https://google.github.io/sqlcommenter/)-style comment to every
+statement it forwards:
+
+```sql
+/*dbbat='0.28.1',user='florent',conn='3f9a1c7b2e4d',grant='diag-paris-habitat'*/ SELECT ...
+```
+
+`conn=` is the same 12 hex characters as `program_name`'s `c=` tag, so it
+feeds the same `GET /api/v1/connections?uid_suffix=` lookup. Off by default —
+it changes the bytes the server receives.
+
+**Where it is applied.** `COM_QUERY` and `COM_STMT_PREPARE`. `COM_STMT_EXECUTE`
+is a binary payload with no statement text at all, and needs none: it runs the
+statement prepared (and tagged) by its `COM_STMT_PREPARE`, so the tag is
+already in `performance_schema`'s `SQL_TEXT` for it. The text-protocol
+`PREPARE ... FROM '<literal>'` / `EXECUTE <name>` pair is tagged on its outer
+statement, like anything else sent as `COM_QUERY`.
+
+**What it does not change.** The `queries` table, the tamper-evident audit
+chain and the UI's query-text search all hold the **client's** statement,
+untagged; every control — `read_only`, `block_ddl`, `block_copy`, the
+database-switch scan, the dynamic-SQL checks, approval-hold patterns — runs on
+the client's text, before tagging; and dbbat's own `.pcapng` captures tap the
+client leg, so the tag does not appear in them either.
+
+**`max_allowed_packet`.** The tag is roughly 90 bytes. A statement that was
+already within ~90 bytes of the server's `max_allowed_packet` will now be
+rejected with tagging on where it previously squeaked through. There is no
+special handling: the limit is the server's, and raising it (or leaving
+tagging off) is the operator's call.
+
+**Known limit: the digest.** MySQL's statement digest normalises comments
+away, so the digest itself is unaffected and repeated executions keep
+aggregating — which is exactly why the tag carries no timestamp and no
+per-statement id. The *sample* text stored alongside a digest
+(`events_statements_summary_by_digest.QUERY_SAMPLE_TEXT`) is one execution's,
+so its tag names whichever session produced that sample rather than all of
+them. `events_statements_current`/`_history` and the slow log are exact.
+
 ## Testing
 
 ### Integration tests
