@@ -423,6 +423,15 @@ type Connection struct {
 	Queries          int64      `bun:"queries,notnull,default:0" json:"queries"`
 	BytesTransferred int64      `bun:"bytes_transferred,notnull,default:0" json:"bytes_transferred"`
 
+	// TerminationReason says why *dbbat* ended this session, when dbbat is
+	// what ended it. nil — the ordinary case — means the client or the
+	// network did. Written in the same statement as DisconnectedAt, so a
+	// terminated session can never read back as a clean one.
+	//
+	// The vocabulary is the TerminationReason* constants; anything else is a
+	// bug, not an extension point.
+	TerminationReason *string `bun:"termination_reason" json:"termination_reason,omitempty"`
+
 	// UpstreamTLS reports whether the proxy→upstream leg of this session was
 	// encrypted. The server row's ssl_mode states a policy, not an outcome:
 	// the opportunistic modes ("prefer", and the empty default) fall back to
@@ -897,6 +906,34 @@ func (g *AccessGrant) MaxBytesTransferred() *int64 {
 	return g.Definition.MaxBytesTransferred
 }
 
+// StatementTimeout resolves the per-statement limit for this grant. global is
+// the instance-wide default (zero = none). Returns 0 when nothing applies.
+//
+// The definition's three states are resolved here and nowhere else:
+//
+//   - nil                     → global (which may itself be zero)
+//   - a pointer to 0          → 0, i.e. no limit, *overriding* global
+//   - a pointer to a positive → that many seconds
+//
+// A shapeless grant (no definition attached) falls back to global rather than
+// to the fail-closed zero the quota accessors use: the narrow answer here is
+// the *global* limit, since returning "no limit" would be the widening one and
+// returning something arbitrary would kill sessions the operator never
+// configured a limit for. GetActiveGrant refuses to hand out a definitionless
+// grant anyway — see Controls.
+func (g *AccessGrant) StatementTimeout(global time.Duration) time.Duration {
+	if g == nil || g.Definition == nil || g.Definition.StatementTimeoutSeconds == nil {
+		return global
+	}
+
+	secs := *g.Definition.StatementTimeoutSeconds
+	if secs <= 0 {
+		return 0
+	}
+
+	return time.Duration(secs) * time.Second
+}
+
 // ApprovalPatterns are the RE2 patterns that suspend a matching statement
 // until an approver resolves it, read from the grant's definition.
 func (g *AccessGrant) ApprovalPatterns() []string {
@@ -989,6 +1026,18 @@ type GrantDefinition struct {
 	Controls            StringArray `bun:"controls,notnull,default:'{}'" json:"controls"`
 	MaxQueryCounts      *int64      `bun:"max_query_counts" json:"max_query_counts"`
 	MaxBytesTransferred *int64      `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
+	// StatementTimeoutSeconds bounds how long a *single* statement issued
+	// under this definition may run. Three states, and the distinction
+	// between the last two is the point of the pointer:
+	//
+	//   nil — inherit the instance-wide default.
+	//   0   — explicitly no limit, overriding a global one. The escape hatch
+	//         for a dump or ETL definition, taken by an admin at edit time.
+	//   > 0 — the limit, in seconds.
+	//
+	// Read through AccessGrant.StatementTimeout, never directly: the
+	// inheritance is what makes the three states mean anything.
+	StatementTimeoutSeconds *int64 `bun:"statement_timeout_seconds" json:"statement_timeout_seconds"`
 	// Priority, when non-nil, is copied verbatim onto every grant
 	// materialized from this definition, pinning it above or below the tier
 	// its controls would otherwise earn. nil — the default — means "compute

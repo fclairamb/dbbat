@@ -68,25 +68,26 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 	uid := uuid.New()
 
 	result := &GrantDefinition{
-		UID:                   uid,
-		LineageUID:            uid,
-		Name:                  def.Name,
-		Slug:                  def.Slug,
-		Description:           def.Description,
-		DurationSeconds:       def.DurationSeconds,
-		Controls:              controls,
-		MaxQueryCounts:        def.MaxQueryCounts,
-		MaxBytesTransferred:   def.MaxBytesTransferred,
-		Priority:              def.Priority,
-		AutoApprove:           def.AutoApprove,
-		UserGroupUIDs:         groupUIDs,
-		ServerGroupUIDs:       serverGroupUIDs,
-		ApprovalPatterns:      copyStrings(def.ApprovalPatterns),
-		SampleQueries:         copyStrings(def.SampleQueries),
-		ApproverUserGroupUIDs: copyUUIDs(def.ApproverUserGroupUIDs),
-		IsActive:              true,
-		CreatedBy:             def.CreatedBy,
-		CreatedAt:             time.Now(),
+		UID:                     uid,
+		LineageUID:              uid,
+		Name:                    def.Name,
+		Slug:                    def.Slug,
+		Description:             def.Description,
+		DurationSeconds:         def.DurationSeconds,
+		Controls:                controls,
+		MaxQueryCounts:          def.MaxQueryCounts,
+		MaxBytesTransferred:     def.MaxBytesTransferred,
+		StatementTimeoutSeconds: def.StatementTimeoutSeconds,
+		Priority:                def.Priority,
+		AutoApprove:             def.AutoApprove,
+		UserGroupUIDs:           groupUIDs,
+		ServerGroupUIDs:         serverGroupUIDs,
+		ApprovalPatterns:        copyStrings(def.ApprovalPatterns),
+		SampleQueries:           copyStrings(def.SampleQueries),
+		ApproverUserGroupUIDs:   copyUUIDs(def.ApproverUserGroupUIDs),
+		IsActive:                true,
+		CreatedBy:               def.CreatedBy,
+		CreatedAt:               time.Now(),
 	}
 
 	_, err := s.db.NewInsert().
@@ -368,21 +369,22 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 			Slug:       def.Slug,
 			// Description and the rest come from the merged definition the
 			// caller assembled; lifecycle stays with the lineage.
-			Description:           def.Description,
-			DurationSeconds:       def.DurationSeconds,
-			Controls:              def.Controls,
-			MaxQueryCounts:        def.MaxQueryCounts,
-			MaxBytesTransferred:   def.MaxBytesTransferred,
-			Priority:              def.Priority,
-			AutoApprove:           def.AutoApprove,
-			UserGroupUIDs:         def.UserGroupUIDs,
-			ServerGroupUIDs:       def.ServerGroupUIDs,
-			ApprovalPatterns:      def.ApprovalPatterns,
-			SampleQueries:         def.SampleQueries,
-			ApproverUserGroupUIDs: def.ApproverUserGroupUIDs,
-			IsActive:              current.IsActive,
-			CreatedBy:             current.CreatedBy,
-			CreatedAt:             now,
+			Description:             def.Description,
+			DurationSeconds:         def.DurationSeconds,
+			Controls:                def.Controls,
+			MaxQueryCounts:          def.MaxQueryCounts,
+			MaxBytesTransferred:     def.MaxBytesTransferred,
+			StatementTimeoutSeconds: def.StatementTimeoutSeconds,
+			Priority:                def.Priority,
+			AutoApprove:             def.AutoApprove,
+			UserGroupUIDs:           def.UserGroupUIDs,
+			ServerGroupUIDs:         def.ServerGroupUIDs,
+			ApprovalPatterns:        def.ApprovalPatterns,
+			SampleQueries:           def.SampleQueries,
+			ApproverUserGroupUIDs:   def.ApproverUserGroupUIDs,
+			IsActive:                current.IsActive,
+			CreatedBy:               current.CreatedBy,
+			CreatedAt:               now,
 		}
 
 		if _, err := tx.NewInsert().Model(next).Returning("*").Exec(ctx); err != nil {
@@ -411,6 +413,7 @@ func sameGrantDefinitionShape(a, b *GrantDefinition) bool {
 		slices.Equal(a.Controls, b.Controls) &&
 		equalInt64Ptr(a.MaxQueryCounts, b.MaxQueryCounts) &&
 		equalInt64Ptr(a.MaxBytesTransferred, b.MaxBytesTransferred) &&
+		equalInt64Ptr(a.StatementTimeoutSeconds, b.StatementTimeoutSeconds) &&
 		equalInt16Ptr(a.Priority, b.Priority) &&
 		slices.Equal(a.UserGroupUIDs, b.UserGroupUIDs) &&
 		slices.Equal(a.ServerGroupUIDs, b.ServerGroupUIDs) &&
