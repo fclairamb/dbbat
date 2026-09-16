@@ -95,6 +95,18 @@ type Session struct {
 
 	// guard enforces the grant's time-window / bandwidth limits mid-stream.
 	guard *shared.LimitGuard
+
+	// statementTimeouts resolves the instance-wide per-statement limit;
+	// statementLimit is this session's resolved value (0 = no limit), stamped
+	// at auth; statementClock marks the oldest command awaiting a reply.
+	statementTimeouts *shared.StatementTimeoutResolver
+	statementLimit    time.Duration
+	statementClock    shared.StatementClock
+
+	// termination records why dbbat ended this session, when dbbat is what
+	// ended it. Written by the watchdog goroutine, read by the teardown.
+	terminationMu sync.Mutex
+	termination   store.Termination
 	// revocation is signaled when this session's grant is revoked mid-flight.
 	revocation *cache.RevocationHandle
 
@@ -135,6 +147,15 @@ func (s *Session) setHeldQuery(uid uuid.UUID) {
 	s.heldMu.Lock()
 	s.heldQueryUID = uid
 	s.heldMu.Unlock()
+}
+
+// heldQuery is the uid of the command currently parked on a human, uuid.Nil
+// when nothing is.
+func (s *Session) heldQuery() uuid.UUID {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
+	return s.heldQueryUID
 }
 
 // KillHeldQuery ends a command parked on a human, in response to a MongoDB
@@ -559,10 +580,40 @@ func (s *Session) cumulativeClientBytes() int64 {
 
 // onLimitViolation force-closes both conns when the watchdog trips.
 func (s *Session) onLimitViolation(up *UpstreamConn, clientConn io.Closer, err error) {
-	s.logger.WarnContext(s.ctx, "terminating MongoDB session: grant no longer valid mid-stream",
+	s.logger.WarnContext(s.ctx, "terminating MongoDB session: limit crossed mid-stream",
 		slog.Any("error", err))
 
+	s.noteTermination(err)
+
+	// No upstream cancel to send: killOp needs privileges the proxied role
+	// usually lacks, and asking for them would widen what dbbat's stored
+	// credentials can do on every deployment, to buy a cancel the injected
+	// maxTimeMS already performs on the server's own side. The injection *is*
+	// the cancel on this protocol; the socket close is the backstop.
 	closeSessionConns(up, clientConn)
+}
+
+// noteTermination records why dbbat is ending this session. First writer wins.
+func (s *Session) noteTermination(err error) {
+	t := shared.TerminationFor(err, s.guard, s.heldQuery())
+	if !t.Set() {
+		return
+	}
+
+	s.terminationMu.Lock()
+	defer s.terminationMu.Unlock()
+
+	if !s.termination.Set() {
+		s.termination = t
+	}
+}
+
+// recordedTermination returns the termination reason, if any.
+func (s *Session) recordedTermination() store.Termination {
+	s.terminationMu.Lock()
+	defer s.terminationMu.Unlock()
+
+	return s.termination
 }
 
 // closeSessionConns drops both sockets, which is how a session is ended from
@@ -644,7 +695,13 @@ func (s *Session) recordDisconnect() {
 		}
 	}
 
-	if err := s.server.store.CloseConnection(s.ctx, s.connection.UID); err != nil {
+	termination := s.recordedTermination()
+	if termination.Set() {
+		// "terminated" before "closed": why, then that.
+		s.stream.ConnectionWithReason(s.ctx, shared.ConnectionTerminated, termination.Reason)
+	}
+
+	if err := s.server.store.CloseConnectionWithReason(s.ctx, s.connection.UID, termination); err != nil {
 		s.logger.WarnContext(s.ctx, "MongoDB connection close failed",
 			slog.Any("connection_id", s.connection.UID),
 			slog.Any("error", err))

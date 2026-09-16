@@ -603,3 +603,139 @@ func lookupBool(doc bson.Raw, key string) bool {
 
 	return false
 }
+
+// bsonTypeInt64 is the BSON element type byte for a 64-bit integer, which is
+// what maxTimeMS is written as. Spelled out because the injection below builds
+// the element by hand rather than round-tripping the document through a Go
+// struct: a decode/encode cycle would have to be lossless for every BSON type a
+// client can send, and "almost lossless" on a forwarded command is a data bug.
+const bsonTypeInt64 = 0x12
+
+// maxTimeMSKey is the generic MongoDB command option that bounds server-side
+// execution time. It is the only server-side lever this protocol offers — there
+// is no session-level statement timeout to SET — so dbbat injects it into the
+// commands it forwards.
+const maxTimeMSKey = "maxTimeMS"
+
+// withMaxTimeMS returns doc with maxTimeMS clamped to limitMS, and reports
+// whether anything changed.
+//
+// A client value that is already at or below the limit is left alone: a client
+// narrowing its own deadline is exactly the behaviour a per-statement limit is
+// trying to encourage, and overwriting it would *widen* the client's own
+// expectation. A missing value, a zero (which MongoDB reads as "no limit") or a
+// larger one is replaced.
+//
+// The document is rebuilt element by element from the raw bytes, so every value
+// but the replaced one is forwarded byte-identical.
+func withMaxTimeMS(doc bson.Raw, limitMS int64) (bson.Raw, bool, error) {
+	elements, err := doc.Elements()
+	if err != nil {
+		return doc, false, fmt.Errorf("mongodb: read command elements: %w", err)
+	}
+
+	out := make([]byte, 4, len(doc)+16)
+
+	for _, e := range elements {
+		if e.Key() != maxTimeMSKey {
+			out = append(out, e...)
+
+			continue
+		}
+
+		if existing, ok := asInt64(e.Value()); ok && existing > 0 && existing <= limitMS {
+			return doc, false, nil
+		}
+	}
+
+	out = append(out, bsonTypeInt64)
+	out = append(out, maxTimeMSKey...)
+	out = append(out, 0)
+	out = binary.LittleEndian.AppendUint64(out, uint64(limitMS))
+	out = append(out, 0)
+
+	binary.LittleEndian.PutUint32(out[0:4], uint32(len(out)))
+
+	return out, true, nil
+}
+
+// asInt64 reads a BSON numeric value as an int64, reporting whether it was one.
+// Drivers spell maxTimeMS as int32, int64 or double depending on the language,
+// so all three are accepted.
+func asInt64(v bson.RawValue) (int64, bool) {
+	switch v.Type {
+	case bson.TypeInt32:
+		i, ok := v.Int32OK()
+
+		return int64(i), ok
+	case bson.TypeInt64:
+		return v.Int64OK()
+	case bson.TypeDouble:
+		f, ok := v.DoubleOK()
+
+		return int64(f), ok
+	default:
+		return 0, false
+	}
+}
+
+// rebuildOpMsg re-serializes a parsed OP_MSG with body replacing its kind-0
+// command document, preserving the request id and every kind-1 document
+// sequence (the bulk payloads `documents`, `updates`, `deletes` ride in those).
+//
+// The checksumPresent flag is cleared rather than recomputed: the checksum
+// covers bytes this function just changed, it is optional on the wire, and
+// recomputing a CRC-32C here would be a second place for it to be wrong.
+func rebuildOpMsg(m *message, parsed *opMsg, body bson.Raw) ([]byte, error) {
+	payload := make([]byte, 4, len(m.body)+16)
+	binary.LittleEndian.PutUint32(payload[0:4], parsed.flags&^flagChecksumPresent)
+
+	wroteBody := false
+
+	for _, section := range parsed.sections {
+		switch section.kind {
+		case 0:
+			if wroteBody {
+				return nil, fmt.Errorf("%w: more than one command document", ErrBadSection)
+			}
+
+			wroteBody = true
+
+			payload = append(payload, 0)
+			payload = append(payload, body...)
+
+		case 1:
+			payload = append(payload, 1)
+
+			// int32 size (inclusive of itself), cstring identifier, documents.
+			start := len(payload)
+			payload = append(payload, 0, 0, 0, 0)
+			payload = append(payload, section.identifier...)
+			payload = append(payload, 0)
+
+			for _, doc := range section.documents {
+				payload = append(payload, doc...)
+			}
+
+			binary.LittleEndian.PutUint32(payload[start:start+4], uint32(len(payload)-start))
+
+		default:
+			return nil, fmt.Errorf("%w: %d", ErrBadSection, section.kind)
+		}
+	}
+
+	if !wroteBody {
+		return nil, ErrNoCommandBody
+	}
+
+	total := headerLen + len(payload)
+	if total > maxWireMessageSize {
+		return nil, fmt.Errorf("%w: %d", ErrMessageTooLarge, total)
+	}
+
+	buf := make([]byte, total)
+	writeHeader(buf, int32(total), m.requestID, m.responseTo, opCodeMsg)
+	copy(buf[headerLen:], payload)
+
+	return buf, nil
+}
