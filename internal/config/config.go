@@ -955,6 +955,9 @@ type Config struct {
 	// Connection holds the session-ledger settings, retention above all.
 	Connection ConnectionConfig `koanf:"connection"`
 
+	// QueryTagging holds the sqlcommenter-style statement tagging settings.
+	QueryTagging QueryTaggingConfig `koanf:"query_tagging"`
+
 	// RateLimit holds rate limiting configuration.
 	RateLimit RateLimitConfig `koanf:"rate_limit"`
 
@@ -1030,6 +1033,25 @@ type Config struct {
 
 	// MCP holds the Model Context Protocol endpoint configuration.
 	MCP MCPConfig `koanf:"mcp"`
+}
+
+// QueryTaggingConfig configures the sqlcommenter-style comment dbbat prepends
+// to every statement it forwards, so the *target's* own tooling — RDS
+// Performance Insights, pg_stat_statements, the slow query log — can attribute
+// a statement to the dbbat user, connection and grant rather than to the
+// shared database role every session logs in as.
+//
+// Enabled defaults to **false**, deliberately. This changes the bytes the
+// database receives, and a deployment that pins statement text (a
+// pg_stat_statements allowlist, a query firewall, a per-statement cache) has
+// to turn it on knowingly.
+type QueryTaggingConfig struct {
+	// Enabled prepends the tag on the PostgreSQL and MySQL/MariaDB proxies.
+	// The other three protocols ignore it: Oracle's V$SQL deduplicates on
+	// statement text, so a per-connection tag would defeat its shared-cursor
+	// cache, and MongoDB's natural equivalent is the commands' `comment`
+	// field rather than a SQL comment.
+	Enabled bool `koanf:"enabled"`
 }
 
 // MCPConfig configures the Model Context Protocol endpoint that lets AI
@@ -1252,6 +1274,23 @@ func envTransform(k, v string) (string, any) {
 	// test pinning that this mapping happens.
 	if key == "connection_retention" {
 		return "connection.retention", v
+	}
+	// query_tagging -> query_tagging.enabled
+	//
+	// The documented variable is the bare DBB_QUERY_TAGGING, because the
+	// feature is one boolean and "DBB_QUERY_TAGGING_ENABLED=true" reads as a
+	// stutter. It has to be an exact match tested *before* the prefix rule
+	// below, which would otherwise leave "query_tagging" on a key the struct
+	// does not unmarshal — i.e. the operator turns tagging on and nothing
+	// happens.
+	if key == "query_tagging" {
+		return "query_tagging.enabled", v
+	}
+	// query_tagging_* -> query_tagging.* (the config-file-shaped spelling,
+	// DBB_QUERY_TAGGING_ENABLED, kept working for symmetry with every other
+	// nested section).
+	if strings.HasPrefix(key, "query_tagging_") {
+		return "query_tagging." + strings.TrimPrefix(key, "query_tagging_"), v
 	}
 	// rate_limit_* -> rate_limit.*
 	if strings.HasPrefix(key, "rate_limit_") {
