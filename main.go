@@ -434,6 +434,21 @@ func startProxies(
 		set.mssql.SetStatementTimeouts(statementTimeouts)
 	}
 
+	// The sqlcommenter-style statement tag, on the two protocols that have it:
+	// PostgreSQL and MySQL/MariaDB. Oracle is deliberately absent — V$SQL
+	// deduplicates on statement text, so a per-connection tag would defeat its
+	// shared-cursor cache — and so are SQL Server and MongoDB.
+	if cfg.QueryTagging.Enabled {
+		set.postgres.SetQueryTagging(true)
+
+		if set.mysql != nil {
+			set.mysql.SetQueryTagging(true)
+		}
+
+		logger.InfoContext(ctx, "statement tagging enabled",
+			slog.String("protocols", "postgresql,mysql"))
+	}
+
 	set.postgres.SetDumpUploader(dumpUploader)
 
 	if set.oracle != nil {

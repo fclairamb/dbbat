@@ -85,6 +85,13 @@ type Session struct {
 	statementLimit time.Duration
 	statementClock shared.StatementClock
 
+	// queryTag prepends the dbbat identity comment to the statement text handed
+	// to the upstream — COM_QUERY and COM_STMT_PREPARE, never the binary
+	// COM_STMT_EXECUTE, which carries no text. Built at auth from the server's
+	// DBB_QUERY_TAGGING setting; its zero value is inert, so every call site is
+	// unconditional and the disabled path changes nothing.
+	queryTag shared.QueryTagger
+
 	// upstreamConnID / upstreamVersion are the backend's own connection id and
 	// version banner, captured at connect. The id is what KILL QUERY names when
 	// the watchdog cancels a runaway statement; the banner is what tells MySQL
