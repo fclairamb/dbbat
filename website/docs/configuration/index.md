@@ -340,9 +340,21 @@ ORM's own tracing may already own it. Such a command is still attributable: the
 profiler records `appName`, which dbbat tags on every session. See
 [the MongoDB notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md).
 
-**Oracle and SQL Server are excluded.** Oracle deliberately: `V$SQL`
-deduplicates on statement text, so a per-connection tag would defeat its
-shared-cursor cache. SQL Server is a follow-up.
+**Oracle and SQL Server are excluded**, and there is no
+`DBB_QUERY_TAGGING_ORACLE`. `V$SQL` keys on statement text, so every distinct
+tag is a distinct SQL_ID holding its own shared-pool cursor. Measured on Oracle
+23ai with one join executed 600 times: the `conn=` tag spread over 200 sessions
+cost 200 cursors and 9.6 MB, growing with every session opened. Dropping `conn=`
+bounds it instead by the number of dbbat *users* — 20 identities cost 20
+cursors, one hard parse each and ~48 KB apiece, then plateau, with a second 600
+executions adding nothing at all — so a per-user tag is affordable. What is not
+ready is the proxy: unlike the three above it relays the client's TNS packets
+byte for byte and only decodes statements to gate and record them, so there is
+nowhere to prepend a comment without re-encoding the TTC frame. A setting that
+changed nothing would be worse than its absence. The numbers and the remaining
+work are in
+[the Oracle notes](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md).
+SQL Server is a follow-up.
 
 **Off by default**, because it changes the bytes the database receives — a
 deployment that pins statement text (a `pg_stat_statements` allowlist, a query
