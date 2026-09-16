@@ -73,12 +73,10 @@ type Session struct {
 	// force-closes both conns.
 	guard *shared.LimitGuard
 
-	// statementTimeouts resolves the instance-wide per-statement limit;
 	// statementLimit is this session's resolved value (0 = no limit), stamped
 	// at auth; statementClock marks the statement currently executing upstream.
-	statementTimeouts *shared.StatementTimeoutResolver
-	statementLimit    time.Duration
-	statementClock    shared.StatementClock
+	statementLimit time.Duration
+	statementClock shared.StatementClock
 
 	// upstreamConnID / upstreamVersion are the backend's own connection id and
 	// version banner, captured at connect. The id is what KILL QUERY names when

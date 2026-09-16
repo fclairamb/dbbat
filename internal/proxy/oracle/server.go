@@ -208,6 +208,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	session := newSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.authCache, s.queryStorage, s.dumpConfig, s.rowWriter)
 	session.approvalDeps = s.approvalDeps
+	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
 	if err := session.run(); err != nil {
 		// Two expected outcomes, told apart by the sentinel rather than by

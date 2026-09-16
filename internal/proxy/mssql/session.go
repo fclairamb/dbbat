@@ -113,16 +113,14 @@ type session struct {
 	// revocation is signaled when the grant is revoked under a live session.
 	guard *shared.LimitGuard
 
-	// statementTimeouts resolves the instance-wide per-statement limit;
-	// statementLimit is this session's resolved value (0 = no limit), stamped
+	// statementLimit is this session's resolved per-statement limit (0 = no limit), stamped
 	// at auth; statementClock marks the statement currently executing upstream.
 	//
 	// SQL Server has no server-side statement timeout — the query timeout every
 	// driver exposes is a client-side one — so on this protocol the watchdog is
 	// the whole of layer 1 and layer 2, and the ATTENTION token is the cancel.
-	statementTimeouts *shared.StatementTimeoutResolver
-	statementLimit    time.Duration
-	statementClock    shared.StatementClock
+	statementLimit time.Duration
+	statementClock shared.StatementClock
 
 	// upstreamWriteMu serializes writes on the upstream leg. The forward pump
 	// is the ordinary writer; the watchdog's cancel is the other one.
@@ -384,7 +382,7 @@ func (s *session) Run(ctx context.Context) error {
 	// guard that enforces expiry / bandwidth / revocation mid-stream.
 	s.revocation = s.server.store.Revocations().Register(s.grant.UID)
 	// Resolve the per-statement limit once, next to the grant it comes from.
-	s.statementLimit = s.statementTimeouts.For(ctx, s.grant)
+	s.statementLimit = s.server.statementTimeouts.For(ctx, s.grant)
 
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).

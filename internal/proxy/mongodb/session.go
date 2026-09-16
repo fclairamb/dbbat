@@ -96,12 +96,10 @@ type Session struct {
 	// guard enforces the grant's time-window / bandwidth limits mid-stream.
 	guard *shared.LimitGuard
 
-	// statementTimeouts resolves the instance-wide per-statement limit;
 	// statementLimit is this session's resolved value (0 = no limit), stamped
 	// at auth; statementClock marks the oldest command awaiting a reply.
-	statementTimeouts *shared.StatementTimeoutResolver
-	statementLimit    time.Duration
-	statementClock    shared.StatementClock
+	statementLimit time.Duration
+	statementClock shared.StatementClock
 
 	// termination records why dbbat ended this session, when dbbat is what
 	// ended it. Written by the watchdog goroutine, read by the teardown.

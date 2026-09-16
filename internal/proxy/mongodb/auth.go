@@ -128,7 +128,7 @@ func (s *Session) establishSession(responseTo int32, grant *store.Grant) error {
 	s.revocation = s.server.store.Revocations().Register(grant.UID)
 	// Resolve the per-statement limit once, next to the grant it comes from,
 	// so the maxTimeMS injection and the watchdog read one value.
-	s.statementLimit = s.statementTimeouts.For(s.ctx, grant)
+	s.statementLimit = s.server.statementTimeouts.For(s.ctx, grant)
 
 	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).

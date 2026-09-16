@@ -55,3 +55,19 @@ func isResetMarker(pkt *TNSPacket) bool {
 func buildResetMarker() []byte {
 	return []byte{0x00, 0x00, 0x00, 0x0B, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, markerTypeReset}
 }
+
+// buildBreakMarker returns the raw bytes of a TNS Break Marker packet — the
+// out-of-band signal an Oracle client sends to interrupt the call the server is
+// executing (what Ctrl-C does in sqlplus).
+//
+// Same 11-byte v315+ layout as buildResetMarker, with the marker type changed;
+// see that function for the field-by-field breakdown.
+//
+// **Unverified against a real Oracle server.** dbbat sends this on the watchdog
+// teardown path as a courtesy — a server that honours it stops burning CPU on a
+// statement nobody will read — but the socket close immediately after is what
+// the enforcement actually rests on, and the end-to-end suite has not yet proven
+// the marker alone ends the call. See docs/oracle.md.
+func buildBreakMarker() []byte {
+	return []byte{0x00, 0x00, 0x00, 0x0B, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, markerTypeBreak}
+}

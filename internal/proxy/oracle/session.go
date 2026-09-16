@@ -231,6 +231,22 @@ type session struct {
 	heldMu       sync.Mutex
 	heldQueryUID uuid.UUID
 
+	// statementTimeouts resolves the instance-wide per-statement limit (set
+	// from the server at session creation); statementLimit is this session's
+	// resolved value (0 = no limit), stamped at auth; statementClock marks the
+	// call currently executing upstream.
+	//
+	// Oracle has no server-side statement timeout, so on this protocol the
+	// watchdog is the entire mechanism and the break marker is its only cancel.
+	statementTimeouts *shared.StatementTimeoutResolver
+	statementLimit    time.Duration
+	statementClock    shared.StatementClock
+
+	// termination records why dbbat ended this session, when dbbat is what
+	// ended it.
+	terminationMu sync.Mutex
+	termination   store.Termination
+
 	// guard enforces the grant's time-window and bandwidth limits mid-stream.
 	guard *shared.LimitGuard
 
@@ -1142,6 +1158,9 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 
 	s.grant = grant
 
+	// Resolve the per-statement limit once, next to the grant it comes from.
+	s.statementLimit = s.statementTimeouts.For(s.ctx, grant)
+
 	// Check quotas
 	if err := s.checkQuotas(); err != nil {
 		return err
@@ -1519,7 +1538,8 @@ func (s *session) proxyMessages() error {
 	// upstreamToClient handles the actively-streaming case with a clean TTC
 	// error frame.
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
-		WithRevocation(s.revocation.Flag())
+		WithRevocation(s.revocation.Flag()).
+		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
 	databaseName := ""
 	if s.database != nil {
@@ -1953,7 +1973,82 @@ func (s *session) onLimitViolation(err error) {
 
 	s.logger.WarnContext(s.ctx, logMsgWatchdogTeardown, attrs...)
 
+	s.noteTermination(err)
+	s.breakUpstreamStatement()
+
 	s.closeConns()
+}
+
+// breakUpstreamStatement sends a TNS break marker on the upstream leg, asking
+// the server to interrupt the call it is executing.
+//
+// Oracle has no in-band statement time limit (a per-statement cap is a Resource
+// Manager plan, which is DBA territory, and CALL_TIMEOUT is an OCI *client*
+// setting), so unlike PostgreSQL and MySQL there is no polite server-side path
+// this is backing up — the watchdog is the whole of the enforcement, and this
+// is its only attempt at stopping the work rather than merely stopping the
+// session.
+//
+// Best effort, and explicitly **unverified**: the marker exchange is documented
+// from the client's side, dbbat is playing the client here, and the end-to-end
+// suite has not yet proven a real server abandons the call on this alone. The
+// socket close that follows is the guarantee; this is what might spare the
+// database the rest of the scan. See docs/oracle.md.
+func (s *session) breakUpstreamStatement() {
+	if s.upstreamConn == nil || !s.statementClock.Running() {
+		return
+	}
+
+	if _, err := s.upstreamConn.Write(buildBreakMarker()); err != nil {
+		s.logger.DebugContext(s.ctx, "failed to send the upstream break marker",
+			slog.Any("error", err))
+
+		return
+	}
+
+	// The reset marker is the second half of the exchange: a client that breaks
+	// follows with a reset to resynchronize the stream. Sent immediately rather
+	// than after reading the server's acknowledgement, because the relay
+	// goroutine owns the upstream reader and this session is going away.
+	if _, err := s.upstreamConn.Write(buildResetMarker()); err != nil {
+		s.logger.DebugContext(s.ctx, "failed to send the upstream reset marker",
+			slog.Any("error", err))
+
+		return
+	}
+
+	// Let the two markers reach the server before the socket is dropped: an
+	// immediate close can RST them away, which would leave the server running
+	// the very statement this is trying to stop.
+	time.Sleep(breakSettleDelay)
+}
+
+// breakSettleDelay is how long the teardown waits after the break/reset
+// exchange before dropping the sockets. Bounded and short: the session is
+// already gone, and this only buys the markers a chance to land.
+const breakSettleDelay = 150 * time.Millisecond
+
+// noteTermination records why dbbat is ending this session. First writer wins.
+func (s *session) noteTermination(err error) {
+	t := shared.TerminationFor(err, s.guard, s.heldQuery())
+	if !t.Set() {
+		return
+	}
+
+	s.terminationMu.Lock()
+	defer s.terminationMu.Unlock()
+
+	if !s.termination.Set() {
+		s.termination = t
+	}
+}
+
+// recordedTermination returns the termination reason, if any.
+func (s *session) recordedTermination() store.Termination {
+	s.terminationMu.Lock()
+	defer s.terminationMu.Unlock()
+
+	return s.termination
 }
 
 // closeConns drops both sockets, which is how a session is ended from outside
@@ -3392,6 +3487,13 @@ func (s *session) cleanup() {
 	s.flushPendingQuery()
 	s.trackerMu.Unlock()
 
+	// "terminated" before "closed": a watcher should learn why the session
+	// ended before it learns that it did.
+	termination := s.recordedTermination()
+	if termination.Set() {
+		s.stream.ConnectionWithReason(s.ctx, shared.ConnectionTerminated, termination.Reason)
+	}
+
 	s.stream.Connection(s.ctx, shared.ConnectionClosed)
 
 	if s.grant != nil && s.revocation != nil {
@@ -3409,7 +3511,7 @@ func (s *session) cleanup() {
 	}
 
 	if s.connectionUID != uuid.Nil {
-		if err := s.store.CloseConnection(s.ctx, s.connectionUID); err != nil {
+		if err := s.store.CloseConnectionWithReason(s.ctx, s.connectionUID, termination); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close connection record", slog.Any("error", err))
 		}
 	}
