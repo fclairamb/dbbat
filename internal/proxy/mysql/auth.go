@@ -225,8 +225,15 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 	// Build the limit guard now that the grant is known. The command loop's
 	// watchdog (started in Run) uses it to terminate the session mid-query,
 	// including when the grant is revoked.
+	// Resolve the per-statement limit once, next to the grant it comes from:
+	// the definition's value when it has one (0 included, meaning "no limit,
+	// overriding the global"), otherwise the instance-wide default. The
+	// upstream SET and the watchdog both read this one resolved value.
+	s.statementLimit = s.statementTimeouts.For(s.ctx, grant)
+
 	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient).
-		WithRevocation(s.revocation.Flag())
+		WithRevocation(s.revocation.Flag()).
+		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
 	s.authComplete = true
 

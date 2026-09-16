@@ -18,6 +18,16 @@ var (
 	ErrSSLNotSupported = errors.New("TLS connections not supported by this proxy")
 	// ErrUpstreamConnect — outbound connection to the upstream MySQL failed.
 	ErrUpstreamConnect = errors.New("upstream connection failed")
+	// ErrUpstreamStatementTimeout — the upstream refused the per-statement
+	// limit dbbat tried to pin on the session. Fatal rather than ignored: a
+	// session that could not be pinned would look bounded and not be.
+	ErrUpstreamStatementTimeout = errors.New("upstream refused the per-statement time limit")
+	// ErrStatementTimeoutManaged — a client tried to unset or widen the
+	// per-statement limit dbbat pinned. A courtesy refusal: the watchdog is
+	// the enforcement, but without this the client would only ever meet the
+	// disconnect, with nothing explaining it.
+	ErrStatementTimeoutManaged = errors.New("the per-statement time limit is managed by dbbat " +
+		"and cannot be raised for this session")
 	// ErrCommandNotPermitted — protocol-level command refused (admin/replication).
 	ErrCommandNotPermitted = errors.New("command not permitted through dbbat")
 	// ErrSwitchDatabaseDenied — a client tried to change the session database,

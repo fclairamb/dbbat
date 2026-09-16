@@ -73,6 +73,26 @@ type Session struct {
 	// force-closes both conns.
 	guard *shared.LimitGuard
 
+	// statementTimeouts resolves the instance-wide per-statement limit;
+	// statementLimit is this session's resolved value (0 = no limit), stamped
+	// at auth; statementClock marks the statement currently executing upstream.
+	statementTimeouts *shared.StatementTimeoutResolver
+	statementLimit    time.Duration
+	statementClock    shared.StatementClock
+
+	// upstreamConnID / upstreamVersion are the backend's own connection id and
+	// version banner, captured at connect. The id is what KILL QUERY names when
+	// the watchdog cancels a runaway statement; the banner is what tells MySQL
+	// from MariaDB, which spell the per-statement limit differently.
+	upstreamConnID  uint32
+	upstreamVersion string
+
+	// termination records why dbbat ended this session, when dbbat is what
+	// ended it. Written by the watchdog from a goroutine of its own, read by
+	// recordDisconnect — hence the mutex.
+	terminationMu sync.Mutex
+	termination   store.Termination
+
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
@@ -291,10 +311,45 @@ func (s *Session) Run() error {
 // Read/Write and safe to call twice (the deferred closeUpstream closes the same
 // conn).
 func (s *Session) onLimitViolation(upstreamConn, clientConn io.Closer, err error) {
-	s.logger.WarnContext(s.ctx, "terminating MySQL session: grant no longer valid mid-stream",
+	s.logger.WarnContext(s.ctx, "terminating MySQL session: limit crossed mid-stream",
 		slog.Any("error", err))
 
+	s.noteTermination(err)
+
+	// Kill upstream first, close second. A KILL QUERY needs the upstream
+	// credentials and a reachable target, both of which are still true here;
+	// after the close there is still a server-side thread running the statement
+	// nobody is reading any more.
+	if s.statementClock.Running() {
+		s.killUpstreamStatement()
+	}
+
 	closeSessionConns(upstreamConn, clientConn)
+}
+
+// noteTermination records why dbbat is ending this session. First writer wins:
+// a second violation observed during teardown must not overwrite the reason
+// that actually caused it.
+func (s *Session) noteTermination(err error) {
+	t := shared.TerminationFor(err, s.guard, s.heldQuery())
+	if !t.Set() {
+		return
+	}
+
+	s.terminationMu.Lock()
+	defer s.terminationMu.Unlock()
+
+	if !s.termination.Set() {
+		s.termination = t
+	}
+}
+
+// recordedTermination returns the termination reason, if any.
+func (s *Session) recordedTermination() store.Termination {
+	s.terminationMu.Lock()
+	defer s.terminationMu.Unlock()
+
+	return s.termination
 }
 
 // closeSessionConns force-closes both conns, which is the enforcement mechanism
@@ -402,7 +457,14 @@ func (s *Session) recordDisconnect() {
 		}
 	}
 
-	if err := s.server.store.CloseConnection(s.ctx, s.connection.UID); err != nil {
+	termination := s.recordedTermination()
+	if termination.Set() {
+		// "terminated" before "closed": a watcher should learn why the session
+		// ended before it learns that it did.
+		s.stream.ConnectionWithReason(s.ctx, shared.ConnectionTerminated, termination.Reason)
+	}
+
+	if err := s.server.store.CloseConnectionWithReason(s.ctx, s.connection.UID, termination); err != nil {
 		s.logger.WarnContext(s.ctx, "MySQL connection close failed",
 			slog.Any("connection_id", s.connection.UID),
 			slog.Any("error", err))
