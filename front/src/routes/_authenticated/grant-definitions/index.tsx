@@ -4,6 +4,7 @@ import { Plus, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
+  useInstance,
   useServerGroups,
   useUserGroups,
   useGrantDefinitions,
@@ -62,6 +63,20 @@ import { canManageGrantDefinitions } from "@/lib/permissions";
 import { UsageLimit } from "@/components/shared/UsageMeter";
 import { formatBytes } from "@/lib/utils";
 import { autoPriority } from "@/lib/grant-priority";
+
+// statementTimeoutPlaceholder shows what an empty field will actually do, so
+// "inherit" is never a guess.
+function statementTimeoutPlaceholder(resolvedSeconds: number): string {
+  return resolvedSeconds > 0
+    ? `Inherit (${resolvedSeconds}s)`
+    : "Inherit (no limit)";
+}
+
+function describeResolvedStatementTimeout(resolvedSeconds: number): string {
+  return resolvedSeconds > 0
+    ? `currently ${resolvedSeconds}s`
+    : "currently no limit";
+}
 
 export const Route = createFileRoute("/_authenticated/grant-definitions/")({
   component: GrantDefinitionsPage,
@@ -539,6 +554,9 @@ function DefinitionDialog({
   const [queryResults, setQueryResults] = useState<
     QueryValidationResult[] | null
   >(null);
+  const { data: instance } = useInstance();
+  const resolvedStatementTimeout =
+    instance?.resolved_limits?.statement_timeout_seconds ?? 0;
   const { data: groups = [] } = useUserGroups();
   const { data: serverGroups = [] } = useServerGroups();
   const [autoApprove, setAutoApprove] = useState(
@@ -554,6 +572,15 @@ function DefinitionDialog({
     if (v >= 1024 * 1024) return String(v / (1024 * 1024));
     return String(v / 1024);
   });
+  // Three states, and "" is not one of the two obvious ones: "" means
+  // *inherit* the instance-wide default, "0" means explicitly no limit, and a
+  // positive value is the limit in seconds. That is why the input is a string
+  // rather than a number — a number could not tell "empty" from "zero".
+  const [statementTimeout, setStatementTimeout] = useState<string>(
+    editing?.statement_timeout_seconds != null
+      ? String(editing.statement_timeout_seconds)
+      : ""
+  );
   const [bytesUnit, setBytesUnit] = useState<"KB" | "MB" | "GB">(() => {
     if (editing?.max_bytes_transferred == null) return "MB";
     const v = editing.max_bytes_transferred;
@@ -694,6 +721,10 @@ function DefinitionDialog({
     // tier from its own controls.
     const priorityValue =
       priorityTouched && priority !== "" ? parseInt(priority) : null;
+    // Trimmed before the emptiness test: a field holding only spaces means
+    // "inherit", not "parse this as NaN seconds".
+    const statementTimeoutValue =
+      statementTimeout.trim() === "" ? null : parseInt(statementTimeout, 10);
     const approvalPatternsValue = parsedPatterns();
     const sampleQueriesValue = parsedSampleQueries();
 
@@ -712,6 +743,11 @@ function DefinitionDialog({
         clear_max_query_counts: maxQueryCounts === null,
         max_bytes_transferred: maxBytesTransferred ?? undefined,
         clear_max_bytes_transferred: maxBytesTransferred === null,
+        // Unlike the quotas above, null and 0 mean different things here
+        // ("inherit the global" vs "no limit at all"), so the clear flag is
+        // the only way to restore inheritance.
+        statement_timeout_seconds: statementTimeoutValue ?? undefined,
+        clear_statement_timeout_seconds: statementTimeoutValue === null,
         priority: priorityValue ?? undefined,
         clear_priority: priorityValue === null,
         auto_approve: autoApprove,
@@ -731,6 +767,7 @@ function DefinitionDialog({
         controls: controlsValue,
         max_query_counts: maxQueryCounts,
         max_bytes_transferred: maxBytesTransferred,
+        statement_timeout_seconds: statementTimeoutValue,
         priority: priorityValue,
         auto_approve: autoApprove,
         user_group_uids: userGroupUids,
@@ -1132,6 +1169,27 @@ function DefinitionDialog({
                 </Select>
               </div>
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="def-stmt-timeout">Statement timeout (seconds)</Label>
+            <Input
+              id="def-stmt-timeout"
+              type="number"
+              min="0"
+              max="86400"
+              placeholder={statementTimeoutPlaceholder(resolvedStatementTimeout)}
+              value={statementTimeout}
+              onChange={(e) => setStatementTimeout(e.target.value)}
+              data-testid="grant-definition-statement-timeout"
+            />
+            <p className="text-sm text-muted-foreground">
+              How long a single statement may run before dbbat cancels it and
+              ends the session. Leave empty to inherit the instance-wide
+              setting ({describeResolvedStatementTimeout(resolvedStatementTimeout)}).
+              Enter <code className="text-xs">0</code> for{" "}
+              <strong>no limit (overrides the global timeout)</strong> — the
+              escape hatch for a dump or ETL definition.
+            </p>
           </div>
         </div>
         <DialogFooter>

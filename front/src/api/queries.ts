@@ -1522,6 +1522,31 @@ export function useUpdateInstancePublic(options?: {
   });
 }
 
+export type InstanceLimits = components["schemas"]["InstanceLimits"];
+
+export function useUpdateInstanceLimits(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: InstanceLimits) => {
+      const response = await apiClient.PUT("/instance/limits", { body });
+      if (response.error) {
+        throw new Error(
+          (response.error as { message?: string }).message ||
+            "Failed to save limits"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["instance"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
 export function useParameters(groupKey?: string) {
   return useQuery({
     queryKey: ["parameters", groupKey],

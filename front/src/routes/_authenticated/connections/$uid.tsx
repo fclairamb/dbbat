@@ -36,6 +36,27 @@ function formatControlName(control: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// terminationReasonLabel renders connections.termination_reason. The stored
+// vocabulary is a small closed set; an unknown value is shown verbatim rather
+// than hidden, so a reason added on the backend is visible before the UI knows
+// about it.
+function terminationReasonLabel(reason: string): string {
+  switch (reason) {
+    case "statement_timeout":
+      return "Statement exceeded the per-statement time limit";
+    case "grant_expired":
+      return "The grant expired mid-session";
+    case "quota_exceeded":
+      return "The grant's quota was exhausted mid-session";
+    case "grant_revoked":
+      return "The grant was revoked mid-session";
+    case "admin_terminated":
+      return "An administrator ended this session";
+    default:
+      return reason;
+  }
+}
+
 export const Route = createFileRoute("/_authenticated/connections/$uid")({
   // ?watch=1 is the deep link Slack approval notifications point at. It is now
   // a no-op: an open connection streams from mount, so the approver lands on
@@ -142,7 +163,19 @@ function ConnectionDetailPage() {
               </Tooltip>
             )}
             {connection.disconnected_at ? (
-              <Badge variant="secondary">Disconnected</Badge>
+              connection.termination_reason ? (
+                // A session dbbat ended is not the same fact as one that ended
+                // — the badge says which, so the page does not read as an
+                // ordinary disconnect when it was a kill.
+                <Badge
+                  variant="destructive"
+                  data-testid="connection-terminated-badge"
+                >
+                  Terminated
+                </Badge>
+              ) : (
+                <Badge variant="secondary">Disconnected</Badge>
+              )
             ) : (
               <Badge variant="default">Active</Badge>
             )}
@@ -198,6 +231,16 @@ function ConnectionDetailPage() {
               </dt>
               <dd>{durationLabel}</dd>
             </div>
+            {connection.termination_reason && (
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground mb-1">
+                  Ended by dbbat
+                </dt>
+                <dd data-testid="connection-termination-reason">
+                  {terminationReasonLabel(connection.termination_reason)}
+                </dd>
+              </div>
+            )}
             <div>
               <dt className="text-sm font-medium text-muted-foreground mb-1">
                 Queries
