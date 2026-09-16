@@ -1932,6 +1932,19 @@ func buildEventPlumbing(
 			slog.Bool("slack_sql", cfg.Approval.SlackSQL))
 	}
 
+	// Same Slack client again: a session dbbat ends on its own is a sibling
+	// signal to the approval-hold escalation above, not a separate feature.
+	// Wired only when both a notifier exists (Slack is configured at all) and
+	// the operator did not turn terminations off — a nil concrete *SlackNotifier
+	// stored in the interface field would defeat Store's own nil check, so this
+	// checks the concrete pointer before handing it over.
+	if notifier := apiServer.Notifier(); notifier != nil && cfg.SlackNotify.Terminations {
+		dataStore.SetTerminationNotifier(notifier)
+
+		logger.InfoContext(ctx, "termination notifications enabled",
+			slog.Bool("sql", cfg.SlackNotify.SQL))
+	}
+
 	return apiServer, approvals, shared.ApprovalDeps{
 		Enabled:   cfg.Approval.Enabled,
 		Store:     dataStore,

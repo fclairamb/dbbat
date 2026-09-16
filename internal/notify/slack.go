@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/slack-go/slack"
@@ -115,6 +117,18 @@ type SlackNotifier struct {
 	interactive   bool
 	store         SlackPersister
 	log           *slog.Logger
+
+	// terminationSQL gates whether NotifyTermination copies statement text
+	// into Slack — see config.SlackNotifyConfig.SQL.
+	terminationSQL bool
+	// terminationWindow is the coalescing window NotifyTermination folds
+	// repeats into — see terminationCoalesceWindow. A field rather than the
+	// constant directly so a test can shrink it instead of waiting out a real
+	// 10 minutes.
+	terminationWindow time.Duration
+
+	terminationMu      sync.Mutex
+	terminationPending map[terminationCoalesceKey]*terminationCoalesce
 }
 
 // NewSlackNotifier returns a configured notifier or nil when the feature is
@@ -158,6 +172,10 @@ func NewSlackNotifier(cfg config.SlackNotifyConfig, publicURL string, persister 
 		interactive:   cfg.Interactive(),
 		store:         persister,
 		log:           log,
+
+		terminationSQL:     cfg.SQL,
+		terminationWindow:  terminationCoalesceWindow,
+		terminationPending: make(map[terminationCoalesceKey]*terminationCoalesce),
 	}, nil
 }
 

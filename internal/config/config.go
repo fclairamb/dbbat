@@ -670,6 +670,15 @@ type SlackNotifyConfig struct {
 	// deployments that can't accept inbound Slack traffic. Empty = no Socket
 	// Mode.
 	AppToken string `koanf:"app_token"`
+	// Terminations posts a message for every connection.terminated whose
+	// reason is worth a human's attention (statement_timeout,
+	// admin_terminated, quota_exceeded — never grant_revoked, grant_expired
+	// or instance_lost). Only meaningful when BotToken is set. Default true.
+	Terminations bool `koanf:"terminations"`
+	// SQL includes the (truncated) statement text of a terminated session in
+	// the Slack message. Mirrors ApprovalConfig.SlackSQL: Slack is a lower
+	// trust boundary than the dbbat UI. Default true.
+	SQL bool `koanf:"sql"`
 }
 
 // Enabled returns true when a bot token is set. Channel is enforced at
@@ -1162,7 +1171,9 @@ func defaultConfig() Config {
 			GroupsClaim: DefaultOIDCGroupsClaim,
 		},
 		SlackNotify: SlackNotifyConfig{
-			Channel: "#dbbat",
+			Channel:      "#dbbat",
+			Terminations: true,
+			SQL:          true,
 		},
 		Dump: DumpConfig{
 			MaxSize:   DefaultDumpMaxSize,

@@ -503,6 +503,36 @@ only the transport differs. Socket Mode and the HTTP endpoint can both be
 configured; at the Slack app level, enabling Socket Mode makes Slack deliver over
 the socket and ignore the request URL.
 
+#### Session termination notifications (optional)
+
+When a bot token is configured, DBBat also posts to `DBB_SLACK_NOTIFY_CHANNEL`
+whenever it ends a session on its own for a reason worth a human's attention:
+
+| Reason | Posted |
+|--------|--------|
+| `statement_timeout` | yes |
+| `admin_terminated` | yes — names the admin and their reason |
+| `quota_exceeded` | yes |
+| `grant_revoked` | no — already went through a human |
+| `grant_expired` | no — routine |
+| `instance_lost` | no — covered by infrastructure alerting elsewhere |
+
+The message names the user (`@`-mentioned when they have a linked Slack
+identity), the grant, the reason, and — for a statement timeout — the limit and
+how long the statement actually ran. It carries no buttons: there is no
+decision left to make, only something to know happened.
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_SLACK_NOTIFY_TERMINATIONS` | Enable termination notifications. Default `true`; only meaningful when `DBB_SLACK_NOTIFY_BOT_TOKEN` is set. |
+| `DBB_SLACK_NOTIFY_SQL` | Include the (truncated, 200-character) statement text that was running when dbbat acted. Default `true` — mirrors `DBB_APPROVAL_SLACK_SQL` for approval-hold escalations, since Slack is a lower trust boundary than the DBBat UI. |
+
+A client stuck in a reconnect loop that trips the same limit over and over
+would otherwise flood the channel with identical messages. DBBat coalesces:
+the first termination for a given (user, database, reason) posts immediately,
+and any further one within a 10-minute window is folded into a single
+follow-up ("+7 more in the last 10 min") posted once the window closes.
+
 ## Configuration File
 
 DBBat supports YAML, JSON, and TOML configuration files.
