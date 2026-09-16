@@ -146,8 +146,11 @@ type instanceResolvedLimits struct {
 	// seconds, and the UI compares the two.
 	StatementTimeoutSeconds int64 `json:"statement_timeout_seconds"`
 	// StatementTimeoutSource says where the effective value came from:
-	// "parameter", "env", or "" when there is no limit. It is what lets the
-	// Settings page explain why clearing the field does not disable the limit.
+	// "parameter" (the store parameter is set, including to an explicit "0"),
+	// "env", or "" when neither is configured. It is what lets the Settings
+	// page tell "no limit because an admin said so" from "no limit because
+	// nobody set one", and explain why clearing the field does not necessarily
+	// disable the limit.
 	StatementTimeoutSource string `json:"statement_timeout_source"`
 }
 
@@ -170,13 +173,15 @@ func resolveInstanceLimits(limits store.Limits, cfg *config.Config) instanceReso
 	source := ""
 
 	switch {
-	case effective <= 0:
-		// Nothing applies — including the case where the parameter is an
-		// explicit "0" that turns the environment default off.
 	case limits.StatementTimeout != "":
+		// Set, whatever the value: an explicit "0" *is* a configured choice —
+		// it turns the environment default off — and reporting it as "nothing
+		// is configured" would make the two indistinguishable in the UI.
 		source = "parameter"
-	default:
+	case effective > 0:
 		source = "env"
+	default:
+		// Genuinely nothing: no parameter, and no environment default either.
 	}
 
 	return instanceResolvedLimits{

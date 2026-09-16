@@ -4186,7 +4186,7 @@ export interface components {
              */
             statement_timeout_seconds: number;
             /**
-             * @description Where the effective value came from: the store parameter, the environment variable, or empty when there is no limit.
+             * @description Where the effective value came from: `parameter` when the store parameter is set (including to an explicit "0", which disables the limit), `env` when the environment variable supplies it, empty when neither is configured.
              * @enum {string}
              */
             statement_timeout_source: "" | "parameter" | "env";
