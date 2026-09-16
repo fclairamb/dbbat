@@ -6583,6 +6583,26 @@ export interface operations {
                  *     400 rather than silently dropped.
                  */
                 active?: boolean;
+                /**
+                 * @description Filter by the last 12 hex characters of the connection uid — the
+                 *     "c=" tag every proxied upstream session now advertises in its
+                 *     application/program name (`dbbat/$version @$username
+                 *     c=<uid_suffix> for $clientAppName`, e.g. PostgreSQL's
+                 *     `application_name`, Oracle's `V$SESSION.PROGRAM`, MySQL's
+                 *     `program_name` connect attribute, `APP_NAME()` on SQL Server,
+                 *     `client.application.name` on MongoDB). Paste it from a
+                 *     `pg_stat_activity` row (or equivalent) to jump straight to the
+                 *     dbbat connection it came from.
+                 *
+                 *     Matched with `right(uid::text, 12)`, not a prefix: a UUIDv7's
+                 *     leading characters are a millisecond timestamp shared by every
+                 *     connection opened in the same instant, so only the trailing,
+                 *     purely-random 12 hex characters identify one connection. Case
+                 *     insensitive on input, normalized to lowercase. Must be exactly 12
+                 *     hex characters — anything else is refused with 400 rather than
+                 *     silently dropped.
+                 */
+                uid_suffix?: string;
                 /** @description Maximum number of results to return */
                 limit?: components["parameters"]["Limit"];
                 /** @description Number of results to skip for pagination */
