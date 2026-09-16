@@ -303,8 +303,41 @@ func locateStatementRewrite(ttcPayload []byte, bigChunks bool) (stmtRewrite, boo
 		}
 	}
 
-	return locateOALL8Rewrite(ttcPayload, bigChunks)
+	// OALL8 is deliberately not rewritten. See oall8RewriteEnabled.
+	if oall8RewriteEnabled {
+		return locateOALL8Rewrite(ttcPayload, bigChunks)
+	}
+
+	return stmtRewrite{}, false
 }
+
+// oall8RewriteEnabled gates the legacy OALL8 rewrite, and is false.
+//
+// Turning it off costs no coverage at all: **no recording in testdata/ carries
+// an OALL8 statement**, no client the e2e suite drives sends one, and the survey
+// counts zero of them. What it removes is the least-defended write path of the
+// three, which is not a description of how the code below is written but of what
+// the op's own layout allows:
+//
+//   - it does not go through locateStatementValue, so it gets none of that
+//     function's guards — no uniqueness requirement, no boundedness check at the
+//     run's far end, and in particular no valuePrecededByAnotherLength, the
+//     check that exists because a stale second copy of the declared length is
+//     exactly the bug a real 23ai already caught once (ORA-03120, see
+//     locateStatementValue);
+//   - its clrKind is stmtClrNone, so verify's value half compares the run
+//     against itself — true by construction, not a check. Only the length half
+//     is doing work, which is half the certainty every other shape gets;
+//   - the offsets come from decodeOALL8's walk, which this package's own comment
+//     calls "a simplified decoding that handles the most common cases" and which
+//     has never been checked against a real OALL8 capture, because there is
+//     none.
+//
+// So the encoder below is a specification rather than a shipped path: the
+// writers are unit-tested against synthetic frames (TestRewriteOALL8VarLenWidens)
+// and stay that way until a recording of a real OALL8 client lands in testdata/.
+// See specs/todos/2026-09-16-11-oracle-tag-oall8-rewrite.md.
+const oall8RewriteEnabled = false
 
 // locateExecRewriteAt locates the statement of an exec op starting at base
 // inside ttcPayload, returning offsets relative to ttcPayload.
@@ -479,6 +512,20 @@ func locateStatementValue(body []byte, field execSQLLenField) (stmtRewrite, bool
 // here is a *second* length — a CLR chunk header, a repeated field — that the
 // rewriter would leave behind still declaring the old size.
 func valuePrecededByAnotherLength(body []byte, valueAt, declared int) bool {
+	// `0xFE <len> <text> 0x00`: a CLR long form carrying a value *below* the
+	// 252-byte short-form limit, which is the one instance of the ORA-03120 bug
+	// class the two guards around this one do not see. locateChunkedStatementValue
+	// bails out under clrChunkedMinLen and never looks; the encodings below do not
+	// match, because a compressed int of a value under 256 is `01 <n>` and not
+	// `FE <n>`. So the scan would read the 0xFE as framing it does not own and
+	// the byte after it as an ordinary short prefix, and a tag pushing the value
+	// past the limit would then nest a whole new `0xFE … 0x00` inside the
+	// client's own. One byte of the *next* length would be enough to
+	// desynchronize the message; a nested long form certainly is.
+	if valueAt >= 2 && body[valueAt-2] == 0xFE && body[valueAt-1] == byte(declared) {
+		return true
+	}
+
 	ub4 := make([]byte, 4)
 	binary.LittleEndian.PutUint32(ub4, uint32(declared*wideCharWidth))
 

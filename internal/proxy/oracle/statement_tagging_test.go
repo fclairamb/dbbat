@@ -277,6 +277,12 @@ func TestStatementTaggingLeavesCursorReexecutionAlone(t *testing.T) {
 // half of the same question, at the tracker rather than on the wire: the cursor
 // dbbat re-gates is the one it learned from the client's own text, and a tagged
 // parse upstream does not put it out of step.
+//
+// The parse here is an OALL8, which is simply the one op that seeds a cursor id
+// without a server round trip. That op is *not* rewritten (oall8RewriteEnabled),
+// and the assertion below says so rather than working around it — what is being
+// checked is the tracker, and the tracker holds the client's text whether the
+// wire carried a tag or not.
 func TestStatementTaggingReexecutionKeepsTheClientsTextInTheTracker(t *testing.T) {
 	t.Parallel()
 
@@ -284,17 +290,12 @@ func TestStatementTaggingReexecutionKeepsTheClientsTextInTheTracker(t *testing.T
 
 	s := taggedSession(t, 8192)
 
-	// The parse: gated and tracked on the client's text...
+	// The parse: gated and tracked on the client's text.
 	require.NoError(t, s.handleOALL8(buildOALL8(sql, nil, 7)))
 	require.Equal(t, sql, s.tracker.cursors[7].sql)
 
-	// ...while what went upstream carried the tag.
-	frames, ok := s.rewriteStatementMessage(messageOf(buildOALL8(sql, nil, 7)))
-	require.True(t, ok)
-
-	res, err := decodeOALL8(upstreamTTC(t, frames))
-	require.NoError(t, err)
-	require.Equal(t, taggingTagPrefix+sql, res.SQL)
+	_, ok := s.rewriteStatementMessage(messageOf(buildOALL8(sql, nil, 7)))
+	require.False(t, ok, "OALL8 is forwarded byte for byte; see TestOALL8RewriteIsDisabled")
 
 	// The re-execution names cursor 7 and nothing else, and re-gates against the
 	// text the tracker holds — the client's.
@@ -304,6 +305,88 @@ func TestStatementTaggingReexecutionKeepsTheClientsTextInTheTracker(t *testing.T
 	require.NotNil(t, s.tracker.pendingQuery)
 	assert.Equal(t, sql, s.tracker.pendingQuery.cursor.sql,
 		"the re-execution is gated on the statement the client sent, untagged")
+}
+
+// TestStatementTaggingTagsTheParseButNotTheReexecution is the same invariant on
+// the wire, on the op that is actually rewritten: the parse carries the tag
+// upstream, the re-execution that follows carries a cursor id and nothing else,
+// and dbbat leaves it exactly as it arrived.
+func TestStatementTaggingTagsTheParseButNotTheReexecution(t *testing.T) {
+	t.Parallel()
+
+	parse := firstCorpusStatementFrame(t, "go_ora.pcapng")
+
+	client, ok := decodeExecStatement(parse)
+	require.True(t, ok)
+
+	s := taggedSession(t, 8192)
+
+	frames, ok := s.rewriteStatementMessage(messageOf(parse))
+	require.True(t, ok)
+
+	wire, ok := decodeExecStatement(upstreamTTC(t, frames))
+	require.True(t, ok)
+	require.Equal(t, taggingTagPrefix+client, wire)
+
+	// The upstream cursor now holds the tagged text and dbbat's tracker holds the
+	// client's. Nothing compares the two, which is the thing to be sure of.
+	_, ok = s.rewriteStatementMessage(messageOf(buildPiggybackReexec(7)))
+	assert.False(t, ok, "a re-execution carries no statement, so there is nothing to rewrite")
+}
+
+// TestStatementTaggingCertifiedSessionSkipsOneFrameAndKeepsGoing is the converse
+// of TestStatementTaggingDecidesOncePerSession, and it pins a choice rather than
+// an accident.
+//
+// A session that certified and then meets a frame the locator refuses forwards
+// *that* frame untagged and carries on tagging the rest. The tempting
+// alternative — demote the session on the first refusal — is what must not
+// happen: it would leave the statements before the demotion tagged and the same
+// statements after it untagged, which is precisely the two-SQL_IDs-for-one-
+// statement bug the per-session gate exists to prevent. Forwarding the one frame
+// untagged does not have that property, because the locator is a pure function
+// of the frame: the same statement always gets the same verdict.
+//
+// Without this test a refactor that dropped the `!located` guard, or that
+// demoted the session, would pass the whole suite while reintroducing the bug.
+func TestStatementTaggingCertifiedSessionSkipsOneFrameAndKeepsGoing(t *testing.T) {
+	t.Parallel()
+
+	ordinary := firstCorpusStatementFrame(t, "go_ora.pcapng")
+
+	// Statement-carrying, and refused: a 0xFC short-form CLR prefix.
+	unrewritable := thinExecCLR("SELECT " + strings.Repeat("f", 235) + " FROM dual")
+	require.True(t, frameCarriesStatement(unrewritable))
+
+	s := taggedSession(t, 8192)
+
+	// Frame 1 certifies the session and is tagged.
+	first, ok := s.rewriteStatementMessage(messageOf(ordinary))
+	require.True(t, ok)
+	require.True(t, s.tagging.certified)
+
+	wire, ok := decodeExecStatement(upstreamTTC(t, first))
+	require.True(t, ok)
+	require.Contains(t, wire, "/*dbbat='")
+
+	// Frame 2 is one the locator refuses: it forwards untagged, and says so once.
+	_, ok = s.rewriteStatementMessage(messageOf(unrewritable))
+	assert.False(t, ok, "a frame that cannot be relocated exactly is forwarded as it arrived")
+	assert.True(t, s.tagging.warnedFrame, "and the anomaly is logged")
+	assert.True(t, s.tagging.certified,
+		"but the session is NOT demoted: demoting it would untag statements that were "+
+			"tagged a moment ago, which is the two-SQL_IDs bug this design prevents")
+
+	// Frame 3 is ordinary again, and is tagged — the same verdict frame 1 got, so
+	// that statement has exactly one text upstream for the life of the session.
+	third, ok := s.rewriteStatementMessage(messageOf(ordinary))
+	require.True(t, ok, "the session keeps tagging")
+
+	again, ok := decodeExecStatement(upstreamTTC(t, third))
+	require.True(t, ok)
+	assert.Equal(t, wire, again,
+		"the same statement must go upstream as the same bytes every time, or it costs "+
+			"two shared-pool cursors instead of one")
 }
 
 // TestStatementTaggingRecutsPastTheNegotiatedUnit exercises the growth axis the
