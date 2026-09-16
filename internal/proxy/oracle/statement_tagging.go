@@ -86,7 +86,7 @@ func (s *session) configureStatementTagging() {
 // certainty. It reports false for everything else, which is every message on a
 // session with tagging off — the disabled path costs one boolean.
 func (s *session) rewriteStatementMessage(msg *statementFragments) ([][]byte, bool) {
-	if msg == nil || msg.gate == nil || !s.tagging.active() {
+	if msg == nil || msg.gate == nil || len(msg.packets) == 0 || !s.tagging.active() {
 		return nil, false
 	}
 
