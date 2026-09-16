@@ -86,6 +86,21 @@ func (s *Session) helloDoc(name string, request bson.Raw) bson.D {
 	return doc
 }
 
+// clientAppNameFromHello extracts client.application.name from a hello /
+// isMaster request document — the name a driver or shell (mongosh, a
+// connection string's appName) declares about itself. Nested under "client"
+// per the MongoDB handshake spec, hence the multi-key Lookup rather than
+// lookupString's single-key form. Returns "" when absent.
+func clientAppNameFromHello(request bson.Raw) string {
+	if request == nil {
+		return ""
+	}
+
+	name, _ := request.Lookup("client", "application", "name").StringValueOK()
+
+	return name
+}
+
 // supportedMechsFor answers a hello's saslSupportedMechs probe. The probe value
 // is "<authSource>.<username>". SCRAM-SHA-256 is advertised first (drivers
 // prefer it) when that user has a stored MongoDB SCRAM verifier; PLAIN is

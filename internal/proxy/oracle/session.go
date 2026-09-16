@@ -43,12 +43,26 @@ type session struct {
 	authCache       *cache.AuthCache
 
 	// Connection metadata
-	serviceName   string
-	username      string
-	database      *store.Server
-	user          *store.User
-	grant         *store.Grant
+	serviceName string
+	username    string
+	database    *store.Server
+	user        *store.User
+	grant       *store.Grant
+	// connectionUID is set only once CreateConnection has actually inserted
+	// the row it names — uuid.Nil until then, which is what every dump/
+	// close/record-write gate below tests for ("is there a row to write
+	// against"). It is NOT what tags AUTH_PROGRAM_NM: that needs the uid
+	// before this row can possibly exist (beginUpstreamAuth, step 4b, runs
+	// well before CreateConnection at step 7), so buildUpstreamProgramName
+	// uses connUID instead (below).
 	connectionUID uuid.UUID
+	// connUID is generated up front (store.NewConnectionUID), before
+	// beginUpstreamAuth runs, so AUTH_PROGRAM_NM can be tagged with it
+	// (shared.BuildUpstreamName's "c=" field). CreateConnection pins the row
+	// to this exact value (store.WithUID), so once it succeeds
+	// connectionUID and connUID are the same value — but only
+	// connectionUID's non-nil-ness means the row exists.
+	connUID uuid.UUID
 
 	// databaseCandidates holds every dbbat database sharing the connect
 	// string's oracle_service_name when that name is ambiguous (a mutualized
@@ -350,6 +364,7 @@ func newSession(
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 		oer:             defaultOERShape(),
+		connUID:         store.NewConnectionUID(),
 	}
 
 	// Assigned separately so a nil store stays a nil interface rather than a
@@ -520,9 +535,14 @@ func (s *session) run() error {
 	// s.grant is always set here: authenticateClient (step 5, above) returns
 	// an error — aborting run() before this point — whenever the grant lookup
 	// fails.
+	//
+	// WithUID pins the row to s.connUID, generated in newSession — well
+	// before beginUpstreamAuth (step 4b) tagged AUTH_PROGRAM_NM with it.
 	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP,
-		store.WithUpstreamTLS(false), store.WithGrantUID(s.grant.UID))
-	if err == nil {
+		store.WithUID(s.connUID), store.WithUpstreamTLS(false), store.WithGrantUID(s.grant.UID))
+	if err != nil {
+		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
+	} else {
 		s.connectionUID = conn.UID
 	}
 

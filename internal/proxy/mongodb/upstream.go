@@ -220,8 +220,9 @@ func (s *Session) connectUpstream() error {
 		Username:   s.database.Username,
 		Password:   s.database.Password,
 		AuthSource: s.scramAuthDB(),
-		AppName:    shared.BuildUpstreamName(version.Version, s.user.Username, "", maxAppNameLen),
-		SSLMode:    s.database.SSLMode,
+		AppName: shared.BuildUpstreamName(
+			version.Version, s.user.Username, s.connUID, s.clientApplicationName, maxAppNameLen),
+		SSLMode: s.database.SSLMode,
 	})
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrUpstreamConnect, err)

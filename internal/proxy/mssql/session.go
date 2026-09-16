@@ -67,6 +67,13 @@ type session struct {
 	// closed on teardown.
 	connection *store.Connection
 
+	// connUID is generated up front (store.NewConnectionUID), before
+	// connectUpstream runs, so the upstream LOGIN7 AppName can be tagged
+	// with it (shared.BuildUpstreamName's "c=" field) before the row backing
+	// it exists. recordConnection pins the row to this exact value via
+	// store.WithUID.
+	connUID uuid.UUID
+
 	// dumpWriter captures the post-auth packet stream when captures are
 	// enabled. dumpMu guards it, because the two relay pumps tap it from
 	// different goroutines.
@@ -317,6 +324,7 @@ func newSession(conn net.Conn, server *Server) *session {
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 		prepared:        make(map[int64]string),
+		connUID:         store.NewConnectionUID(),
 	}
 }
 
@@ -604,7 +612,7 @@ func (s *session) connectUpstream(ctx context.Context, login *Login7) error {
 		Username: s.database.Username,
 		Password: s.database.Password,
 		Database: s.database.DatabaseName,
-		AppName:  buildUpstreamAppName(s.user.Username, login.AppName),
+		AppName:  buildUpstreamAppName(s.user.Username, s.connUID, login.AppName),
 		SSLMode:  s.database.SSLMode,
 	}, login)
 	if err != nil {
@@ -635,6 +643,10 @@ func (s *session) recordConnection(ctx context.Context) error {
 		s.user.UID,
 		s.database.UID,
 		store.ExtractSourceIP(s.conn.RemoteAddr()),
+		// s.connUID was generated in newSession, before connectUpstream
+		// tagged the upstream LOGIN7 AppName with it — pin the row to the
+		// same value rather than letting CreateConnection mint its own.
+		store.WithUID(s.connUID),
 		store.WithUpstreamTLS(s.upstream.TLS),
 		store.WithGrantUID(s.grant.UID),
 	)

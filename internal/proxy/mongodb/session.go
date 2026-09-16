@@ -84,6 +84,19 @@ type Session struct {
 	// connection is the DBBat audit record (insert on auth, close on teardown).
 	connection *store.Connection
 
+	// connUID is generated up front (store.NewConnectionUID), before
+	// connectUpstream runs, so the upstream hello's application.name can be
+	// tagged with it (shared.BuildUpstreamName's "c=" field) before the row
+	// backing it exists. recordConnection pins the row to this exact value
+	// via store.WithUID.
+	connUID uuid.UUID
+
+	// clientApplicationName is the client's own hello/isMaster
+	// client.application.name, captured in helloDoc — the MongoDB
+	// counterpart of PostgreSQL's clientApplicationName (session.go). Folded
+	// into the upstream-facing name in place of the "" dbbat used to send.
+	clientApplicationName string
+
 	// dumpWriter captures post-auth framed traffic (plaintext) when enabled.
 	dumpWriter *dump.Writer
 	dumpMu     sync.Mutex
@@ -198,6 +211,7 @@ func newSession(rawConn net.Conn, server *Server) *Session {
 		cursorOrigins:   make(map[int64]cursorOrigin),
 		logger:          server.logger,
 		ctx:             server.ctx,
+		connUID:         store.NewConnectionUID(),
 	}
 	s.replyReqID.Store(preAuthReplyRequestIDBase)
 
@@ -366,6 +380,8 @@ func (s *Session) dispatchPreAuthOpQuery(m *message) (bool, error) {
 	name := commandName(q.query)
 	switch name {
 	case "hello", "isMaster", "ismaster":
+		s.clientApplicationName = clientAppNameFromHello(q.query)
+
 		reply, err := buildOpReply(s.nextReplyID(), m.requestID, s.helloDoc(name, q.query))
 		if err != nil {
 			return false, err
@@ -394,6 +410,8 @@ func (s *Session) dispatchPreAuthOpMsg(m *message) (bool, error) {
 	name := commandName(body)
 	switch name {
 	case "hello", "isMaster", "ismaster":
+		s.clientApplicationName = clientAppNameFromHello(body)
+
 		return false, s.replyOpMsg(m.requestID, s.helloDoc(name, body))
 	case "ping":
 		return false, s.replyOpMsg(m.requestID, okDoc())
@@ -645,6 +663,11 @@ func (s *Session) recordConnection() error {
 		s.user.UID,
 		s.database.UID,
 		store.ExtractSourceIP(s.clientConn.RemoteAddr()),
+		// s.connUID was generated in newSession, before connectUpstream
+		// tagged the upstream hello's application.name with it — pin the
+		// row to the same value rather than letting CreateConnection mint
+		// its own.
+		store.WithUID(s.connUID),
 		store.WithUpstreamTLS(s.upstreamTLS),
 		// s.grant is always set here: establishSession only clears it (on an
 		// upstream-dial failure) along a path that returns before calling

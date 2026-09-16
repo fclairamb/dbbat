@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/version"
@@ -27,11 +29,11 @@ const maxProgramNameLen = 256
 
 // buildUpstreamProgramName constructs the "program_name" connection
 // attribute sent to the upstream MySQL/MariaDB server: "dbbat/$version
-// @$username", plus " for $appName" when the client declared its own
-// program_name attribute. See shared.BuildUpstreamName for the truncation
-// rules.
-func buildUpstreamProgramName(username, clientProgramName string) string {
-	return shared.BuildUpstreamName(version.Version, username, clientProgramName, maxProgramNameLen)
+// @$username c=$uidSuffix", plus " for $appName" when the client declared
+// its own program_name attribute. See shared.BuildUpstreamName for the
+// truncation rules.
+func buildUpstreamProgramName(username string, connUID uuid.UUID, clientProgramName string) string {
+	return shared.BuildUpstreamName(version.Version, username, connUID, clientProgramName, maxProgramNameLen)
 }
 
 // connectUpstream opens an authenticated MySQL connection to the upstream
@@ -91,7 +93,7 @@ func (s *Session) upstreamConfig() upstream.MySQLConfig {
 		Username:    s.database.Username,
 		Password:    s.database.Password,
 		Database:    s.database.DatabaseName,
-		ProgramName: buildUpstreamProgramName(s.user.Username, clientProgramName),
+		ProgramName: buildUpstreamProgramName(s.user.Username, s.connUID, clientProgramName),
 		SSLMode:     s.database.SSLMode,
 	}
 }

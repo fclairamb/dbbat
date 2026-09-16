@@ -51,6 +51,13 @@ type Session struct {
 	// DBBat connection record (insert on connect, close on disconnect).
 	connection *store.Connection
 
+	// connUID is generated up front (store.NewConnectionUID), before
+	// connectUpstream runs, so the upstream program_name can be tagged with
+	// it (shared.BuildUpstreamName's "c=" field) before the row backing it
+	// exists. recordConnection pins the row to this exact value via
+	// store.WithUID.
+	connUID uuid.UUID
+
 	// Optional packet dump for the post-auth phase (matches PG behavior).
 	dumpWriter *dump.Writer
 
@@ -173,6 +180,7 @@ func newSession(clientConn net.Conn, server *Server) *Session {
 		bytesToClient:   bytesToClient,
 		logger:          server.logger,
 		ctx:             server.ctx,
+		connUID:         store.NewConnectionUID(),
 	}
 }
 
@@ -400,6 +408,10 @@ func (s *Session) recordConnection() error {
 		s.user.UID,
 		s.database.UID,
 		store.ExtractSourceIP(s.clientConn.RemoteAddr()),
+		// s.connUID was generated in newSession, before connectUpstream
+		// tagged the upstream program_name with it — pin the row to the
+		// same value rather than letting CreateConnection mint its own.
+		store.WithUID(s.connUID),
 		store.WithUpstreamTLS(s.upstreamTLS),
 		// s.grant is always set by the time OnAuthSuccess calls into
 		// recordConnection: it returns an error whenever GetActiveGrant fails.

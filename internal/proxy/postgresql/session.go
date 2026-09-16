@@ -127,10 +127,23 @@ type Session struct {
 	tlsConfig    *tls.Config // nil when TLS is disabled
 
 	// Session state
-	user                  *store.User
-	database              *store.Server
-	grant                 *store.Grant
-	connectionUID         uuid.UUID
+	user     *store.User
+	database *store.Server
+	grant    *store.Grant
+	// connectionUID is set only once CreateConnection has actually inserted
+	// the row it names — uuid.Nil until then, which is what every dump/
+	// close/record-write gate below tests for ("is there a row to write
+	// against"). It is NOT what tags the upstream application_name: that
+	// needs the uid before this row can possibly exist, so connectUpstream
+	// uses connUID instead (below).
+	connectionUID uuid.UUID
+	// connUID is generated up front (store.NewConnectionUID), before
+	// connectUpstream runs, so the upstream application_name can be tagged
+	// with it (shared.BuildUpstreamName's "c=" field). CreateConnection
+	// pins the row to this exact value (store.WithUID), so once it
+	// succeeds connectionUID and connUID are the same value — but only
+	// connectionUID's non-nil-ness means the row exists.
+	connUID               uuid.UUID
 	clientBackend         *pgproto3.Backend  // To communicate with client (we're the server)
 	upstreamFrontend      *pgproto3.Frontend // To communicate with upstream (we're the client)
 	authenticated         bool
@@ -281,6 +294,7 @@ func NewSession(
 		rowWriter:       rowWriter,
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
+		connUID:         store.NewConnectionUID(),
 		extendedState: &extendedQueryState{
 			preparedStatements: make(map[string]*preparedStatement),
 			portals:            make(map[string]*portalState),
@@ -319,8 +333,12 @@ func (s *Session) Run() error {
 
 	// s.grant is always set here: authenticate() returns an error (aborting
 	// Run before this point) whenever GetActiveGrant fails.
+	//
+	// WithUID pins the row to s.connUID, generated in NewSession before
+	// connectUpstream ran — the upstream application_name is already tagged
+	// with it by the time this insert happens.
 	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP,
-		store.WithUpstreamTLS(s.upstreamTLS), store.WithGrantUID(s.grant.UID))
+		store.WithUID(s.connUID), store.WithUpstreamTLS(s.upstreamTLS), store.WithGrantUID(s.grant.UID))
 	if err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
 	} else {

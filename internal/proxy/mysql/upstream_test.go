@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/fclairamb/dbbat/internal/version"
 )
 
@@ -39,7 +41,7 @@ func TestBuildUpstreamProgramName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := buildUpstreamProgramName(tt.username, tt.clientProgramName)
+			got := buildUpstreamProgramName(tt.username, uuid.Nil, tt.clientProgramName)
 			if got != tt.want {
 				t.Errorf("buildUpstreamProgramName(%q, %q) = %q, want %q",
 					tt.username, tt.clientProgramName, got, tt.want)
@@ -52,7 +54,7 @@ func TestBuildUpstreamProgramName_MaxLength(t *testing.T) {
 	t.Parallel()
 
 	longAppName := strings.Repeat("x", 1000)
-	result := buildUpstreamProgramName("florent", longAppName)
+	result := buildUpstreamProgramName("florent", uuid.Nil, longAppName)
 
 	if len(result) > maxProgramNameLen {
 		t.Errorf("buildUpstreamProgramName() returned %d chars, want <= %d", len(result), maxProgramNameLen)
@@ -61,5 +63,18 @@ func TestBuildUpstreamProgramName_MaxLength(t *testing.T) {
 	expectedPrefix := "dbbat/" + version.Version + " @florent"
 	if !strings.HasPrefix(result, expectedPrefix) {
 		t.Errorf("buildUpstreamProgramName() = %q, want prefix %q", result, expectedPrefix)
+	}
+}
+
+func TestBuildUpstreamProgramName_ConnUIDTag(t *testing.T) {
+	t.Parallel()
+
+	connUID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-0123456789ab")
+
+	got := buildUpstreamProgramName("florent", connUID, "mysql")
+
+	want := "dbbat/" + version.Version + " @florent c=0123456789ab for mysql"
+	if got != want {
+		t.Errorf("buildUpstreamProgramName() = %q, want %q", got, want)
 	}
 }

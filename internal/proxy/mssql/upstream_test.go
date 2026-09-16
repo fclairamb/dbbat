@@ -7,10 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/proxy/upstream"
+	"github.com/fclairamb/dbbat/internal/version"
 )
 
 // errBastionDown stands in for whatever the SSH bastion chain hands back when
@@ -300,4 +302,24 @@ func TestUpstreamCloseIsSafeTwiceAndOnNil(t *testing.T) {
 
 	require.NoError(t, conn.Close())
 	require.NoError(t, conn.Close(), "the relay teardown closes it twice")
+}
+
+func TestBuildUpstreamAppName_ConnUIDTag(t *testing.T) {
+	t.Parallel()
+
+	connUID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-0123456789ab")
+
+	got := buildUpstreamAppName("florent", connUID, "sqlcmd")
+
+	want := "dbbat/" + version.Version + " @florent c=0123456789ab for sqlcmd"
+	assert.Equal(t, want, got)
+}
+
+func TestBuildUpstreamAppName_NoConnUID(t *testing.T) {
+	t.Parallel()
+
+	got := buildUpstreamAppName("florent", uuid.Nil, "sqlcmd")
+
+	want := "dbbat/" + version.Version + " @florent for sqlcmd"
+	assert.Equal(t, want, got)
 }
