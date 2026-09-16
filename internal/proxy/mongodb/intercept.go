@@ -162,9 +162,18 @@ func (s *Session) handleClientOpMsg(m *message) error {
 		s.annotateGetMore(pq, body)
 	}
 
+	// Layer 1 on this protocol: there is no session-level statement timeout to
+	// SET, so the limit rides in the command itself. Done here, where the
+	// command is already parsed, and after the hold — a command that was never
+	// forwarded has no deadline to carry.
+	forwarded, terr := s.applyMaxTimeMS(m, parsed, body, cmd)
+	if terr != nil {
+		return s.rejectCommand(m, cmd, body, moreToCome, terr)
+	}
+
 	s.registerPending(m.requestID, pq)
 
-	if err := s.forward(m); err != nil {
+	if err := s.forward(forwarded); err != nil {
 		s.takePending(m.requestID)
 
 		return err
@@ -214,6 +223,7 @@ func (s *Session) forward(m *message) error {
 func (s *Session) registerPending(requestID int32, pq *pendingQuery) {
 	s.pendingMu.Lock()
 	s.pending[requestID] = pq
+	s.refreshStatementClockLocked()
 	s.pendingMu.Unlock()
 }
 
@@ -228,8 +238,104 @@ func (s *Session) takePending(responseTo int32) *pendingQuery {
 	}
 
 	delete(s.pending, responseTo)
+	s.refreshStatementClockLocked()
 
 	return pq
+}
+
+// refreshStatementClockLocked points the session's statement clock at the
+// oldest command still awaiting an upstream reply, or clears it when none is.
+//
+// Recomputed from the pending map rather than incremented and decremented: a
+// driver can pipeline several commands on one connection, and the oldest is the
+// one the limit is about — a later command must never reset the clock and hide
+// an older one that is already over.
+//
+// Callers hold pendingMu.
+func (s *Session) refreshStatementClockLocked() {
+	oldest := time.Time{}
+
+	for _, pq := range s.pending {
+		if pq == nil {
+			continue
+		}
+
+		if oldest.IsZero() || pq.start.Before(oldest) {
+			oldest = pq.start
+		}
+	}
+
+	s.statementClock.Rearm(oldest)
+}
+
+// maxTimeMSExemptCommands are the commands dbbat forwards untouched.
+//
+// They are the handshake, auth and teardown chatter a driver issues on its own:
+// none of them is a statement a user wrote, none can run long, and a couple
+// (killCursors, endSessions, the SASL exchange) are exactly what a driver sends
+// while cleaning up after a command that *was* cancelled — putting a deadline
+// on those would turn one timeout into two.
+var maxTimeMSExemptCommands = map[string]bool{
+	"hello":          true,
+	"ismaster":       true,
+	"isMaster":       true,
+	"ping":           true,
+	"buildInfo":      true,
+	"buildinfo":      true,
+	"saslStart":      true,
+	"saslContinue":   true,
+	"logout":         true,
+	"killCursors":    true,
+	"killOperations": true,
+	"endSessions":    true,
+	"getnonce":       true,
+}
+
+// applyMaxTimeMS returns the message to forward, with the grant's per-statement
+// limit injected as maxTimeMS when one applies.
+//
+// This is the MongoDB half of layer 1 — the polite, server-side cancellation
+// that gives the client a real MaxTimeMSExpired error and keeps its session
+// alive. The watchdog behind it is unchanged: a client that finds a way past
+// this still meets it.
+//
+// A client value at or below the limit wins; a larger one (or the 0 that means
+// "no limit") is clamped. Clamped rather than refused: unlike a SQL `SET`,
+// maxTimeMS is an ordinary per-command option every driver sets for its own
+// reasons, and refusing it would break clients that are asking for *less* than
+// dbbat is about to impose.
+func (s *Session) applyMaxTimeMS(m *message, parsed *opMsg, body bson.Raw, cmd string) (*message, error) {
+	if s.statementLimit <= 0 || maxTimeMSExemptCommands[cmd] {
+		return m, nil
+	}
+
+	limitMS := s.statementLimit.Milliseconds()
+	if limitMS <= 0 {
+		return m, nil
+	}
+
+	rewritten, changed, err := withMaxTimeMS(body, limitMS)
+	if err != nil {
+		return nil, err
+	}
+
+	if !changed {
+		return m, nil
+	}
+
+	raw, err := rebuildOpMsg(m, parsed, rewritten)
+	if err != nil {
+		return nil, err
+	}
+
+	return &message{
+		length:     int32(len(raw)),
+		requestID:  m.requestID,
+		responseTo: m.responseTo,
+		opCode:     m.opCode,
+		body:       raw[headerLen:],
+		raw:        raw,
+	}, nil
 }
 
 // pendingCommand returns the command name of the in-flight query for responseTo
