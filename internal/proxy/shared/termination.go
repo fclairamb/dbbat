@@ -44,7 +44,7 @@ func TerminationFor(err error, guard *LimitGuard, queryUID uuid.UUID) store.Term
 		QueryUID: queryUID,
 	}
 
-	// A termination signalled from outside the session carries its own reason,
+	// A termination signaled from outside the session carries its own reason,
 	// which is not always `admin_terminated`: the cross-instance poller relays
 	// a grant revoked on another replica through the very same flag, and that
 	// session must still record `grant_revoked`. The handle is therefore the

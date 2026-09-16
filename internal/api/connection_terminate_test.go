@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,9 +26,7 @@ func newTerminateTestRouter(server *Server) *gin.Engine {
 }
 
 func doTerminate(router *gin.Engine, token, uid, body string) *httptest.ResponseRecorder {
-	var reader interface {
-		Read([]byte) (int, error)
-	} = http.NoBody
+	var reader io.Reader = http.NoBody
 
 	if body != "" {
 		reader = strings.NewReader(body)
