@@ -650,9 +650,19 @@ func startOracleProxy(
 		return nil
 	}
 
+	// A typo here is a startup failure rather than a silent "off": the absence
+	// of a tag looks exactly like the feature being disabled, so an operator
+	// who asked for attribution and got none would have no way to tell.
+	tagging, err := cfg.QueryTagging.ResolveOracle()
+	if err != nil {
+		logger.ErrorContext(ctx, "Oracle statement tagging misconfigured", slog.Any("error", err))
+		os.Exit(1)
+	}
+
 	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, cfg.Dump, logger)
 	srv.SetApprovalDeps(approvalDeps)
 	srv.SetRowWriter(rowWriter)
+	srv.SetStatementTagging(tagging)
 
 	go func() {
 		if err := srv.Start(cfg.ListenOracle); err != nil {
