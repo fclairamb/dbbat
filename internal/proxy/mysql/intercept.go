@@ -288,7 +288,14 @@ func (h *handler) runIntercepted(
 	s.statementClock.Stop()
 
 	if err != nil {
+		// A session dbbat tore down reports *why* rather than the socket error
+		// the teardown produced: "connection reset" on the statement that
+		// caused it is the least useful thing the queries page could say.
 		errStr := err.Error()
+		if t := s.recordedTermination(); t.Set() {
+			errStr = t.Message()
+		}
+
 		h.recordQuery(sql, params, start, &errStr)
 
 		return result, err

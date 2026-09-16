@@ -695,6 +695,11 @@ func (s *Session) recordDisconnect() {
 
 	termination := s.recordedTermination()
 	if termination.Set() {
+		// The commands still awaiting a reply never get one, so nothing else
+		// will complete their rows. Say why here, before the session record
+		// closes. Plural: a driver can pipeline several on one connection.
+		s.flushPendingOnTermination(termination)
+
 		// "terminated" before "closed": why, then that.
 		s.stream.ConnectionWithReason(s.ctx, shared.ConnectionTerminated, termination.Reason)
 	}
@@ -797,4 +802,29 @@ func (p *prefixConn) Read(b []byte) (int, error) {
 	}
 
 	return p.Conn.Read(b)
+}
+
+// flushPendingOnTermination records every command that was still awaiting an
+// upstream reply when dbbat ended the session, with the reason it ended.
+func (s *Session) flushPendingOnTermination(t store.Termination) {
+	s.pendingMu.Lock()
+
+	pending := make([]*pendingQuery, 0, len(s.pending))
+
+	for requestID, pq := range s.pending {
+		if pq != nil {
+			pending = append(pending, pq)
+		}
+
+		delete(s.pending, requestID)
+	}
+
+	s.statementClock.Stop()
+	s.pendingMu.Unlock()
+
+	message := t.Message()
+
+	for _, pq := range pending {
+		s.recordQuery(pq, nil, nil, &message)
+	}
 }
