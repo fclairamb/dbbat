@@ -55,6 +55,10 @@ type Server struct {
 	// fixtures) gets.
 	statementTimeouts *shared.StatementTimeoutResolver
 
+	// queryTagging prepends the dbbat identity comment to every statement on
+	// its way upstream (DBB_QUERY_TAGGING). Off by default.
+	queryTagging bool
+
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
 	// in a goroutine).
@@ -115,6 +119,13 @@ func (s *Server) SetStatementTimeouts(r *shared.StatementTimeoutResolver) {
 // wiring in main; a server without them simply never holds anything.
 func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
 	s.approvalDeps = deps
+}
+
+// SetQueryTagging turns the sqlcommenter-style statement tag on. Called by the
+// wiring in main from DBB_QUERY_TAGGING; a server without it forwards every
+// statement byte-for-byte as it always did.
+func (s *Server) SetQueryTagging(enabled bool) {
+	s.queryTagging = enabled
 }
 
 // SetRowWriter installs the process-wide result-row writer, replacing (and
@@ -266,6 +277,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.cancels = s.cancels
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
+	session.queryTagging = s.queryTagging
 
 	if err := session.Run(); err != nil {
 		// A CancelRequest is a normal, expected one-shot connection, not a
