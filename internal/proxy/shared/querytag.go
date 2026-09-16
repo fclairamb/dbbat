@@ -101,6 +101,32 @@ func NewQueryTagger(dbbatVersion, username string, connUID uuid.UUID, grantSlug 
 	return QueryTagger{fields: fields, prefix: "/*" + fields + "*/ "}
 }
 
+// NewUserQueryTagger builds a tagger whose identity stops at the dbbat *user*:
+// `dbbat='…',user='…',grant='…'`, with no `conn=` field.
+//
+// It exists for Oracle. V$SQL keys on statement text, so the tag's cardinality
+// *is* its cost: every distinct tag is a distinct SQL_ID holding its own child
+// cursor in the shared pool. A per-connection tag makes that cost grow with
+// every session the fleet opens, which is why the SQL-comment tagging work left
+// Oracle out. Dropping `conn=` bounds it by the number of dbbat users instead,
+// which is a number an operator can look at and reason about.
+//
+// Measured on Oracle 23ai Free, one join executed 600 times per arm with the
+// shared pool flushed between them: untagged, 1 cursor and 48KB; 20 tagged
+// users, 20 cursors, 20 loads and 962KB; the same traffic spread over 200
+// per-connection tags, 200 cursors and 9.6MB. The per-user cost is also
+// one-time — a second 600-execution pass on the un-flushed pool added no loads,
+// no library-cache misses and no memory at all, so it plateaus at k rather than
+// degrading per execution.
+//
+// This is a thin wrapper over NewQueryTagger: uidSuffix(uuid.Nil) is "" and
+// empty fields are omitted, so the zero uuid already produces exactly these
+// bytes. The wrapper is what makes that omission deliberate at the call site
+// instead of a zero value someone later "fixes" by passing the real uid.
+func NewUserQueryTagger(dbbatVersion, username, grantSlug string) QueryTagger {
+	return NewQueryTagger(dbbatVersion, username, uuid.Nil, grantSlug)
+}
+
 // appendQueryTagField writes `,key='value'` (without the leading comma for the
 // first field) when value is non-empty, and nothing at all when it is.
 func appendQueryTagField(b *strings.Builder, key, value string) {
