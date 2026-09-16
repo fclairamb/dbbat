@@ -62,7 +62,7 @@ type QueryTagger struct {
 }
 
 // NewQueryTagger builds the tagger for one session. Empty components are
-// omitted rather than emitted as `key=''`: a shapeless grant or an
+// omitted rather than emitted as an empty-valued key: a shapeless grant or an
 // unidentified connection should shorten the tag, not pad it with noise that
 // reads like a value.
 //

@@ -122,7 +122,7 @@ func TestQueryTaggerEncodesValues(t *testing.T) {
 }
 
 // TestQueryTaggerOmitsEmptyFields — a shapeless grant or an unidentified
-// connection shortens the tag rather than padding it with `key=''`, which would
+// connection shortens the tag rather than padding it with an empty-valued key, which would
 // read like a value.
 func TestQueryTaggerOmitsEmptyFields(t *testing.T) {
 	t.Parallel()

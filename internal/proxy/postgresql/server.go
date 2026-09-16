@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/cache"
@@ -57,7 +58,12 @@ type Server struct {
 
 	// queryTagging prepends the dbbat identity comment to every statement on
 	// its way upstream (DBB_QUERY_TAGGING). Off by default.
-	queryTagging bool
+	//
+	// Atomic, unlike its neighbours above: those are installed before Start,
+	// but this one is also flipped on an already-listening server (the
+	// integration suite does exactly that), and the accept loop reads it on
+	// every connection.
+	queryTagging atomic.Bool
 
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
@@ -125,7 +131,7 @@ func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
 // wiring in main from DBB_QUERY_TAGGING; a server without it forwards every
 // statement byte-for-byte as it always did.
 func (s *Server) SetQueryTagging(enabled bool) {
-	s.queryTagging = enabled
+	s.queryTagging.Store(enabled)
 }
 
 // SetRowWriter installs the process-wide result-row writer, replacing (and
@@ -277,7 +283,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.cancels = s.cancels
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
-	session.queryTagging = s.queryTagging
+	session.queryTagging = s.queryTagging.Load()
 
 	if err := session.Run(); err != nil {
 		// A CancelRequest is a normal, expected one-shot connection, not a
