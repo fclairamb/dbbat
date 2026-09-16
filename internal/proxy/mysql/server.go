@@ -77,7 +77,7 @@ type Server struct {
 	// queryTagging prepends the dbbat identity comment to every statement text
 	// handed to the upstream (DBB_QUERY_TAGGING). Off by default.
 	//
-	// Atomic, unlike its neighbours above: those are installed before Start,
+	// Atomic, unlike its neighbors above: those are installed before Start,
 	// but this one is also flipped on an already-listening server (the
 	// integration suite does exactly that), and every session's auth reads it.
 	queryTagging atomic.Bool
