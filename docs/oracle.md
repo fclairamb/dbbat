@@ -2145,6 +2145,80 @@ exact dbbat connection: its queries, its grant, and the Terminate button —
 rather than guessing from the username alone, which is ambiguous the moment a
 user has more than one session open.
 
+## Statement tagging: measured, affordable, and still not wired
+
+`V$SESSION.PROGRAM` above is where Oracle attribution stops today. The other
+three protocols also tag the **statement** — `DBB_QUERY_TAGGING` prepends a
+[sqlcommenter](https://google.github.io/sqlcommenter/)-style comment, so
+`pg_stat_statements` and the slow logs name a dbbat user rather than the shared
+role. Oracle was left out with a one-line reason: `V$SQL` keys on statement
+text, so a tag carrying `conn='<12hex>'` gives every dbbat *session* its own
+SQL_ID and its own shared-pool cursor.
+
+That reason was never measured, so it was measured. The open question was the
+*coarser* tag — one constant per dbbat user, `conn=` omitted — whose cardinality
+is the number of users rather than the number of sessions.
+
+**Setup.** `gvenzl/oracle-free:23-slim`, reporting Oracle 23.26.3.0.0, service
+`FREEPDB1`, `cursor_sharing=EXACT`, `session_cached_cursors=50`,
+`open_cursors=300`. One statement — a two-table join with a `GROUP BY` and two
+binds, not `SELECT 1` — executed **600 times per arm** over one session, with
+`ALTER SYSTEM FLUSH SHARED_POOL` between arms. The only thing that varies is how
+many distinct *texts* those 600 executions spread over, which is exactly what
+the tag changes.
+
+| arm | distinct texts | SQL_IDs | child cursors | `LOADS` | `PARSE_CALLS` | `SHARABLE_MEM` | SQL AREA `GETMISSES` | `RELOADS` |
+|---|---|---|---|---|---|---|---|---|
+| untagged | 1 | 1 | 1 | 1 | 600 | 48 KB | 10 | 13 |
+| per-user (k=20) | 20 | 20 | 20 | 20 | 600 | 962 KB | 44 | 7 |
+| per-user, 2nd pass, no flush | 20 | 20 | 20 | **20** | 1200 | **962 KB** | **0** | **0** |
+| per-connection (200 sessions) | 200 | 200 | 200 | 200 | 600 | 9 624 KB | 404 | 7 |
+
+- **The per-user cost is one-time and bounded by k.** `LOADS` equals the number
+  of distinct texts in every arm: one hard parse per identity, every execution
+  after it a soft parse against that identity's own cursor. The second pass
+  proves the plateau — 600 further executions on an un-flushed pool added zero
+  loads, zero library-cache gets, zero getmisses, zero reloads and not one byte
+  of `SHARABLE_MEM`.
+- **~48 KB of shared pool per identity per hot statement.** Under a megabyte for
+  a 20-user fleet. No arm produced any `invalidations`, and `RELOADS` did not
+  rise with the identity count.
+- **The per-connection tag is the one the folklore was right about**, and now
+  there is a number for it: 200 cursors and 9.6 MB for the same 600 executions,
+  and unlike k it has no ceiling — it grows with every session opened.
+
+**So the tag is affordable, and it is still not wired.** What blocks it is this
+proxy, not Oracle. Every other protocol re-encodes each message on its way
+upstream, which is why their injection point is one function
+(`upstreamText` in `internal/proxy/mysql/intercept.go`). Oracle's proxy
+**decodes the statement only to gate and record it** and relays the client's own
+TNS packets byte for byte — an invariant stated in `reassembly.go`: *"the
+reassembled buffer is for reading only, and dbbat never synthesizes wire bytes
+toward the upstream."* There is no point at which dbbat writes a statement.
+
+Prepending bytes therefore needs a TTC statement re-encoder, and the surface is
+the whole of §TTC above: three statement-carrying ops with three different
+SQL-length fields (compressed int on the `03 5e` and `11 69` execs, `decodeVarLen`
+on `OALL8`, with the bind count and bind values sitting right behind the text);
+a second ub4 `sqlLen * 3` encoding for OCI clients; the CLR length byte repeated
+before the text, and the short→`0xFE`-chunked format change at 252 bytes that a
+tag is exactly long enough to push a statement across; a TNS writer that can
+emit a v315+ 4-byte-length data packet (`encodeTNSPacket` writes only the legacy
+2-byte header); and SDU re-fragmentation. On top of that, `locateExecSQLText`
+*searches* for the text run rather than knowing its offset — sound for a gate
+that fails open to a scan, not sound as the basis for rewriting a length prefix,
+where the documented failure mode (already met on the AUTH leg) is `ORA-03146
+invalid buffer length for TTC field` and a dead session.
+
+Half of it would be worse than none: a tag applied to some frames and not others
+gives one statement both a tagged and an untagged SQL_ID, doubling the cursor
+count the measurement was about, with coverage varying by client. So there is
+deliberately **no `DBB_QUERY_TAGGING_ORACLE`** — a setting that parsed and then
+changed nothing is worse than its absence. The bytes it would emit are settled
+and pinned by tests (`shared.NewUserQueryTagger`,
+`/*dbbat='0.28.1',user='florent',grant='diag'*/ `, no `conn=`); the encoder is
+its own spec.
+
 ## Testing
 
 **Per-client verdicts live in exactly one place: "Client compatibility on Oracle

@@ -86,13 +86,64 @@ Reading:
 - No arm produced any `invalidations`, and `RELOADS` did not rise with the
   number of identities (13 / 7 / 7), so nothing here is aging cursors out.
 
-**Verdict: the per-user tag lands.** Implemented behind its own
-`DBB_QUERY_TAGGING_ORACLE` setting (`off` by default), separate from
-`DBB_QUERY_TAGGING`.
+**Verdict on the cost: the per-user tag is affordable.** The question this spec
+set out to answer — "does a tag constant per dbbat user fragment the shared
+cursor cache?" — has a number now, and the answer is no: bounded by k, one-time,
+sub-megabyte. The folklore is settled.
 
-`shared.QueryTagger`'s existing constructor is indeed all that is needed:
-`uidSuffix(uuid.Nil)` returns `""` and `appendQueryTagField` skips empty values,
-so `NewQueryTagger(version, user, uuid.Nil, grant)` emits
-`/*dbbat='…',user='…',grant='…'*/ ` with no `conn=` field and no new code. A
-named constructor wraps it so the omission is intentional at the call site
-rather than an accident of passing a zero value.
+`shared.QueryTagger`'s existing constructor is indeed all that is needed to
+produce it: `uidSuffix(uuid.Nil)` returns `""` and `appendQueryTagField` skips
+empty values, so `NewQueryTagger(version, user, uuid.Nil, grant)` emits
+`/*dbbat='…',user='…',grant='…'*/ ` with no `conn=` field and no new encoding
+code. Verified and pinned by tests as `shared.NewUserQueryTagger`, a named
+wrapper so the omission is intentional at the call site rather than an accident
+of passing a zero value.
+
+## What blocks the injection (and why nothing was wired)
+
+The tag is not wired to Oracle, and `DBB_QUERY_TAGGING_ORACLE` was deliberately
+**not** added. The spec's implementation sketch assumed an injection point of
+the shape MySQL and PostgreSQL have — `upstreamText(sql)` at the last moment
+before the write. Oracle has no such point, and that is a design invariant
+rather than an oversight (`reassembly.go`): *"the buffered packets are forwarded
+as they arrived, byte for byte: the reassembled buffer is for reading only, and
+dbbat never synthesizes wire bytes toward the upstream."* The proxy **decodes**
+the statement to gate and record it and relays the client's own TNS packets
+untouched. PostgreSQL and MySQL are one-liners because those proxies re-encode
+every message anyway; Oracle does not.
+
+Prepending 40-odd bytes therefore means writing a TTC statement re-encoder:
+
+- **Three statement-carrying ops**, each with its own SQL-length field:
+  the v315+ piggyback exec `03 5e` and the JDBC `11 69` (TTC compressed int,
+  whose *encoded width* changes with the value, shifting everything behind it),
+  and `OALL8` (`decodeVarLen`: 1 byte / `0xFE`+2 / `0xFF`+4, with a bind count
+  and the bind values sitting immediately behind the text).
+- **A second, unrelated encoding for OCI clients** (sqlplus, SQL*Developer,
+  Instant Client): the length is `sqlLen * 3` as a little-endian ub4 behind a
+  `fe x8` pointer sentinel, and OCI sometimes counts a trailing NUL in it.
+- **The CLR framing**: go-ora repeats the length as a raw byte immediately
+  before the text, so that byte moves too — and a statement that crosses 252
+  bytes changes *format*, from the short form to the `0xFE`-chunked long form.
+  A tag is exactly what pushes a statement near that boundary across it.
+- **The TNS frame**: `encodeTNSPacket` writes only the legacy 2-byte length
+  header, so it cannot even reproduce a v315+ data packet (4-byte length, the
+  2-byte field zeroed); and a message already at the negotiated SDU has to be
+  re-fragmented.
+- **The locator is a heuristic.** `locateExecSQLText` *searches* for a text run
+  of the declared length, accepting `sqlLen` or `sqlLen-1` and a possible
+  one-byte shift past a printable CLR prefix. That is sound for gating, which
+  fails open to a scan. Rewriting a length prefix found by search is not: the
+  documented failure mode of getting a TTC length field wrong, already met on
+  the AUTH leg, is `ORA-03146 invalid buffer length for TTC field` — a dead
+  session, in exchange for a comment.
+
+Doing part of it is worse than none: a tag applied on some frames and not others
+gives one statement *both* a tagged and an untagged SQL_ID, doubling the very
+cursor count this measurement was about, with coverage varying by client.
+
+So the honest split is: this spec answered its question, and the encoder is its
+own piece of work — filed as `2026-09-16-08-oracle-ttc-statement-rewrite.md`.
+Landed here: the measurement, `shared.NewUserQueryTagger` with the bytes pinned
+by tests, and the number written into `docs/oracle.md` and the configuration
+docs in place of the standing "would defeat the shared-cursor cache" folklore.

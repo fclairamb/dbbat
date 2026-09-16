@@ -123,6 +123,15 @@ func NewQueryTagger(dbbatVersion, username string, connUID uuid.UUID, grantSlug 
 // empty fields are omitted, so the zero uuid already produces exactly these
 // bytes. The wrapper is what makes that omission deliberate at the call site
 // instead of a zero value someone later "fixes" by passing the real uid.
+//
+// **It has no caller yet.** The measurement said the tag is affordable; the
+// Oracle proxy is what is not ready for it. It relays the client's TNS packets
+// byte for byte and only decodes the statement to gate and record it, so
+// prepending anything means re-encoding the TTC frame — three statement ops,
+// two length encodings, the CLR chunked form and TNS re-fragmentation. This
+// constructor and its tests are the half of that work that was worth settling
+// now: the bytes are pinned, so the encoder spec only has to deliver the
+// encoder.
 func NewUserQueryTagger(dbbatVersion, username, grantSlug string) QueryTagger {
 	return NewQueryTagger(dbbatVersion, username, uuid.Nil, grantSlug)
 }
