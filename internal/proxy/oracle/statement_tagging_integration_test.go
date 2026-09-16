@@ -6,8 +6,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -214,4 +219,105 @@ func TestIntegration_StatementTaggingOffLeavesVSQLAlone(t *testing.T) {
 		assert.NotContains(t, text, "dbbat=",
 			"with tagging off the server must see the client's own statement: %q", text)
 	}
+}
+
+// --- the other client shapes ------------------------------------------------
+//
+// The tests above drive go-ora, which is one of the three on-wire shapes the
+// locator covers. These two cover the other two: the OCI wide header (sqlplus,
+// `sqlLen * 3` as a little-endian ub4, the trailing NUL inside the declared
+// length) and python-oracledb thin. A shape that regressed here would show up as
+// a session that quietly stopped tagging — or, if the rewrite were wrong rather
+// than refused, as ORA-03146 / ORA-03120.
+
+// sqlplusTagProbeScript runs a marked statement and then looks for it in V$SQL.
+//
+// The lookup's own text is built with `||` so that it does not itself contain
+// the marker — otherwise the lookup would match itself and the count would be
+// about the wrong statement.
+const sqlplusTagProbeScript = `SET PAGESIZE 0
+SET FEEDBACK OFF
+SELECT 'probe=' || 1 FROM dual WHERE 'dbbat_oci_probe' = 'dbbat_oci_probe';
+SELECT 'tagged=' || COUNT(*) FROM v$sql WHERE sql_text LIKE '%dbbat' || '_oci_probe%' AND sql_text LIKE '/*dbbat=''%';
+EXIT
+`
+
+// TestIntegration_StatementTagFromOCIClient is the OCI wide header on a real
+// server: a different length encoding (`sqlLen * 3`, little-endian ub4) and a
+// declared length that sometimes counts a trailing NUL.
+func TestIntegration_StatementTagFromOCIClient(t *testing.T) {
+	env := startOracleThroughProxyWith(t, oracleFixtureOptions{
+		statementTagging:        true,
+		reachableFromContainers: plannedOCIClient() == ociClientContainer,
+	})
+
+	client := requireOCIClient(t, env)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	out, err := client.run(t, ctx, sqlplusTagProbeScript)
+	require.NoErrorf(t, err, "sqlplus through a tagging proxy:\n%s", out)
+
+	assert.NotContains(t, out, "ORA-03146",
+		"a wrong TTC length field is what this whole design exists to avoid:\n%s", out)
+	assert.NotContains(t, out, "ORA-03120",
+		"a desynchronized message reads as a conversion overflow:\n%s", out)
+	assert.Contains(t, out, "probe=1", "the statement must have run:\n%s", out)
+	assert.Contains(t, out, "tagged=1",
+		"Oracle's own view of the OCI client's statement must carry the tag:\n%s", out)
+}
+
+// pythonTagProbeScript is the same probe through python-oracledb thin.
+const pythonTagProbeScript = `import sys
+import oracledb
+
+host, port, service, user, key = sys.argv[1:6]
+conn = oracledb.connect(user=user, password=key, dsn="%s:%s/%s" % (host, port, service))
+cur = conn.cursor()
+
+cur.execute("SELECT 'probe=' || 1 FROM dual WHERE 'dbbat_py_probe' = 'dbbat_py_probe'")
+print(cur.fetchone()[0])
+
+cur.execute("SELECT sql_text FROM v$sql WHERE sql_text LIKE '%dbbat' || '_py_probe%'")
+rows = [r[0] for r in cur.fetchall()]
+for r in rows:
+    print("VSQL:", r[:100])
+print("tagged=%d" % sum(1 for r in rows if r.startswith("/*dbbat='")))
+
+conn.close()
+print("done")
+`
+
+// TestIntegration_StatementTagFromPythonThin is the third recorded client shape
+// against a real server.
+func TestIntegration_StatementTagFromPythonThin(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+
+	if err := exec.Command("python3", "-c", "import oracledb").Run(); err != nil {
+		t.Skip("python-oracledb not installed (pip install oracledb)")
+	}
+
+	env := startOracleThroughProxyWith(t, oracleFixtureOptions{statementTagging: true})
+
+	script := filepath.Join(t.TempDir(), "tagprobe.py")
+	require.NoError(t, os.WriteFile(script, []byte(pythonTagProbeScript), 0o600))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "python3", script,
+		env.host, strconv.Itoa(env.port), env.service, env.username, env.apiKey).CombinedOutput()
+
+	output := string(out)
+	require.NoErrorf(t, err, "python-oracledb through a tagging proxy:\n%s", output)
+
+	assert.NotContains(t, output, "ORA-03146", "%s", output)
+	assert.NotContains(t, output, "ORA-03120", "%s", output)
+	assert.Contains(t, output, "probe=1", "%s", output)
+	assert.Contains(t, output, "tagged=1",
+		"Oracle's own view of the thin client's statement must carry the tag:\n%s", output)
+	assert.Contains(t, output, "done", "%s", output)
 }
