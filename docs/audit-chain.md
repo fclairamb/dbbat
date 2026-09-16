@@ -213,8 +213,10 @@ There are **three** writers of that stamp, and only the first two are closes:
 
 With `DBB_QUERY_TAGGING` on, dbbat prepends a sqlcommenter-style comment —
 `/*dbbat='0.28.1',user='florent',conn='3f9a1c7b2e4d',grant='diag-paris'*/` — to
-the statement it forwards to the target, so the target's own tooling can
-attribute it (see [PostgreSQL](postgresql.md) and [MySQL](mysql.md)).
+the statement it forwards to the target — and, on MongoDB, the same string in
+the command's `comment` field — so the target's own tooling can attribute it
+(see [PostgreSQL](postgresql.md), [MySQL](mysql.md) and
+[MongoDB](mongodb.md)).
 
 **That tag is never what the chain covers.** It is applied to the bytes going
 upstream and to nothing else: the `queries` row, and therefore the MAC over it,

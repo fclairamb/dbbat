@@ -297,7 +297,7 @@ sockets. See
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DBB_QUERY_TAGGING` | Prepend a dbbat identity comment to every statement forwarded to the target | `false` |
+| `DBB_QUERY_TAGGING` | Tag every statement forwarded to the target with the dbbat identity — a comment on PostgreSQL and MySQL, the `comment` command field on MongoDB | `false` |
 
 Every dbbat session logs in to the target as the **same shared database role**,
 from the **same host** — the proxy. So the target's own tooling attributes the
@@ -305,8 +305,9 @@ whole fleet's load to one client: RDS Performance Insights shows one user and
 one host, `pg_stat_statements` has no `application_name` dimension at all, and
 the slow query log prints statement text and nothing else.
 
-What all of them do show is the statement text. Turn this on and dbbat prepends
-a [sqlcommenter](https://google.github.io/sqlcommenter/)-style comment:
+What all of them do show is the statement itself. Turn this on and dbbat
+prepends a [sqlcommenter](https://google.github.io/sqlcommenter/)-style
+comment:
 
 ```sql
 /*dbbat='0.28.1',user='florent',conn='3f9a1c7b2e4d',grant='diag-paris-habitat'*/ SELECT ...
@@ -320,9 +321,28 @@ a [sqlcommenter](https://google.github.io/sqlcommenter/)-style comment:
   `GET /api/v1/connections?uid_suffix=3f9a1c7b2e4d`
 - `grant` — the slug of the grant definition the session is running under
 
-**PostgreSQL and MySQL/MariaDB only.** Oracle is deliberately excluded: `V$SQL`
+**MongoDB gets the same tag, in the place MongoDB has for it.** There is no
+statement text to comment, so the identity rides in the command's `comment`
+field — the one `system.profile`, the Atlas Query Profiler and
+`db.currentOp()` echo back:
+
+```js
+{ find: "widgets", filter: { … }, comment: "dbbat='0.28.1',user='florent',conn='3f9a1c7b2e4d',grant='diag-paris-habitat'" }
+```
+
+It is the same string, so one search finds a session whatever the protocol. Two
+MongoDB-specific rules: it is applied to the commands whose `comment` support
+MongoDB documents (`find`, `aggregate`, `count`, `distinct`, `insert`,
+`update`, `delete`, `findAndModify`, `getMore`, `mapReduce`, `bulkWrite`) and
+to no others, and **a client-supplied `comment` wins** — that command is
+forwarded untouched, because the field is single-valued and a driver's or
+ORM's own tracing may already own it. Such a command is still attributable: the
+profiler records `appName`, which dbbat tags on every session. See
+[the MongoDB notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md).
+
+**Oracle and SQL Server are excluded.** Oracle deliberately: `V$SQL`
 deduplicates on statement text, so a per-connection tag would defeat its
-shared-cursor cache. SQL Server and MongoDB are follow-ups.
+shared-cursor cache. SQL Server is a follow-up.
 
 **Off by default**, because it changes the bytes the database receives — a
 deployment that pins statement text (a `pg_stat_statements` allowlist, a query
@@ -338,8 +358,8 @@ execution.
 
 **It changes nothing dbbat stores or enforces.** Every grant control
 (`read_only`, `block_ddl`, `block_copy`), every bypass scan and every
-approval-hold pattern runs on the statement the **client** sent, before the tag
-exists — so a pattern author never has to account for it. The `queries` table,
+approval-hold pattern runs on the statement — or, on MongoDB, the command — the
+**client** sent, before the tag exists — so a pattern author never has to account for it. The `queries` table,
 the tamper-evident audit chain, the UI's query-text search and the `.pcapng`
 session captures all hold the client's text too. The tag is a pure function of
 `(version, user, connection, grant)`, all of which the connection row already
