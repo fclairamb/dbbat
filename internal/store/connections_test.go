@@ -1160,6 +1160,56 @@ func TestListConnections(t *testing.T) {
 	})
 }
 
+// TestListConnections_UIDSuffixFilter covers the `uid_suffix` filter
+// (GET /api/v1/connections?uid_suffix=<12 hex>): it has to match on the
+// *last* 12 hex characters of the uid, not any prefix — the two connections
+// here deliberately share everything except their last dash-delimited group,
+// which is exactly the collision a UUIDv7's shared, millisecond-granularity
+// timestamp prefix would cause if the filter matched on the wrong end.
+func TestListConnections_UIDSuffixFilter(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "uidsuffix")
+
+	uid1 := uuid.MustParse("018f1234-5678-7abc-9def-0123456789ab")
+	uid2 := uuid.MustParse("018f1234-5678-7abc-9def-fedcba987654")
+
+	conn1, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1", WithUID(uid1))
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+
+	conn2, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.2", WithUID(uid2))
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+
+	conns, err := store.ListConnections(ctx, ConnectionFilter{UIDSuffix: "0123456789ab"})
+	if err != nil {
+		t.Fatalf("ListConnections() error = %v", err)
+	}
+
+	if len(conns) != 1 {
+		t.Fatalf("ListConnections(uid_suffix=0123456789ab) len = %d, want 1", len(conns))
+	}
+
+	if conns[0].UID != conn1.UID {
+		t.Errorf("ListConnections(uid_suffix=0123456789ab) matched %s, want %s", conns[0].UID, conn1.UID)
+	}
+
+	conns2, err := store.ListConnections(ctx, ConnectionFilter{UIDSuffix: "fedcba987654"})
+	if err != nil {
+		t.Fatalf("ListConnections() error = %v", err)
+	}
+
+	if len(conns2) != 1 || conns2[0].UID != conn2.UID {
+		t.Fatalf("ListConnections(uid_suffix=fedcba987654) = %v, want exactly [%s]", conns2, conn2.UID)
+	}
+}
+
 // listedConnection re-reads a connection through ListConnections, which is where
 // the counters are read from in anger.
 func listedConnection(t *testing.T, ctx context.Context, store *Store, user, conn uuid.UUID) *Connection {

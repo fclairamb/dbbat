@@ -111,6 +111,20 @@ func TestObservabilityFilters_RejectMalformedUUIDs(t *testing.T) {
 
 	w = doGet(t, router, token, "/api/v1/queries?approval_status=pending")
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	// uid_suffix is /connections-only, follows the new-parameter rule (400,
+	// not silently unfiltered), and must be exactly 12 hex characters — not
+	// shorter, not longer, not containing anything else.
+	for _, value := range []string{"not-hex-zzzz", "0123456789a", "0123456789abc", "0123456789g0"} {
+		w := doGet(t, router, token, "/api/v1/connections?uid_suffix="+value)
+		assert.Equal(t, http.StatusBadRequest, w.Code,
+			"?uid_suffix=%s must be refused: %s", value, w.Body.String())
+	}
+
+	for _, value := range []string{"0123456789ab", "0123456789AB"} {
+		w := doGet(t, router, token, "/api/v1/connections?uid_suffix="+value)
+		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
 }
 
 // TestObservabilityFilters_Accepted proves the parameters actually reach the
@@ -191,6 +205,12 @@ func TestObservabilityFilters_Accepted(t *testing.T) {
 		"false is unfiltered, not closed-only")
 	assert.Empty(t, listed("?active=true&grant_provenance=approved"),
 		"active composes with AND like every other filter")
+
+	// uid_suffix reaches the store and matches on the *last* 12 hex
+	// characters of the uid — a DBA pasting the "c=" tag straight from
+	// pg_stat_activity.application_name must land on this exact connection.
+	suffix := granted.UID.String()[len(granted.UID.String())-12:]
+	assert.Equal(t, []string{granted.UID.String()}, listed("?uid_suffix="+suffix))
 }
 
 // TestConnectionsActiveFilterStaysScopedToTheConnector pins that the new
