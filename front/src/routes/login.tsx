@@ -345,7 +345,7 @@ function LoginPage() {
                   type="text"
                   value={username}
                   onChange={(e) => setTypedUsername(e.target.value)}
-                  placeholder="admin"
+                  placeholder="Enter your username"
                   required
                   autoComplete="username"
                   autoFocus
