@@ -74,6 +74,11 @@ type oracleFixtureOptions struct {
 	// binding a test listener on 0.0.0.0 is a real (if brief) exposure and, on
 	// macOS with the firewall on, an interactive prompt.
 	reachableFromContainers bool
+
+	// statementTagging is DBB_QUERY_TAGGING_ORACLE=user: the proxy prepends the
+	// per-user tag to every statement it can relocate exactly. Off by default,
+	// as it is in production.
+	statementTagging bool
 }
 
 func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProxy {
@@ -169,6 +174,8 @@ func startOracleThroughProxyWith(t *testing.T, opts oracleFixtureOptions) *oracl
 	}
 
 	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.New(logs))
+	proxy.SetStatementTagging(opts.statementTagging)
+
 	go func() { _ = proxy.Start(bindAddr) }()
 
 	// Bounded, like the PostgreSQL fixture's: Shutdown waits for every live

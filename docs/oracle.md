@@ -2145,9 +2145,9 @@ exact dbbat connection: its queries, its grant, and the Terminate button —
 rather than guessing from the username alone, which is ambiguous the moment a
 user has more than one session open.
 
-## Statement tagging: measured, affordable, and still not wired
+## Statement tagging: the per-user tag, and the TTC writer under it
 
-`V$SESSION.PROGRAM` above is where Oracle attribution stops today. The other
+`V$SESSION.PROGRAM` above is where Oracle attribution used to stop. The other
 three protocols also tag the **statement** — `DBB_QUERY_TAGGING` prepends a
 [sqlcommenter](https://google.github.io/sqlcommenter/)-style comment, so
 `pg_stat_statements` and the slow logs name a dbbat user rather than the shared
@@ -2187,37 +2187,92 @@ the tag changes.
   there is a number for it: 200 cursors and 9.6 MB for the same 600 executions,
   and unlike k it has no ceiling — it grows with every session opened.
 
-**So the tag is affordable, and it is still not wired.** What blocks it is this
-proxy, not Oracle. Every other protocol re-encodes each message on its way
-upstream, which is why their injection point is one function
-(`upstreamText` in `internal/proxy/mysql/intercept.go`). Oracle's proxy
-**decodes the statement only to gate and record it** and relays the client's own
-TNS packets byte for byte — an invariant stated in `reassembly.go`: *"the
-reassembled buffer is for reading only, and dbbat never synthesizes wire bytes
-toward the upstream."* There is no point at which dbbat writes a statement.
+So the tag is affordable, and `DBB_QUERY_TAGGING_ORACLE=user` turns it on. It is
+**separate** from `DBB_QUERY_TAGGING`: the trade-off above is Oracle's alone, and
+an operator who accepted it on PostgreSQL did not accept it here. `off` is the
+default and the only other value; anything else fails the process at startup.
 
-Prepending bytes therefore needs a TTC statement re-encoder, and the surface is
-the whole of §TTC above: three statement-carrying ops with three different
-SQL-length fields (compressed int on the `03 5e` and `11 69` execs, `decodeVarLen`
-on `OALL8`, with the bind count and bind values sitting right behind the text);
-a second ub4 `sqlLen * 3` encoding for OCI clients; the CLR length byte repeated
-before the text, and the short→`0xFE`-chunked format change at 252 bytes that a
-tag is exactly long enough to push a statement across; a TNS writer that can
-emit a v315+ 4-byte-length data packet (`encodeTNSPacket` writes only the legacy
-2-byte header); and SDU re-fragmentation. On top of that, `locateExecSQLText`
-*searches* for the text run rather than knowing its offset — sound for a gate
-that fails open to a scan, not sound as the basis for rewriting a length prefix,
-where the documented failure mode (already met on the AUTH leg) is `ORA-03146
-invalid buffer length for TTC field` and a dead session.
+### What had to exist first: a TTC statement writer
 
-Half of it would be worse than none: a tag applied to some frames and not others
-gives one statement both a tagged and an untagged SQL_ID, doubling the cursor
-count the measurement was about, with coverage varying by client. So there is
-deliberately **no `DBB_QUERY_TAGGING_ORACLE`** — a setting that parsed and then
-changed nothing is worse than its absence. The bytes it would emit are settled
-and pinned by tests (`shared.NewUserQueryTagger`,
-`/*dbbat='0.28.1',user='florent',grant='diag'*/ `, no `conn=`); the encoder is
-its own spec.
+Every other protocol re-encodes each message on its way upstream, which is why
+their injection point is one function (`upstreamText` in
+`internal/proxy/mysql/intercept.go`). Oracle's proxy **decodes the statement only
+to gate and record it** and relays the client's own TNS packets byte for byte —
+an invariant `reassembly.go` states outright: *"the reassembled buffer is for
+reading only, and dbbat never synthesizes wire bytes toward the upstream."*
+`internal/proxy/oracle/ttc_statement_rewrite.go` is the first thing in the data
+phase that breaks it, and the injection point is `clientToUpstream`, between the
+`blocked` check and the packet-write loop — after the controls, the `queries`
+row, the audit chain, the capture and any approval hold have all run on the
+client's own text.
+
+**The design is one idea: locate exactly, or refuse.** The decoders next door
+(`decodeExecStatementText`, `locateExecSQLText`) *search* for a text run of
+roughly the declared length: they accept `sqlLen` or `sqlLen-1`, tolerate a
+one-byte shift past a printable CLR prefix, and validate with "looks like SQL".
+That is right for a gate, which fails open to a scan when it is unsure. It is not
+a basis for overwriting a length prefix — the documented failure mode for getting
+a TTC length field wrong, already met on the AUTH leg, is `ORA-03146 invalid
+buffer length for TTC field`: a dead session, in exchange for a comment. So
+`locateStatementRewrite` names the SQL-length field's offset, its encoded width
+and its encoding; the span holding the statement value with whatever framing
+wraps it; and the statement bytes themselves — **and answers only when
+re-encoding what it read reproduces the client's own bytes exactly**. That
+round-trip is the certainty, and it runs on every frame rather than only on the
+first.
+
+The surface, all of it:
+
+| shape | clients | length field | statement framing |
+|---|---|---|---|
+| thin exec `03 5e` (also stapled behind `11 69`) | go-ora, python-oracledb thin | TTC compressed int, **width grows with the value** | CLR short form: the length repeated as one byte in front of the text |
+| same op | ojdbc thin, DBeaver | same | **bare run** — the header field is its only length |
+| OCI wide exec | sqlplus, SQL\*Developer, Instant Client | `sqlLen * 3` as a little-endian ub4 behind the `fe x8` sentinel, fixed width | CLR short form, sometimes including a trailing NUL in the declared length |
+| `OALL8` (pre-v315) | legacy | `decodeVarLen`: 1 byte / `0xFE`+2BE / `0xFF`+4BE, width grows | none; the bind count sits immediately behind the text |
+
+Two of the three length encodings change *width* with their value, so growing a
+statement can shift every byte behind the field — which is why the rewriter
+rebuilds the message rather than patching it. The CLR format change at 252 bytes
+is the one a tag provokes directly: a ~50-byte tag is exactly what pushes a
+statement across it, so a value that no longer fits the short form is written in
+the `0xFE`-chunked long form, in the variant the session negotiated
+(`clientBigClrChunks`); a value the client *already* chunked is re-chunked at the
+client's own observed chunk size and chunk-length encoding, which the round-trip
+check pins. Below the TTC layer, a rewritten packet carries no stale `pkt.Raw`
+(`writeTNSPacket` prefers it), is re-framed in whichever header form the client
+used — `encodeTNSPacket` can only write the legacy 2-byte length — and is re-cut
+to the session data unit read off the Accept packet (`acceptNegotiatedSDU`;
+measured at 2048 for the sqlplus captures, 8192 for the thin clients, 65536 for
+several go-ora ones). Rewriting *after* `collectStatementMessage` is what keeps
+the shortfall accounting (`execFragmentShortfall`, `oall8FragmentShortfall`)
+reading the client's own declared length, untouched.
+
+### The decision is per session, and it is taken once
+
+Half of this would be worse than none: a statement tagged on some executions and
+not others gets *both* a tagged and an untagged SQL_ID, doubling exactly the
+cursor count the measurement was about. So the first statement-carrying frame of
+a session decides for the whole session. A client shape the locator cannot
+certify runs untagged start to finish and logs why once, rather than tagging the
+frames that happen to parse.
+
+### What is measured, and against what
+
+`ttc_statement_rewrite_survey_test.go` runs the locator over every recording in
+`testdata/`, the way `sql_extraction_survey_test.go` runs the gate's decoder:
+**159 of 159 statement-carrying frames located**, each of them rewriting to
+itself byte for byte and reading back as the tagged statement, across all five
+recorded client shapes (go-ora and python-oracledb thin as
+`compressed`/`clr-short`, ojdbc thin and DBeaver as `compressed`/`bare`, sqlplus
+as `wide-ub4`/`clr-short`). `statement_tagging_integration_test.go` then puts it
+on a real 23ai: the tag read back out of `V$SQL`, 25 executions of one statement
+landing on one SQL_ID, statements padded across the 252-byte CLR boundary, and a
+20 KB statement that has to be re-cut into several packets.
+
+The bytes of the tag itself are `shared.NewUserQueryTagger`'s and are pinned by
+`internal/proxy/shared`: `/*dbbat='0.28.1',user='florent',grant='diag'*/ `, no
+`conn=`, ASCII only — dbbat does not know the session charset, so byte length has
+to equal character length.
 
 ## Testing
 
