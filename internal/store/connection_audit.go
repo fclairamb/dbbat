@@ -43,7 +43,48 @@ const (
 	// disconnected_at is committed — by whichever writer got there, which the
 	// entry's closed_by records.
 	AuditEventConnectionClosed = "connection.closed"
+
+	// AuditEventConnectionTerminated is written when *dbbat* ended a session
+	// rather than the client — a statement over its time limit, a grant that
+	// expired or was revoked mid-flight, a quota crossed, and later an admin
+	// pulling the plug.
+	//
+	// It is written *in addition to* connection.closed, not instead of it: the
+	// close entry is the one that seals the query chain, and folding the two
+	// would mean either losing that seal or duplicating it. This entry carries
+	// the *why*, including the statement that caused it, which is what an
+	// operator reading the audit page after a killed session actually needs.
+	AuditEventConnectionTerminated = "connection.terminated"
 )
+
+// Why dbbat ended a session, as written to connections.termination_reason and
+// to the connection.terminated audit entry. A small, closed vocabulary: the UI
+// and any log-based alerting switch on these exact strings.
+const (
+	// TerminationStatementTimeout — one statement ran past the grant's
+	// per-statement limit (plus the watchdog grace).
+	TerminationStatementTimeout = "statement_timeout"
+	// TerminationGrantExpired — the grant's window closed mid-session.
+	TerminationGrantExpired = "grant_expired"
+	// TerminationQuotaExceeded — the grant's byte or query quota was crossed
+	// mid-session.
+	TerminationQuotaExceeded = "quota_exceeded"
+	// TerminationGrantRevoked — an admin revoked the grant mid-session.
+	TerminationGrantRevoked = "grant_revoked"
+	// TerminationAdminTerminated — an admin ended this specific session.
+	// Reserved by the terminate-connection work; nothing writes it yet.
+	TerminationAdminTerminated = "admin_terminated"
+)
+
+// ValidTerminationReasons is the closed vocabulary above, for validation and
+// for the API's documented enum.
+var ValidTerminationReasons = []string{
+	TerminationStatementTimeout,
+	TerminationGrantExpired,
+	TerminationQuotaExceeded,
+	TerminationGrantRevoked,
+	TerminationAdminTerminated,
+}
 
 // SessionAuditEventTypes are the audit events one *session* produces, as opposed
 // to the control-plane changes the rest of `audit_log` records.
@@ -58,7 +99,11 @@ const (
 // entries deliberately omit — so nothing is hidden, only unmixed. Asking for one
 // by name (`?event_type=connection.closed`) returns it, and neither the chain
 // nor `dbbat audit verify` knows the difference: these are ordinary chained rows.
-var SessionAuditEventTypes = []string{AuditEventConnectionOpened, AuditEventConnectionClosed}
+var SessionAuditEventTypes = []string{
+	AuditEventConnectionOpened,
+	AuditEventConnectionClosed,
+	AuditEventConnectionTerminated,
+}
 
 // Who wrote a connection.closed entry. It is part of the record because the two
 // mean different things to a reader: a clean teardown sealed what the session
@@ -95,8 +140,17 @@ type connectionAuditDetails struct {
 	// fields are the stamp the close (or the reconcile) sealed onto the row, so
 	// the audit entry points at the query chain this session owned even after
 	// the row carrying it is gone.
-	DisconnectedAt         string `json:"disconnected_at,omitempty"`
-	ClosedBy               string `json:"closed_by,omitempty"`
+	DisconnectedAt string `json:"disconnected_at,omitempty"`
+	ClosedBy       string `json:"closed_by,omitempty"`
+
+	// Termination-only: why dbbat ended the session, which statement was in
+	// flight when it did, and — for a statement timeout — the limit that was
+	// crossed and how long the statement had actually been running.
+	TerminationReason      string `json:"termination_reason,omitempty"`
+	QueryUID               string `json:"query_uid,omitempty"`
+	LimitSeconds           string `json:"limit,omitempty"`
+	ObservedDuration       string `json:"observed_duration,omitempty"`
+	TerminationDetails     string `json:"detail,omitempty"`
 	QueryChainMAC          string `json:"query_chain_mac,omitempty"`
 	QueryChainLen          *int64 `json:"query_chain_len,omitempty"`
 	QueryChainStampVersion *int16 `json:"query_chain_stamp_version,omitempty"`
@@ -112,7 +166,7 @@ type connectionAuditDetails struct {
 // entry carries — is the bare address. host() is what makes the open and close
 // entries of one session agree on where it came from.
 const connectionAuditColumns = "uid, user_id, database_id, host(source_ip) AS source_ip, connected_at, " +
-	"disconnected_at, instance_id, run_id, grant_uid, " +
+	"disconnected_at, instance_id, run_id, grant_uid, termination_reason, " +
 	"query_chain_mac, query_chain_len, query_chain_stamp_version"
 
 // connectionOpenedEvent builds the entry written when a session starts.
@@ -331,4 +385,105 @@ func optionalUUIDString(id *uuid.UUID) string {
 	}
 
 	return id.String()
+}
+
+// Termination describes a session dbbat ended itself: why, and — when a
+// statement is what caused it — which statement and by how much it overran.
+//
+// It is protocol-agnostic on purpose. The statement-timeout watchdog is its
+// first caller; the grant/quota/revocation teardowns and the admin
+// terminate-connection endpoint are the next ones, and they all want the same
+// three surfaces updated in the same order.
+type Termination struct {
+	// Reason is one of the Termination* constants. An empty Reason makes
+	// RecordTermination a no-op: "dbbat did not end this session".
+	Reason string
+
+	// QueryUID is the statement that was in flight, uuid.Nil when none was.
+	QueryUID uuid.UUID
+
+	// Limit is the limit that was crossed and Observed how far past it the
+	// session got. Both zero when the reason is not a duration.
+	Limit    time.Duration
+	Observed time.Duration
+
+	// Detail is free text for the audit entry when the three fields above do
+	// not say enough. Never shown to the client.
+	Detail string
+}
+
+// Set reports whether this record describes an actual dbbat-initiated
+// termination, as opposed to the zero value every ordinary close carries.
+func (t Termination) Set() bool {
+	return t.Reason != ""
+}
+
+// Message is the human-readable one-liner a terminated session's in-flight
+// query row carries, and the text the client is told where the protocol allows
+// one. It names the limit and what was actually observed, because "your
+// session was terminated" without either is unactionable.
+func (t Termination) Message() string {
+	switch {
+	case !t.Set():
+		return ""
+	case t.Reason == TerminationStatementTimeout && t.Limit > 0 && t.Observed > 0:
+		return fmt.Sprintf("statement timeout: limit %s, ran %s, session terminated by dbbat",
+			t.Limit, t.Observed.Round(100*time.Millisecond))
+	case t.Reason == TerminationStatementTimeout && t.Limit > 0:
+		return fmt.Sprintf("statement timeout: limit %s, session terminated by dbbat", t.Limit)
+	case t.Detail != "":
+		return t.Reason + ": " + t.Detail + ", session terminated by dbbat"
+	default:
+		return t.Reason + ": session terminated by dbbat"
+	}
+}
+
+// recordConnectionTerminated writes the connection.terminated audit entry.
+//
+// It is written *before* the close entry rather than after, so a reader
+// following the chain sees the reason and then the seal, which is the order the
+// events actually happened in.
+func (s *Store) recordConnectionTerminated(ctx context.Context, conn *Connection, t Termination) {
+	if !t.Set() {
+		return
+	}
+
+	details := connectionAuditDetails{
+		ConnectionUID:      conn.UID.String(),
+		UserID:             conn.UserID.String(),
+		DatabaseID:         conn.DatabaseID.String(),
+		SourceIP:           conn.SourceIP,
+		ConnectedAt:        auditTimestamp(conn.ConnectedAt),
+		InstanceID:         conn.InstanceID,
+		RunID:              derefString(conn.RunID),
+		GrantUID:           optionalUUIDString(conn.GrantUID),
+		TerminationReason:  t.Reason,
+		TerminationDetails: t.Detail,
+	}
+
+	if conn.DisconnectedAt != nil {
+		details.DisconnectedAt = auditTimestamp(*conn.DisconnectedAt)
+	}
+
+	if t.QueryUID != uuid.Nil {
+		details.QueryUID = t.QueryUID.String()
+	}
+
+	if t.Limit > 0 {
+		details.LimitSeconds = t.Limit.String()
+	}
+
+	if t.Observed > 0 {
+		details.ObservedDuration = t.Observed.Round(time.Millisecond).String()
+	}
+
+	event, err := connectionAuditEvent(AuditEventConnectionTerminated, conn, details)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to build the session termination audit entry",
+			slog.String("connection", conn.UID.String()), slog.Any("error", err))
+
+		return
+	}
+
+	s.writeConnectionAudit(ctx, event)
 }

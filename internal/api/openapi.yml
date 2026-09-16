@@ -6291,6 +6291,18 @@ components:
           type: integer
           format: int64
           description: Total bytes transferred
+        termination_reason:
+          type: string
+          nullable: true
+          enum:
+            - statement_timeout
+            - grant_expired
+            - quota_exceeded
+            - grant_revoked
+            - admin_terminated
+          description: >-
+            Why *dbbat* ended this session, when dbbat is what ended it. Absent
+            — the ordinary case — means the client or the network did.
         upstream_tls:
           type: boolean
           description: >-
