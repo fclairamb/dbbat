@@ -298,6 +298,7 @@ sockets. See
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DBB_QUERY_TAGGING` | Tag every statement forwarded to the target with the dbbat identity — a comment on PostgreSQL and MySQL, the `comment` command field on MongoDB | `false` |
+| `DBB_QUERY_TAGGING_ORACLE` | Oracle's own switch: `off`, or `user` for a tag carrying the version, the user and the grant and **no** `conn=` | `off` |
 
 Every dbbat session logs in to the target as the **same shared database role**,
 from the **same host** — the proxy. So the target's own tooling attributes the
@@ -340,19 +341,30 @@ ORM's own tracing may already own it. Such a command is still attributable: the
 profiler records `appName`, which dbbat tags on every session. See
 [the MongoDB notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md).
 
-**Oracle and SQL Server are excluded**, and there is no
-`DBB_QUERY_TAGGING_ORACLE`. `V$SQL` keys on statement text, so every distinct
-tag is a distinct SQL_ID holding its own shared-pool cursor. Measured on Oracle
-23ai with one join executed 600 times: the `conn=` tag spread over 200 sessions
-cost 200 cursors and 9.6 MB, growing with every session opened. Dropping `conn=`
-bounds it instead by the number of dbbat *users* — 20 identities cost 20
-cursors, one hard parse each and ~48 KB apiece, then plateau, with a second 600
-executions adding nothing at all — so a per-user tag is affordable. What is not
-ready is the proxy: unlike the three above it relays the client's TNS packets
-byte for byte and only decodes statements to gate and record them, so there is
-nowhere to prepend a comment without re-encoding the TTC frame. A setting that
-changed nothing would be worse than its absence. The numbers and the remaining
-work are in
+**Oracle has its own variable**, `DBB_QUERY_TAGGING_ORACLE`, and
+`DBB_QUERY_TAGGING` deliberately does not reach it. `V$SQL` keys on statement
+text, so every distinct tag is a distinct SQL_ID holding its own shared-pool
+cursor — the tag buys attribution by spending shared pool, and that trade-off is
+Oracle's alone. Measured on Oracle 23ai with one join executed 600 times: the
+`conn=` tag spread over 200 sessions cost 200 cursors and 9.6 MB, growing with
+every session opened. Dropping `conn=` bounds it by the number of dbbat *users*
+instead — 20 identities cost 20 cursors, one hard parse each and ~48 KB apiece,
+then plateau, with a second 600 executions adding nothing at all. So the only
+non-off value is `user`:
+
+```sql
+/*dbbat='0.28.1',user='florent',grant='diag-paris-habitat'*/ SELECT ...
+```
+
+Turning it on does not oblige the proxy to tag. Unlike the three protocols
+above, Oracle relays the client's own TNS packets, so a statement can only carry
+the tag when dbbat can relocate it in the frame **to the byte** and re-encode
+that frame back to the client's own bytes. A session whose client shape it
+cannot certify runs untagged from start to finish and logs why — deliberately
+all-or-nothing per session, because a statement tagged on some executions and
+not others would get *two* SQL_IDs and double the cursor count the whole design
+is about. Anything other than `off` or `user` fails the process at startup. The
+numbers and the encoding details are in
 [the Oracle notes](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md).
 SQL Server is a follow-up.
 
