@@ -73,6 +73,12 @@ type Server struct {
 	// every session's auth. nil — the default — means no limit is imposed
 	// beyond whatever the grant definition carries.
 	statementTimeouts *shared.StatementTimeoutResolver
+
+	// queryTagging puts the dbbat identity in the `comment` field of every
+	// taggable command forwarded upstream (querytag.go). Off — the default —
+	// forwards each command byte-for-byte as it always did. Atomic because the
+	// wiring in main sets it while the listener may already be accepting.
+	queryTagging atomic.Bool
 }
 
 // NewServer creates a new MongoDB proxy server.
@@ -297,6 +303,13 @@ func (s *Server) SetStatementTimeouts(r *shared.StatementTimeoutResolver) {
 // them never holds anything.
 func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
 	s.approvalDeps = deps
+}
+
+// SetQueryTagging turns the dbbat identity tag on. Called by the wiring in
+// main from DBB_QUERY_TAGGING — the same flag the SQL proxies read; a server
+// without it forwards every command byte-for-byte as it always did.
+func (s *Server) SetQueryTagging(enabled bool) {
+	s.queryTagging.Store(enabled)
 }
 
 // SetRowWriter installs the process-wide result-row writer, replacing (and

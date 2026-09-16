@@ -11,6 +11,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
+	"github.com/fclairamb/dbbat/internal/version"
 )
 
 // authFailDelay slows brute-force attempts: replies to failed auth are held
@@ -129,6 +130,14 @@ func (s *Session) establishSession(responseTo int32, grant *store.Grant) error {
 	// Resolve the per-statement limit once, next to the grant it comes from,
 	// so the maxTimeMS injection and the watchdog read one value.
 	s.statementLimit = s.server.statementTimeouts.For(s.ctx, grant)
+
+	// The identity tag, built once, here, because every component of it is
+	// known exactly now and none of them changes for the rest of the session.
+	// Left at its inert zero value when DBB_QUERY_TAGGING is off.
+	if s.server.queryTagging.Load() {
+		s.queryTag = shared.NewQueryTagger(
+			version.Version, s.user.Username, s.connUID, grant.DefinitionSlug())
+	}
 
 	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).

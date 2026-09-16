@@ -162,11 +162,13 @@ func (s *Session) handleClientOpMsg(m *message) error {
 		s.annotateGetMore(pq, body)
 	}
 
-	// Layer 1 on this protocol: there is no session-level statement timeout to
-	// SET, so the limit rides in the command itself. Done here, where the
-	// command is already parsed, and after the hold — a command that was never
-	// forwarded has no deadline to carry.
-	forwarded, terr := s.applyMaxTimeMS(m, parsed, body, cmd)
+	// The last thing before the command goes upstream: the per-statement
+	// deadline and the dbbat identity tag, both written into the *forwarded*
+	// copy only. Every control above — the grant, the $db check, the quota and
+	// the approval hold — ran on the client's command, and pq.sqlText (which
+	// feeds the queries row and the audit chain) holds the client's command
+	// too. Only the bytes on the wire change.
+	forwarded, terr := s.prepareForwarded(m, parsed, body, cmd)
 	if terr != nil {
 		return s.rejectCommand(m, cmd, body, moreToCome, terr)
 	}
@@ -291,32 +293,37 @@ var maxTimeMSExemptCommands = map[string]bool{
 	"getnonce":       true,
 }
 
-// applyMaxTimeMS returns the message to forward, with the grant's per-statement
-// limit injected as maxTimeMS when one applies.
+// prepareForwarded returns the message to forward: the client's, rewritten by
+// each dbbat-owned command option that applies — the per-statement deadline
+// (maxTimeMS) and the identity tag (`comment`).
 //
-// This is the MongoDB half of layer 1 — the polite, server-side cancellation
-// that gives the client a real MaxTimeMSExpired error and keeps its session
-// alive. The watchdog behind it is unchanged: a client that finds a way past
-// this still meets it.
+// They compose on the *document* and the message is re-serialized once, rather
+// than each rewriting a message of its own: rebuildOpMsg re-serializes from the
+// sections parsed out of the original body, so feeding it a second time with a
+// message the first pass already rebuilt would silently drop that pass's work.
 //
-// A client value at or below the limit wins; a larger one (or the 0 that means
-// "no limit") is clamped. Clamped rather than refused: unlike a SQL `SET`,
-// maxTimeMS is an ordinary per-command option every driver sets for its own
-// reasons, and refusing it would break clients that are asking for *less* than
-// dbbat is about to impose.
-func (s *Session) applyMaxTimeMS(m *message, parsed *opMsg, body bson.Raw, cmd string) (*message, error) {
-	if s.statementLimit <= 0 || maxTimeMSExemptCommands[cmd] {
-		return m, nil
-	}
+// A command no rewrite touches is forwarded as the very bytes that arrived,
+// pointer included.
+func (s *Session) prepareForwarded(m *message, parsed *opMsg, body bson.Raw, cmd string) (*message, error) {
+	rewritten := body
+	changed := false
 
-	limitMS := s.statementLimit.Milliseconds()
-	if limitMS <= 0 {
-		return m, nil
-	}
-
-	rewritten, changed, err := withMaxTimeMS(body, limitMS)
+	next, ok, err := s.applyMaxTimeMS(rewritten, cmd)
 	if err != nil {
 		return nil, err
+	}
+
+	if ok {
+		rewritten, changed = next, true
+	}
+
+	next, ok, err = s.applyQueryTag(rewritten, cmd)
+	if err != nil {
+		return nil, err
+	}
+
+	if ok {
+		rewritten, changed = next, true
 	}
 
 	if !changed {
@@ -336,6 +343,32 @@ func (s *Session) applyMaxTimeMS(m *message, parsed *opMsg, body bson.Raw, cmd s
 		body:       raw[headerLen:],
 		raw:        raw,
 	}, nil
+}
+
+// applyMaxTimeMS returns the command body with the grant's per-statement limit
+// injected as maxTimeMS when one applies, and reports whether it changed.
+//
+// This is the MongoDB half of layer 1 — the polite, server-side cancellation
+// that gives the client a real MaxTimeMSExpired error and keeps its session
+// alive. The watchdog behind it is unchanged: a client that finds a way past
+// this still meets it.
+//
+// A client value at or below the limit wins; a larger one (or the 0 that means
+// "no limit") is clamped. Clamped rather than refused: unlike a SQL `SET`,
+// maxTimeMS is an ordinary per-command option every driver sets for its own
+// reasons, and refusing it would break clients that are asking for *less* than
+// dbbat is about to impose.
+func (s *Session) applyMaxTimeMS(body bson.Raw, cmd string) (bson.Raw, bool, error) {
+	if s.statementLimit <= 0 || maxTimeMSExemptCommands[cmd] {
+		return body, false, nil
+	}
+
+	limitMS := s.statementLimit.Milliseconds()
+	if limitMS <= 0 {
+		return body, false, nil
+	}
+
+	return withMaxTimeMS(body, limitMS)
 }
 
 // pendingCommand returns the command name of the in-flight query for responseTo
