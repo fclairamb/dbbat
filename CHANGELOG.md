@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.28.1](https://github.com/fclairamb/dbbat/compare/v0.28.0...v0.28.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/gopacket/gopacket to v1.7.2 ([#381](https://github.com/fclairamb/dbbat/issues/381)) ([e734c59](https://github.com/fclairamb/dbbat/commit/e734c59cfe6a8b8c23d9bc461cd07aa39d568d43))
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.8.0 ([#379](https://github.com/fclairamb/dbbat/issues/379)) ([4d616b5](https://github.com/fclairamb/dbbat/commit/4d616b57bcc9ffe571cc721cfd0006b48d9161ce))
+* **deps:** update module github.com/urfave/cli/v3 to v3.12.0 ([#380](https://github.com/fclairamb/dbbat/issues/380)) ([e792094](https://github.com/fclairamb/dbbat/commit/e7920946833c7a4cfd3015cbc1b3f300c7341497))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.9.1 ([#377](https://github.com/fclairamb/dbbat/issues/377)) ([e49d833](https://github.com/fclairamb/dbbat/commit/e49d833a055cb494b247f2b6ee21f817a0a65c1b))
+
 ## [0.28.0](https://github.com/fclairamb/dbbat/compare/v0.27.0...v0.28.0) (2026-09-09)
 
 
