@@ -432,6 +432,20 @@ type Connection struct {
 	// bug, not an extension point.
 	TerminationReason *string `bun:"termination_reason" json:"termination_reason,omitempty"`
 
+	// The admin's request to end this session, which is how a terminate
+	// crosses the instance boundary: the replica serving the API call writes
+	// these, and the replica that actually owns the session (connections.run_id)
+	// picks them up on its next poll.
+	//
+	// They are an *intent*, distinct from TerminationReason's record of what
+	// happened: a session can close on its own between the request and the
+	// poll, in which case these stay set and TerminationReason stays nil, and
+	// that is the honest reading of it. TerminateReason is the requesting
+	// admin's free text, never the closed vocabulary.
+	TerminateRequestedAt *time.Time `bun:"terminate_requested_at" json:"terminate_requested_at,omitempty"`
+	TerminateRequestedBy *uuid.UUID `bun:"terminate_requested_by,type:uuid" json:"terminate_requested_by,omitempty"`
+	TerminateReason      *string    `bun:"terminate_reason" json:"terminate_reason,omitempty"`
+
 	// UpstreamTLS reports whether the proxy→upstream leg of this session was
 	// encrypted. The server row's ssl_mode states a policy, not an outcome:
 	// the opportunistic modes ("prefer", and the empty default) fall back to
