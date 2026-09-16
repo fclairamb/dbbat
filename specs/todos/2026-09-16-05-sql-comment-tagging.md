@@ -182,4 +182,14 @@ Ordered, committable steps. Each one builds and lints on its own.
    → no `/*dbbat=` upstream. MySQL: `performance_schema.
    events_statements_history` shows the tag, `COM_STMT_PREPARE` + execute
    works. Plus `audit verify --queries` clean with tagging on.
+
+   The approval-hold case is covered at **both** levels, deliberately. The
+   unit tests (`internal/proxy/postgresql/querytag_test.go`) drive the real
+   gate over a real socket but a fake store; the integration one
+   (`TestIntegration_QueryTagging_ApprovalHoldStoresClientText`) is what
+   proves the *persisted* row — the one the tamper-evident chain MACs — holds
+   the client's text, which a store fake cannot show. It needed the PG
+   fixture to grow an `approvalPatterns` option, wiring both the definition's
+   patterns and the proxy's approval collaborators before `Start` (the deps
+   are a plain field the accept loop reads, and these suites run `-race`).
    *Commit: `test: cover statement tagging`*
