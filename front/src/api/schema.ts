@@ -2043,6 +2043,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/instance/limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update instance-wide limits
+         * @description Writes the `limits.*` parameter group. Admin-only. An empty `statement_timeout` clears the parameter, falling back to DBB_STATEMENT_TIMEOUT; "0" disables the limit outright.
+         */
+        put: operations["updateInstanceLimits"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/mcp": {
         parameters: {
             query?: never;
@@ -2885,6 +2905,15 @@ export interface components {
             /** Format: int64 */
             max_bytes_transferred?: number | null;
             /**
+             * Format: int64
+             * @description Per-statement time limit for grants issued from this definition.
+             *     Three states: `null`/omitted inherits the instance-wide default
+             *     (`limits.statement_timeout`, else `DBB_STATEMENT_TIMEOUT`); `0`
+             *     means explicitly no limit, overriding that default; a positive
+             *     value is the limit in seconds.
+             */
+            statement_timeout_seconds?: number | null;
+            /**
              * Format: int32
              * @description Selection priority stamped verbatim on every grant materialized
              *     from this definition. `null` — the normal case — means the grant
@@ -3007,6 +3036,15 @@ export interface components {
             /** Format: int64 */
             max_bytes_transferred?: number | null;
             /**
+             * Format: int64
+             * @description Per-statement time limit for grants issued from this definition.
+             *     Three states: `null`/omitted inherits the instance-wide default
+             *     (`limits.statement_timeout`, else `DBB_STATEMENT_TIMEOUT`); `0`
+             *     means explicitly no limit, overriding that default; a positive
+             *     value is the limit in seconds.
+             */
+            statement_timeout_seconds?: number | null;
+            /**
              * Format: int32
              * @description Optional selection priority for grants materialized from this
              *     definition. Omit (or send `null`) to let each grant take the tier
@@ -3101,6 +3139,17 @@ export interface components {
             max_bytes_transferred?: number | null;
             /** @description When true, resets max_bytes_transferred to unlimited. */
             clear_max_bytes_transferred?: boolean;
+            /**
+             * Format: int64
+             * @description Per-statement time limit for grants issued from this definition.
+             *     Three states: `null`/omitted inherits the instance-wide default
+             *     (`limits.statement_timeout`, else `DBB_STATEMENT_TIMEOUT`); `0`
+             *     means explicitly no limit, overriding that default; a positive
+             *     value is the limit in seconds.
+             */
+            statement_timeout_seconds?: number | null;
+            /** @description When true, resets statement_timeout_seconds to null, i.e. back to inheriting the instance-wide default. Needed because `null` and `0` mean different things here, so sending `null` cannot express it. */
+            clear_statement_timeout_seconds?: boolean;
             /** Format: int32 */
             priority?: number | null;
             /** @description When true, resets priority to auto (tier derived from controls). */
@@ -3530,6 +3579,11 @@ export interface components {
              * @description Total bytes transferred
              */
             bytes_transferred: number;
+            /**
+             * @description Why *dbbat* ended this session, when dbbat is what ended it. Absent — the ordinary case — means the client or the network did.
+             * @enum {string|null}
+             */
+            termination_reason?: "statement_timeout" | "grant_expired" | "quota_exceeded" | "grant_revoked" | "admin_terminated" | null;
             /** @description Whether the proxy→upstream leg of this session was actually encrypted. The server's ssl_mode states a policy, not an outcome: the opportunistic modes (`prefer`, and the empty default) offer TLS and fall back to plaintext when the target refuses, so only the session knows which way it went. Always false for Oracle, whose proxy relays the client's own TNS Connect descriptor over a plain socket. */
             upstream_tls?: boolean;
             /**
@@ -4114,7 +4168,28 @@ export interface components {
             };
             /** @description Only present for admin callers */
             public?: components["schemas"]["PublicEndpoints"];
+            /** @description Only present for admin callers */
+            limits?: components["schemas"]["InstanceLimits"];
             resolved: components["schemas"]["ResolvedEndpoints"];
+            resolved_limits: components["schemas"]["ResolvedInstanceLimits"];
+        };
+        /** @description Raw operator-configured instance-wide limits (the `limits.*` parameter group), before the environment-variable fallback is applied. */
+        InstanceLimits: {
+            /** @description Go duration string ("30s", "5m") bounding how long a single statement may run. Empty means the parameter is unset and DBB_STATEMENT_TIMEOUT applies; "0" disables the limit outright. */
+            statement_timeout: string;
+        };
+        /** @description The instance-wide limits that actually apply. */
+        ResolvedInstanceLimits: {
+            /**
+             * Format: int64
+             * @description Effective per-statement limit in seconds; 0 = no limit.
+             */
+            statement_timeout_seconds: number;
+            /**
+             * @description Where the effective value came from: the store parameter, the environment variable, or empty when there is no limit.
+             * @enum {string}
+             */
+            statement_timeout_source: "" | "parameter" | "env";
         };
         /** @description Standard error response */
         Error: {
@@ -4345,6 +4420,8 @@ export type SetParameterRequest = components['schemas']['SetParameterRequest'];
 export type PublicEndpoints = components['schemas']['PublicEndpoints'];
 export type ResolvedEndpoints = components['schemas']['ResolvedEndpoints'];
 export type InstanceInfo = components['schemas']['InstanceInfo'];
+export type InstanceLimits = components['schemas']['InstanceLimits'];
+export type ResolvedInstanceLimits = components['schemas']['ResolvedInstanceLimits'];
 export type Error = components['schemas']['Error'];
 export type MessageResponse = components['schemas']['MessageResponse'];
 export type McpMessage = components['schemas']['MCPMessage'];
@@ -7283,6 +7360,32 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["PublicEndpoints"];
+            };
+        };
+        responses: {
+            /** @description Settings saved */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateInstanceLimits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstanceLimits"];
             };
         };
         responses: {

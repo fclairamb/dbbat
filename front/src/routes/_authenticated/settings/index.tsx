@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import {
   useInstance,
   useUpdateInstancePublic,
+  useUpdateInstanceLimits,
   useParameters,
   useUpdateParameter,
   useDeleteParameter,
@@ -92,9 +93,98 @@ function SettingsPage() {
         description="Instance configuration and public endpoint advertisement"
       />
       <LocalListenersSection />
+      <LimitsSection />
       <PublicAdvertisementSection />
       <RawParametersSection />
     </div>
+  );
+}
+
+function LimitsSection() {
+  const { data: instance } = useInstance();
+
+  // Keyed on load so the inputs pick up the fetched values once, without a
+  // controlled-vs-fetched tug of war on every re-render.
+  return (
+    <LimitsForm
+      key={instance ? "loaded" : "init"}
+      statementTimeout={instance?.limits?.statement_timeout ?? ""}
+      resolvedSeconds={instance?.resolved_limits?.statement_timeout_seconds ?? 0}
+      resolvedSource={instance?.resolved_limits?.statement_timeout_source ?? ""}
+    />
+  );
+}
+
+function LimitsForm({
+  statementTimeout,
+  resolvedSeconds,
+  resolvedSource,
+}: {
+  statementTimeout: string;
+  resolvedSeconds: number;
+  resolvedSource: string;
+}) {
+  const updateLimits = useUpdateInstanceLimits({
+    onSuccess: () => toast.success("Limits saved"),
+    onError: (e) => toast.error(e.message),
+  });
+
+  const [value, setValue] = useState(statementTimeout);
+
+  const effective =
+    resolvedSeconds > 0
+      ? `${resolvedSeconds}s`
+      : "no limit";
+
+  const sourceLabel =
+    resolvedSource === "parameter"
+      ? "from this setting"
+      : resolvedSource === "env"
+        ? "from DBB_STATEMENT_TIMEOUT"
+        : "nothing is configured";
+
+  return (
+    <Card data-testid="limits-section">
+      <CardHeader>
+        <CardTitle>Limits</CardTitle>
+        <CardDescription>
+          Instance-wide limits every grant inherits unless its definition says
+          otherwise. A grant definition can set its own per-statement timeout,
+          including <code className="text-xs">0</code> for &ldquo;no
+          limit&rdquo; — which is how a dump or ETL definition stays usable.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor="statement-timeout">Statement timeout</Label>
+          <Input
+            id="statement-timeout"
+            data-testid="limits-statement-timeout-input"
+            placeholder="e.g. 30s, 5m — empty falls back to DBB_STATEMENT_TIMEOUT"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+          <p className="text-sm text-muted-foreground">
+            How long any single statement may run before dbbat cancels it and
+            ends the session. A Go duration (<code className="text-xs">30s</code>,{" "}
+            <code className="text-xs">5m</code>). Leave empty to fall back to the{" "}
+            <code className="text-xs">DBB_STATEMENT_TIMEOUT</code> environment
+            variable; use <code className="text-xs">0</code> to disable the
+            limit outright.
+          </p>
+          <p className="text-sm text-muted-foreground">
+            Currently in effect: <strong>{effective}</strong> ({sourceLabel}).
+          </p>
+        </div>
+        <Button
+          data-testid="limits-save-button"
+          onClick={() => updateLimits.mutate({ statement_timeout: value })}
+          disabled={updateLimits.isPending}
+        >
+          {updateLimits.isPending ? "Saving..." : "Save limits"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
