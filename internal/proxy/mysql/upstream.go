@@ -176,17 +176,17 @@ func (s *Session) pinStatementTimeout() error {
 // order. Closing the sockets alone leaves the server executing the statement
 // until it next notices the client is gone, which on a long scan can be a very
 // long time — and that load is exactly what the limit exists to stop.
-func (s *Session) killUpstreamStatement() {
+func (s *Session) killUpstreamStatement(ctx context.Context) {
 	if s.upstreamConnID == 0 || s.database == nil {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(s.ctx, mysqlKillTimeout)
+	ctx, cancel := context.WithTimeout(ctx, mysqlKillTimeout)
 	defer cancel()
 
 	up, err := upstream.ConnectMySQL(ctx, s.dialUpstream, s.upstreamConfig())
 	if err != nil {
-		s.logger.WarnContext(s.ctx, "failed to open a connection to kill the upstream statement",
+		s.logger.WarnContext(ctx, "failed to open a connection to kill the upstream statement",
 			slog.Any("error", err))
 
 		return
@@ -195,14 +195,14 @@ func (s *Session) killUpstreamStatement() {
 	defer func() { _ = up.Close() }()
 
 	if _, err := up.Conn.Execute(fmt.Sprintf("KILL QUERY %d", s.upstreamConnID)); err != nil {
-		s.logger.WarnContext(s.ctx, "failed to kill the upstream statement",
+		s.logger.WarnContext(ctx, "failed to kill the upstream statement",
 			slog.Uint64("upstream_connection_id", uint64(s.upstreamConnID)),
 			slog.Any("error", err))
 
 		return
 	}
 
-	s.logger.InfoContext(s.ctx, "killed the upstream statement",
+	s.logger.InfoContext(ctx, "killed the upstream statement",
 		slog.Uint64("upstream_connection_id", uint64(s.upstreamConnID)))
 }
 

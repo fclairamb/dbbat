@@ -45,6 +45,16 @@ func WithMaxBytesTransferred(maxBytes int64) GrantOption {
 	}
 }
 
+// WithStatementTimeout puts a per-statement time limit on the definition, in
+// seconds. Zero is meaningful here and is *not* "unset": it means "no limit,
+// overriding the instance-wide default", which is the state a dump or ETL
+// definition needs. Leaving the option off is what means "inherit".
+func WithStatementTimeout(seconds int64) GrantOption {
+	return func(def *store.GrantDefinition) {
+		def.StatementTimeoutSeconds = &seconds
+	}
+}
+
 // CreateGrantWithControls issues a grant carrying the given controls. Every
 // grant is an *instance of a definition* and carries no shape of its own, so
 // the definition has to exist first and be named by uid — an inline

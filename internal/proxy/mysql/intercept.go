@@ -733,7 +733,7 @@ var statementTimeoutSetPatterns = []*regexp.Regexp{
 // hint, capturing n (milliseconds).
 //
 // The hint is checked rather than refused outright because a *smaller* value is
-// a client narrowing its own limit, which is exactly the behaviour the limit is
+// a client narrowing its own limit, which is exactly the behavior the limit is
 // trying to encourage. Only a value above the grant's limit is a bypass.
 var maxExecutionTimeHint = regexp.MustCompile(`(?i)/\*\+[^*]*\bMAX_EXECUTION_TIME\s*\(\s*(\d+)\s*\)`)
 

@@ -372,6 +372,11 @@ func computeMD5Password(password, username string, salt [4]byte) string {
 	return "md5" + hex.EncodeToString(h2.Sum(nil))
 }
 
+// ErrPostgresNoCancelKey means the session never received a BackendKeyData, so
+// there is no backend to name in a CancelRequest. Not a failure of the cancel —
+// there was nothing to cancel with.
+var ErrPostgresNoCancelKey = errors.New("no upstream cancellation key")
+
 // postgresCancelTimeout bounds the whole cancel exchange — dial, TLS
 // negotiation, one write. A cancel is best-effort housekeeping on a session
 // that is already being torn down, so it must never be what keeps the teardown
@@ -398,7 +403,7 @@ func CancelPostgres(
 	ctx context.Context, dial DialFunc, sslMode, host string, key *pgproto3.BackendKeyData,
 ) error {
 	if key == nil {
-		return errors.New("no upstream cancellation key")
+		return ErrPostgresNoCancelKey
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, postgresCancelTimeout)

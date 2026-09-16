@@ -513,7 +513,7 @@ func (s *session) cancelUpstreamStatement(ctx context.Context) {
 		return
 	}
 
-	s.logger.InfoContext(ctx, "cancelled the upstream statement with an ATTENTION")
+	s.logger.InfoContext(ctx, "canceled the upstream statement with an ATTENTION")
 
 	time.Sleep(attentionSettleDelay)
 }

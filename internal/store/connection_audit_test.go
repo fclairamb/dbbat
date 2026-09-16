@@ -386,3 +386,81 @@ func TestSessionAuditRecordsTheStoredConnectedAt(t *testing.T) {
 		"the entry's connected_at (%s) must be the value the row stores (%s)",
 		recorded, row.ConnectedAt.UTC())
 }
+
+// TestCloseConnectionWithReasonRecordsTheTermination pins the whole
+// dbbat-initiated teardown record: the reason lands on the row in the same
+// statement as disconnected_at (so a terminated session can never read back as
+// a clean one), and a chained connection.terminated entry carries the statement
+// and the numbers alongside the ordinary close entry.
+func TestCloseConnectionWithReasonRecordsTheTermination(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "terminated_session")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.7.7.7")
+	require.NoError(t, err)
+
+	queryUID := uuid.New()
+
+	require.NoError(t, store.CloseConnectionWithReason(ctx, conn.UID, Termination{
+		Reason:   TerminationStatementTimeout,
+		QueryUID: queryUID,
+		Limit:    30 * time.Second,
+		Observed: 32100 * time.Millisecond,
+	}))
+
+	row, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, row.DisconnectedAt, "a terminated session must also be closed")
+	require.NotNil(t, row.TerminationReason)
+	assert.Equal(t, TerminationStatementTimeout, *row.TerminationReason)
+
+	terminated := sessionAuditEntries(t, ctx, store, AuditEventConnectionTerminated, conn.UID)
+	require.Len(t, terminated, 1)
+
+	assert.Equal(t, TerminationStatementTimeout, terminated[0].TerminationReason)
+	assert.Equal(t, queryUID.String(), terminated[0].QueryUID)
+	assert.Equal(t, "30s", terminated[0].LimitSeconds)
+	assert.Equal(t, "32.1s", terminated[0].ObservedDuration)
+	assert.Equal(t, user.UID.String(), terminated[0].UserID)
+	assert.Equal(t, database.UID.String(), terminated[0].DatabaseID)
+
+	// The ordinary close entry is still written: it is the one that seals the
+	// query chain, and the terminated entry carries the *why*, not the seal.
+	require.Len(t, sessionAuditEntries(t, ctx, store, AuditEventConnectionClosed, conn.UID), 1)
+
+	// Both are ordinary chained rows, so the chain still verifies.
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.OK(), "the audit chain must still verify: %v", result.Break)
+}
+
+// TestCloseConnectionWithReasonIsPlainCloseWhenUnset keeps the two paths one
+// path: a caller that only sometimes has a reason must not need two code paths,
+// and a zero Termination must leave no trace of a termination that did not
+// happen.
+func TestCloseConnectionWithReasonIsPlainCloseWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "ordinary_close")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.8.8.8")
+	require.NoError(t, err)
+
+	require.NoError(t, store.CloseConnectionWithReason(ctx, conn.UID, Termination{}))
+
+	row, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, row.DisconnectedAt)
+	assert.Nil(t, row.TerminationReason, "an ordinary close leaves no termination reason")
+
+	assert.Empty(t, sessionAuditEntries(t, ctx, store, AuditEventConnectionTerminated, conn.UID),
+		"an ordinary close writes no connection.terminated entry")
+	require.Len(t, sessionAuditEntries(t, ctx, store, AuditEventConnectionClosed, conn.UID), 1)
+}

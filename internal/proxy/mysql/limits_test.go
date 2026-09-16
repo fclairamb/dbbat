@@ -81,7 +81,7 @@ func TestWatchdog_TearsDownOnRevocation(t *testing.T) {
 	defer cancel()
 
 	go guard.Watch(ctx, time.Millisecond, func(err error) {
-		s.onLimitViolation(upstreamConn, clientConn, err)
+		s.onLimitViolation(context.Background(), upstreamConn, clientConn, err)
 	})
 
 	reg.Revoke(grant.UID)
@@ -152,7 +152,7 @@ func TestOnLimitViolation_ClosesConns(t *testing.T) {
 	clientConn := pipePair(t)
 	upstreamConn := pipePair(t)
 
-	s.onLimitViolation(upstreamConn, clientConn, shared.ErrByteQuotaExceeded)
+	s.onLimitViolation(context.Background(), upstreamConn, clientConn, shared.ErrByteQuotaExceeded)
 
 	assertConnClosed(t, clientConn, "client")
 	assertConnClosed(t, upstreamConn, "upstream")
@@ -179,7 +179,7 @@ func TestWatchdog_TearsDownOnByteQuota(t *testing.T) {
 	defer cancel()
 
 	go guard.Watch(ctx, time.Millisecond, func(err error) {
-		s.onLimitViolation(upstreamConn, clientConn, err)
+		s.onLimitViolation(context.Background(), upstreamConn, clientConn, err)
 	})
 
 	assertConnClosed(t, clientConn, "client")
@@ -207,7 +207,7 @@ func TestWatchdog_TearsDownOnExpiry(t *testing.T) {
 	defer cancel()
 
 	go guard.Watch(ctx, time.Millisecond, func(err error) {
-		s.onLimitViolation(upstreamConn, clientConn, err)
+		s.onLimitViolation(context.Background(), upstreamConn, clientConn, err)
 	})
 
 	assertConnClosed(t, clientConn, "client")

@@ -64,7 +64,7 @@ func buildResetMarker() []byte {
 // see that function for the field-by-field breakdown.
 //
 // **Unverified against a real Oracle server.** dbbat sends this on the watchdog
-// teardown path as a courtesy — a server that honours it stops burning CPU on a
+// teardown path as a courtesy — a server that honors it stops burning CPU on a
 // statement nobody will read — but the socket close immediately after is what
 // the enforcement actually rests on, and the end-to-end suite has not yet proven
 // the marker alone ends the call. See docs/oracle.md.

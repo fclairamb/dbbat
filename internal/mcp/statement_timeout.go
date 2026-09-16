@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// ErrStatementTimeout is what an agent is told when dbbat cancelled its
+// ErrStatementTimeout is what an agent is told when dbbat canceled its
 // statement for running past the grant's per-statement limit.
 //
 // It exists as its own error, rather than the raw driver failure being passed
@@ -17,10 +17,10 @@ import (
 // SQL Server — which have no server-side limit at all — the watchdog's socket
 // close arrives as a bare connection reset. An agent reading any of those
 // retries; an agent told it exceeded a named limit narrows its query, which is
-// the whole behavioural point.
-var ErrStatementTimeout = errors.New("statement exceeded the per-statement time limit of your grant and was cancelled")
+// the whole behavioral point.
+var ErrStatementTimeout = errors.New("statement exceeded the per-statement time limit of your grant and was canceled")
 
-// statementTimeoutSignatures are the messages a cancelled statement produces on
+// statementTimeoutSignatures are the messages a canceled statement produces on
 // each protocol's client library.
 //
 // Matched on text because that is all the drivers expose in common: pgx surfaces
@@ -50,7 +50,7 @@ var statementTimeoutSignatures = []string{
 //
 // limit is the grant's resolved per-statement limit; zero means no limit
 // applies, in which case nothing is reclassified — a statement that was
-// cancelled for some other reason must keep saying so.
+// canceled for some other reason must keep saying so.
 //
 // The original error is wrapped rather than discarded: an operator reading the
 // audit trail still wants the protocol's own words.

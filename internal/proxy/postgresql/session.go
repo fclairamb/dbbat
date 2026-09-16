@@ -566,7 +566,7 @@ func (s *Session) cancelUpstreamStatement() {
 		return
 	}
 
-	s.logger.InfoContext(s.ctx, "cancelled the upstream statement",
+	s.logger.InfoContext(s.ctx, "canceled the upstream statement",
 		slog.String("database", s.database.Name))
 }
 

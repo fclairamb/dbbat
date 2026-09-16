@@ -621,7 +621,7 @@ const maxTimeMSKey = "maxTimeMS"
 // whether anything changed.
 //
 // A client value that is already at or below the limit is left alone: a client
-// narrowing its own deadline is exactly the behaviour a per-statement limit is
+// narrowing its own deadline is exactly the behavior a per-statement limit is
 // trying to encourage, and overwriting it would *widen* the client's own
 // expectation. A missing value, a zero (which MongoDB reads as "no limit") or a
 // larger one is replaced.
@@ -662,6 +662,8 @@ func withMaxTimeMS(doc bson.Raw, limitMS int64) (bson.Raw, bool, error) {
 // asInt64 reads a BSON numeric value as an int64, reporting whether it was one.
 // Drivers spell maxTimeMS as int32, int64 or double depending on the language,
 // so all three are accepted.
+//
+//nolint:exhaustive // the three numeric types are the point; default covers the rest
 func asInt64(v bson.RawValue) (int64, bool) {
 	switch v.Type {
 	case bson.TypeInt32:

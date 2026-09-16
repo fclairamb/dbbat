@@ -273,7 +273,7 @@ func (s *Session) refreshStatementClockLocked() {
 // They are the handshake, auth and teardown chatter a driver issues on its own:
 // none of them is a statement a user wrote, none can run long, and a couple
 // (killCursors, endSessions, the SASL exchange) are exactly what a driver sends
-// while cleaning up after a command that *was* cancelled — putting a deadline
+// while cleaning up after a command that *was* canceled — putting a deadline
 // on those would turn one timeout into two.
 var maxTimeMSExemptCommands = map[string]bool{
 	"hello":          true,

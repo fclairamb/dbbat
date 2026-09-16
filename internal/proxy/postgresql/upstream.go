@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
@@ -14,6 +15,16 @@ import (
 	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/version"
 )
+
+// skipStatementTimeoutSetup suppresses the server-side `SET SESSION
+// statement_timeout`, leaving only dbbat's own watchdog.
+//
+// A test seam, and one that earns its place in product code: the two layers are
+// designed so the polite one normally wins, which means the watchdog — the layer
+// the whole feature actually rests on — is never exercised end to end unless the
+// polite one can be turned off. Nothing outside the integration suite writes it,
+// and with it unset the behavior is exactly as if it did not exist.
+var skipStatementTimeoutSetup atomic.Bool
 
 // ErrUpstreamReadOnlyMode is returned when the upstream fails to set read-only
 // mode. Kept as the historical name; ErrUpstreamSessionSetup is what the
@@ -160,7 +171,7 @@ func buildApplicationName(username, clientAppName string) string {
 // Both entries are defense in depth rather than the enforcement itself — dbbat
 // refuses a write and kills an over-time statement on its own — but both change
 // what the *client* sees when it crosses the line: a real PostgreSQL error with
-// a real SQLSTATE (25006 for a write, 57014 for a cancelled statement) instead
+// a real SQLSTATE (25006 for a write, 57014 for a canceled statement) instead
 // of a dropped socket.
 func (s *Session) upstreamSetupStatements() []string {
 	var stmts []string
@@ -169,7 +180,7 @@ func (s *Session) upstreamSetupStatements() []string {
 		stmts = append(stmts, "SET SESSION default_transaction_read_only = on;")
 	}
 
-	if s.statementLimit > 0 {
+	if s.statementLimit > 0 && !skipStatementTimeoutSetup.Load() {
 		// Milliseconds: statement_timeout's bare-integer unit, and the one
 		// every version accepts without a unit suffix being parsed.
 		stmts = append(stmts, fmt.Sprintf("SET SESSION statement_timeout = %d;",

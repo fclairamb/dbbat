@@ -987,7 +987,7 @@ type Config struct {
 
 	// StatementTimeout is the deployment's default per-statement time limit,
 	// as a Go duration ("30s", "5m"). Empty or "0" — the default — means no
-	// instance-wide limit, so an upgrade never starts cancelling statements
+	// instance-wide limit, so an upgrade never starts canceling statements
 	// on its own.
 	//
 	// It is the *lowest* of the three layers: the operator-set

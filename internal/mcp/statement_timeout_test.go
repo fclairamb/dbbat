@@ -7,6 +7,19 @@ import (
 	"time"
 )
 
+// The driver failures each protocol actually produces. Static so the linter's
+// "no dynamic errors" rule is satisfied, and so the strings sit together where
+// they can be compared against statementTimeoutSignatures.
+var (
+	errPGStatementTimeout = errors.New("ERROR: canceling statement due to statement timeout (SQLSTATE 57014)")
+	errPGUserRequest      = errors.New("ERROR: canceling statement due to user request (SQLSTATE 57014)")
+	errMySQLMaxExecution  = errors.New(
+		"ERROR 3024 (HY000): Query execution was interrupted, maximum statement execution time exceeded")
+	errMongoMaxTimeMS  = errors.New("(MaxTimeMSExpired) operation exceeded time limit")
+	errOrdinaryFailure = errors.New(`ERROR: relation "nope" does not exist (SQLSTATE 42P01)`)
+	errBareCancel      = errors.New("canceling statement due to user request")
+)
+
 func TestClassifyStatementTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -18,31 +31,31 @@ func TestClassifyStatementTimeout(t *testing.T) {
 	}{
 		{
 			name:  "postgresql server-side cancellation",
-			err:   errors.New("ERROR: canceling statement due to statement timeout (SQLSTATE 57014)"),
+			err:   errPGStatementTimeout,
 			limit: 30 * time.Second,
 			want:  true,
 		},
 		{
 			name:  "postgresql watchdog CancelRequest",
-			err:   errors.New("ERROR: canceling statement due to user request (SQLSTATE 57014)"),
+			err:   errPGUserRequest,
 			limit: 30 * time.Second,
 			want:  true,
 		},
 		{
 			name:  "mysql max_execution_time",
-			err:   errors.New("ERROR 3024 (HY000): Query execution was interrupted, maximum statement execution time exceeded"),
+			err:   errMySQLMaxExecution,
 			limit: time.Second,
 			want:  true,
 		},
 		{
 			name:  "mongodb maxTimeMS",
-			err:   errors.New("(MaxTimeMSExpired) operation exceeded time limit"),
+			err:   errMongoMaxTimeMS,
 			limit: time.Second,
 			want:  true,
 		},
 		{
 			name:  "an ordinary failure is left alone",
-			err:   errors.New(`ERROR: relation "nope" does not exist (SQLSTATE 42P01)`),
+			err:   errOrdinaryFailure,
 			limit: 30 * time.Second,
 			want:  false,
 		},
@@ -50,7 +63,7 @@ func TestClassifyStatementTimeout(t *testing.T) {
 			// Without a limit configured, a cancellation came from something
 			// else entirely and must keep saying what it said.
 			name:  "no limit reclassifies nothing",
-			err:   errors.New("canceling statement due to user request"),
+			err:   errBareCancel,
 			limit: 0,
 			want:  false,
 		},
