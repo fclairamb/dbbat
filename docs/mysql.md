@@ -385,3 +385,35 @@ Tested clients (CI matrix):
 | MariaDB CLI | mariadb 10.x | manual smoke test |
 
 For protocol debugging, set `DBB_LOG_LEVEL=debug` to see incoming MySQL commands and forwarded packets.
+
+## Per-statement time limits
+
+**Layer 1** differs by dialect, and neither server accepts the other's name, so
+picking wrong means the session fails to start:
+
+- **MySQL**: `SET SESSION max_execution_time = <ms>`. It only covers read-only
+  `SELECT`s — every other statement is the watchdog's problem, which is why
+  this layer is defense in depth rather than the enforcement.
+- **MariaDB**: `SET SESSION max_statement_time = <seconds>` (fractional
+  allowed), which covers more than `SELECT`. MariaDB is detected from the
+  handshake version banner (`…-MariaDB…`); there is no capability flag for it.
+
+The `SET` is issued immediately after `upstream.ConnectMySQL`, on the
+`*client.Conn` the connector returns. It failing is fatal to the session: a
+session that could not be pinned would look bounded and not be.
+
+A statement that would change it is refused next to the grant controls in
+`runIntercepted`: `SET [SESSION|GLOBAL|PERSIST|…] max_execution_time` /
+`max_statement_time` in either `@@`-qualified or bare form. The
+`/*+ MAX_EXECUTION_TIME(n) */` optimizer hint is treated differently — a value
+*at or below* the limit is allowed, since a client narrowing its own deadline is
+the behaviour the limit is trying to encourage; a larger one, or the `0` MySQL
+reads as "no limit", is refused. The hint is matched on the **raw** SQL: it
+lives inside a comment, which normalization strips.
+
+**Layer 2**, the watchdog, cancels with **`KILL QUERY <upstream connection id>`**
+on a fresh upstream connection — the one running the statement is not reading
+its socket. The id is `conn.GetConnectionID()`, captured at connect so the
+teardown does not race `closeUpstream` nilling the conn. The kill is sent
+*before* the sockets are closed: after the close there is still a server-side
+thread running a statement nobody will read.

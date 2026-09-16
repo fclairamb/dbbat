@@ -230,6 +230,7 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. Legacy alias `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted; the canonical name wins if both are set. | No |
 | `DBB_SLACK_NOTIFY_APP_TOKEN` | Slack app-level token (`xapp-...`, scope `connections:write`); enables **Socket Mode** — receives Approve/Deny clicks over an outbound WebSocket instead of the inbound endpoint (for deployments Slack can't reach inbound). Requires the bot token. | No |
 | `DBB_PUBLIC_URL` | Externally reachable base URL; used for deep-links in Slack notifications | If notify enabled |
+| `DBB_STATEMENT_TIMEOUT` | Instance-wide per-statement time limit, as a Go duration (`30s`, `5m`). Empty or `0` — the default — means no limit, so an upgrade never starts cancelling statements on its own. It is the **lowest** of three layers: the operator-set `limits.statement_timeout` store parameter wins over it (the way `public.*` wins over `DBB_LISTEN_*`), and a grant definition's `statement_timeout_seconds` wins over both — including an explicit `0`, which is how a dump or ETL definition stays usable. A malformed value disables the limit with a startup WARN rather than shortening it. Enforcement is dbbat's own watchdog (`LimitGuard`, 250ms tick, `limit + 2s` grace); the server-side setting each protocol offers is only how the client learns *why*. See "Per-statement time limits" below | No |
 | `DBB_APPROVAL_ENABLED` | Enable pattern-triggered approval holds (four-eyes on a statement). **Off by default** — a hold blocks a live database connection on a human. See `docs/approvals.md` | No |
 | `DBB_APPROVAL_SLACK_DELAY` | How long a hold stays pending before escalating to Slack (default: `30s`; `0` disables) | No |
 | `DBB_APPROVAL_SLACK_SQL` | Include the (truncated) SQL text in the Slack escalation (default: `true`) | No |
@@ -378,6 +379,11 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   and `priority` ranks group-bound grants against each other on the databases
   where their groups overlap. The auth path is one function,
   `store.GetActiveGrant`, which all five protocols share.
+- Optional **per-statement time limit** (`statement_timeout_seconds` on the
+  definition). Three states, and `0` is not "omitted": `NULL` inherits the
+  instance-wide default, `0` means explicitly **no limit, overriding that
+  default** (the escape hatch a dump or ETL definition needs), and a positive
+  value is the limit in seconds. See "Per-statement time limits" below
 - Optional **approval holds**: RE2 patterns on the definition that suspend a
   matching statement mid-flight until a second human approves it. Self-approval
   is always rejected; a hold has no timeout. Off by default
@@ -416,6 +422,73 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   **Deactivating** a definition is different from that archival — it withdraws
   the whole lineage and fails closed at auth time; hard deletion is refused
   (409) while anything references it.
+
+### Per-statement time limits
+
+A grant bounds *time* (`expires_at`), *volume* (`max_query_counts`,
+`max_bytes_transferred`) and *shape* (`read_only`, `block_ddl`, `block_copy`,
+approval patterns). It also bounds a **single statement's duration**, which is
+what stops one investigation session from saturating a production replica.
+
+Resolution, per session at auth time: the grant definition's
+`statement_timeout_seconds` when it has one (`0` = no limit, overriding
+everything below), otherwise the `limits.statement_timeout` store parameter
+(Settings page), otherwise `DBB_STATEMENT_TIMEOUT`. One resolved value feeds
+both layers, so they cannot disagree.
+
+**Layer 1 — the server-side setting**, applied before the client is told it is
+connected, at the same point the read-only pin is. It is not the enforcement;
+it is how the client gets a real database error instead of a dropped socket. A
+session that cannot be pinned fails, same rule as `ErrUpstreamReadOnlyMode`.
+
+| Protocol | What is set | Notes |
+|---|---|---|
+| PostgreSQL | `SET SESSION statement_timeout` | SQLSTATE 57014, session survives |
+| MySQL | `SET SESSION max_execution_time` (ms) | Covers `SELECT` only; the watchdog covers the rest |
+| MariaDB | `SET SESSION max_statement_time` (s) | Detected from the version banner — neither server accepts the other's name |
+| MongoDB | `maxTimeMS` injected into each forwarded command | No session knob exists. A client value **at or below** the limit is kept; a larger one (or `0`) is clamped |
+| Oracle | nothing | A statement time limit is a Resource Manager plan (DBA-level); `CALL_TIMEOUT` is an OCI *client* setting |
+| SQL Server | nothing | The query timeout is a client concept |
+
+Because the limit is hard, a statement that would unset or widen it is refused
+with a clear error — PostgreSQL's `SET/RESET statement_timeout` and `RESET ALL`,
+MySQL's `SET max_execution_time` / `max_statement_time` and an over-limit
+`/*+ MAX_EXECUTION_TIME(n) */` hint. The refusal runs through the same
+`validateStatement` the grant controls do, so the simple and extended paths
+cannot drift. `SHOW statement_timeout` stays allowed: reading the limit is the
+opposite of bypassing it. On MongoDB an over-limit `maxTimeMS` is clamped, not
+refused — it is an ordinary per-command option, not a `SET`.
+
+**Layer 2 — dbbat's watchdog**, which is the actual enforcement. The per-session
+`LimitGuard` carries a `StatementClock` marking when the **oldest** statement
+still executing upstream was forwarded, and trips `ErrStatementTimeout` once
+that passes `limit + StatementTimeoutGrace` (2s, a constant, not a setting). The
+250ms poll means the kill lands within 2.25s of the limit. **Time parked on an
+approval hold does not count**: the clock starts when the statement is actually
+sent upstream, which a held statement has not been — and the server-side
+settings agree by construction, having never seen it.
+
+On a trip, in this order: **cancel upstream, then close both sockets**. Closing
+alone is not enough — a PostgreSQL backend in a long sequential scan does not
+notice a dead client until it next tries to send, and
+`client_connection_check_interval` defaults to `0`. Per protocol: PostgreSQL a
+`CancelRequest` on a fresh connection through the same dial path (SSH /
+Kubernetes tunnels included); MySQL `KILL QUERY <upstream connection id>`,
+likewise on a fresh connection; SQL Server a TDS ATTENTION on the existing
+connection; Oracle a break/reset marker exchange (**unverified against a real
+server** — the socket close is the guarantee, see `docs/oracle.md`); MongoDB
+nothing, because the injected `maxTimeMS` already is the cancel and `killOp`
+needs privileges the proxied role usually lacks.
+
+Every dbbat-initiated teardown is recorded rather than merely logged:
+`connections.termination_reason` (`statement_timeout`, `grant_expired`,
+`quota_exceeded`, `grant_revoked`, later `admin_terminated`) written in the same
+statement as `disconnected_at`, a chained `connection.terminated` audit entry
+carrying the statement, the limit and the observed duration, a `connection`
+stream event with state `terminated`, and the in-flight query row completed with
+`statement timeout: limit 30s, ran 32.1s, session terminated by dbbat`. MCP
+agents get the same limit named in the tool error rather than an opaque driver
+failure (`docs/mcp.md`).
 
 ### Security
 - User passwords: Argon2id hashed

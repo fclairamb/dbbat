@@ -449,3 +449,34 @@ Library: [`github.com/modelcontextprotocol/go-sdk`](https://github.com/modelcont
 the official Go SDK, at v1.7.0 — past 1.0, and it documents the stateless
 one-server-per-request deployment this uses, including the schema cache that
 makes it cheap.
+
+## Per-statement time limits
+
+An agent's statement runs through the proxy listener like any other, so the
+grant's per-statement time limit applies to it unchanged — which is the case
+that prompted the feature: an agent looping `EXPLAIN (ANALYZE, BUFFERS)` and
+full aggregates over a large table under a perfectly valid read-only grant.
+
+The MCP executors still carry **no client-side timeout** of their own
+(`connection timeout=0`, `readTimeout` unset), and that stays: an approval hold
+parks a statement on a human for as long as it takes, and a driver-side clock
+would cancel it. The bound is the execution context, and the proxy's watchdog.
+
+What the MCP layer adds is the *wording*. The cancellation reaches each client
+library as something different and none of it is actionable: PostgreSQL says
+`canceling statement due to statement timeout` without saying who configured it,
+MySQL says `Query execution was interrupted`, and on Oracle and SQL Server —
+which have no server-side limit at all — the watchdog's socket close arrives as a
+bare connection reset. An agent reading any of those retries. So
+`LoopbackExecutor.Execute` reclassifies them, in one place for all five
+protocols, into
+
+```
+statement exceeded the per-statement time limit of your grant and was cancelled (limit 30s): <the driver's own words>
+```
+
+naming the limit that applies to *this* grant (resolved from the grant the
+authorization step already found, so it costs no extra round trip), and wrapping
+rather than discarding the original — an operator reading the audit trail still
+wants the protocol's own words. With no limit configured nothing is
+reclassified: a statement cancelled for some other reason must keep saying so.

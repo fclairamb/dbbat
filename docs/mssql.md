@@ -923,3 +923,31 @@ and in-session grant counters behind `statsMu`, the hold flags behind `heldMu`,
 the prepared-handle map behind `preparedMu` — each a per-concern lock, none of
 them session-wide. See `docs/oracle.md`, "The suite runs under `-race`", for
 what the detector found where that discipline was missing.
+
+## Per-statement time limits
+
+SQL Server has **no server-side statement timeout** — the "query timeout" every
+driver exposes is a client-side clock — so there is no layer 1 here at all. The
+dbbat watchdog is the whole mechanism.
+
+`LimitGuard` trips `ErrStatementTimeout` once the statement passes
+`limit + 2s`. The clock starts in `runStatement` at the moment the payload is
+handed to the forward path, *not* when the client's message arrived: everything
+in between — the validators, and an approval hold that may have parked on a
+human for an hour — is time the upstream spent doing nothing. TDS is strictly
+request/response on one connection, so there is never a second statement in
+flight and the clock is a plain start/stop (`takePending` stops it).
+
+The cancel is a **TDS ATTENTION token**, and unlike PostgreSQL and MySQL it
+needs no second connection: ATTENTION is defined to be sent on the same
+connection as the request it interrupts. That is why the upstream leg has a
+write lock (`upstreamWriteMu`) — TDS packets are not interleavable, and the
+forward pump is the other writer. In practice the pump is blocked reading the
+client while a long statement runs, which is exactly when the watchdog wants to
+write, but "in practice" is not a synchronization strategy.
+
+After the ATTENTION the teardown waits `attentionSettleDelay` (150ms) before
+dropping the sockets. It is not a drain — the response pump owns the upstream
+reader, so there is nobody here to read the `DONE_ATTN` — it is to keep an
+immediate close from RSTing the cancel away, which would leave the server
+executing the very statement this is trying to stop.

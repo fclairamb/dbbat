@@ -3190,3 +3190,39 @@ remain candidates:
 - **Legacy keys** (created before the scheme, `user_salt` absent): unchanged
   fallback — the first verifier-bearing key is the single candidate, no forced
   rotation. Creating any new key upgrades the user to multi-key login.
+
+## Per-statement time limits
+
+Oracle has **no in-band statement time limit** dbbat can set: a per-statement
+cap is a Resource Manager plan, which is DBA territory and not something a proxy
+can impose per session, and `CALL_TIMEOUT` is an OCI *client* setting. There is
+therefore no layer 1 on this protocol — the dbbat watchdog is the entire
+mechanism.
+
+`LimitGuard` trips `ErrStatementTimeout` once the call passes `limit + 2s`. The
+clock is armed at each of the four cursor start sites, from the pending query's
+`startTime` — which is stamped *after* any approval hold resolved, so a
+statement is never charged for the time it waited on a human — and cleared in
+`completeQuery`. TTC is request/response on one connection, so there is exactly
+one pending call at a time.
+
+### The break/reset cancel is unverified
+
+On a trip dbbat writes a TNS **break marker** followed by a **reset marker** to
+the upstream (`buildBreakMarker` / `buildResetMarker`), then waits 150ms before
+dropping the sockets so the markers are not RSTed away.
+
+This is **best effort and not yet proven end to end.** The marker exchange is
+documented from the *client's* side and dbbat is playing the client here, but
+the e2e suite has not shown that a real Oracle server abandons the call on these
+two packets alone. Until it does:
+
+- the **socket close** is what the enforcement actually rests on, exactly as it
+  was before;
+- the markers are what *might* spare the database the rest of the scan;
+- neither failing is fatal — a write error is logged at DEBUG and the teardown
+  continues.
+
+Treat a green statement-timeout test on Oracle as proving the *session* ended,
+not that the server stopped working. Removing this caveat needs a test that
+watches `v$session` (or the server's CPU) after the teardown.
