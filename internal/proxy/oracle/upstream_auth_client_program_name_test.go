@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/fclairamb/dbbat/internal/version"
 )
 
@@ -76,6 +78,28 @@ func TestBuildUpstreamProgramName(t *testing.T) {
 	}
 
 	want := "dbbat/" + version.Version + " @florent.clairambault for python"
+	if got := s.buildUpstreamProgramName(); got != want {
+		t.Errorf("buildUpstreamProgramName() = %q, want %q", got, want)
+	}
+}
+
+// TestBuildUpstreamProgramName_ConnUIDTag confirms the AUTH_PROGRAM_NM
+// includes the "c=<12 hex>" connection tag once s.connUID is set — the case
+// that matters in production, where it is generated in newSession before
+// beginUpstreamAuth ever runs (well before s.connectionUID, which stays
+// uuid.Nil until CreateConnection actually inserts the row).
+func TestBuildUpstreamProgramName_ConnUIDTag(t *testing.T) {
+	t.Parallel()
+
+	// A short username, unlike the other cases in this file: with the c=
+	// tag added, "florent.clairambault" would leave no room under the
+	// 48-byte Oracle cap for "for python" too, and this test wants both.
+	s := &session{
+		clientAuthPhase1Pkt: &TNSPacket{Payload: thinPhase1Payload("florent", true)},
+		connUID:             uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-0123456789ab"),
+	}
+
+	want := "dbbat/" + version.Version + " @florent c=0123456789ab for python"
 	if got := s.buildUpstreamProgramName(); got != want {
 		t.Errorf("buildUpstreamProgramName() = %q, want %q", got, want)
 	}

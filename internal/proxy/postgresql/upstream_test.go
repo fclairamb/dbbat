@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/fclairamb/dbbat/internal/version"
 )
 
@@ -57,7 +59,7 @@ func TestBuildApplicationName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := buildApplicationName(tt.username, tt.clientAppName)
+			got := buildApplicationName(tt.username, uuid.Nil, tt.clientAppName)
 			if got != tt.want {
 				t.Errorf("buildApplicationName(%q, %q) = %q, want %q", tt.username, tt.clientAppName, got, tt.want)
 			}
@@ -70,7 +72,7 @@ func TestBuildApplicationName_MaxLength(t *testing.T) {
 
 	// Test that result never exceeds maxAppNameLen (63 characters)
 	longAppName := strings.Repeat("x", 100)
-	result := buildApplicationName("florent", longAppName)
+	result := buildApplicationName("florent", uuid.Nil, longAppName)
 
 	if len(result) > maxAppNameLen {
 		t.Errorf("buildApplicationName() returned %d chars, want <= %d", len(result), maxAppNameLen)
@@ -92,7 +94,7 @@ func TestBuildApplicationName_ExactlyMaxLength(t *testing.T) {
 	maxClientLen := maxAppNameLen - len(base) - len(separator)
 
 	clientAppName := strings.Repeat("a", maxClientLen)
-	result := buildApplicationName("florent", clientAppName)
+	result := buildApplicationName("florent", uuid.Nil, clientAppName)
 
 	expected := base + separator + clientAppName
 	if result != expected {
@@ -101,5 +103,18 @@ func TestBuildApplicationName_ExactlyMaxLength(t *testing.T) {
 
 	if len(result) != maxAppNameLen {
 		t.Errorf("len(buildApplicationName()) = %d, want exactly %d", len(result), maxAppNameLen)
+	}
+}
+
+func TestBuildApplicationName_ConnUIDTag(t *testing.T) {
+	t.Parallel()
+
+	connUID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-0123456789ab")
+
+	got := buildApplicationName("florent", connUID, "psql")
+
+	want := "dbbat/" + version.Version + " @florent c=0123456789ab for psql"
+	if got != want {
+		t.Errorf("buildApplicationName() = %q, want %q", got, want)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
@@ -56,7 +57,7 @@ func (s *Session) connectUpstream() error {
 		Username:        s.database.Username,
 		Password:        s.database.Password,
 		Database:        s.database.DatabaseName,
-		ApplicationName: buildApplicationName(s.user.Username, s.clientApplicationName),
+		ApplicationName: buildApplicationName(s.user.Username, s.connUID, s.clientApplicationName),
 		SSLMode:         s.database.SSLMode,
 	}, s.logger)
 	if err != nil {
@@ -157,11 +158,11 @@ func (s *Session) sendToClient(msg pgproto3.BackendMessage) error {
 const maxAppNameLen = 63
 
 // buildApplicationName constructs the application_name for upstream
-// connections: "dbbat/$version @$username", plus " for $appName" when the
-// client declared an application_name of its own. See
+// connections: "dbbat/$version @$username c=$uidSuffix", plus " for
+// $appName" when the client declared an application_name of its own. See
 // shared.BuildUpstreamName for the truncation rules.
-func buildApplicationName(username, clientAppName string) string {
-	return shared.BuildUpstreamName(version.Version, username, clientAppName, maxAppNameLen)
+func buildApplicationName(username string, connUID uuid.UUID, clientAppName string) string {
+	return shared.BuildUpstreamName(version.Version, username, connUID, clientAppName, maxAppNameLen)
 }
 
 // upstreamSetupStatements is the session state dbbat pins on the upstream

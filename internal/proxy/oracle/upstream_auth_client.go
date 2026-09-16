@@ -120,14 +120,14 @@ func clientDeclaredProgramName(pkt *TNSPacket, bigChunks bool) string {
 }
 
 // buildUpstreamProgramName composes the canonical dbbat-branded AUTH_PROGRAM_NM
-// forwarded to the upstream: "dbbat/$version @$username", plus " for $appName"
-// when the client declared (and dbbat could intercept) its own program name.
-// See shared.BuildUpstreamName for the truncation rules.
+// forwarded to the upstream: "dbbat/$version @$username c=$uidSuffix", plus
+// " for $appName" when the client declared (and dbbat could intercept) its
+// own program name. See shared.BuildUpstreamName for the truncation rules.
 func (s *session) buildUpstreamProgramName() string {
 	username := s.oracleDbbatUsername()
 	appName := clientDeclaredProgramName(s.clientAuthPhase1Pkt, s.clientBigClrChunks)
 
-	return shared.BuildUpstreamName(version.Version, username, appName, maxProgramNameLen)
+	return shared.BuildUpstreamName(version.Version, username, s.connUID, appName, maxProgramNameLen)
 }
 
 // runUpstreamClientAuth drives Oracle AUTH on the relay-phase upstream socket

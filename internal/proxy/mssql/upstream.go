@@ -9,6 +9,8 @@ import (
 	"os"
 	"sync"
 
+	"github.com/google/uuid"
+
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/version"
@@ -394,9 +396,10 @@ func defaultUpstreamLogin() *Login7 {
 	}
 }
 
-// buildUpstreamAppName constructs the LOGIN7 AppName dbbat presents upstream:
-// "dbbat/$version @$username", plus " for $appName" when the client declared
-// one of its own. See shared.BuildUpstreamName for the truncation rules.
-func buildUpstreamAppName(username, clientAppName string) string {
-	return shared.BuildUpstreamName(version.Version, username, clientAppName, maxUpstreamAppNameLen)
+// buildUpstreamAppName constructs the LOGIN7 AppName dbbat presents
+// upstream: "dbbat/$version @$username c=$uidSuffix", plus " for $appName"
+// when the client declared one of its own. See shared.BuildUpstreamName for
+// the truncation rules.
+func buildUpstreamAppName(username string, connUID uuid.UUID, clientAppName string) string {
+	return shared.BuildUpstreamName(version.Version, username, connUID, clientAppName, maxUpstreamAppNameLen)
 }
