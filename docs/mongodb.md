@@ -406,3 +406,43 @@ MONGO_TEST_IMAGE=mongo:8 go test -tags integration ./internal/proxy/mongodb/...
 The default `mongo:7` and the `postgres:15-alpine` store container both have
 arm64 builds, so the suite runs unmodified on Apple Silicon (verified on
 2026-07-21).
+
+## Per-statement time limits
+
+MongoDB has no session-level statement timeout to `SET`, so **layer 1 rides in
+the command itself**: dbbat injects `maxTimeMS` into each forwarded `OP_MSG`,
+at the interception point in `pumpClientToUpstream` where the command document
+is already decoded.
+
+The rules:
+
+- A client value **at or below** the limit is kept. A client narrowing its own
+  deadline is exactly what a per-statement limit is trying to encourage, and
+  overwriting it would *widen* the client's own expectation.
+- A larger value, a missing one, or the `0` MongoDB reads as "no limit" is
+  replaced with the grant's limit. **Clamped, not refused** — unlike a SQL
+  `SET`, `maxTimeMS` is an ordinary per-command option every driver sets for its
+  own reasons.
+- Handshake, auth and teardown chatter is exempt (`hello`, `ping`, `saslStart`,
+  `killCursors`, `endSessions`, …): none of it is a statement a user wrote, and
+  a couple of them are what a driver sends while cleaning up after a command
+  that *was* cancelled.
+
+The rewrite is done element by element on the raw BSON
+(`withMaxTimeMS` / `rebuildOpMsg` in `wire.go`), never by decoding the document
+into Go types and re-encoding it: a round trip would have to be lossless for
+every BSON type a client can send, and "almost lossless" on a forwarded command
+is a data bug. Document sequences (the kind-1 sections carrying `documents`,
+`updates`, `deletes`) are copied through untouched, and the request id survives —
+it is the key the reply is correlated on. The `checksumPresent` flag is cleared
+rather than recomputed: the checksum covers bytes the rewrite just changed, it
+is optional on the wire, and a hand-rolled CRC-32C would be one more place to be
+wrong.
+
+**Layer 2**, the watchdog, is the same as everywhere else, with one difference:
+there is **no upstream cancel**. `killOp` needs privileges the proxied role
+usually lacks, and asking for them would widen what dbbat's stored credentials
+can do on every deployment, to buy a cancel the injected `maxTimeMS` already
+performs on the server's own side. The injection *is* the cancel here; the
+socket close is the backstop. A driver can pipeline several commands on one
+connection, so the clock tracks the oldest one still awaiting a reply.

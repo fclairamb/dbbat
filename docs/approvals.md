@@ -288,6 +288,24 @@ statement is parked ends the hold with that error. With no approval timeout,
 this is the one remaining server-side bound, so the parked state must not
 bypass it.
 
+## Hold time does not count against the statement limit
+
+The per-statement time limit (`DBB_STATEMENT_TIMEOUT`,
+`limits.statement_timeout`, `grant_definitions.statement_timeout_seconds`) is
+measured from the moment a statement is **forwarded upstream**, which is after
+the hold resolves. A statement parked on a human for forty minutes under a 30s
+limit runs its full 30s once approved.
+
+That is not a concession, it is the only reading that makes sense: during a hold
+nothing has been sent anywhere and the upstream database is doing no work, so
+there is nothing for the limit to be protecting. The server-side settings agree
+by construction — the server has not seen the statement — and `StatementClock`
+is stamped from the same post-hold instant the query row's `executed_at` is.
+
+The two limits compose the other way round too: a hold that outlives the
+*grant* still ends, because `LimitGuard` keeps evaluating expiry, revocation and
+quotas throughout (above).
+
 ## Shutdown
 
 Draining explicitly abandons every parked statement (`approval_drain` in

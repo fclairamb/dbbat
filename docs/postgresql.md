@@ -83,3 +83,40 @@ PG_TEST_IMAGE=postgres:17 go test -tags integration -timeout 40m ./internal/prox
 | `DBBAT_STORE_TEST_IMAGE` | Image backing dbbat's own store (default `postgres:15-alpine`) |
 
 The suite dials **through** the proxy with `jackc/pgx/v5` and covers password / `dbb_` API-key / wrong-password auth, `sslmode=require` (proxy-terminated TLS) and `sslmode=disable`, upstream TLS (`ssl_mode` `require` / `disable` / `verify-full` against a TLS-enabled upstream container, asserted via `pg_stat_ssl`), refusal of an unknown database name, simple-protocol query + result-row capture, extended-protocol (Parse/Bind/Execute) bind-parameter capture, the `read_only`, `block_ddl` and `block_copy` grant controls, per-session `.pcapng` captures, and mid-session grant revocation tearing the connection down. Both default images have arm64 builds, so it runs unmodified on Apple Silicon (verified on 2026-07-21).
+
+## Per-statement time limits
+
+PostgreSQL is the one protocol where both layers are comfortable.
+
+**Layer 1**, the server-side setting: `SET SESSION statement_timeout = <ms>` is
+issued in `replayUpstreamStartup`, in the same batch as the read-only pin
+(`runUpstreamSetup`), before the client is told it is connected. A session that
+cannot be pinned fails rather than running unbounded. The client then gets a
+real `ERROR: canceling statement due to statement timeout` with SQLSTATE
+`57014`, and **the session survives** — which is the whole reason this layer
+exists.
+
+A statement that would unset or change it is refused through `validateStatement`
+(so the simple and extended paths cannot drift): `SET [SESSION|LOCAL]
+statement_timeout …`, `RESET statement_timeout`, and `RESET ALL`. Every `SET` is
+refused rather than only the widening ones — parsing PostgreSQL's unit grammar
+(`500`, `500ms`, `5s`, `1min`, `DEFAULT`) to allow a narrowing one would be a
+new place to be wrong about a security-relevant value, and a client wanting less
+time can cancel its own query. `SHOW statement_timeout` stays allowed. The
+matcher is comment-normalized, like every other check here:
+`SET/**/statement_timeout=0` reaches the server as a plain `SET`.
+
+**Layer 2**, the watchdog: `LimitGuard` trips `ErrStatementTimeout` once the
+oldest in-flight statement passes `limit + 2s`. Several statements can be in
+flight at once under the extended protocol, so the clock holds the *oldest*
+start (`extendedState.pendingQueries`) and is re-armed from the next pending one
+on completion. A `COPY` in progress is a statement.
+
+On a trip dbbat sends a **`CancelRequest`** carrying the upstream's
+`BackendKeyData` before closing anything. It goes on a *fresh* connection — the
+backend running the query is not reading its socket — dialed through the same
+`shared.DialUpstream` path the session used, so an SSH bastion or a Kubernetes
+port-forward is honoured. This is not optional politeness: a backend in a long
+sequential scan does not notice a dead client until it next tries to send, and
+`client_connection_check_interval` defaults to `0`, so without the cancel the
+scan runs to completion.

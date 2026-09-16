@@ -327,6 +327,82 @@ Time and bandwidth limits are enforced **mid-stream**, not only between commands
 
 The bytes already transferred by a query aborted this way are still persisted, so quota accounting stays accurate.
 
+## Per-statement time limits
+
+A grant bounds how long it lasts, how much it may transfer and what shape of
+statement it allows. It also bounds **how long one statement may run**, which is
+the limit that stops a single investigation session from saturating a production
+replica while every other quota still reads as fine.
+
+```json
+{ "statement_timeout_seconds": 30 }
+```
+
+Three states, and `0` is not "omitted":
+
+| Value | Meaning |
+|---|---|
+| omitted / `null` | Inherit the instance-wide default (`limits.statement_timeout`, else `DBB_STATEMENT_TIMEOUT`). |
+| `0` | **No limit**, overriding the instance-wide default. The escape hatch a dump or ETL definition needs. |
+| `> 0` | The limit, in seconds. |
+
+Because `null` and `0` mean different things, a `PATCH` that wants to restore
+inheritance sends `clear_statement_timeout_seconds: true` — a bare `null` cannot
+express it.
+
+Definitions are immutably versioned, so editing the value archives the row and
+inserts a successor: a live grant keeps the limit it was issued under, exactly
+like `duration_seconds` and the quotas.
+
+### What happens when a statement runs too long
+
+Where the database has a server-side statement timeout, dbbat sets it on the
+session before the client is told it is connected — so the client gets a real
+error and **keeps its session**:
+
+| Database | Server-side | What the client sees |
+|---|---|---|
+| PostgreSQL | `statement_timeout` | `canceling statement due to statement timeout`, SQLSTATE `57014` |
+| MySQL | `max_execution_time` | Error 3024; covers `SELECT` only |
+| MariaDB | `max_statement_time` | The same, covering more than `SELECT` |
+| MongoDB | `maxTimeMS` injected per command | `MaxTimeMSExpired` |
+| Oracle | none exists | — |
+| SQL Server | none exists | — |
+
+That layer is a courtesy, not the enforcement. Oracle and SQL Server have no
+such setting at all, MySQL's covers only `SELECT`, and a client could try to
+unset the others — so dbbat runs its own watchdog, which is what the limit
+really rests on. About two seconds past the limit it **cancels the statement
+upstream** (a PostgreSQL `CancelRequest`, a MySQL `KILL QUERY`, a SQL Server
+ATTENTION) and then ends the session. Cancelling first matters: closing the
+socket alone leaves the database finishing a scan nobody will ever read.
+
+Because the limit is hard, a statement that would unset or raise it is refused
+with a clear error naming the limit — `SET statement_timeout`, `RESET ALL`, `SET
+max_execution_time`, an over-limit `MAX_EXECUTION_TIME` hint. Reading the value
+(`SHOW statement_timeout`) stays allowed, and a MongoDB client asking for *less*
+time than the limit keeps its own value.
+
+**Time parked on an approval hold does not count.** The clock starts when the
+statement is actually sent to the database, which a held statement has not been.
+
+### What a terminated session leaves behind
+
+A session dbbat ended is recorded, not just logged:
+
+- `termination_reason` on the connection (`statement_timeout`, `grant_expired`,
+  `quota_exceeded`, `grant_revoked`), shown as a **Terminated** badge on the
+  connection page;
+- the statement that caused it, completed in the query log with
+  `statement timeout: limit 30s, ran 32.1s, session terminated by dbbat`;
+- a `connection.terminated` entry in the tamper-evident audit trail, carrying
+  the limit and the observed duration;
+- a live `terminated` event on the connections stream.
+
+AI agents going through [MCP](/docs/features/mcp) get the limit named in the
+tool error rather than an opaque driver failure, so they narrow the query
+instead of retrying it.
+
 ## Revoking Grants
 
 Manually revoke a grant before expiration:

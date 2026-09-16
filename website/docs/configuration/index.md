@@ -263,6 +263,36 @@ deleted and the server still starts. See
 [Query Logging](/docs/features/query-logging#retention) for exactly what a sweep
 removes.
 
+### Per-statement time limits
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DBB_STATEMENT_TIMEOUT` | How long any single statement may run before dbbat cancels it and ends the session, as a Go duration (`30s`, `5m`). Empty or `0` = no limit. | `` (no limit) |
+
+This is the **deployment default**, the lowest of three layers:
+
+1. a grant definition's `statement_timeout_seconds` wins over everything —
+   including an explicit `0`, which means "no limit for this definition" and is
+   how a dump or ETL definition stays usable;
+2. otherwise the `limits.statement_timeout` [global parameter](#global-parameters),
+   editable from the Settings page without a restart;
+3. otherwise this variable.
+
+Like retention, it is **opt-in**: upgrading dbbat never starts cancelling
+statements on its own. A malformed value disables the limit with a startup
+warning rather than shortening it — this setting kills live database sessions,
+so a typo must never be read as "kill sooner".
+
+Enforcement is dbbat's own watchdog, not the database's. Where a protocol has a
+server-side knob (PostgreSQL's `statement_timeout`, MySQL's
+`max_execution_time`, MongoDB's `maxTimeMS`) dbbat sets it too, so the client
+gets a real database error instead of a dropped socket — but Oracle and SQL
+Server have no such knob, and a client can try to unset the ones that exist, so
+the watchdog is what the limit actually rests on. It kills within about 2.25
+seconds of the limit and cancels the statement upstream before closing the
+sockets. See
+[Access Control](/docs/features/access-control#per-statement-time-limits).
+
 ### Rate Limiting
 
 | Variable | Description | Default |
@@ -565,6 +595,7 @@ values are exposed by `GET /api/v1/instance`.
 | Parameter | Description |
 |-----------|-------------|
 | `public.web_ui_url` | Externally reachable base URL of the web UI, used for Slack deep-links. **Takes precedence over `DBB_PUBLIC_URL`** when set. |
+| `limits.statement_timeout` | Instance-wide per-statement time limit, as a Go duration (`30s`, `5m`). **Takes precedence over `DBB_STATEMENT_TIMEOUT`** when set; `"0"` disables the limit outright. Edited from the Settings page, or through `PUT /api/v1/instance/limits`. |
 
 ```bash
 # Read the current parameters
