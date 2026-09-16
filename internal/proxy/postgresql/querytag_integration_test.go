@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -319,4 +320,111 @@ func TestIntegration_QueryTagging_AuditChainVerifies(t *testing.T) {
 	auditRes, err := f.store.VerifyAuditChain(ctx)
 	require.NoError(t, err)
 	assert.True(t, auditRes.OK(), "audit chain break with tagging on: %+v", auditRes.Break)
+}
+
+// TestIntegration_QueryTagging_ApprovalHoldStoresClientText is the
+// integration-level form of the invariant that matters most, and the one the
+// unit tests cannot reach: the parked row is written by the **real** store, so
+// the text this asserts on is the text that actually went into the
+// tamper-evident `queries` chain — not a fake's copy of it.
+//
+// It checks all three halves of a hold under tagging: the pattern still parks
+// the statement (it is anchored at `^`, which a prepended tag would defeat if
+// the match ran on the forwarded text), the persisted row carries the client's
+// statement untagged, and the statement that finally reaches the upstream after
+// approval carries the tag.
+func TestIntegration_QueryTagging_ApprovalHoldStoresClientText(t *testing.T) {
+	ctx := context.Background()
+
+	f := setupFixtureWith(ctx, t, fixtureOpts{approvalPatterns: []string{`^DELETE\s+FROM`}})
+	f.proxy.SetQueryTagging(true)
+
+	require.NotNil(t, f.approvals, "the fixture must have wired an approval registry")
+
+	setup := f.mustConnect(ctx, fixturePass)
+	_, err := setup.Exec(ctx, "CREATE TABLE IF NOT EXISTS tagheld (id int)")
+	require.NoError(t, err)
+	_, err = setup.Exec(ctx, "INSERT INTO tagheld (id) VALUES (1), (2), (3)")
+	require.NoError(t, err)
+
+	held := f.mustConnect(ctx, fixturePass)
+
+	const clientSQL = "DELETE FROM tagheld WHERE id = 2"
+
+	outcome := make(chan error, 1)
+
+	go func() {
+		_, execErr := held.Exec(ctx, clientSQL)
+		outcome <- execErr
+	}()
+
+	// (1) The anchored pattern still parks it.
+	var pending store.Query
+
+	require.Eventually(t, func() bool {
+		queries, qErr := f.store.ListQueries(ctx, store.QueryFilter{Limit: 100})
+		if qErr != nil {
+			return false
+		}
+
+		for i := range queries {
+			if queries[i].ApprovalStatus != nil && *queries[i].ApprovalStatus == store.ApprovalPending {
+				pending = queries[i]
+
+				return true
+			}
+		}
+
+		return false
+	}, 30*time.Second, 200*time.Millisecond,
+		"the statement was never parked — an anchored pattern stopped matching under tagging")
+
+	// (2) The row an approver reads, and the row the chain MACs, is the
+	// client's statement.
+	assert.Equal(t, clientSQL, pending.SQLText,
+		"the parked row must carry the client's statement, untagged")
+	assert.NotContains(t, pending.SQLText, tagPrefix)
+
+	if pending.ApprovalPattern != nil {
+		assert.Equal(t, `^DELETE\s+FROM`, *pending.ApprovalPattern)
+	}
+
+	by := f.user.UID
+	f.approvals.Resolve(approval.Decision{
+		QueryUID: pending.UID,
+		Status:   store.ApprovalApproved,
+		By:       &by,
+		ByName:   fixtureUser,
+	})
+
+	select {
+	case execErr := <-outcome:
+		require.NoError(t, execErr, "the approved statement must have run")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the approved statement never resumed")
+	}
+
+	// It really ran.
+	var remaining int
+	require.NoError(t, setup.QueryRow(ctx, "SELECT count(*) FROM tagheld").Scan(&remaining))
+	assert.Equal(t, 2, remaining)
+
+	// (3) What the upstream received after the hold resolved carries the tag.
+	var upstreamSaw string
+	require.NoError(t, setup.QueryRow(ctx,
+		"SELECT query FROM pg_stat_activity WHERE query LIKE '%tagheld WHERE id = 2%' "+
+			"AND pid <> pg_backend_pid() LIMIT 1").Scan(&upstreamSaw))
+
+	assert.True(t, strings.HasPrefix(upstreamSaw, tagPrefix),
+		"the released statement must have reached the upstream tagged, got %q", upstreamSaw)
+	assert.True(t, strings.HasSuffix(upstreamSaw, clientSQL))
+
+	// (4) And the settled row is still the client's text.
+	settled, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 100})
+	require.NoError(t, err)
+
+	for i := range settled {
+		assert.NotContains(t, settled[i].SQLText, tagPrefix,
+			"a stored statement carries the tag — the chain would be MACing rewritten text")
+	}
 }

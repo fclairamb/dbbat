@@ -27,8 +27,10 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -191,6 +193,9 @@ func selfSignedCert(t *testing.T) ([]byte, []byte) {
 type fixture struct {
 	t     *testing.T
 	store *store.Store
+	// approvals is the registry a parked statement is released through, or nil
+	// when the fixture was built without approval patterns.
+	approvals *approval.Registry
 	// storeDSN is the storage database this fixture's store is connected to,
 	// so a test can open a *second* handle onto it — which is how the
 	// cross-instance paths are exercised: a second handle mints its own run id,
@@ -219,6 +224,12 @@ type fixtureOpts struct {
 	tlsUpstream bool
 	// sslMode is the server row's ssl_mode (defaults to "disable").
 	sslMode string
+	// approvalPatterns, when non-empty, puts RE2 approval-hold patterns on the
+	// grant definition *and* wires the proxy's approval collaborators — the
+	// two halves of a live hold. Installed before Start, because
+	// Server.approvalDeps is a plain field the accept loop reads and these
+	// suites run under -race.
+	approvalPatterns []string
 }
 
 func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, dumpDir string) *fixture {
@@ -293,7 +304,8 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	}, encKey)
 	require.NoError(t, err)
 
-	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{},
+		testsupport.WithApprovalPatterns(opts.approvalPatterns...))
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{
@@ -314,6 +326,20 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	proxy, err := NewServer(dataStore, encKey, queryStorage, dumpCfg, nil, config.PGConfig{}, slog.Default())
 	require.NoError(t, err)
 
+	var approvals *approval.Registry
+
+	if len(opts.approvalPatterns) > 0 {
+		approvals = approval.NewRegistry()
+
+		proxy.SetApprovalDeps(shared.ApprovalDeps{
+			Enabled:      true,
+			Store:        dataStore,
+			Registry:     approvals,
+			Logger:       slog.Default(),
+			PollInterval: 200 * time.Millisecond,
+		})
+	}
+
 	go func() { _ = proxy.Start("127.0.0.1:0") }()
 
 	t.Cleanup(func() {
@@ -328,6 +354,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	return &fixture{
 		t:            t,
 		store:        dataStore,
+		approvals:    approvals,
 		storeDSN:     storeDSN,
 		proxy:        proxy,
 		proxyAddr:    proxy.Addr().String(),
