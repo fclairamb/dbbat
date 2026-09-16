@@ -281,6 +281,38 @@ const errRetiredGroupUIDs = "group_uids is no longer supported; " +
 const errRetiredApproverGroupUIDs = "approver_group_uids is no longer supported; " +
 	"use approver_user_group_uids instead"
 
+// validateDefinitionLimits checks the three numeric bounds a definition can
+// carry. Split out of validateDefinitionRequest because the two quotas and the
+// statement timeout follow *different* rules — the quotas are "> 0 or omitted",
+// while 0 is a meaningful value for the timeout — and keeping them together is
+// what makes that contrast readable instead of a subtle inconsistency.
+func validateDefinitionLimits(req *CreateGrantDefinitionRequest) string {
+	if req.MaxQueryCounts != nil && *req.MaxQueryCounts <= 0 {
+		return "max_query_counts must be > 0 or omitted"
+	}
+
+	if req.MaxBytesTransferred != nil && *req.MaxBytesTransferred <= 0 {
+		return "max_bytes_transferred must be > 0 or omitted"
+	}
+
+	if req.StatementTimeoutSeconds == nil {
+		return ""
+	}
+
+	// >= 0, not > 0: unlike the quotas above, 0 is meaningful here — "no limit,
+	// overriding the global one". Omitting the field is what means "inherit".
+	if *req.StatementTimeoutSeconds < 0 {
+		return "statement_timeout_seconds must be >= 0 or omitted (0 = no limit)"
+	}
+
+	const maxStatementTimeout = int64(24 * 3600) // 24 hours
+	if *req.StatementTimeoutSeconds > maxStatementTimeout {
+		return "statement_timeout_seconds must be at most 24 hours (86400)"
+	}
+
+	return ""
+}
+
 func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 	if req.Name == "" {
 		return "name is required"
@@ -337,24 +369,8 @@ func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 		}
 	}
 
-	if req.MaxQueryCounts != nil && *req.MaxQueryCounts <= 0 {
-		return "max_query_counts must be > 0 or omitted"
-	}
-
-	if req.MaxBytesTransferred != nil && *req.MaxBytesTransferred <= 0 {
-		return "max_bytes_transferred must be > 0 or omitted"
-	}
-
-	// >= 0, not > 0: unlike the quotas above, 0 is a meaningful value here —
-	// "no limit, overriding the global one". Omitting the field is what means
-	// "inherit".
-	if req.StatementTimeoutSeconds != nil && *req.StatementTimeoutSeconds < 0 {
-		return "statement_timeout_seconds must be >= 0 or omitted (0 = no limit)"
-	}
-
-	const maxStatementTimeout = int64(24 * 3600) // 24 hours
-	if req.StatementTimeoutSeconds != nil && *req.StatementTimeoutSeconds > maxStatementTimeout {
-		return "statement_timeout_seconds must be at most 24 hours (86400)"
+	if msg := validateDefinitionLimits(req); msg != "" {
+		return msg
 	}
 
 	if err := store.ValidateApprovalPatterns(req.ApprovalPatterns); err != nil {

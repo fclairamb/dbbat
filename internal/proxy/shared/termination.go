@@ -53,14 +53,14 @@ func TerminationFor(err error, guard *LimitGuard, queryUID uuid.UUID) store.Term
 }
 
 // StatementTimeoutMessage is the one-liner a client is told when its statement
-// was cancelled for running too long, on the protocols where dbbat can still
-// get a message out. It names the limit because "cancelled" on its own tells
+// was canceled for running too long, on the protocols where dbbat can still
+// get a message out. It names the limit because "canceled" on its own tells
 // the author nothing about how to fix the query.
 func StatementTimeoutMessage(limit time.Duration) string {
 	if limit <= 0 {
-		return "statement cancelled by dbbat: per-statement time limit exceeded"
+		return "statement canceled by dbbat: per-statement time limit exceeded"
 	}
 
-	return "statement cancelled by dbbat: exceeded the " + limit.String() +
+	return "statement canceled by dbbat: exceeded the " + limit.String() +
 		" per-statement limit of your grant"
 }

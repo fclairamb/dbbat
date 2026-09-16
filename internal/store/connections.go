@@ -883,8 +883,8 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 	err := s.db.NewSelect().
 		Model(conn).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
-			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid, "+
-			"query_chain_mac, query_chain_len, query_chain_stamp_version").
+			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, "+
+			"dump_key, grant_uid, query_chain_mac, query_chain_len, query_chain_stamp_version").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {
@@ -919,8 +919,8 @@ func (s *Store) GetConnectionsByUIDs(ctx context.Context, uids []uuid.UUID) (map
 	err := s.db.NewSelect().
 		Model(&connections).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
-			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid, "+
-			"query_chain_mac, query_chain_len, query_chain_stamp_version").
+			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, "+
+			"dump_key, grant_uid, query_chain_mac, query_chain_len, query_chain_stamp_version").
 		Where("uid IN (?)", bun.List(uids)).
 		Scan(ctx)
 	if err != nil {
@@ -967,7 +967,8 @@ func (s *Store) buildListConnectionsQuery(
 	q := s.db.NewSelect().
 		Model(dest).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, " +
-			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid")
+			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, " +
+			"dump_key, grant_uid")
 
 	if filter.UserID != nil {
 		q = q.Where("user_id = ?", *filter.UserID)

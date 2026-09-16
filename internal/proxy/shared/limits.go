@@ -24,7 +24,7 @@ var (
 	// (by an admin, via the API) while the connection was still live.
 	ErrGrantRevoked = errors.New("grant revoked")
 	// ErrStatementTimeout indicates a single statement ran past the grant's
-	// per-statement limit (plus StatementTimeoutGrace) and dbbat cancelled it
+	// per-statement limit (plus StatementTimeoutGrace) and dbbat canceled it
 	// upstream and tore the session down.
 	//
 	// Unlike the three above, this one is not about the grant being over: the

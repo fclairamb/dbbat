@@ -280,7 +280,7 @@ func (s *Session) Run() error {
 	// exactly how onLimitViolation enforces.
 	go safe.RunWatchdog(watchCtx, s.logger, goroutineNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
-			s.onLimitViolation(upstreamConn, clientConn, err)
+			s.onLimitViolation(watchCtx, upstreamConn, clientConn, err)
 		})
 	}, func() {
 		closeSessionConns(upstreamConn, clientConn)
@@ -308,8 +308,8 @@ func (s *Session) Run() error {
 // teardown race-free. Close is safe to call concurrently with a blocked
 // Read/Write and safe to call twice (the deferred closeUpstream closes the same
 // conn).
-func (s *Session) onLimitViolation(upstreamConn, clientConn io.Closer, err error) {
-	s.logger.WarnContext(s.ctx, "terminating MySQL session: limit crossed mid-stream",
+func (s *Session) onLimitViolation(ctx context.Context, upstreamConn, clientConn io.Closer, err error) {
+	s.logger.WarnContext(ctx, "terminating MySQL session: limit crossed mid-stream",
 		slog.Any("error", err))
 
 	s.noteTermination(err)
@@ -319,7 +319,7 @@ func (s *Session) onLimitViolation(upstreamConn, clientConn io.Closer, err error
 	// after the close there is still a server-side thread running the statement
 	// nobody is reading any more.
 	if s.statementClock.Running() {
-		s.killUpstreamStatement()
+		s.killUpstreamStatement(ctx)
 	}
 
 	closeSessionConns(upstreamConn, clientConn)

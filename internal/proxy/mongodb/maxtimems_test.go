@@ -107,7 +107,8 @@ func TestRebuildOpMsg_PreservesDocumentSequences(t *testing.T) {
 	doc2 := mustRaw(t, bson.D{{Key: "_id", Value: int32(2)}})
 
 	// header + flags + kind0 body + kind1 sequence("documents", doc1, doc2)
-	payload := make([]byte, 4)
+	payload := make([]byte, 0, 4+1+len(body)+1+4+len("documents")+1+len(doc1)+len(doc2))
+	payload = append(payload, 0, 0, 0, 0)
 	payload = append(payload, 0)
 	payload = append(payload, body...)
 	payload = append(payload, 1)
