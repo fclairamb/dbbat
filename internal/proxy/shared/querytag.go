@@ -56,6 +56,12 @@ const (
 // what a session gets when DBB_QUERY_TAGGING is off, so the disabled path costs
 // one string comparison and cannot change a single byte on the wire.
 type QueryTagger struct {
+	// fields is the bare `key='value',…` body, in the fixed key order above,
+	// without the comment delimiters. It is what a protocol that has no SQL
+	// comments carries instead — MongoDB puts it in the command's `comment`
+	// field — so the same bytes identify a session whatever the wire format.
+	// Empty = inert.
+	fields string
 	// prefix is the whole comment plus its trailing space, precomputed once
 	// per session. Empty = inert.
 	prefix string
@@ -90,7 +96,9 @@ func NewQueryTagger(dbbatVersion, username string, connUID uuid.UUID, grantSlug 
 		return QueryTagger{}
 	}
 
-	return QueryTagger{prefix: "/*" + b.String() + "*/ "}
+	fields := b.String()
+
+	return QueryTagger{fields: fields, prefix: "/*" + fields + "*/ "}
 }
 
 // appendQueryTagField writes `,key='value'` (without the leading comma for the
@@ -113,6 +121,23 @@ func appendQueryTagField(b *strings.Builder, key, value string) {
 // Active reports whether this tagger will actually change anything.
 func (t QueryTagger) Active() bool {
 	return t.prefix != ""
+}
+
+// Tag is the identity itself — `dbbat='…',user='…',conn='…',grant='…'` — with
+// no comment delimiters and no trailing space, or "" for an inert tagger.
+//
+// It exists for MongoDB, which has no statement text to prepend a comment to
+// but does have a first-class `comment` command field that the profiler and
+// db.currentOp() echo back. Handing that field this exact string (rather than
+// a BSON sub-document of the same four values) is deliberate: it is what
+// sqlcommenter consumers already parse, it greps identically to the comment
+// the SQL proxies emit, and it renders inline in the Atlas profiler instead of
+// as a collapsed sub-document.
+//
+// Same guarantees as Prefix: fixed key order, percent-encoded values, no
+// timestamp and no per-statement id.
+func (t QueryTagger) Tag() string {
+	return t.fields
 }
 
 // Prefix is the comment (plus its single trailing space) Apply prepends, or ""

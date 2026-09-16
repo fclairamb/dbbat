@@ -114,6 +114,12 @@ type Session struct {
 	statementLimit time.Duration
 	statementClock shared.StatementClock
 
+	// queryTag carries the dbbat identity into the `comment` field of the
+	// commands forwarded upstream (querytag.go). Built once at auth, because
+	// every component of it is known exactly then and none changes afterwards.
+	// Left at its inert zero value when DBB_QUERY_TAGGING is off.
+	queryTag shared.QueryTagger
+
 	// termination records why dbbat ended this session, when dbbat is what
 	// ended it. Written by the watchdog goroutine, read by the teardown.
 	terminationMu sync.Mutex
