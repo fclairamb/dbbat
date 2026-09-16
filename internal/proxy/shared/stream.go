@@ -150,17 +150,35 @@ func (p *StreamPublisher) stampApproval(data map[string]any, queryUID uuid.UUID,
 // Connection announces a connection lifecycle change on the admin-only
 // connections topic.
 func (p *StreamPublisher) Connection(ctx context.Context, state string) {
+	p.ConnectionWithReason(ctx, state, "")
+}
+
+// ConnectionWithReason is Connection carrying why dbbat ended the session —
+// one of the store.Termination* reasons. An empty reason omits the field
+// entirely rather than publishing a blank one, so a client can treat its
+// presence as "dbbat did this".
+//
+// Separate from Connection rather than a variadic on it: every caller but the
+// termination path has nothing to say, and a reason that silently defaulted to
+// "" would be easy to forget to pass where it matters.
+func (p *StreamPublisher) ConnectionWithReason(ctx context.Context, state, reason string) {
 	if p == nil || p.broker == nil || p.connectionUID == uuid.Nil {
 		return
 	}
 
-	p.broker.Publish(events.TopicConnections, events.EventConnection, map[string]any{
+	payload := map[string]any{
 		"connection_uid": p.connectionUID.String(),
 		"user_uid":       p.userUID.String(),
 		"username":       p.username,
 		"database_name":  p.databaseName,
 		"state":          state,
-	})
+	}
+
+	if reason != "" {
+		payload["termination_reason"] = reason
+	}
+
+	p.broker.Publish(events.TopicConnections, events.EventConnection, payload)
 
 	if p.store == nil {
 		return
@@ -182,6 +200,12 @@ const (
 	ConnectionOpened = "opened"
 	// ConnectionClosed marks a session that ended.
 	ConnectionClosed = "closed"
+	// ConnectionTerminated marks a session *dbbat* ended — a statement over
+	// its time limit, an expired or revoked grant, a crossed quota. Published
+	// before the "closed" event that follows it, and carrying the reason, so
+	// the live connections page can say what happened rather than showing a
+	// session that merely vanished.
+	ConnectionTerminated = "terminated"
 )
 
 func derefString(s *string) string {

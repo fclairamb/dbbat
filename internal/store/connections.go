@@ -117,7 +117,7 @@ func (s *Store) createConnection(
 // tail of a session could simply recopy it; sealing means correcting the stamp
 // after a deletion needs the chain key, exactly like forging a statement.
 func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
-	return s.closeConnection(ctx, uid, time.Now())
+	return s.closeConnection(ctx, uid, time.Now(), Termination{})
 }
 
 // CloseConnectionAt is CloseConnection with the close instant supplied by the
@@ -128,15 +128,31 @@ func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 // seal-from-stored-statements routine CloseConnection uses — never a second
 // MAC implementation.
 func (s *Store) CloseConnectionAt(ctx context.Context, uid uuid.UUID, closedAt time.Time) error {
-	return s.closeConnection(ctx, uid, closedAt)
+	return s.closeConnection(ctx, uid, closedAt, Termination{})
 }
 
-func (s *Store) closeConnection(ctx context.Context, uid uuid.UUID, closedAt time.Time) error {
+// CloseConnectionWithReason is CloseConnection for a session *dbbat* ended: the
+// reason lands on the row in the same UPDATE as disconnected_at, so a
+// terminated session can never be read back as a clean one, and a
+// connection.terminated audit entry carrying the reason (and the statement that
+// caused it) is written alongside the ordinary close entry.
+//
+// A zero Termination makes this exactly CloseConnection, so a caller that only
+// sometimes has a reason does not need two code paths.
+func (s *Store) CloseConnectionWithReason(ctx context.Context, uid uuid.UUID, t Termination) error {
+	return s.closeConnection(ctx, uid, time.Now(), t)
+}
+
+func (s *Store) closeConnection(ctx context.Context, uid uuid.UUID, closedAt time.Time, t Termination) error {
 	q := s.db.NewUpdate().
 		Model((*Connection)(nil)).
 		Where("uid = ?", uid).
 		Where("disconnected_at IS NULL").
 		Set("disconnected_at = ?", closedAt)
+
+	if t.Set() {
+		q = q.Set("termination_reason = ?", t.Reason)
+	}
 
 	if s.ChainEnabled() {
 		seq, mac, err := s.queryChainHead(ctx, uid)
@@ -184,6 +200,9 @@ func (s *Store) closeConnection(ctx context.Context, uid uuid.UUID, closedAt tim
 		return ErrConnectionNotFound
 	}
 
+	// Reason first, seal second: that is the order the two facts happened in,
+	// and the order a reader walking the chain wants to meet them.
+	s.recordConnectionTerminated(ctx, &closed[0], t)
 	s.recordConnectionClosed(ctx, &closed[0], connectionClosedBySession)
 
 	return nil
