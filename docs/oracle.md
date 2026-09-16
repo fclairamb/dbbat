@@ -2264,10 +2264,28 @@ frames that happen to parse.
 itself byte for byte and reading back as the tagged statement, across all five
 recorded client shapes (go-ora and python-oracledb thin as
 `compressed`/`clr-short`, ojdbc thin and DBeaver as `compressed`/`bare`, sqlplus
-as `wide-ub4`/`clr-short`). `statement_tagging_integration_test.go` then puts it
-on a real 23ai: the tag read back out of `V$SQL`, 25 executions of one statement
-landing on one SQL_ID, statements padded across the 252-byte CLR boundary, and a
-20 KB statement that has to be re-cut into several packets.
+as `wide-ub4`/`clr-short`).
+
+`statement_tagging_integration_test.go` then puts it on a real 23ai: the tag read
+back out of `V$SQL`, 25 executions of one statement landing on one SQL_ID,
+statements padded across the 252-byte CLR boundary, a 20 KB statement re-cut into
+several packets, and the same probe driven through **sqlplus (OCI)** and
+**python-oracledb thin** as well as go-ora. ojdbc thin needs a driver jar
+(`ORACLE_TEST_OJDBC_JAR`) and is covered live only where one is present.
+
+**One failure only a real server could find.** The first run of that suite hit
+`ORA-03120: two-task conversion routine: integer overflow` on any statement past
+252 bytes. The cause was not the encoding but the *reading*: a client whose chunk
+size exceeds the statement writes it as **one** chunk, so its text sits
+contiguously in the payload and the contiguous scan found it — as a bare run,
+with the chunk's own length prefix left outside the span being rewritten. The tag
+went in, the chunk header kept declaring the old length, and the message
+desynchronized. Note what did *not* catch it: the round-trip identity check
+passes on such a frame, because re-encoding the same value reproduces it either
+way. The fix is structural — read the CLR long form before the contiguous scan,
+and refuse outright when another copy of the declared length sits immediately in
+front of the value — and it is pinned by
+`TestRewriteSingleChunkLongFormIsNotReadAsABareRun`.
 
 The bytes of the tag itself are `shared.NewUserQueryTagger`'s and are pinned by
 `internal/proxy/shared`: `/*dbbat='0.28.1',user='florent',grant='diag'*/ `, no
