@@ -306,6 +306,12 @@ func (s *session) runStatement(ctx context.Context, payload []byte, st statement
 		prepareFor:  st.prepareFor,
 	})
 
+	// The clock starts *now*, not at `start` above: start is when the client's
+	// message arrived, and everything between the two — the validators, and an
+	// approval hold that may have parked on a human for an hour — is time the
+	// upstream spent doing nothing. Only what follows is the statement's own.
+	s.statementClock.Start()
+
 	return forwarded(payload), nil
 }
 

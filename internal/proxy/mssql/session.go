@@ -111,8 +111,28 @@ type session struct {
 
 	// guard enforces the grant's expiry / bandwidth / revocation mid-stream;
 	// revocation is signaled when the grant is revoked under a live session.
-	guard      *shared.LimitGuard
-	revocation *cache.RevocationHandle
+	guard *shared.LimitGuard
+
+	// statementTimeouts resolves the instance-wide per-statement limit;
+	// statementLimit is this session's resolved value (0 = no limit), stamped
+	// at auth; statementClock marks the statement currently executing upstream.
+	//
+	// SQL Server has no server-side statement timeout — the query timeout every
+	// driver exposes is a client-side one — so on this protocol the watchdog is
+	// the whole of layer 1 and layer 2, and the ATTENTION token is the cancel.
+	statementTimeouts *shared.StatementTimeoutResolver
+	statementLimit    time.Duration
+	statementClock    shared.StatementClock
+
+	// upstreamWriteMu serializes writes on the upstream leg. The forward pump
+	// is the ordinary writer; the watchdog's cancel is the other one.
+	upstreamWriteMu sync.Mutex
+
+	// termination records why dbbat ended this session, when dbbat is what
+	// ended it.
+	terminationMu sync.Mutex
+	termination   store.Termination
+	revocation    *cache.RevocationHandle
 
 	// approvalGate implements pattern-triggered approval holds; publisher
 	// pushes this session's activity onto the live event stream. (The plain
@@ -363,8 +383,12 @@ func (s *session) Run(ctx context.Context) error {
 	// Register the live session so an admin revoke can signal it, and arm the
 	// guard that enforces expiry / bandwidth / revocation mid-stream.
 	s.revocation = s.server.store.Revocations().Register(s.grant.UID)
+	// Resolve the per-statement limit once, next to the grant it comes from.
+	s.statementLimit = s.statementTimeouts.For(ctx, s.grant)
+
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
-		WithRevocation(s.revocation.Flag())
+		WithRevocation(s.revocation.Flag()).
+		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
 	defer s.deregisterRevocation()
 
@@ -451,10 +475,81 @@ func (s *session) serve(ctx context.Context) error {
 
 // onLimitViolation force-closes both legs when the watchdog trips.
 func (s *session) onLimitViolation(ctx context.Context, up *UpstreamConn, clientConn net.Conn, err error) {
-	s.logger.WarnContext(ctx, "terminating MSSQL session: grant no longer valid mid-stream",
+	s.logger.WarnContext(ctx, "terminating MSSQL session: limit crossed mid-stream",
 		slog.Any("error", err))
 
+	s.noteTermination(err)
+	s.cancelUpstreamStatement(ctx)
+
 	closeSessionConns(up, clientConn)
+}
+
+// attentionSettleDelay is how long the teardown waits after sending the
+// ATTENTION before dropping the sockets.
+//
+// Closing immediately risks an RST that discards the cancel the proxy just
+// wrote, which would leave the server executing a statement nobody is reading —
+// exactly the outcome the cancel exists to prevent. The wait is not a drain:
+// the response pump owns the upstream reader, so there is nobody here to read
+// the DONE_ATTN, and the session is going away regardless.
+const attentionSettleDelay = 150 * time.Millisecond
+
+// cancelUpstreamStatement sends the TDS ATTENTION that aborts the request the
+// upstream is currently executing.
+//
+// This is the whole of the cancel story on SQL Server: there is no server-side
+// statement timeout to have ended it politely, and no out-of-band KILL that
+// dbbat's stored credentials can be assumed to have rights for. Unlike
+// PostgreSQL and MySQL it needs no second connection — ATTENTION is defined to
+// be sent on the same connection as the request it interrupts, which is why the
+// upstream write lock exists.
+func (s *session) cancelUpstreamStatement(ctx context.Context) {
+	if !s.statementClock.Running() {
+		return
+	}
+
+	if err := s.writeUpstreamAttention(); err != nil {
+		s.logger.WarnContext(ctx, "failed to cancel the upstream statement",
+			slog.Any("error", err))
+
+		return
+	}
+
+	s.logger.InfoContext(ctx, "cancelled the upstream statement with an ATTENTION")
+
+	time.Sleep(attentionSettleDelay)
+}
+
+// noteTermination records why dbbat is ending this session. First writer wins.
+func (s *session) noteTermination(err error) {
+	t := shared.TerminationFor(err, s.guard, s.heldQuery())
+	if !t.Set() {
+		return
+	}
+
+	s.terminationMu.Lock()
+	defer s.terminationMu.Unlock()
+
+	if !s.termination.Set() {
+		s.termination = t
+	}
+}
+
+// recordedTermination returns the termination reason, if any.
+func (s *session) recordedTermination() store.Termination {
+	s.terminationMu.Lock()
+	defer s.terminationMu.Unlock()
+
+	return s.termination
+}
+
+// heldQuery is the uid of the statement currently parked on a human, uuid.Nil
+// when nothing is.
+func (s *session) heldQuery() uuid.UUID {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
+	return s.heldQueryUID
 }
 
 // closeSessionConns drops both sockets, which is how a session is ended from
@@ -569,7 +664,13 @@ func (s *session) recordDisconnect(ctx context.Context) {
 		}
 	}
 
-	if err := s.server.store.CloseConnection(ctx, s.connection.UID); err != nil {
+	termination := s.recordedTermination()
+	if termination.Set() {
+		// "terminated" before "closed": why, then that.
+		s.publisher.ConnectionWithReason(ctx, shared.ConnectionTerminated, termination.Reason)
+	}
+
+	if err := s.server.store.CloseConnectionWithReason(ctx, s.connection.UID, termination); err != nil {
 		s.logger.WarnContext(ctx, "MSSQL connection close failed",
 			slog.Any("connection_id", s.connection.UID),
 			slog.Any("error", err))

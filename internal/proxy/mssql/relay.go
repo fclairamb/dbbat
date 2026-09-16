@@ -244,7 +244,11 @@ func (s *session) forwardClientMessage(ctx context.Context, msg clientMessage) e
 	// A non-nil payload is forwarded; nil means the hook answered the client on
 	// its own and nothing must reach the upstream.
 	if forward != nil {
-		if err := s.upstream.pkt.WriteMessageWithStatus(msg.msgType, forward, msg.status); err != nil {
+		s.upstreamWriteMu.Lock()
+		err := s.upstream.pkt.WriteMessageWithStatus(msg.msgType, forward, msg.status)
+		s.upstreamWriteMu.Unlock()
+
+		if err != nil {
 			return err
 		}
 	}
@@ -262,6 +266,26 @@ func (s *session) forwardClientMessage(ctx context.Context, msg clientMessage) e
 // the reader would have produced had it forwarded the ATTENTION itself.
 func (s *session) forwardDeferredAttention() error {
 	if !s.takeAttentionUpstream() {
+		return nil
+	}
+
+	return s.writeUpstreamAttention()
+}
+
+// writeUpstreamAttention sends a TDS ATTENTION on the upstream leg, under the
+// lock every upstream write takes.
+//
+// The lock is what makes this callable from the watchdog goroutine as well as
+// from the forward pump: TDS packets are not interleavable, so two writers
+// framing at once would corrupt the stream. In practice the pump is blocked
+// reading the client while a long statement runs — which is exactly when the
+// watchdog wants to write — but "in practice" is not a synchronization
+// strategy.
+func (s *session) writeUpstreamAttention() error {
+	s.upstreamWriteMu.Lock()
+	defer s.upstreamWriteMu.Unlock()
+
+	if s.upstream == nil || s.upstream.pkt == nil {
 		return nil
 	}
 
