@@ -229,7 +229,7 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 	// the definition's value when it has one (0 included, meaning "no limit,
 	// overriding the global"), otherwise the instance-wide default. The
 	// upstream SET and the watchdog both read this one resolved value.
-	s.statementLimit = s.statementTimeouts.For(s.ctx, grant)
+	s.statementLimit = s.server.statementTimeouts.For(s.ctx, grant)
 
 	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
