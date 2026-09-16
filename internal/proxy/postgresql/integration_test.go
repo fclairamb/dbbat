@@ -957,3 +957,31 @@ func TestIntegration_RevocationKillsSession(t *testing.T) {
 		return conn.QueryRow(ctx, "SELECT 1").Scan(&got) != nil
 	}, 10*time.Second, 250*time.Millisecond, "revoked session should be torn down")
 }
+
+// TestIntegration_UpstreamApplicationNameCarriesConnectionUID verifies the
+// upstream sees dbbat's branded application_name, tagged with this
+// connection's uid (shared.BuildUpstreamName's "c=" field), so a DBA reading
+// pg_stat_activity can trace a session back to its dbbat connection row.
+func TestIntegration_UpstreamApplicationNameCarriesConnectionUID(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	var appName string
+	require.NoError(t, conn.QueryRow(ctx,
+		"SELECT current_setting('application_name')").Scan(&appName))
+
+	connections, err := f.store.ListConnections(ctx, store.ConnectionFilter{UserID: &f.user.UID})
+	require.NoError(t, err)
+	require.NotEmpty(t, connections, "the connection above must have created a row")
+
+	// ListConnections orders uid DESC (UUIDv7 is time-ordered), so the
+	// just-opened session is first.
+	row := connections[0]
+	hex := strings.ReplaceAll(row.UID.String(), "-", "")
+	wantSuffix := hex[len(hex)-12:]
+
+	assert.True(t, strings.HasPrefix(appName, "dbbat/"), "got %q", appName)
+	assert.Contains(t, appName, "@"+fixtureUser+" c="+wantSuffix)
+}

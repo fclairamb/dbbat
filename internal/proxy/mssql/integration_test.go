@@ -540,6 +540,36 @@ func TestProxyRelaysQueriesEndToEnd(t *testing.T) {
 	}
 }
 
+// TestProxyStampsAppNameWithConnectionUID verifies the upstream sees dbbat's
+// branded APP_NAME(), tagged with this session's connection uid
+// (shared.BuildUpstreamName's "c=" field), via sys.dm_exec_sessions.
+func TestProxyStampsAppNameWithConnectionUID(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	upstreamAddr := startUpstreamSQLServer(ctx, t)
+	dataStore, encryptionKey := seedE2E(ctx, t, upstreamAddr, "disable")
+
+	proxyAddr := startProxyWithStore(t, config.MSSQLConfig{}, dataStore, encryptionKey)
+
+	db, err := sql.Open("sqlserver", proxyDSN(proxyAddr, "disable"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	var appName string
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT APP_NAME()").Scan(&appName))
+
+	connections, err := dataStore.ListConnections(ctx, store.ConnectionFilter{Limit: 10})
+	require.NoError(t, err)
+	require.NotEmpty(t, connections)
+
+	hex := strings.ReplaceAll(connections[0].UID.String(), "-", "")
+	wantSuffix := hex[len(hex)-12:]
+
+	assert.True(t, strings.HasPrefix(appName, "dbbat/"), "got %q", appName)
+	assert.Contains(t, appName, "@"+e2eDBBatUser+" c="+wantSuffix)
+}
+
 // TestProxyRefusesBadCredentialsAgainstARealServer proves the refusal path is
 // the same one a real driver reads, and that nothing reaches the upstream.
 func TestProxyRefusesBadCredentialsAgainstARealServer(t *testing.T) {
