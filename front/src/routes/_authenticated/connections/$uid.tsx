@@ -1,25 +1,41 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useCallback, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useConnection,
   useUsers,
   useDatabases,
   useDownloadConnectionDump,
+  useTerminateConnection,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { PageLoader } from "@/components/shared/LoadingSpinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Download } from "lucide-react";
+import { Download, Ban } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
 import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
 import { useAuth } from "@/contexts/AuthContext";
+import { useEventStream } from "@/hooks/use-event-stream";
 import { ConnectionQueryFeed } from "@/components/shared/ConnectionQueryFeed";
 import { UpstreamTlsIndicator } from "@/components/shared/UpstreamTlsIndicator";
 import {
@@ -52,6 +68,8 @@ function terminationReasonLabel(reason: string): string {
       return "The grant was revoked mid-session";
     case "admin_terminated":
       return "An administrator ended this session";
+    case "instance_lost":
+      return "The dbbat process serving this session stopped; the row was closed by the crash reconcile";
     default:
       return reason;
   }
@@ -82,8 +100,38 @@ function ConnectionDetailPage() {
     useConnection(uid);
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
+  const queryClient = useQueryClient();
+  const [isTerminateOpen, setIsTerminateOpen] = useState(false);
   const downloadDump = useDownloadConnectionDump(uid, {
     onError: (error) => toast.error(error.message),
+  });
+
+  const isLive = !!connection && !connection.disconnected_at;
+
+  // A terminate is asynchronous — the replica that owns the session may be a
+  // different one — so the page learns the session ended the same way it learns
+  // anything else about a live session: from the stream. The connections topic
+  // is admin-only, which is also exactly who can terminate.
+  const onConnectionEvent = useCallback(
+    (event: { event: string; data: { connection_uid?: string } }) => {
+      if (event.event !== "connection" || event.data.connection_uid !== uid) {
+        return;
+      }
+
+      void queryClient.invalidateQueries({ queryKey: ["connections", uid] });
+    },
+    [queryClient, uid],
+  );
+
+  const onConnectionGap = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["connections", uid] });
+  }, [queryClient, uid]);
+
+  useEventStream({
+    topics: ["connections"],
+    onEvent: onConnectionEvent,
+    onGap: onConnectionGap,
+    enabled: isAdmin && isLive,
   });
 
   const getUserName = (userId: string) =>
@@ -162,6 +210,17 @@ function ConnectionDetailPage() {
                 </TooltipContent>
               </Tooltip>
             )}
+            {isAdmin && isLive && (
+              <Button
+                variant="destructive"
+                size="sm"
+                data-testid="terminate-session-button"
+                onClick={() => setIsTerminateOpen(true)}
+              >
+                <Ban className="h-4 w-4 mr-1.5" />
+                Terminate session
+              </Button>
+            )}
             {connection.disconnected_at ? (
               connection.termination_reason ? (
                 // A session dbbat ended is not the same fact as one that ended
@@ -238,9 +297,43 @@ function ConnectionDetailPage() {
                 </dt>
                 <dd data-testid="connection-termination-reason">
                   {terminationReasonLabel(connection.termination_reason)}
+                  {connection.terminated_by && (
+                    <span data-testid="connection-terminated-by">
+                      {" — "}
+                      {connection.terminated_by.username}
+                    </span>
+                  )}
                 </dd>
+                {connection.terminate_reason && (
+                  <dd
+                    className="mt-1 text-xs text-muted-foreground"
+                    data-testid="connection-terminate-reason"
+                  >
+                    “{connection.terminate_reason}”
+                  </dd>
+                )}
               </div>
             )}
+            {/* A request that has not been acted on yet: the owning replica
+                polls every couple of seconds, so this state is brief — but a
+                session that closed on its own in between keeps it forever, and
+                showing it is the only way that reads as what it was. */}
+            {!connection.termination_reason &&
+              connection.terminate_requested_at && (
+                <div>
+                  <dt className="text-sm font-medium text-muted-foreground mb-1">
+                    Termination requested
+                  </dt>
+                  <dd data-testid="connection-terminate-requested">
+                    {format(
+                      new Date(connection.terminate_requested_at),
+                      "PPpp",
+                    )}
+                    {connection.terminated_by &&
+                      ` by ${connection.terminated_by.username}`}
+                  </dd>
+                </div>
+              )}
             <div>
               <dt className="text-sm font-medium text-muted-foreground mb-1">
                 Queries
@@ -392,7 +485,122 @@ function ConnectionDetailPage() {
         active={!connection.disconnected_at}
         statementsRetained={connection.statements_retained}
       />
+
+      <TerminateSessionDialog
+        uid={uid}
+        open={isTerminateOpen}
+        onOpenChange={setIsTerminateOpen}
+        username={getUserName(connection.user_id)}
+        databaseName={getDbName(connection.database_id)}
+        grantUid={connection.grant?.uid}
+      />
     </div>
+  );
+}
+
+// TerminateSessionDialog confirms ending one live session.
+//
+// It says the two things an admin gets wrong otherwise. First, that the running
+// statement is cancelled upstream — this is not a polite "please stop", the
+// backend's work is killed. Second, that terminating is *not* revoking: the
+// grant is untouched, so the same user can reconnect a second later, and if
+// that is not what was wanted the grants page is one click away.
+function TerminateSessionDialog({
+  uid,
+  open,
+  onOpenChange,
+  username,
+  databaseName,
+  grantUid,
+}: {
+  uid: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  username: string;
+  databaseName: string;
+  grantUid?: string;
+}) {
+  const [reason, setReason] = useState("");
+
+  const terminate = useTerminateConnection(uid, {
+    onSuccess: ({ local }) => {
+      toast.success(
+        local
+          ? "Session terminated"
+          : "Termination requested — the replica serving this session will end it within a few seconds",
+      );
+      setReason("");
+      onOpenChange(false);
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent data-testid="terminate-session-dialog">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Terminate session</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-2">
+              <p>
+                End {username}'s session on{" "}
+                <span className="font-mono">{databaseName}</span>? Whatever
+                statement is running will be cancelled on the database itself,
+                then both legs of the connection are dropped.
+              </p>
+              <p>
+                This does not revoke access — {username} can reconnect
+                immediately under the same grant.
+                {grantUid && (
+                  <>
+                    {" "}
+                    To withdraw the access itself,{" "}
+                    <Link
+                      to="/grants"
+                      className="underline hover:text-foreground"
+                      data-testid="terminate-revoke-grant-link"
+                    >
+                      revoke the grant
+                    </Link>{" "}
+                    instead.
+                  </>
+                )}
+              </p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="space-y-2">
+          <Label htmlFor="terminate-reason">Reason (optional)</Label>
+          <Textarea
+            id="terminate-reason"
+            data-testid="terminate-reason-input"
+            value={reason}
+            maxLength={1000}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Recorded in the audit log; never shown to the user whose session ends."
+          />
+        </div>
+        <AlertDialogFooter>
+          <AlertDialogCancel data-testid="terminate-cancel">
+            Cancel
+          </AlertDialogCancel>
+          <AlertDialogAction
+            data-testid="terminate-confirm"
+            disabled={terminate.isPending}
+            onClick={(e) => {
+              // The dialog would otherwise close on click, unmounting the
+              // mutation before its toast can say whether the session was ended
+              // here or handed to another replica.
+              e.preventDefault();
+              terminate.mutate(reason);
+            }}
+            className="bg-destructive text-white hover:bg-destructive/90"
+          >
+            {terminate.isPending ? "Terminating..." : "Terminate"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
