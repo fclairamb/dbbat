@@ -115,6 +115,13 @@ func (s *Session) authenticate() error {
 
 	s.grant = grant
 
+	// Resolve the per-statement limit once, here, next to the grant it comes
+	// from: the definition's value when it has one (0 included, which means
+	// "no limit, overriding the global"), otherwise the instance-wide default.
+	// The upstream SET and the watchdog both read this single resolved value,
+	// so they can never disagree about what the session is allowed.
+	s.statementLimit = s.statementTimeouts.For(s.ctx, grant)
+
 	// Check quotas
 	if err := s.checkQuotas(); err != nil {
 		s.sendError(err.Error())

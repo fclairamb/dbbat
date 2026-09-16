@@ -259,7 +259,7 @@ func TestPersistAbortedQuery_CompletesARecordItAlreadyCreated(t *testing.T) {
 
 	// No new bytes and a capture already in flight: the abort must be logged.
 	withRecord := newAbortSession(true)
-	withRecord.persistAbortedQuery(errAbortedForTest)
+	withRecord.persistAbortedQuery("aborted: " + errAbortedForTest.Error())
 
 	assert.Equal(t, int64(1), withRecord.grant.QueryCount,
 		"an abort on a query whose record already exists must still be completed")
@@ -267,7 +267,7 @@ func TestPersistAbortedQuery_CompletesARecordItAlreadyCreated(t *testing.T) {
 	// No new bytes and nothing captured: nothing was ever inserted, so there
 	// is still nothing to log.
 	withoutRecord := newAbortSession(false)
-	withoutRecord.persistAbortedQuery(errAbortedForTest)
+	withoutRecord.persistAbortedQuery("aborted: " + errAbortedForTest.Error())
 
 	assert.Equal(t, int64(0), withoutRecord.grant.QueryCount,
 		"an abort with no record and no bytes stays unlogged")

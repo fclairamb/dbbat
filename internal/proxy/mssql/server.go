@@ -70,6 +70,11 @@ type Server struct {
 	shutdown   chan struct{}
 	ctx        context.Context //nolint:containedctx // Context is needed for the server lifecycle
 	cancel     context.CancelFunc
+
+	// statementTimeouts resolves the instance-wide per-statement limit at
+	// every session's auth. nil — the default — means no limit is imposed
+	// beyond whatever the grant definition carries.
+	statementTimeouts *shared.StatementTimeoutResolver
 }
 
 // NewServer creates a new SQL Server proxy.
@@ -107,6 +112,13 @@ func NewServer(
 		ctx:           ctx,
 		cancel:        cancel,
 	}, nil
+}
+
+// SetStatementTimeouts installs the resolver for the instance-wide
+// per-statement limit. Called by the wiring in main; a server without one never
+// imposes a limit that the grant definition did not itself carry.
+func (s *Server) SetStatementTimeouts(r *shared.StatementTimeoutResolver) {
+	s.statementTimeouts = r
 }
 
 // SetApprovalDeps installs the approval-hold collaborators. A server without

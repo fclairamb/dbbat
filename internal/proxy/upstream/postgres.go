@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
@@ -369,4 +370,69 @@ func computeMD5Password(password, username string, salt [4]byte) string {
 	h2.Write(salt[:])
 
 	return "md5" + hex.EncodeToString(h2.Sum(nil))
+}
+
+// postgresCancelTimeout bounds the whole cancel exchange — dial, TLS
+// negotiation, one write. A cancel is best-effort housekeeping on a session
+// that is already being torn down, so it must never be what keeps the teardown
+// waiting; an unreachable target simply means the socket close does the job
+// alone.
+const postgresCancelTimeout = 3 * time.Second
+
+// CancelPostgres asks the upstream server to cancel whatever the backend
+// identified by key is currently running.
+//
+// PostgreSQL's cancellation protocol requires a *fresh* connection — the
+// backend running the query is, by definition, not reading its socket — so
+// this dials again through the same DialFunc the session used. That matters:
+// the target may only be reachable through an SSH bastion or a Kubernetes
+// port-forward, and a bare net.Dial would silently fail to reach it.
+//
+// The server answers nothing at all (it closes the connection whether or not
+// the key matched), so there is no result to report beyond "we managed to send
+// it". Closing the client's socket is never a substitute: a backend in a long
+// sequential scan does not notice a dead client until it next tries to send,
+// and with client_connection_check_interval at its default of 0 it never
+// checks — the scan runs to completion.
+func CancelPostgres(
+	ctx context.Context, dial DialFunc, sslMode, host string, key *pgproto3.BackendKeyData,
+) error {
+	if key == nil {
+		return errors.New("no upstream cancellation key")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, postgresCancelTimeout)
+	defer cancel()
+
+	conn, err := dial(ctx)
+	if err != nil {
+		return fmt.Errorf("dial for cancel: %w", err)
+	}
+
+	negotiated, _, err := negotiatePostgresSSL(ctx, conn, PlanFor(sslMode, host))
+	if err != nil {
+		_ = conn.Close()
+
+		return fmt.Errorf("cancel SSL negotiation: %w", err)
+	}
+
+	defer func() { _ = negotiated.Close() }()
+
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = negotiated.SetDeadline(deadline)
+	}
+
+	buf, err := (&pgproto3.CancelRequest{
+		ProcessID: key.ProcessID,
+		SecretKey: key.SecretKey,
+	}).Encode(nil)
+	if err != nil {
+		return fmt.Errorf("encode cancel request: %w", err)
+	}
+
+	if _, err := negotiated.Write(buf); err != nil {
+		return fmt.Errorf("send cancel request: %w", err)
+	}
+
+	return nil
 }

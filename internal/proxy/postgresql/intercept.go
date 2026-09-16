@@ -36,6 +36,35 @@ var readOnlyBypassPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bSET\s+ROLE\b`),
 }
 
+// statementTimeoutBypassPatterns detect a client trying to unset or widen the
+// statement_timeout dbbat pinned on the session.
+//
+// Every SET is refused, not just the ones that widen it: parsing the value
+// would mean re-implementing PostgreSQL's unit grammar ("500", "500ms", "5s",
+// "1min", "DEFAULT") to answer a question that does not need answering — a
+// client that wants a *shorter* limit can cancel its own query, and the
+// watchdog is what actually enforces the ceiling either way.
+//
+// SHOW statement_timeout is deliberately absent: reading the value is how a
+// client discovers the limit it is under, which is the opposite of a bypass.
+var statementTimeoutBypassPatterns = []*regexp.Regexp{
+	// SET [SESSION|LOCAL] statement_timeout (=|TO) <anything>, DEFAULT included
+	regexp.MustCompile(`(?i)\bSET\s+(?:SESSION\s+|LOCAL\s+)?statement_timeout\s*(?:=|TO)\s*\S`),
+
+	// RESET [SESSION] statement_timeout
+	regexp.MustCompile(`(?i)\bRESET\s+(?:SESSION\s+)?statement_timeout\b`),
+
+	// RESET ALL — resets statement_timeout along with everything else, so it
+	// is the same bypass by another name.
+	regexp.MustCompile(`(?i)\bRESET\s+ALL\b`),
+
+	// SET SESSION CHARACTERISTICS ... cannot touch statement_timeout, but
+	// `SET SESSION AUTHORIZATION` / `SET ROLE` can re-enter with different
+	// defaults; those are already refused by readOnlyBypassPatterns for a
+	// read-only grant, and harmless otherwise (the SET above still applies to
+	// the session, not to the role).
+}
+
 // validateStatement runs the deterministic, grant-derived controls one
 // statement has to clear before a single byte of it reaches upstream.
 //
@@ -69,6 +98,13 @@ func (s *Session) validateStatement(sqlText string) error {
 		return ErrCopyNotPermitted
 	}
 
+	// Limit: the pinned statement_timeout. Only when one is actually pinned —
+	// with no limit there is nothing to bypass and `SET statement_timeout` is
+	// an ordinary client setting.
+	if s.statementLimit > 0 && isStatementTimeoutBypassAttempt(sqlText) {
+		return fmt.Errorf("%w (limit %s)", ErrStatementTimeoutManaged, s.statementLimit)
+	}
+
 	return nil
 }
 
@@ -100,13 +136,17 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 		return err
 	}
 
-	// Start tracking query for logging
+	// Start tracking query for logging. startTime is stamped here, *after* the
+	// hold resolved, which is what keeps time parked on a human out of the
+	// statement's own clock.
 	return s.book(func() error {
 		s.currentQuery = &pendingQuery{
 			sql:         sqlText,
 			startTime:   time.Now(),
 			approvalUID: approvalUID,
 		}
+
+		s.refreshStatementClock()
 
 		return nil
 	})
@@ -291,6 +331,8 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 	return s.book(func() error {
 		s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
 
+		s.refreshStatementClock()
+
 		return nil
 	})
 }
@@ -334,6 +376,15 @@ func isCopyQuery(sql string) bool {
 // check that sits one line away from it.
 func isReadOnlyBypassAttempt(sql string) bool {
 	return shared.MatchesAnyNormalizedSQL(sql, readOnlyBypassPatterns)
+}
+
+// isStatementTimeoutBypassAttempt checks whether a statement would unset or
+// change the session's pinned statement_timeout.
+//
+// Comment-normalized like every other check here: `SET/**/statement_timeout=0`
+// reaches the server as a plain SET, so it has to reach this matcher as one.
+func isStatementTimeoutBypassAttempt(sql string) bool {
+	return shared.MatchesAnyNormalizedSQL(sql, statementTimeoutBypassPatterns)
 }
 
 // isPasswordChangeQuery checks if a query attempts to modify user/role passwords.

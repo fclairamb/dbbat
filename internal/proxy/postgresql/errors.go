@@ -17,6 +17,13 @@ var (
 	ErrPasswordChangeNotAllowed = errors.New("password modification is not allowed through the proxy")
 	ErrReadOnlyBypassAttempt    = errors.New("attempt to disable read-only mode is not permitted: " +
 		"your access grant is read-only and cannot be changed for this session")
+	// ErrStatementTimeoutManaged refuses a client statement that would unset
+	// or widen the session's statement_timeout. It is a courtesy, not the
+	// security boundary — dbbat's own watchdog is that — but without it a
+	// client that sets the value to 0 would only ever meet the disconnect,
+	// with nothing explaining why.
+	ErrStatementTimeoutManaged = errors.New("statement_timeout is managed by dbbat and cannot be " +
+		"changed for this session")
 	ErrDDLNotPermitted  = errors.New("DDL operations not permitted: your access grant blocks schema modifications")
 	ErrCopyNotPermitted = errors.New("COPY not permitted: your access grant blocks COPY commands")
 

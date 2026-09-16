@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
@@ -14,8 +15,16 @@ import (
 	"github.com/fclairamb/dbbat/internal/version"
 )
 
-// ErrUpstreamReadOnlyMode is returned when the upstream fails to set read-only mode.
+// ErrUpstreamReadOnlyMode is returned when the upstream fails to set read-only
+// mode. Kept as the historical name; ErrUpstreamSessionSetup is what the
+// generalized setup path actually returns, and it wraps to this so callers and
+// tests that matched on read-only still do.
 var ErrUpstreamReadOnlyMode = errors.New("upstream error setting read-only mode")
+
+// ErrUpstreamSessionSetup is returned when the upstream refuses one of the
+// session-setup statements (the read-only pin, the statement limit). A session
+// that cannot be pinned is failed rather than served unbounded.
+var ErrUpstreamSessionSetup = fmt.Errorf("%w (session setup)", ErrUpstreamReadOnlyMode)
 
 // connectUpstream connects to the upstream PostgreSQL server and replays the
 // result to the client.
@@ -46,6 +55,13 @@ func (s *Session) connectUpstream() error {
 	s.upstreamConn = up.Conn
 	s.upstreamFrontend = up.Frontend
 	s.upstreamTLS = up.TLS
+
+	// Remember the server's cancellation key for *dbbat's* use: the watchdog
+	// cancels a runaway statement with it, on a fresh connection. It is the
+	// same key that is forwarded to the client a few lines down, but the two
+	// uses are independent and only one of them survives a client that never
+	// asked for one.
+	s.upstreamKey = up.BackendKeyData
 
 	return s.replayUpstreamStartup(up)
 }
@@ -83,10 +99,8 @@ func (s *Session) reportUpstreamConnectFailure(err error) error {
 // session that cannot be pinned read-only must fail rather than serve one
 // writable query.
 func (s *Session) replayUpstreamStartup(up *upstream.PostgresUpstream) error {
-	if s.grant.IsReadOnly() {
-		if err := s.setSessionReadOnly(); err != nil {
-			return fmt.Errorf("failed to set read-only mode: %w", err)
-		}
+	if err := s.runUpstreamSetup(s.upstreamSetupStatements()...); err != nil {
+		return err
 	}
 
 	if err := s.sendToClient(&pgproto3.AuthenticationOk{}); err != nil {
@@ -139,36 +153,66 @@ func buildApplicationName(username, clientAppName string) string {
 	return shared.BuildUpstreamName(version.Version, username, clientAppName, maxAppNameLen)
 }
 
-// setSessionReadOnly sets the upstream session to read-only mode.
-// This enforces read-only access at the PostgreSQL level for defense-in-depth.
-func (s *Session) setSessionReadOnly() error {
-	// Send SET SESSION command to upstream database
-	query := &pgproto3.Query{
-		String: "SET SESSION default_transaction_read_only = on;",
+// upstreamSetupStatements is the session state dbbat pins on the upstream
+// before the client is told it is connected: the grant's controls expressed in
+// the server's own terms.
+//
+// Both entries are defense in depth rather than the enforcement itself — dbbat
+// refuses a write and kills an over-time statement on its own — but both change
+// what the *client* sees when it crosses the line: a real PostgreSQL error with
+// a real SQLSTATE (25006 for a write, 57014 for a cancelled statement) instead
+// of a dropped socket.
+func (s *Session) upstreamSetupStatements() []string {
+	var stmts []string
+
+	if s.grant.IsReadOnly() {
+		stmts = append(stmts, "SET SESSION default_transaction_read_only = on;")
 	}
 
-	s.upstreamFrontend.Send(query)
+	if s.statementLimit > 0 {
+		// Milliseconds: statement_timeout's bare-integer unit, and the one
+		// every version accepts without a unit suffix being parsed.
+		stmts = append(stmts, fmt.Sprintf("SET SESSION statement_timeout = %d;",
+			s.statementLimit.Milliseconds()))
+	}
+
+	return stmts
+}
+
+// runUpstreamSetup issues the session-setup statements on the upstream leg,
+// before the client has been told it is connected.
+//
+// A session that cannot be pinned fails rather than serving one unbounded (or
+// one writable) query: the same rule the read-only pin has always had, now
+// covering the statement limit too. The statements are sent as one batch and
+// answered by one ReadyForQuery, since PostgreSQL's simple-query protocol
+// allows several statements in a single Query message.
+func (s *Session) runUpstreamSetup(stmts ...string) error {
+	if len(stmts) == 0 {
+		return nil
+	}
+
+	s.upstreamFrontend.Send(&pgproto3.Query{String: strings.Join(stmts, " ")})
 
 	if err := s.upstreamFrontend.Flush(); err != nil {
-		return fmt.Errorf("send SET SESSION: %w", err)
+		return fmt.Errorf("send session setup: %w", err)
 	}
 
-	// Read response from upstream
 	for {
 		msg, err := s.upstreamFrontend.Receive()
 		if err != nil {
-			return fmt.Errorf("receive response: %w", err)
+			return fmt.Errorf("receive session setup response: %w", err)
 		}
 
 		switch msg.(type) {
 		case *pgproto3.CommandComplete:
-			// Success - read-only mode is now enforced
+			// One per statement in the batch; keep reading until the server
+			// says it is ready again.
 			continue
 		case *pgproto3.ReadyForQuery:
-			// Session is ready
 			return nil
 		case *pgproto3.ErrorResponse:
-			return fmt.Errorf("%w: %v", ErrUpstreamReadOnlyMode, msg)
+			return fmt.Errorf("%w: %v", ErrUpstreamSessionSetup, msg)
 		default:
 			continue
 		}

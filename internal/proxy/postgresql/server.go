@@ -49,6 +49,12 @@ type Server struct {
 	// connection, back to the session that owns the backend key.
 	cancels *cancelRegistry
 
+	// statementTimeouts resolves the instance-wide per-statement limit at
+	// every session's auth. nil — the default — means no limit is ever
+	// imposed, which is what a server built without the wiring (tests,
+	// fixtures) gets.
+	statementTimeouts *shared.StatementTimeoutResolver
+
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
 	// in a goroutine).
@@ -96,6 +102,13 @@ func NewServer(
 		cancel:        cancel,
 		cancels:       newCancelRegistry(),
 	}, nil
+}
+
+// SetStatementTimeouts installs the resolver for the instance-wide
+// per-statement limit. Called by the wiring in main; a server without one never
+// imposes a limit that the grant definition did not itself carry.
+func (s *Server) SetStatementTimeouts(r *shared.StatementTimeoutResolver) {
+	s.statementTimeouts = r
 }
 
 // SetApprovalDeps installs the approval-hold collaborators. Called by the
@@ -251,6 +264,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.dumpConfig, s.authCache, s.tlsConfig, s.rowWriter)
 	session.approvalDeps = s.approvalDeps
 	session.cancels = s.cancels
+	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
 
 	if err := session.Run(); err != nil {
