@@ -344,6 +344,27 @@ If the test fails after a `go.mod` upgrade: either pin go-mysql back, or extend 
 
 When `DBB_DUMP_DIR` is set, the MySQL proxy writes a per-session `.pcapng` capture file containing the post-auth command-phase byte stream (matching the PG and Oracle proxies). The filename is the connection UID. Wiring is in `session.go: startDumpIfConfigured` — it swaps the underlying `net.Conn` on the live `packet.Conn` for a `dump.TapConn` after `recordConnection` runs, so the auth handshake itself is never captured. For TLS-upgraded connections the tap sees TLS records, which still preserves timing and packet boundaries.
 
+## Finding a session from performance_schema
+
+Every proxied session's `program_name` connect attribute is dbbat-branded and
+carries the connection's own uid, not just the dbbat user's:
+
+```sql
+SELECT p.ID, a.ATTR_VALUE AS program_name, p.INFO
+FROM performance_schema.processlist p
+JOIN performance_schema.session_connect_attrs a
+  ON a.PROCESSLIST_ID = p.ID AND a.ATTR_NAME = 'program_name'
+WHERE a.ATTR_VALUE LIKE 'dbbat/%';
+```
+
+`program_name` reads `dbbat/0.28.1 @florent c=3f9a1c7b2e4d for mysql` — the
+`c=` tag is the last 12 hex characters of the connection uid. Paste it (or the
+whole `c=...` token) into the connections page's search box, or call
+`GET /api/v1/connections?uid_suffix=3f9a1c7b2e4d` directly, to land on the
+exact dbbat connection: its queries, its grant, and the Terminate button —
+rather than guessing from the username alone, which is ambiguous the moment a
+user has more than one session open.
+
 ## Testing
 
 ### Integration tests

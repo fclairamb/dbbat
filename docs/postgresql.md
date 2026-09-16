@@ -63,6 +63,25 @@ DBBat sends `AuthenticationCleartextPassword` (`R`) to the client. Inside a TLS 
 
 Both DBBat user passwords (Argon2id) and DBBat API keys (prefix `dbb_`) are accepted as the password. API key verification is independent of the user password path.
 
+## Finding a session in pg_stat_activity
+
+Every proxied session's `application_name` is dbbat-branded and carries the
+connection's own uid, not just the dbbat user's:
+
+```sql
+SELECT pid, application_name, state, query
+FROM pg_stat_activity
+WHERE application_name LIKE 'dbbat/%';
+```
+
+`application_name` reads `dbbat/0.28.1 @florent c=3f9a1c7b2e4d for psql` — the
+`c=` tag is the last 12 hex characters of the connection uid. Paste it (or the
+whole `c=...` token) into the connections page's search box, or call
+`GET /api/v1/connections?uid_suffix=3f9a1c7b2e4d` directly, to land on the
+exact dbbat connection: its queries, its grant, and the Terminate button —
+rather than guessing from the username alone, which is ambiguous the moment a
+user has more than one session open.
+
 ## Testing
 
 ### Integration tests

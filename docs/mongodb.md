@@ -364,6 +364,24 @@ traffic is captured per session using `dump.ProtocolMongo`. Dumps are pruned per
 - **No `snappy`/`zstd` compression** (only `zlib`), **no streaming/awaitable
   hello**, **no exhaust cursors**.
 
+## Finding a session with currentOp
+
+Every proxied session's `appName` is dbbat-branded and carries the
+connection's own uid, not just the dbbat user's — and, since this feature,
+the client's own declared `appName` too (previously dropped):
+
+```js
+db.adminCommand({ currentOp: 1, appName: /^dbbat\// })
+```
+
+`appName` reads `dbbat/0.28.1 @florent c=3f9a1c7b2e4d for mongosh` — the `c=`
+tag is the last 12 hex characters of the connection uid. Paste it (or the
+whole `c=...` token) into the connections page's search box, or call
+`GET /api/v1/connections?uid_suffix=3f9a1c7b2e4d` directly, to land on the
+exact dbbat connection: its queries, its grant, and the Terminate button —
+rather than guessing from the username alone, which is ambiguous the moment a
+user has more than one session open.
+
 ## Testing
 
 `internal/proxy/mongodb/wire_test.go` covers the framing round-trips (including
