@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -71,6 +72,11 @@ type ExecRequest struct {
 	// path on both protocols, which is also what an operator wants for
 	// untrusted values.
 	Params []any
+	// StatementTimeout is the grant's resolved per-statement limit, zero when
+	// none applies. The executor does not enforce it — the proxy does, on the
+	// other side of the loopback socket — it only needs the number to name it
+	// when the cancellation comes back as an opaque driver error.
+	StatementTimeout time.Duration
 	// MaxRows caps the rows returned to the agent. Already clamped by the
 	// caller; the executor treats it as authoritative.
 	MaxRows int
@@ -123,6 +129,15 @@ func NewLoopbackExecutor(listeners LoopbackListeners) *LoopbackExecutor {
 
 // Execute dispatches to the loopback client for the request's protocol.
 func (e *LoopbackExecutor) Execute(ctx context.Context, req ExecRequest) (*QueryResult, error) {
+	result, err := e.execute(ctx, req)
+
+	// One place, five protocols: the cancellation reaches each client library
+	// as something different, and the agent should read the same sentence
+	// whichever one it was.
+	return result, classifyStatementTimeout(err, req.StatementTimeout)
+}
+
+func (e *LoopbackExecutor) execute(ctx context.Context, req ExecRequest) (*QueryResult, error) {
 	switch req.Protocol {
 	case store.ProtocolPostgreSQL:
 		addr, err := loopbackAddr(e.listeners.PostgreSQL)
