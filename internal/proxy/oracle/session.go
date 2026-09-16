@@ -312,6 +312,15 @@ type session struct {
 	oer           oerShape
 	oerSeq        int
 	oerCallNumber byte
+
+	// statementTaggingEnabled is DBB_QUERY_TAGGING_ORACLE=user, resolved at
+	// startup and stamped on the session by the server.
+	statementTaggingEnabled bool
+
+	// tagging carries the per-user statement tag and the once-per-session
+	// decision about whether this client's frames can be rewritten to hold it.
+	// Inert unless statementTaggingEnabled. See statement_tagging.go.
+	tagging statementTagging
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -545,6 +554,10 @@ func (s *session) run() error {
 	} else {
 		s.connectionUID = conn.UID
 	}
+
+	// The per-user statement tag needs the user and the grant, both settled by
+	// now. It stays inert unless DBB_QUERY_TAGGING_ORACLE=user.
+	s.configureStatementTagging()
 
 	upstreamAddr := net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port))
 	s.logger.InfoContext(s.ctx, "Oracle session established, entering proxy mode",
@@ -2137,6 +2150,22 @@ func (s *session) clientToUpstream() error {
 				// Every fragment is dropped, not just the first: the refusal was
 				// answered once, and letting a continuation through on its own is
 				// what used to desynchronize the upstream and kill the session.
+				continue
+			}
+
+			// Everything above ran on the client's own text: the controls, the
+			// `queries` row, the audit chain, the capture and any approval hold.
+			// This is the one point where the bytes going upstream may differ
+			// from the bytes that arrived — see statement_tagging.go, which
+			// forwards the client's packets untouched unless the statement can
+			// be relocated exactly *and* this session was certified for it.
+			if tagged, ok := s.rewriteStatementMessage(msg); ok {
+				for _, frame := range tagged {
+					if _, err := s.upstreamConn.Write(frame); err != nil {
+						return fmt.Errorf("upstream write error: %w", err)
+					}
+				}
+
 				continue
 			}
 

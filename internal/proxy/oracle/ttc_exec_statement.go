@@ -153,15 +153,39 @@ func decodeExecStatementAt(body []byte) (execStatement, bool) {
 //	[13..20] fe x8        pointer sentinel
 //	[21..24] sqlLen*3     uint32 little-endian   <- this
 func execSQLLength(body []byte) (int, bool) {
-	if n, ok := execSQLLengthWide(body); ok {
-		return n, true
+	field, ok := execSQLLengthField(body)
+
+	return field.value, ok
+}
+
+// execSQLLenField is where an exec op declares its statement's length, and in
+// which of the two encodings execSQLLength knows.
+//
+// It exists for the rewriter, which has to put a *different* number in that
+// field: a decoder only needs the value, an encoder needs the exact span it
+// occupies, because widening the field shifts every byte behind it. See
+// ttc_statement_rewrite.go.
+type execSQLLenField struct {
+	value int
+	at    int
+	width int
+	kind  stmtLenKind
+}
+
+// execSQLLengthField is execSQLLength keeping the field's position. The two
+// share one walk deliberately: a second implementation of "where does this
+// header declare its length" is exactly the drift that would let the gate read
+// one field and the rewriter overwrite another.
+func execSQLLengthField(body []byte) (execSQLLenField, bool) {
+	if field, ok := execSQLLengthWideField(body); ok {
+		return field, true
 	}
 
 	// Guarded rather than relying on the caller's execHeaderMinLen check: this
 	// function has a second entry point in the tests, and an unconditional
 	// index is the shape that cost a panic below.
 	if len(body) <= 3 {
-		return 0, false
+		return execSQLLenField{}, false
 	}
 
 	pos := 3
@@ -172,7 +196,7 @@ func execSQLLength(body []byte) (int, bool) {
 	// options
 	_, n := readCompressedInt(body[pos:])
 	if n == 0 {
-		return 0, false
+		return execSQLLenField{}, false
 	}
 
 	pos += n
@@ -180,7 +204,7 @@ func execSQLLength(body []byte) (int, bool) {
 	// cursor id
 	_, n = readCompressedInt(body[pos:])
 	if n == 0 {
-		return 0, false
+		return execSQLLenField{}, false
 	}
 
 	pos += n
@@ -192,17 +216,17 @@ func execSQLLength(body []byte) (int, bool) {
 	// contain the panic, but containment means the frame is forwarded ungated,
 	// which is the bypass class this decode exists to close.
 	if pos >= len(body) {
-		return 0, false
+		return execSQLLenField{}, false
 	}
 
 	pos++
 
 	sqlLen, n := readCompressedInt(body[pos:])
 	if n == 0 || sqlLen <= 0 || sqlLen > execMaxSQLLen {
-		return 0, false
+		return execSQLLenField{}, false
 	}
 
-	return sqlLen, true
+	return execSQLLenField{value: sqlLen, at: pos, width: n, kind: stmtLenCompressed}, true
 }
 
 // execSQLLengthWide reads the statement length out of the OCI wide exec header.
@@ -220,6 +244,19 @@ func execSQLLength(body []byte) (int, bool) {
 // shape this reading does not fit falls through to the legacy scan instead of
 // producing a length that would slice the statement.
 func execSQLLengthWide(body []byte) (int, bool) {
+	field, ok := execSQLLengthWideField(body)
+
+	return field.value, ok
+}
+
+// wideCharWidth is the multiplier the OCI exec header applies to the statement
+// length: the client sizes the buffer for its widest character encoding rather
+// than reporting the byte count.
+const wideCharWidth = 3
+
+// execSQLLengthWideField is execSQLLengthWide keeping the field's position, for
+// the same reason execSQLLengthField exists.
+func execSQLLengthWideField(body []byte) (execSQLLenField, bool) {
 	const (
 		optionsLen   = 8
 		sentinelAt   = 5 + optionsLen
@@ -228,33 +265,31 @@ func execSQLLengthWide(body []byte) (int, bool) {
 	)
 
 	if len(body) < minWideBytes {
-		return 0, false
+		return execSQLLenField{}, false
 	}
 
 	if body[3] != closeCursorsPointer || body[4] != body[2]+1 {
-		return 0, false
+		return execSQLLenField{}, false
 	}
 
 	for i, b := range closeCursorsWideSentinel {
 		if body[sentinelAt+i] != b {
-			return 0, false
+			return execSQLLenField{}, false
 		}
 	}
-
-	const wideCharWidth = 3
 
 	buffered := int(body[sqlLenAt]) | int(body[sqlLenAt+1])<<8 |
 		int(body[sqlLenAt+2])<<16 | int(body[sqlLenAt+3])<<24
 	if buffered <= 0 || buffered%wideCharWidth != 0 {
-		return 0, false
+		return execSQLLenField{}, false
 	}
 
 	sqlLen := buffered / wideCharWidth
 	if sqlLen > execMaxSQLLen {
-		return 0, false
+		return execSQLLenField{}, false
 	}
 
-	return sqlLen, true
+	return execSQLLenField{value: sqlLen, at: sqlLenAt, width: 4, kind: stmtLenWideUB4}, true
 }
 
 // locateExecSQLText finds the statement of exactly sqlLen bytes inside an exec

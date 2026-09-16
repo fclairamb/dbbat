@@ -54,6 +54,18 @@ type Server struct {
 	// every session's auth. nil — the default — means no limit is imposed
 	// beyond whatever the grant definition carries.
 	statementTimeouts *shared.StatementTimeoutResolver
+
+	// statementTagging is DBB_QUERY_TAGGING_ORACLE=user, already resolved.
+	// false — the default — forwards every client packet byte for byte, which
+	// is what this proxy did before the tag existed.
+	statementTagging bool
+}
+
+// SetStatementTagging turns the per-user statement tag on for new sessions.
+// Resolved from DBB_QUERY_TAGGING_ORACLE by the caller, so an invalid value
+// fails the process at startup rather than reaching a session.
+func (s *Server) SetStatementTagging(on bool) {
+	s.statementTagging = on
 }
 
 // NewServer creates a new Oracle proxy server.
@@ -210,6 +222,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.approvalDeps = s.approvalDeps
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
+	session.statementTaggingEnabled = s.statementTagging
 	if err := session.run(); err != nil {
 		// Two expected outcomes, told apart by the sentinel rather than by
 		// matching on the error text as this used to. The string match demoted

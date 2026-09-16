@@ -76,6 +76,14 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 		s.logger.DebugContext(s.ctx, "pre-auth relay: stripped FAST_AUTH/END_OF_RESPONSE from Accept")
 	}
 
+	// The negotiated packet size, kept for the one thing that ever writes a
+	// client message dbbat did not receive: a statement re-cut to hold the
+	// per-user tag (statement_tagging.go). A session whose Accept does not yield
+	// one simply never tags.
+	if sdu, ok := acceptNegotiatedSDU(acceptPkt.Raw); ok {
+		s.tagging.sdu = sdu
+	}
+
 	s.logger.DebugContext(s.ctx, "pre-auth relay: forwarding Accept to client", slog.Int("len", len(acceptPkt.Raw)))
 
 	if _, err := s.clientConn.Write(acceptPkt.Raw); err != nil {
