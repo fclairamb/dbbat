@@ -1112,6 +1112,48 @@ export function useDownloadConnectionDump(
   });
 }
 
+// useTerminateConnection ends one live proxied session.
+//
+// The response is a 202, not a 200, and the difference is visible here: the
+// replica that answered is not necessarily the one serving the session, so
+// success means "the termination was requested", not "the session is gone".
+// `local` says which — true when that replica owned the session and signaled it
+// on the spot, false when another replica picks it up on its next poll (about
+// two seconds). Either way the page learns the session actually ended from the
+// connections stream, not from this call.
+export function useTerminateConnection(
+  uid: string,
+  options?: {
+    onSuccess?: (result: { local: boolean }) => void;
+    onError?: (error: Error) => void;
+  }
+) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (reason: string): Promise<{ local: boolean }> => {
+      const response = await apiClient.POST("/connections/{uid}/terminate", {
+        params: { path: { uid } },
+        body: { reason },
+      });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.response?.status === 409
+            ? "This session has already ended"
+            : (response.error as { message?: string })?.message ||
+                "Failed to terminate the session"
+        );
+      }
+      return { local: response.data.local };
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["connections", uid] });
+      options?.onSuccess?.(result);
+    },
+    onError: options?.onError,
+  });
+}
+
 // ============================================================================
 // Queries
 // ============================================================================
