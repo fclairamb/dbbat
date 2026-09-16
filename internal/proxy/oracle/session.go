@@ -272,6 +272,9 @@ type session struct {
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
+	// liveSession is signaled when an admin ends *this* session, keyed by the
+	// connection uid rather than by the grant.
+	liveSession *cache.SessionHandle
 
 	// oer holds the negotiated layout of the TTC summary object, so a refusal
 	// dbbat synthesizes is framed the way this client parses one. Its
@@ -1532,6 +1535,11 @@ func (s *session) proxyMessages() error {
 
 	s.revocation = s.store.Revocations().Register(grantUID)
 
+	// And register it by connection uid, which is the only identifier an admin
+	// has: that is what POST /connections/{uid}/terminate — and the poller
+	// relaying such a request from another replica — signals.
+	s.liveSession = s.store.Sessions().Register(s.connectionUID)
+
 	// Build the limit guard now that the grant is known, and run a watchdog to
 	// tear the session down if a limit is crossed (or the grant is revoked)
 	// while a query is blocked producing no traffic. The inline check in
@@ -1539,6 +1547,7 @@ func (s *session) proxyMessages() error {
 	// error frame.
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithTermination(s.liveSession).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
 	databaseName := ""
@@ -3499,6 +3508,8 @@ func (s *session) cleanup() {
 	if s.grant != nil && s.revocation != nil {
 		s.store.Revocations().Deregister(s.grant.UID, s.revocation)
 	}
+
+	s.store.Sessions().Deregister(s.connectionUID, s.liveSession)
 
 	if s.dump != nil {
 		if err := s.dump.Close(); err != nil {

@@ -141,6 +141,7 @@ type Session struct {
 	upstreamTLS           bool                    // Whether the proxy→upstream leg ended up encrypted
 	guard                 *shared.LimitGuard      // Mid-stream time/bandwidth limit enforcement
 	revocation            *cache.RevocationHandle // Signaled when this session's grant is revoked mid-flight
+	liveSession           *cache.SessionHandle    // Signaled when an admin ends *this* session (POST /connections/{uid}/terminate)
 
 	// statementTimeouts resolves the instance-wide per-statement limit;
 	// statementLimit is this session's resolved value (0 = no limit), stamped
@@ -420,6 +421,11 @@ func (s *Session) proxyMessages() error {
 	// deregistered in cleanup.
 	s.revocation = s.store.Revocations().Register(s.grant.UID)
 
+	// And register it by connection uid, which is the only identifier an admin
+	// has: that is what POST /connections/{uid}/terminate — and the poller
+	// relaying such a request from another replica — signals.
+	s.liveSession = s.store.Sessions().Register(s.connectionUID)
+
 	// Build the limit guard once the grant is known, then run a watchdog that
 	// tears the session down if a limit is crossed (or the grant is revoked)
 	// while a query is blocked producing no traffic (the inline check in
@@ -427,6 +433,7 @@ func (s *Session) proxyMessages() error {
 	// error frame).
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithTermination(s.liveSession).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
 	// The approval gate compiles the grant's patterns once, here, so the
@@ -1279,6 +1286,8 @@ func (s *Session) cleanup() {
 	if s.grant != nil && s.revocation != nil {
 		s.store.Revocations().Deregister(s.grant.UID, s.revocation)
 	}
+
+	s.store.Sessions().Deregister(s.connectionUID, s.liveSession)
 
 	if s.dumpWriter != nil {
 		if err := s.dumpWriter.Close(); err != nil {
