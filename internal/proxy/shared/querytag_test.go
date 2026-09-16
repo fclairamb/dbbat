@@ -134,6 +134,58 @@ func TestQueryTaggerOmitsEmptyFields(t *testing.T) {
 	assert.NotContains(t, prefix, "grant=")
 }
 
+// TestUserQueryTaggerOmitsConn is Oracle's whole reason for a second
+// constructor. V$SQL keys on statement text, so a `conn=` field would give
+// every dbbat session its own SQL_ID and its own shared-pool cursor; without
+// it the cursor count is bounded by the number of dbbat users.
+func TestUserQueryTaggerOmitsConn(t *testing.T) {
+	t.Parallel()
+
+	tagger := NewUserQueryTagger("0.28.1", "florent", "diag-paris-habitat")
+
+	assert.Equal(t,
+		"/*dbbat='0.28.1',user='florent',grant='diag-paris-habitat'*/ ",
+		tagger.Prefix())
+	assert.NotContains(t, tagger.Prefix(), "conn=")
+
+	assert.Equal(t,
+		"/*dbbat='0.28.1',user='florent',grant='diag-paris-habitat'*/ SELECT 1",
+		tagger.Apply("SELECT 1"))
+}
+
+// TestUserQueryTaggerIsTheSameForEverySession is the property the measurement
+// rests on: two different connections belonging to the same user under the same
+// grant must produce byte-identical text, or Oracle sees two SQL_IDs and the
+// cost stops being bounded by k.
+func TestUserQueryTaggerIsTheSameForEverySession(t *testing.T) {
+	t.Parallel()
+
+	first := NewUserQueryTagger("0.28.1", "florent", "diag")
+	second := NewUserQueryTagger("0.28.1", "florent", "diag")
+
+	assert.Equal(t, first.Apply("SELECT 1"), second.Apply("SELECT 1"))
+
+	// And it is exactly what the general constructor yields for a nil uid —
+	// the wrapper names the intent, it does not change the bytes.
+	assert.Equal(t,
+		NewQueryTagger("0.28.1", "florent", uuid.Nil, "diag").Prefix(),
+		first.Prefix())
+}
+
+// TestUserQueryTaggerEncodesValues — the injection guard has to hold on this
+// path too: a username able to close the comment would be closing an Oracle
+// statement.
+func TestUserQueryTaggerEncodesValues(t *testing.T) {
+	t.Parallel()
+
+	prefix := NewUserQueryTagger("0.28.1", "rob*/ DROP TABLE t --", "g'rant").Prefix()
+
+	assert.NotContains(t, prefix[2:len(prefix)-3], "*/")
+	assert.NotContains(t, prefix, "DROP TABLE t")
+	assert.Contains(t, prefix, "%2A%2F")
+	assert.Contains(t, prefix, "%27")
+}
+
 // TestQueryTaggerZeroValueIsInert is what the disabled feature relies on: with
 // DBB_QUERY_TAGGING off a session holds the zero tagger, and not one byte of
 // any statement may change.

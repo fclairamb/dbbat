@@ -1046,12 +1046,61 @@ type Config struct {
 // pg_stat_statements allowlist, a query firewall, a per-statement cache) has
 // to turn it on knowingly.
 type QueryTaggingConfig struct {
-	// Enabled prepends the tag on the PostgreSQL and MySQL/MariaDB proxies.
-	// The other three protocols ignore it: Oracle's V$SQL deduplicates on
-	// statement text, so a per-connection tag would defeat its shared-cursor
-	// cache, and MongoDB's natural equivalent is the commands' `comment`
-	// field rather than a SQL comment.
+	// Enabled prepends the tag on the PostgreSQL, MySQL/MariaDB and MongoDB
+	// proxies (MongoDB puts it in the commands' `comment` field rather than in
+	// a SQL comment). It does **not** reach Oracle, which has its own setting
+	// below, or SQL Server, which has none yet.
 	Enabled bool `koanf:"enabled"`
+
+	// Oracle is Oracle's own switch, deliberately not folded into Enabled.
+	//
+	// V$SQL keys on statement text, so every distinct tag is a distinct
+	// SQL_ID: the tag buys attribution by spending shared-pool cursors. That
+	// trade-off is Oracle's alone, and an operator who turned tagging on for
+	// PostgreSQL did not consent to it — hence a separate variable, off by
+	// default even when Enabled is true.
+	//
+	// The only non-off value is "user": the tag carries the dbbat version, the
+	// user and the grant, and **omits `conn=`**, so the cursor count is bounded
+	// by the number of dbbat *users* rather than growing with every session.
+	// Measured on Oracle 23ai Free with one join executed 600 times: 20 tagged
+	// identities cost 20 cursors, 20 one-time hard parses and ~48KB of
+	// SHARABLE_MEM each, and then plateau — a second 600-execution pass added
+	// zero loads, zero library-cache misses and zero bytes. The same traffic
+	// under a per-connection tag cost 200 cursors and 9.6MB, with no ceiling.
+	// See docs/oracle.md.
+	Oracle string `koanf:"oracle"`
+}
+
+// Oracle statement-tagging modes.
+const (
+	// QueryTaggingOracleOff forwards Oracle statements byte-for-byte. The
+	// default, and what an empty value means.
+	QueryTaggingOracleOff = "off"
+	// QueryTaggingOracleUser tags with the dbbat version, user and grant, and
+	// no per-connection component.
+	QueryTaggingOracleUser = "user"
+)
+
+// ErrQueryTaggingOracleInvalid is returned when DBB_QUERY_TAGGING_ORACLE holds
+// something other than "off" or "user". Like the TLS ceiling above it fails the
+// process at startup rather than falling back: an operator who asked for
+// attribution on their Oracle fleet and silently got none would have no way to
+// tell, since the absence of a tag looks exactly like the feature being off.
+var ErrQueryTaggingOracleInvalid = errors.New(
+	`invalid DBB_QUERY_TAGGING_ORACLE: want "off" or "user"`)
+
+// ResolveOracle validates Oracle and reports whether the per-user tag is on.
+// An empty value resolves to QueryTaggingOracleOff.
+func (c QueryTaggingConfig) ResolveOracle() (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(c.Oracle)) {
+	case "", QueryTaggingOracleOff:
+		return false, nil
+	case QueryTaggingOracleUser:
+		return true, nil
+	default:
+		return false, fmt.Errorf("%w: got %q", ErrQueryTaggingOracleInvalid, c.Oracle)
+	}
 }
 
 // MCPConfig configures the Model Context Protocol endpoint that lets AI
