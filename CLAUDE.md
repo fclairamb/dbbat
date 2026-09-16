@@ -482,13 +482,43 @@ needs privileges the proxied role usually lacks.
 
 Every dbbat-initiated teardown is recorded rather than merely logged:
 `connections.termination_reason` (`statement_timeout`, `grant_expired`,
-`quota_exceeded`, `grant_revoked`, later `admin_terminated`) written in the same
-statement as `disconnected_at`, a chained `connection.terminated` audit entry
-carrying the statement, the limit and the observed duration, a `connection`
-stream event with state `terminated`, and the in-flight query row completed with
-`statement timeout: limit 30s, ran 32.1s, session terminated by dbbat`. MCP
-agents get the same limit named in the tool error rather than an opaque driver
-failure (`docs/mcp.md`).
+`quota_exceeded`, `grant_revoked`, `admin_terminated`, `instance_lost`) written
+in the same statement as `disconnected_at`, a chained `connection.terminated`
+audit entry carrying the statement, the limit and the observed duration, a
+`connection` stream event with state `terminated`, and the in-flight query row
+completed with `statement timeout: limit 30s, ran 32.1s, session terminated by
+dbbat`. MCP agents get the same limit named in the tool error rather than an
+opaque driver failure (`docs/mcp.md`). `instance_lost` is the odd one out — no
+session wrote it, the crash reconcile did, so the column has no unexplained
+NULLs on closed rows.
+
+**Ending one live session**: `POST /api/v1/connections/{uid}/terminate`, admin
+only, 202/404/409 (`POST` on a sub-path, never `DELETE /connections/{uid}` —
+that reads as deleting the ledger row, which retention owns and the audit chain
+protects). Terminating is not revoking: the grant is untouched and the user may
+reconnect immediately.
+
+The replica serving the API call is not necessarily the one serving the session
+(`connections.run_id` says who is), so the request is a **row** —
+`terminate_requested_at` / `_by` / `terminate_reason`, partial-indexed on
+`(run_id)` — and every process polls for its own every
+`store.TerminationPollInterval` (2s, on the instance-heartbeat goroutine). When
+the API replica *does* own the session it signals `cache.SessionRegistry`
+directly, so the local case stays instant. The registry is keyed by connection
+uid, sits next to `cache.RevocationRegistry`, and its flag is attached to the
+session's `LimitGuard` (`WithTermination`) exactly as revocation is — so
+`Check()` returns `ErrAdminTerminated` and the existing `onLimitViolation`
+teardown runs unchanged.
+
+**The poll has a second arm, and it fixes a bug rather than adding a feature.**
+`DELETE /grants/{uid}` only ever signalled the in-process `RevocationRegistry`,
+so in a multi-replica deployment revoking a grant ended the sessions on the
+replica that served the API call and left every other one running until it
+expired (`GetActiveGrant` runs only at connect; `LimitGuard` compares
+`expires_at`, never `revoked_at`). The second arm selects this run's live
+sessions whose grant carries `revoked_at`, signals them through the same handle,
+and records `grant_revoked` — the handle's reason is authoritative over the
+sentinel, which is what keeps the two apart.
 
 ### Security
 - User passwords: Argon2id hashed

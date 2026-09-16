@@ -391,8 +391,8 @@ statement is actually sent to the database, which a held statement has not been.
 A session dbbat ended is recorded, not just logged:
 
 - `termination_reason` on the connection (`statement_timeout`, `grant_expired`,
-  `quota_exceeded`, `grant_revoked`), shown as a **Terminated** badge on the
-  connection page;
+  `quota_exceeded`, `grant_revoked`, `admin_terminated`, `instance_lost`), shown
+  as a **Terminated** badge on the connection page;
 - the statement that caused it, completed in the query log with
   `statement timeout: limit 30s, ran 32.1s, session terminated by dbbat`;
 - a `connection.terminated` entry in the tamper-evident audit trail, carrying
@@ -414,7 +414,37 @@ curl -X DELETE http://localhost:4200/api/v1/grants/$GRANT_UID \
 
 The grant record is preserved for audit (with `revoked_at` and `revoked_by` populated).
 
-Revocation takes effect immediately across all proxied protocols: further queries are blocked **and sessions already connected under that grant are disconnected**. You do not have to wait for the user to reconnect for a revocation to bite.
+Revocation takes effect immediately across all proxied protocols: further queries are blocked **and sessions already connected under that grant are disconnected**. You do not have to wait for the user to reconnect for a revocation to bite. That holds across replicas too: every dbbat process polls its own live sessions against the store, so a grant revoked through one replica ends the sessions running on all of them.
+
+## Ending One Session
+
+Revoking a grant is often too wide: it ends every session that user has on that
+database. To end a single one:
+
+```bash
+curl -X POST http://localhost:4200/api/v1/connections/$CONNECTION_UID/terminate \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "blocking the migration"}'
+```
+
+Admin only. dbbat cancels whatever statement is running **on the database
+itself** and then drops both legs of the connection — the same teardown a
+statement timeout uses, so closing the socket never leaves the server finishing
+a scan for nobody.
+
+The answer is `202`, not `200`: the replica that received the call is not
+necessarily the one serving the session, so it records the request and the
+replica that owns the session acts on it within a couple of seconds. `409` means
+the session had already ended.
+
+**This does not revoke access.** The grant is untouched, so the same user can
+reconnect immediately. It is the right tool for a runaway query and the wrong
+one for a person who should no longer have access — revoke the grant for that.
+
+The connection page has a **Terminate session** button on any live session, with
+the same confirmation and an optional reason, which lands in the audit trail
+next to the admin's name.
 
 ## Listing Grants
 
