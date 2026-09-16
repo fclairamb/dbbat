@@ -26,6 +26,7 @@ type Store struct {
 	storageDSN  string                    // Parsed storage DSN for security validation
 	authCache   *cache.AuthCache          // Optional auth cache for API key verification
 	revocations *cache.RevocationRegistry // In-process fan-out of grant revocations to live proxy sessions
+	sessions    *cache.SessionRegistry    // In-process fan-out of per-session terminations, keyed by connection uid
 	instanceID  string                    // Identifies this process among the replicas sharing this store
 	runID       string                    // Identifies this *run*: minted here, never configurable
 
@@ -127,6 +128,7 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		db:          db,
 		storageDSN:  dsn,
 		revocations: cache.NewRevocationRegistry(),
+		sessions:    cache.NewSessionRegistry(),
 		instanceID:  options.InstanceID,
 		// Minted here rather than taken from Options: the run id must identify
 		// one live process, and anything an operator can set — including
@@ -303,6 +305,21 @@ func (s *Store) Revocations() *cache.RevocationRegistry {
 	}
 
 	return s.revocations
+}
+
+// Sessions returns the process-wide live-session registry, keyed by connection
+// uid: live proxy sessions register with it, and both the terminate endpoint
+// (for a session this replica happens to own) and the cross-instance poller
+// signal it.
+//
+// Same nil-safety contract as Revocations: nil on a nil or zero-value store,
+// and the registry's own methods are nil-safe, so callers never nil-check.
+func (s *Store) Sessions() *cache.SessionRegistry {
+	if s == nil {
+		return nil
+	}
+
+	return s.sessions
 }
 
 // migrationAdvisoryLockKey is the PostgreSQL advisory-lock key that serializes

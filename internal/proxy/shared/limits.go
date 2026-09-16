@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -33,6 +34,18 @@ var (
 	// mid-stream on five wire protocols, and because a client that got here
 	// already ignored the server-side setting.
 	ErrStatementTimeout = errors.New("statement timeout")
+	// ErrAdminTerminated indicates this *specific* session was ended from
+	// outside it — an admin calling POST /connections/{uid}/terminate, or this
+	// process's poller catching up with a termination (or a grant revocation)
+	// requested on another replica.
+	//
+	// Unlike the four above it says nothing about the grant: the user may
+	// reconnect immediately under the same grant, which is exactly the
+	// difference between terminating and revoking. The reason actually written
+	// to the row comes from the session handle's TerminationRequest, not from
+	// this sentinel — the cross-instance revocation arm signals through the
+	// same flag and must still record `grant_revoked`.
+	ErrAdminTerminated = errors.New("session terminated by an administrator")
 )
 
 // StatementTimeoutGrace is how long past the configured limit dbbat waits
@@ -189,6 +202,14 @@ type LimitGuard struct {
 	// there is no revocation to watch.
 	revoked *atomic.Bool
 
+	// terminated, when non-nil, is the session's shared termination handle,
+	// raised by an admin ending this one session (or by the cross-instance
+	// poller relaying such a request, or a grant revocation, from another
+	// replica). Checked on the same data path as revoked, and for the same
+	// reason: the flag is a single atomic load, so a terminate takes effect on
+	// the next watchdog tick with no database round trip of its own.
+	terminated *cache.SessionHandle
+
 	// statementLimit is the grant's per-statement time limit (0 = none), and
 	// statementGrace the margin past it the watchdog allows the server-side
 	// setting to do the job first. statementClock is the session's shared
@@ -234,6 +255,35 @@ func (g *LimitGuard) WithRevocation(revoked *atomic.Bool) *LimitGuard {
 	g.revoked = revoked
 
 	return g
+}
+
+// WithTermination attaches the session's live-session handle so Check/Watch
+// also trip when somebody asks for *this* session to end. Returns the guard for
+// fluent construction. A nil handle is a no-op, keeping the plain
+// NewLimitGuard signature stable for callers and tests that don't register.
+//
+// It takes the handle rather than the bare flag (as WithRevocation does)
+// because the reason travels with it: the poller signals a cross-instance grant
+// revocation through this same flag, and the record must still say
+// `grant_revoked`, not `admin_terminated`.
+func (g *LimitGuard) WithTermination(h *cache.SessionHandle) *LimitGuard {
+	if g == nil {
+		return g
+	}
+
+	g.terminated = h
+
+	return g
+}
+
+// TerminationRequest reports why this session was asked to end, or the zero
+// value when it was not. Read by TerminationFor to build the record.
+func (g *LimitGuard) TerminationRequest() cache.TerminationRequest {
+	if g == nil {
+		return cache.TerminationRequest{}
+	}
+
+	return g.terminated.Request()
 }
 
 // WithStatementTimeout arms the per-statement watchdog: once clock reports a
@@ -326,6 +376,13 @@ func (g *LimitGuard) Check() error {
 		return nil
 	}
 
+	// A human asking for this session to end outranks everything: it is the
+	// most explicit instruction the guard can be given, and the reason it
+	// carries is the one the operator will look for afterwards.
+	if g.terminated.Terminated() {
+		return ErrAdminTerminated
+	}
+
 	// Revocation is the most authoritative reason to stop: an admin explicitly
 	// pulled access, so report it ahead of the incidental byte/time limits.
 	if g.revoked != nil && g.revoked.Load() {
@@ -365,9 +422,11 @@ func (g *LimitGuard) Watch(ctx context.Context, interval time.Duration, onViolat
 	}
 
 	// Nothing to enforce — avoid spinning a pointless ticker for the lifetime
-	// of the session. A revocation flag is itself something to watch, so keep
-	// polling whenever one is attached even if the grant carries no limits.
-	if g.maxBytes == nil && g.expiresAt.IsZero() && g.revoked == nil && g.statementClock == nil {
+	// of the session. A revocation flag, or a termination handle, is itself
+	// something to watch, so keep polling whenever one is attached even if the
+	// grant carries no limits.
+	if g.maxBytes == nil && g.expiresAt.IsZero() && g.revoked == nil &&
+		g.terminated == nil && g.statementClock == nil {
 		return
 	}
 
