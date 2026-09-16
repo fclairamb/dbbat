@@ -258,9 +258,12 @@ func encodeChunkedCLR(data []byte, chunkSize int, bigChunks bool) []byte {
 		return encodeBigChunkCLRSplit(data, chunkSize)
 	}
 
-	if chunkSize > 0xFB {
-		// A single-byte chunk length cannot carry 0xFC and up without colliding
-		// with the markers. Nothing legitimate asks for it.
+	if chunkSize > ttcClrChunkSize {
+		// ttcClrChunkSize (252) is both what every client emits and the largest
+		// chunk a single-byte length carries without running into the marker
+		// bytes. A larger one is not something any client asks for, and
+		// answering nil here is what makes the round-trip check refuse the frame
+		// rather than write a length nothing can read.
 		return nil
 	}
 
@@ -422,7 +425,18 @@ func locateStatementValue(body []byte, field execSQLLenField) (stmtRewrite, bool
 		// a CLR byte immediately in front of the run; ojdbc and DBeaver do not,
 		// and write a zero there, so the two are told apart by what is actually
 		// on the wire rather than by which client dbbat thinks it is talking to.
-		if i > from && field.value <= clrShortMaxLen && body[i-1] == byte(field.value) {
+		if i > from && field.value <= 0xFF && body[i-1] == byte(field.value) {
+			// …except at 0xFC..0xFF, where a one-byte prefix is a length this
+			// encoder will not write (clrShortMaxLen) and the byte is also what
+			// the long form and the null markers use. Reading such a frame as a
+			// bare run would leave that prefix behind, still declaring the old
+			// length, in front of a longer statement — a desynchronized message
+			// rather than a wrong comment. Neither reading is reproducible, so
+			// the frame is refused outright.
+			if field.value > clrShortMaxLen {
+				return stmtRewrite{}, false
+			}
+
 			found.clrKind = stmtClrShort
 			found.valueAt = i - 1
 		}
