@@ -61,3 +61,62 @@ func TestQueryTaggingEnvKeyMapping(t *testing.T) {
 	assert.Equal(t, "query_tagging.enabled", key,
 		"the prefix rule must not be shadowed by the exact-match one")
 }
+
+// TestQueryTaggingOracleDefaultsToOff pins the safety default separately from
+// DBB_QUERY_TAGGING's: Oracle's trade-off is its own — V$SQL keys on statement
+// text, so the tag's cardinality is its cost — and an operator who turned
+// tagging on for PostgreSQL has not consented to it.
+func TestQueryTaggingOracleDefaultsToOff(t *testing.T) {
+	t.Setenv("DBB_DSN", "postgres://localhost/dbbat")
+
+	cfg, err := Load(LoadOptions{})
+	require.NoError(t, err)
+
+	on, err := cfg.QueryTagging.ResolveOracle()
+	require.NoError(t, err)
+	assert.False(t, on)
+
+	// Turning the shared switch on must not reach Oracle.
+	t.Setenv("DBB_QUERY_TAGGING", "true")
+
+	cfg, err = Load(LoadOptions{})
+	require.NoError(t, err)
+	require.True(t, cfg.QueryTagging.Enabled)
+
+	on, err = cfg.QueryTagging.ResolveOracle()
+	require.NoError(t, err)
+	assert.False(t, on, "DBB_QUERY_TAGGING does not enable the Oracle tag")
+}
+
+// TestQueryTaggingOracleEnvVarReachesItsKey checks the koanf path, which rides
+// the existing query_tagging_ prefix rather than needing an exact-match entry.
+func TestQueryTaggingOracleEnvVarReachesItsKey(t *testing.T) {
+	t.Setenv("DBB_DSN", "postgres://localhost/dbbat")
+	t.Setenv("DBB_QUERY_TAGGING_ORACLE", "user")
+
+	cfg, err := Load(LoadOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, QueryTaggingOracleUser, cfg.QueryTagging.Oracle)
+
+	on, err := cfg.QueryTagging.ResolveOracle()
+	require.NoError(t, err)
+	assert.True(t, on)
+}
+
+// TestQueryTaggingOracleRejectsAnythingElse is why the value is resolved rather
+// than parsed with a fallback: the absence of a tag looks exactly like the
+// feature being off, so a typo has to stop the process instead of quietly
+// disabling what the operator asked for.
+func TestQueryTaggingOracleRejectsAnythingElse(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"conn", "connection", "on", "true", "yes", "1"} {
+		_, err := QueryTaggingConfig{Oracle: value}.ResolveOracle()
+		assert.ErrorIs(t, err, ErrQueryTaggingOracleInvalid, "value %q", value)
+	}
+
+	for _, value := range []string{"", "off", "OFF", " off ", "User", "USER"} {
+		_, err := QueryTaggingConfig{Oracle: value}.ResolveOracle()
+		assert.NoError(t, err, "value %q", value)
+	}
+}
