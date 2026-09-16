@@ -818,6 +818,26 @@ and nothing legible; tapping the codec records the TDS packets themselves, in
 plaintext, whatever the client leg negotiated. Only the post-auth stream is
 captured, matching the other proxies.
 
+## Finding a session in sys.dm_exec_sessions
+
+Every proxied session's `program_name` (what `APP_NAME()` reports for that
+session) is dbbat-branded and carries the connection's own uid, not just the
+dbbat user's:
+
+```sql
+SELECT session_id, program_name, status
+FROM sys.dm_exec_sessions
+WHERE program_name LIKE 'dbbat/%';
+```
+
+`program_name` reads `dbbat/0.28.1 @florent c=3f9a1c7b2e4d for sqlcmd` — the
+`c=` tag is the last 12 hex characters of the connection uid. Paste it (or the
+whole `c=...` token) into the connections page's search box, or call
+`GET /api/v1/connections?uid_suffix=3f9a1c7b2e4d` directly, to land on the
+exact dbbat connection: its queries, its grant, and the Terminate button —
+rather than guessing from the username alone, which is ambiguous the moment a
+user has more than one session open.
+
 ## Testing
 
 Unit tests are the gate for the handshake work, because a framing bug shows up

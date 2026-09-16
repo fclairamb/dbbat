@@ -2124,6 +2124,27 @@ all five protocols.
 - **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results, verified end-to-end against `testdata/go_ora_temporal.pcapng` (`TestDumpReplay_Temporal`). The tz form renders the local wall clock plus its numeric offset, honouring byte 11's `0x40` "time in zone" flag (prefix stored as local vs UTC). Named-region time zones fall back to the stored wall clock without an offset suffix.
 - **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.pcapng`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.
 
+## Finding a session in V$SESSION
+
+Every proxied session's `PROGRAM` is dbbat-branded and carries the
+connection's own uid, not just the dbbat user's:
+
+```sql
+SELECT sid, serial#, program
+FROM v$session
+WHERE program LIKE 'dbbat/%';
+```
+
+`program` reads `dbbat/0.28.1 @florent c=3f9a1c7b2e4d for python` — the `c=`
+tag is the last 12 hex characters of the connection uid (on Oracle's tight
+48-byte cap, the tag is what survives; a long username can still crowd out
+the client's own program name entirely). Paste it (or the whole `c=...`
+token) into the connections page's search box, or call
+`GET /api/v1/connections?uid_suffix=3f9a1c7b2e4d` directly, to land on the
+exact dbbat connection: its queries, its grant, and the Terminate button —
+rather than guessing from the username alone, which is ambiguous the moment a
+user has more than one session open.
+
 ## Testing
 
 **Per-client verdicts live in exactly one place: "Client compatibility on Oracle
