@@ -411,6 +411,29 @@ func startProxies(
 		mssql:    startMSSQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
 	}
 
+	// One resolver for the whole process: the store memoizes the parameter, so
+	// five resolvers would share one cache anyway, but building them here keeps
+	// the "who imposes the limit" wiring in one place.
+	statementTimeouts := shared.NewStatementTimeoutResolver(dataStore, cfg)
+
+	set.postgres.SetStatementTimeouts(statementTimeouts)
+
+	if set.oracle != nil {
+		set.oracle.SetStatementTimeouts(statementTimeouts)
+	}
+
+	if set.mysql != nil {
+		set.mysql.SetStatementTimeouts(statementTimeouts)
+	}
+
+	if set.mongo != nil {
+		set.mongo.SetStatementTimeouts(statementTimeouts)
+	}
+
+	if set.mssql != nil {
+		set.mssql.SetStatementTimeouts(statementTimeouts)
+	}
+
 	set.postgres.SetDumpUploader(dumpUploader)
 
 	if set.oracle != nil {
