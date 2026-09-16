@@ -982,6 +982,21 @@ func (g *AccessGrant) ApproverUserGroupUIDs() []uuid.UUID {
 	return g.Definition.ApproverUserGroupUIDs
 }
 
+// DefinitionSlug is the slug of the definition this grant was issued from, or
+// "" when no definition is attached.
+//
+// Unlike the accessors above it carries no authorization weight at all — it is
+// a label, used to name the grant in the sqlcommenter tag dbbat can prepend to
+// forwarded statements — so a shapeless grant reports the empty string rather
+// than a fail-closed value.
+func (g *AccessGrant) DefinitionSlug() string {
+	if g == nil || g.Definition == nil {
+		return ""
+	}
+
+	return g.Definition.Slug
+}
+
 // newZeroQuota backs the fail-closed quota accessors: an exhausted quota,
 // freshly allocated so no caller can write through the pointer and poison a
 // shared value.
