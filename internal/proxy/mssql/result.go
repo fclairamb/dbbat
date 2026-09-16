@@ -608,6 +608,12 @@ func (s *session) takePending() *pendingQuery {
 	pending := s.pending
 	s.pending = nil
 
+	// The response ended, so nothing is executing upstream any more. TDS is
+	// strictly request/response on one connection — there is never a second
+	// statement in flight to re-arm the clock from, which is why this is a Stop
+	// and not the oldest-of-several Rearm the pipelined protocols need.
+	s.statementClock.Stop()
+
 	return pending
 }
 
