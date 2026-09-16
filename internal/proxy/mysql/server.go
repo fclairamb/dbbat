@@ -10,6 +10,7 @@ import (
 	"net"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gomysqlserver "github.com/go-mysql-org/go-mysql/server"
@@ -75,7 +76,11 @@ type Server struct {
 
 	// queryTagging prepends the dbbat identity comment to every statement text
 	// handed to the upstream (DBB_QUERY_TAGGING). Off by default.
-	queryTagging bool
+	//
+	// Atomic, unlike its neighbours above: those are installed before Start,
+	// but this one is also flipped on an already-listening server (the
+	// integration suite does exactly that), and every session's auth reads it.
+	queryTagging atomic.Bool
 }
 
 // NewServer creates a new MySQL proxy server.
@@ -315,7 +320,7 @@ func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
 // wiring in main from DBB_QUERY_TAGGING; a server without it forwards every
 // statement byte-for-byte as it always did.
 func (s *Server) SetQueryTagging(enabled bool) {
-	s.queryTagging = enabled
+	s.queryTagging.Store(enabled)
 }
 
 // SetRowWriter installs the process-wide result-row writer, replacing (and

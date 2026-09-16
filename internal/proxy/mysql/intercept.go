@@ -103,8 +103,19 @@ func (h *handler) namesSessionDatabase(dbName string) bool {
 // DBB_QUERY_TAGGING is on.
 func (h *handler) HandleQuery(query string) (*gomysql.Result, error) {
 	return h.runIntercepted(query, nil, func() (*gomysql.Result, error) {
-		return h.session.upstreamConn.Execute(h.session.queryTag.Apply(query))
+		return h.session.upstreamConn.Execute(h.upstreamText(query))
 	})
+}
+
+// upstreamText is the one place a statement's text differs between what dbbat
+// enforces and records — the client's — and what the upstream parses.
+//
+// There are exactly two callers, HandleQuery and HandleStmtPrepare, and both
+// call it at the last possible moment: after every grant control, every bypass
+// scan and any approval hold have run on the client's text. Returns its
+// argument unchanged unless DBB_QUERY_TAGGING is on.
+func (h *handler) upstreamText(sql string) string {
+	return h.session.queryTag.Apply(sql)
 }
 
 // HandleFieldList implements COM_FIELD_LIST. Deprecated since MySQL 5.7 but
@@ -142,7 +153,7 @@ func (h *handler) HandleStmtPrepare(query string) (int, int, any, error) {
 	//
 	// syntheticSQL above, and everything recordQuery writes, keep the client's
 	// text.
-	stmt, err := h.session.upstreamConn.Prepare(h.session.queryTag.Apply(query))
+	stmt, err := h.session.upstreamConn.Prepare(h.upstreamText(query))
 	if err != nil {
 		errStr := err.Error()
 		h.recordQuery(syntheticSQL, nil, start, &errStr)

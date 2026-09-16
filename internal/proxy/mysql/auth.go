@@ -241,7 +241,7 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 	// which is what keeps repeated executions of one statement byte-identical
 	// and the MySQL digest aggregating them. Left at its inert zero value when
 	// DBB_QUERY_TAGGING is off.
-	if s.server.queryTagging {
+	if s.server.queryTagging.Load() {
 		s.queryTag = shared.NewQueryTagger(
 			version.Version, s.user.Username, s.connUID, grant.DefinitionSlug())
 	}
