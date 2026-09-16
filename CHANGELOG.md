@@ -5,7 +5,40 @@
 
 ### Features
 
-* per-statement time limits, session termination, statement tagging, and connection attribution ([#388](https://github.com/fclairamb/dbbat/issues/388)) ([4a0fdcf](https://github.com/fclairamb/dbbat/commit/4a0fdcf7a3db650575ff71d31d1aa158561bc903))
+* per-statement time limits, session termination, statement tagging, and connection attribution
+
+  Triggered by an incident where an unbounded AI-agent statement lagged a production replica 20
+  minutes with no way for an admin to end it.
+
+  **Per-statement time limits** (`DBB_STATEMENT_TIMEOUT`, with a per-grant-definition override):
+  a server-side hint plus a proxy-side watchdog across all five protocols, cancelling the
+  statement upstream before disconnecting the session.
+
+  **Terminate a live session** (`POST /connections/{uid}/terminate`, admin only) — and a fix for
+  a real pre-existing bug: revoking a grant only killed sessions on the replica that served the
+  API call, never the others behind the same load balancer.
+
+  **Slack alerts** on a dbbat-initiated termination (timeout, admin action, quota), coalesced so
+  a reconnect loop can't flood the channel.
+
+  **Connection attribution**: the upstream session name now carries a `c=<connection-uid>` tag
+  and `GET /connections?uid_suffix=` looks it up, so a DBA staring at `pg_stat_activity` can jump
+  straight to the dbbat connection page. MongoDB's own client-declared app name is now forwarded
+  upstream instead of being dropped.
+
+  **Statement tagging** (`DBB_QUERY_TAGGING`, opt-in, off by default): a sqlcommenter-style
+  comment naming the dbbat user/connection/grant, prepended to statements on PostgreSQL, MySQL
+  and MongoDB's `comment` field, so RDS Performance Insights / `pg_stat_statements` / the Atlas
+  profiler can attribute load correctly instead of everything showing as the one shared database
+  role. The `queries` table, the audit chain, and approval-hold pattern matching always see the
+  client's own text — only the wire carries the tag.
+
+  **Oracle**: measured on a real instance that a per-connection tag costs one unbounded cursor
+  per session while a per-user tag plateaus at one per identity, then built the wire-level
+  statement rewriter this required — Oracle relays client bytes untouched everywhere else —
+  behind `DBB_QUERY_TAGGING_ORACLE=user`, off by default.
+
+  ([#388](https://github.com/fclairamb/dbbat/issues/388)) ([4a0fdcf](https://github.com/fclairamb/dbbat/commit/4a0fdcf7a3db650575ff71d31d1aa158561bc903))
 
 
 ### Bug Fixes
