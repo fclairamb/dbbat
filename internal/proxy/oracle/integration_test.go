@@ -599,3 +599,101 @@ func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
 		return false
 	}, 30*time.Second, 250*time.Millisecond, "an agent's statement must be logged like any other")
 }
+
+// TestIntegration_UpstreamProgramCarriesConnectionUID verifies
+// V$SESSION.PROGRAM for the proxied session carries dbbat's branded program
+// name, tagged with this connection's uid (shared.BuildUpstreamName's "c="
+// field) — the same MCP-loopback path TestIntegration_MCPExecutesThroughTheProxy
+// uses to drive real SQL through the Oracle proxy.
+func TestIntegration_UpstreamProgramCarriesConnectionUID(t *testing.T) {
+	ctx := context.Background()
+
+	oracleContainer, oracleHost, oraclePort := startOracleContainer(t)
+	defer func() { _ = oracleContainer.Terminate(ctx) }()
+
+	pgContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "postgres:15-alpine",
+			ExposedPorts: []string{"5432/tcp"},
+			Env: map[string]string{
+				"POSTGRES_DB":       "dbbat_test",
+				"POSTGRES_USER":     "test",
+				"POSTGRES_PASSWORD": "test",
+			},
+			WaitingFor: wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60 * time.Second),
+		},
+		Started: true,
+	})
+	require.NoError(t, err)
+	defer func() { _ = pgContainer.Terminate(ctx) }()
+
+	pgHost, _ := pgContainer.Host(ctx)
+	pgPort, _ := pgContainer.MappedPort(ctx, "5432")
+	pgDSN := fmt.Sprintf("postgres://test:test@%s:%s/dbbat_test?sslmode=disable", pgHost, pgPort.Port())
+
+	dataStore, err := store.New(ctx, pgDSN)
+	require.NoError(t, err)
+
+	defer dataStore.Close()
+
+	require.NoError(t, dataStore.Migrate(ctx))
+
+	user, err := dataStore.CreateUser(ctx, "agent", "$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
+	require.NoError(t, err)
+
+	encryptionKey := []byte("0123456789012345678901234567890X")
+
+	service := oracleTestService()
+	db, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:              "oracle_e2e_uid",
+		Host:              oracleHost,
+		Port:              oraclePort,
+		DatabaseName:      service,
+		OracleServiceName: &service,
+		Username:          "system",
+		Password:          "oracle",
+		Protocol:          store.ProtocolOracle,
+	}, encryptionKey)
+	require.NoError(t, err)
+
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
+	require.NoError(t, err)
+
+	_, plainKey, err := dataStore.CreateAPIKey(ctx, user.UID, "agent-key", nil, encryptionKey)
+	require.NoError(t, err)
+
+	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.Default())
+	go func() { _ = proxy.Start("127.0.0.1:0") }()
+
+	defer func() { _ = proxy.Shutdown(ctx) }()
+
+	require.Eventually(t, func() bool { return proxy.Addr() != nil }, 5*time.Second, 50*time.Millisecond)
+
+	executor := mcp.NewLoopbackExecutor(mcp.LoopbackListeners{Oracle: proxy.Addr().String()})
+
+	result, err := executor.Execute(ctx, mcp.ExecRequest{
+		Protocol:         store.ProtocolOracle,
+		Database:         db.Name,
+		UpstreamDatabase: service,
+		Username:         user.Username,
+		APIKey:           plainKey,
+		SQL:              "SELECT program FROM v$session WHERE sid = sys_context('userenv','sid')",
+		MaxRows:          1,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+
+	program, _ := result.Rows[0]["PROGRAM"].(string)
+
+	conns, err := dataStore.ListConnections(ctx, store.ConnectionFilter{UserID: &user.UID})
+	require.NoError(t, err)
+	require.NotEmpty(t, conns)
+
+	hex := strings.ReplaceAll(conns[0].UID.String(), "-", "")
+	wantSuffix := hex[len(hex)-12:]
+
+	assert.True(t, strings.HasPrefix(program, "dbbat/"), "got %q", program)
+	assert.Contains(t, program, "@"+user.Username+" c="+wantSuffix)
+}

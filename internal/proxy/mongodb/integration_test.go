@@ -1118,3 +1118,54 @@ func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, remaining, "a refused write must never reach the upstream")
 }
+
+// TestIntegration_UpstreamAppNameCarriesConnectionUID verifies the upstream's
+// hello-reported application name carries dbbat's branding and this
+// connection's uid (shared.BuildUpstreamName's "c=" field), and that a
+// client-declared appName ("mongosh" here) is forwarded via " for $appName"
+// instead of the "" dbbat used to send.
+func TestIntegration_UpstreamAppNameCarriesConnectionUID(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	opts := options.Client().
+		SetHosts([]string{f.proxyAddr}).
+		SetAuth(options.Credential{
+			AuthMechanism: "PLAIN",
+			AuthSource:    testDBName,
+			Username:      fixtureUser,
+			Password:      fixturePass,
+		}).
+		SetTLSConfig(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}). //nolint:gosec // self-signed proxy cert
+		SetDirect(true).
+		SetAppName("mongosh").
+		SetServerSelectionTimeout(8 * time.Second).
+		SetTimeout(10 * time.Second)
+
+	client, err := mongo.Connect(opts)
+	require.NoError(t, err)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	require.NoError(t, client.Ping(ctx, nil))
+
+	var result struct {
+		Inprog []bson.M `bson:"inprog"`
+	}
+	require.NoError(t, client.Database("admin").
+		RunCommand(ctx, bson.D{{Key: "currentOp", Value: 1}, {Key: "$ownOps", Value: true}}).
+		Decode(&result))
+	require.NotEmpty(t, result.Inprog)
+
+	appName, _ := result.Inprog[0]["appName"].(string)
+
+	connections, err := f.store.ListConnections(ctx, store.ConnectionFilter{UserID: &f.user.UID})
+	require.NoError(t, err)
+	require.NotEmpty(t, connections)
+
+	hex := strings.ReplaceAll(connections[0].UID.String(), "-", "")
+	wantSuffix := hex[len(hex)-12:]
+
+	assert.True(t, strings.HasPrefix(appName, "dbbat/"), "got %q", appName)
+	assert.Contains(t, appName, "@"+fixtureUser+" c="+wantSuffix)
+	assert.Contains(t, appName, " for mongosh")
+}

@@ -752,3 +752,33 @@ func TestIntegration_UpstreamTLS_Disable(t *testing.T) {
 		"upstream connection should stay plaintext under ssl_mode=disable")
 	f.assertRecordedUpstreamTLS(ctx, false)
 }
+
+// TestIntegration_UpstreamProgramNameCarriesConnectionUID verifies dbbat's
+// branded program_name connect attribute reaches the upstream, tagged with
+// this session's connection uid (shared.BuildUpstreamName's "c=" field), via
+// performance_schema.session_connect_attrs.
+func TestIntegration_UpstreamProgramNameCarriesConnectionUID(t *testing.T) {
+	ctx := context.Background()
+
+	f := setupFixture(ctx, t, mysqlImage(), store.ProtocolMySQL)
+	db := f.dialTLS()
+	defer db.Close()
+
+	require.NoError(t, db.PingContext(ctx))
+
+	var programName string
+	require.NoError(t, db.QueryRowContext(ctx,
+		"SELECT ATTR_VALUE FROM performance_schema.session_connect_attrs "+
+			"WHERE PROCESSLIST_ID = CONNECTION_ID() AND ATTR_NAME = 'program_name'",
+	).Scan(&programName))
+
+	conns, err := f.store.ListConnections(ctx, store.ConnectionFilter{Limit: 10})
+	require.NoError(t, err)
+	require.NotEmpty(t, conns)
+
+	hex := strings.ReplaceAll(conns[0].UID.String(), "-", "")
+	wantSuffix := hex[len(hex)-12:]
+
+	assert.True(t, strings.HasPrefix(programName, "dbbat/"), "got %q", programName)
+	assert.Contains(t, programName, "@"+fixtureUser+" c="+wantSuffix)
+}
