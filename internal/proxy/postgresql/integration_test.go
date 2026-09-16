@@ -189,8 +189,13 @@ func selfSignedCert(t *testing.T) ([]byte, []byte) {
 // fixture wires up: a storage container + dbbat store, a user/database/grant,
 // an upstream PostgreSQL container, and a started proxy.
 type fixture struct {
-	t            *testing.T
-	store        *store.Store
+	t     *testing.T
+	store *store.Store
+	// storeDSN is the storage database this fixture's store is connected to,
+	// so a test can open a *second* handle onto it — which is how the
+	// cross-instance paths are exercised: a second handle mints its own run id,
+	// so it can never be the in-process fast path that did the work.
+	storeDSN     string
 	proxy        *Server
 	proxyAddr    string
 	user         *store.User
@@ -323,6 +328,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	return &fixture{
 		t:            t,
 		store:        dataStore,
+		storeDSN:     storeDSN,
 		proxy:        proxy,
 		proxyAddr:    proxy.Addr().String(),
 		user:         user,
