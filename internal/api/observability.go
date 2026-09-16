@@ -239,7 +239,41 @@ func (s *Server) handleGetConnection(c *gin.Context) {
 		Dump:               s.dumpMetadata(c, uid),
 		Grant:              s.grantSummary(c, conn),
 		StatementsRetained: !s.store.StatementsPastRetention(*conn),
+		TerminatedBy:       s.terminationRequester(c, conn),
 	})
+}
+
+// terminationRequester resolves the admin who asked for this session to end, so
+// the page can say "terminated by alice" rather than showing a bare uuid or
+// nothing at all.
+//
+// nil when nobody asked. A requester whose account has since been deleted
+// resolves to nil too (the column is ON DELETE SET NULL), and a lookup failure
+// is downgraded the same way grantSummary downgrades its own: the page can live
+// without the name, and a detail that cannot be resolved must not fail the
+// whole request.
+func (s *Server) terminationRequester(c *gin.Context, conn *store.Connection) *TerminationRequester {
+	if conn.TerminateRequestedBy == nil {
+		return nil
+	}
+
+	user, err := s.store.GetUserByUID(c.Request.Context(), *conn.TerminateRequestedBy)
+	if err != nil {
+		s.logger.WarnContext(c.Request.Context(), "connection references a terminating user that could not be resolved",
+			slog.Any("connection_uid", conn.UID),
+			slog.Any("user_uid", *conn.TerminateRequestedBy),
+			slog.Any("error", err))
+
+		return nil
+	}
+
+	return &TerminationRequester{UID: user.UID, Username: user.Username}
+}
+
+// TerminationRequester names the admin behind connections.terminate_requested_by.
+type TerminationRequester struct {
+	UID      uuid.UUID `json:"uid"`
+	Username string    `json:"username"`
 }
 
 // connectionDetailResponse decorates a connection with capture metadata and a
@@ -271,6 +305,12 @@ type connectionDetailResponse struct {
 	// it (Store.StatementsPastRetention) is the same one chain verification
 	// uses, so it stays in one place.
 	StatementsRetained bool `json:"statements_retained"`
+
+	// TerminatedBy is the admin who asked for this session to end, resolved
+	// from terminate_requested_by. nil when nobody did — which is every
+	// session that ended on its own, and every session dbbat's own watchdogs
+	// ended.
+	TerminatedBy *TerminationRequester `json:"terminated_by,omitempty"`
 }
 
 // GrantSummary is the slice of an access grant a connection detail page needs

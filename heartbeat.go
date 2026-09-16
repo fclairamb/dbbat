@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -19,6 +20,7 @@ const (
 	goroutineNameSharedIDCheck = "shared instance id check"
 	goroutineNameReclaim       = "orphaned connection reclaim"
 	goroutineNameOpenStamps    = "open query chain stamp refresh"
+	goroutineNameTerminations  = "session termination poll"
 )
 
 // instanceHeartbeat keeps this process's row in the instance registry fresh.
@@ -214,6 +216,16 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 	reclaim := time.NewTimer(nextReclaimDelay())
 	defer reclaim.Stop()
 
+	// And so does the termination poll, at the other end of the frequency
+	// range: it is the same "the store is the source of truth about this run's
+	// sessions" job, it must stop for exactly the same reasons, and one
+	// goroutine that does all three is easier to reason about than three that
+	// each have to be shut down. Deliberately *not* jittered like the reclaim —
+	// this one is latency the admin is watching, and the query is scoped to our
+	// own run id, so replicas polling in phase contend over nothing.
+	terminations := time.NewTicker(store.TerminationPollInterval)
+	defer terminations.Stop()
+
 	// Every unit of work runs under safe.RunMaintenance, per turn and
 	// individually. This is a goroutine of its own, so no recover reaches it and
 	// an unguarded panic in any of these store calls would end the process with
@@ -235,6 +247,8 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 			h.guarded(ctx, goroutineNameReclaim, func() { h.reclaim(ctx) })
 			h.guarded(ctx, goroutineNameOpenStamps, func() { h.refreshOpenStamps(ctx) })
 			reclaim.Reset(nextReclaimDelay())
+		case <-terminations.C:
+			h.guarded(ctx, goroutineNameTerminations, func() { h.pollTerminations(ctx) })
 		case <-h.stop:
 			return
 		}
@@ -337,6 +351,55 @@ func (h *instanceHeartbeat) refreshOpenStamps(ctx context.Context) {
 	h.logger.DebugContext(ctx, "Refreshed the query chain stamp of open sessions",
 		slog.Int64("connections", stamped),
 		slog.String("run_id", h.store.RunID()))
+}
+
+// pollTerminations ends the sessions this run owns that the store says should
+// end: an admin's terminate request, and a grant revoked anywhere in the
+// deployment.
+//
+// This is what makes both cross the instance boundary. The replica serving
+// POST /connections/{uid}/terminate signals its own registry first, so the
+// common single-replica case is instant; when the session lives elsewhere, the
+// request row sits in the store until its owner — this loop, on some other pod
+// — reads it. The revocation arm is the same mechanism applied to a bug that
+// predates the feature: DELETE /grants/{uid} only ever signaled the in-process
+// RevocationRegistry, so sessions on every other replica kept running until
+// their grant expired.
+//
+// Signaling is idempotent. The request row is not cleared once acted on — the
+// session's own teardown sets disconnected_at, which is what takes it out of
+// the query — so the same uid comes back on the next tick until the session is
+// actually gone, and cache.SessionRegistry.Terminate keeps the first reason.
+//
+// A failure is logged at warn, not error: the next tick tries again two seconds
+// later, and nothing about serving traffic depends on it.
+func (h *instanceHeartbeat) pollTerminations(ctx context.Context) {
+	pending, err := h.store.PendingTerminations(ctx)
+	if err != nil {
+		h.logger.WarnContext(ctx, "failed to poll for session terminations",
+			slog.Any("error", err))
+
+		return
+	}
+
+	for _, p := range pending {
+		if !h.store.Sessions().Terminate(p.ConnectionUID, cache.TerminationRequest{
+			Reason: p.Reason,
+			By:     p.RequestedBy,
+			Detail: p.Detail,
+		}) {
+			// Either the session is already tearing down from an earlier tick
+			// (the request row stays until disconnected_at is set, so the same
+			// uid comes back every two seconds), or it is between its
+			// connection row and its registration. Neither is worth a log line.
+			continue
+		}
+
+		h.logger.InfoContext(ctx, "Terminating a live session",
+			slog.String("connection_uid", p.ConnectionUID.String()),
+			slog.String("reason", p.Reason),
+			slog.String("requested_by", p.RequestedBy))
+	}
 }
 
 // beat refreshes the row. A failure is logged at warn rather than error: one

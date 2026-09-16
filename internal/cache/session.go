@@ -156,17 +156,20 @@ func (r *SessionRegistry) Deregister(connUID uuid.UUID, h *SessionHandle) {
 }
 
 // Terminate asks the live session serving connUID to end, and reports whether
-// one was found on this process. false means the session lives on another
-// replica (or has already gone) — the caller's cue that the store, not this
-// registry, is the source of truth.
+// it signaled one *now*.
+//
+// false therefore covers two cases that want the same handling: the session
+// lives on another replica (or has already gone), and the session is here but
+// was already asked to end. Both mean "there is nothing new for this caller to
+// do", which is what the cross-instance poller needs — it re-reads the same
+// request row every tick until the session is actually gone, and must not log
+// a termination every two seconds while one tears down.
 //
 // The request is published before the flag is raised, so a watchdog that
 // observes the flag always finds the reason behind it. Handles are not
 // deregistered here: the session tears itself down and Deregisters on the way
-// out, exactly as the revocation path works.
-//
-// Terminating twice is harmless and keeps the first reason: whoever got there
-// first is the one that actually ended the session.
+// out, exactly as the revocation path works. Terminating twice keeps the first
+// reason — whoever got there first is who actually ended the session.
 func (r *SessionRegistry) Terminate(connUID uuid.UUID, req TerminationRequest) bool {
 	if r == nil || connUID == uuid.Nil {
 		return false
@@ -175,24 +178,20 @@ func (r *SessionRegistry) Terminate(connUID uuid.UUID, req TerminationRequest) b
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	set := r.sessions[connUID]
+	signaled := false
 
-	found := false
-
-	for h := range set {
+	for h := range r.sessions[connUID] {
 		if h.terminated.Load() {
-			found = true
-
 			continue
 		}
 
 		h.request.Store(&req)
 		h.terminated.Store(true)
 
-		found = true
+		signaled = true
 	}
 
-	return found
+	return signaled
 }
 
 // Live reports whether this process is serving the session named by connUID.

@@ -461,6 +461,11 @@ func (s *Server) setupRouter() *gin.Engine {
 			// queries pages, including the auth handshake and every result row.
 			authenticated.GET("/connections/:uid/dump", s.requireAdmin(), s.handleGetConnectionDump)
 			authenticated.DELETE("/connections/:uid/dump", s.requireAdmin(), s.handleDeleteConnectionDump)
+			// Ending a live session is admin-only, and a POST on a sub-path
+			// rather than DELETE /connections/:uid — that verb would read as
+			// deleting the ledger row, which retention owns and the audit
+			// chain protects.
+			authenticated.POST("/connections/:uid/terminate", s.requireAdmin(), s.handleTerminateConnection)
 			// Live event stream (WebSocket). Per-topic authorization happens
 			// inside the handler and is re-checked on every send, so no role
 			// middleware here — a connector may watch their own connection.

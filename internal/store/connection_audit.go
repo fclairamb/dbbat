@@ -55,6 +55,19 @@ const (
 	// the *why*, including the statement that caused it, which is what an
 	// operator reading the audit page after a killed session actually needs.
 	AuditEventConnectionTerminated = "connection.terminated"
+
+	// AuditEventConnectionTerminateRequested is written when an admin asks for
+	// a session to end, by the replica that served the API call.
+	//
+	// Separate from connection.terminated, and not one of the session events
+	// below: this is a control-plane action with a PerformedBy, it happens
+	// whether or not the session is still there to be ended (it can close on
+	// its own in the couple of seconds before its owner polls), and it is
+	// written by a different process than the one that finally tears the
+	// session down. An admin action that left no trace unless it succeeded
+	// would be the wrong way round, so it belongs in the ordinary audit
+	// listing alongside grant.revoked.
+	AuditEventConnectionTerminateRequested = "connection.terminate_requested"
 )
 
 // Why dbbat ended a session, as written to connections.termination_reason and
