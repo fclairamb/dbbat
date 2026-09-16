@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -47,6 +48,22 @@ type Store struct {
 	auditChain  chainState
 	queryChains *queryChains
 	rowChains   *queryChains
+
+	// limitsCache memoizes the limits.* parameter group for a few seconds.
+	// The per-statement timeout is read once per *connection* on five
+	// protocols; without this every login would be an extra round trip for a
+	// value operators change a handful of times a year. See
+	// ResolveStatementTimeoutCached.
+	limitsCache limitsCache
+}
+
+// limitsCache is the process-wide memo behind ResolveStatementTimeoutCached.
+// Process-wide rather than per-proxy so that an operator writing the parameter
+// through the API can drop *every* reader's copy at once (InvalidateLimits).
+type limitsCache struct {
+	mu     sync.Mutex
+	value  Limits
+	readAt time.Time
 }
 
 // Options configures Store creation.

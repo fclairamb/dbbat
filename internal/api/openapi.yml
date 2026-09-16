@@ -3818,6 +3818,37 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /instance/limits:
+    put:
+      tags:
+        - Instance
+      summary: Update instance-wide limits
+      description: >-
+        Writes the `limits.*` parameter group. Admin-only. An empty
+        `statement_timeout` clears the parameter, falling back to
+        DBB_STATEMENT_TIMEOUT; "0" disables the limit outright.
+      operationId: updateInstanceLimits
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstanceLimits'
+      responses:
+        '204':
+          description: Settings saved
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /mcp:
     post:
       tags:
@@ -5291,6 +5322,18 @@ components:
           type: integer
           format: int64
           nullable: true
+        statement_timeout_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 86400
+          nullable: true
+          description: |
+            Per-statement time limit for grants issued from this definition.
+            Three states: `null`/omitted inherits the instance-wide default
+            (`limits.statement_timeout`, else `DBB_STATEMENT_TIMEOUT`); `0`
+            means explicitly no limit, overriding that default; a positive
+            value is the limit in seconds.
         priority:
           type: integer
           format: int32
@@ -5466,6 +5509,18 @@ components:
           type: integer
           format: int64
           nullable: true
+        statement_timeout_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 86400
+          nullable: true
+          description: |
+            Per-statement time limit for grants issued from this definition.
+            Three states: `null`/omitted inherits the instance-wide default
+            (`limits.statement_timeout`, else `DBB_STATEMENT_TIMEOUT`); `0`
+            means explicitly no limit, overriding that default; a positive
+            value is the limit in seconds.
         priority:
           type: integer
           format: int32
@@ -5608,6 +5663,24 @@ components:
         clear_max_bytes_transferred:
           type: boolean
           description: When true, resets max_bytes_transferred to unlimited.
+        statement_timeout_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 86400
+          nullable: true
+          description: |
+            Per-statement time limit for grants issued from this definition.
+            Three states: `null`/omitted inherits the instance-wide default
+            (`limits.statement_timeout`, else `DBB_STATEMENT_TIMEOUT`); `0`
+            means explicitly no limit, overriding that default; a positive
+            value is the limit in seconds.
+        clear_statement_timeout_seconds:
+          type: boolean
+          description: >-
+            When true, resets statement_timeout_seconds to null, i.e. back to
+            inheriting the instance-wide default. Needed because `null` and `0`
+            mean different things here, so sending `null` cannot express it.
         priority:
           type: integer
           format: int32
@@ -7128,11 +7201,51 @@ components:
           $ref: '#/components/schemas/PublicEndpoints'
           nullable: true
           description: Only present for admin callers
+        limits:
+          $ref: '#/components/schemas/InstanceLimits'
+          nullable: true
+          description: Only present for admin callers
         resolved:
           $ref: '#/components/schemas/ResolvedEndpoints'
+        resolved_limits:
+          $ref: '#/components/schemas/ResolvedInstanceLimits'
       required:
         - listen
         - resolved
+        - resolved_limits
+
+    InstanceLimits:
+      type: object
+      description: >-
+        Raw operator-configured instance-wide limits (the `limits.*` parameter
+        group), before the environment-variable fallback is applied.
+      properties:
+        statement_timeout:
+          type: string
+          description: >-
+            Go duration string ("30s", "5m") bounding how long a single
+            statement may run. Empty means the parameter is unset and
+            DBB_STATEMENT_TIMEOUT applies; "0" disables the limit outright.
+      required:
+        - statement_timeout
+
+    ResolvedInstanceLimits:
+      type: object
+      description: The instance-wide limits that actually apply.
+      properties:
+        statement_timeout_seconds:
+          type: integer
+          format: int64
+          description: Effective per-statement limit in seconds; 0 = no limit.
+        statement_timeout_source:
+          type: string
+          enum: ['', parameter, env]
+          description: >-
+            Where the effective value came from: the store parameter, the
+            environment variable, or empty when there is no limit.
+      required:
+        - statement_timeout_seconds
+        - statement_timeout_source
 
     # Common schemas
     Error:

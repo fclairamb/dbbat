@@ -412,6 +412,57 @@ func StatementTimeoutMisconfigured(raw string) bool {
 	return raw != "" && raw != "0" && ParseStatementTimeout(raw) <= 0
 }
 
+// limitsCacheTTL is how long ResolveStatementTimeoutCached reuses the
+// parameter group it last read. Short enough that an operator editing the value
+// from the Settings page sees it take effect while they are still looking at
+// the page; long enough that a login storm is not a query storm.
+const limitsCacheTTL = 10 * time.Second
+
+// ResolveStatementTimeoutCached is ResolveStatementTimeout over a short-lived
+// memo of the parameter group, for the callers that ask once per connection.
+//
+// A store error is neither fatal nor fail-closed: it falls back to the
+// environment default. Refusing the connection would take the proxy down on a
+// transient store blip, and inventing a limit would kill sessions nobody
+// configured one for. The fallback is cached too — a store that is down stays
+// down for more than one connection.
+func (s *Store) ResolveStatementTimeoutCached(ctx context.Context, cfg *config.Config) time.Duration {
+	if s == nil {
+		return ResolveStatementTimeout(Limits{}, cfg)
+	}
+
+	s.limitsCache.mu.Lock()
+	defer s.limitsCache.mu.Unlock()
+
+	if !s.limitsCache.readAt.IsZero() && time.Since(s.limitsCache.readAt) < limitsCacheTTL {
+		return ResolveStatementTimeout(s.limitsCache.value, cfg)
+	}
+
+	limits, err := s.GetLimits(ctx)
+	if err != nil {
+		limits = Limits{}
+	}
+
+	s.limitsCache.value = limits
+	s.limitsCache.readAt = time.Now()
+
+	return ResolveStatementTimeout(limits, cfg)
+}
+
+// InvalidateLimits drops the memo so the next resolution re-reads the store.
+// Called after this process writes a limits.* parameter; other replicas pick
+// the change up within limitsCacheTTL.
+func (s *Store) InvalidateLimits() {
+	if s == nil {
+		return
+	}
+
+	s.limitsCache.mu.Lock()
+	defer s.limitsCache.mu.Unlock()
+
+	s.limitsCache.readAt = time.Time{}
+}
+
 // ResolveStatementTimeout applies the global fallback chain: the operator-set
 // limits.statement_timeout parameter wins when set, otherwise the deployment's
 // DBB_STATEMENT_TIMEOUT. Zero means no instance-wide limit, which is the

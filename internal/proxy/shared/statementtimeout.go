@@ -2,20 +2,11 @@ package shared
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
-
-// statementTimeoutCacheTTL is how long a resolver reuses the store parameter it
-// last read. A statement limit is an operator setting that changes a few times
-// a year, and this is read once per *connection* on five protocols, so the
-// alternative is a database round trip on every login for a value that almost
-// never moves. Ten seconds is short enough that an operator editing it from the
-// Settings page sees it take effect while they are still looking at the page.
-const statementTimeoutCacheTTL = 10 * time.Second
 
 // StatementTimeoutResolver answers "what is the instance-wide per-statement
 // limit?" cheaply enough to ask at every connection.
@@ -27,27 +18,18 @@ const statementTimeoutCacheTTL = 10 * time.Second
 //
 // A nil resolver resolves everything to "no limit", so a proxy built without
 // one (unit tests, fixtures) enforces nothing rather than panicking.
+// The memo itself lives on the store, not here, so an operator writing the
+// parameter through the API drops every reader's copy at once — including the
+// five proxies', which each hold a resolver of their own.
 type StatementTimeoutResolver struct {
 	store *store.Store
-
-	// fallback is the env-var default, parsed once at construction: it cannot
-	// change while the process runs.
-	fallback time.Duration
-
-	mu     sync.Mutex
-	value  time.Duration
-	readAt time.Time
+	cfg   *config.Config
 }
 
 // NewStatementTimeoutResolver builds a resolver over the store's limits.*
 // parameters, falling back to cfg's DBB_STATEMENT_TIMEOUT. Either may be nil.
 func NewStatementTimeoutResolver(st *store.Store, cfg *config.Config) *StatementTimeoutResolver {
-	fallback := time.Duration(0)
-	if cfg != nil {
-		fallback = store.ParseStatementTimeout(cfg.StatementTimeout)
-	}
-
-	return &StatementTimeoutResolver{store: st, fallback: fallback}
+	return &StatementTimeoutResolver{store: st, cfg: cfg}
 }
 
 // Global returns the instance-wide limit, zero when there is none.
@@ -63,35 +45,10 @@ func (r *StatementTimeoutResolver) Global(ctx context.Context) time.Duration {
 	}
 
 	if r.store == nil {
-		return r.fallback
+		return store.ResolveStatementTimeout(store.Limits{}, r.cfg)
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if !r.readAt.IsZero() && time.Since(r.readAt) < statementTimeoutCacheTTL {
-		return r.value
-	}
-
-	limits, err := r.store.GetLimits(ctx)
-	if err != nil {
-		// Cache the fallback too: a store that is down stays down for more
-		// than one connection, and hammering it per login helps nobody.
-		r.value = r.fallback
-		r.readAt = time.Now()
-
-		return r.value
-	}
-
-	if limits.StatementTimeout != "" {
-		r.value = store.ParseStatementTimeout(limits.StatementTimeout)
-	} else {
-		r.value = r.fallback
-	}
-
-	r.readAt = time.Now()
-
-	return r.value
+	return r.store.ResolveStatementTimeoutCached(ctx, r.cfg)
 }
 
 // For resolves the limit that applies to one session: the grant definition's
@@ -105,16 +62,12 @@ func (r *StatementTimeoutResolver) For(ctx context.Context, grant *store.Grant) 
 	return grant.StatementTimeout(r.Global(ctx))
 }
 
-// Invalidate drops the cached global value so the next Global() re-reads the
-// store. Called after an operator writes the parameter in-process; other
-// replicas pick the change up within statementTimeoutCacheTTL.
+// Invalidate drops the process-wide memo so the next Global() re-reads the
+// store.
 func (r *StatementTimeoutResolver) Invalidate() {
 	if r == nil {
 		return
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.readAt = time.Time{}
+	r.store.InvalidateLimits()
 }
