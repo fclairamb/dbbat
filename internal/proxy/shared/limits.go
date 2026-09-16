@@ -23,7 +23,117 @@ var (
 	// ErrGrantRevoked indicates the grant backing the session was revoked
 	// (by an admin, via the API) while the connection was still live.
 	ErrGrantRevoked = errors.New("grant revoked")
+	// ErrStatementTimeout indicates a single statement ran past the grant's
+	// per-statement limit (plus StatementTimeoutGrace) and dbbat cancelled it
+	// upstream and tore the session down.
+	//
+	// Unlike the three above, this one is not about the grant being over: the
+	// grant is still perfectly valid, one statement was not. The session still
+	// ends, because there is no protocol-independent way to fail one statement
+	// mid-stream on five wire protocols, and because a client that got here
+	// already ignored the server-side setting.
+	ErrStatementTimeout = errors.New("statement timeout")
 )
+
+// StatementTimeoutGrace is how long past the configured limit dbbat waits
+// before killing the session itself.
+//
+// It is a constant, not a setting. The server-side setting (PostgreSQL's
+// statement_timeout, MySQL's max_execution_time, MongoDB's maxTimeMS) is what
+// normally ends the statement, with a clean protocol error and a surviving
+// session; this watchdog only exists for the statement that outlived it — a
+// protocol with no server-side knob at all (Oracle, SQL Server), a server that
+// ignored it, or a client that unset it. Two seconds is the margin that lets
+// the polite path win whenever it can, and matches the "+2 secondes" the design
+// thread settled on.
+const StatementTimeoutGrace = 2 * time.Second
+
+// StatementClock marks when the oldest statement currently executing upstream
+// was forwarded. Zero means the session is idle.
+//
+// It is deliberately a *forwarded*-at clock, not a received-at one: time a
+// statement spends parked on an approval hold does not count against its own
+// time limit, because during a hold the statement has not been sent anywhere
+// and is costing the upstream database nothing. The server-side settings agree
+// by construction — the server has not seen the statement yet.
+//
+// Written by whichever goroutine starts and completes statements for a
+// protocol, read by the watchdog. An int64 of unix nanos rather than a
+// time.Time so both sides are a single atomic operation with no lock.
+type StatementClock struct {
+	since atomic.Int64
+}
+
+// Start marks a statement as forwarded upstream *now*, if none is already being
+// timed. Several statements can be in flight at once (PostgreSQL's extended
+// protocol, MongoDB's pipelined ops), and the oldest is the one that matters:
+// a session is over the limit when its longest-running statement is, so a
+// later statement must never reset the clock and hide it.
+func (c *StatementClock) Start() {
+	if c == nil {
+		return
+	}
+
+	c.StartAt(time.Now())
+}
+
+// StartAt is Start with the instant supplied, for tests and for re-arming the
+// clock from a statement that started earlier (see Rearm).
+func (c *StatementClock) StartAt(at time.Time) {
+	if c == nil {
+		return
+	}
+
+	c.since.CompareAndSwap(0, at.UnixNano())
+}
+
+// Stop clears the clock: nothing is executing upstream any more.
+//
+// Callers with more than one statement in flight call Rearm instead, so the
+// remaining ones keep being timed from when *they* were forwarded.
+func (c *StatementClock) Stop() {
+	if c == nil {
+		return
+	}
+
+	c.since.Store(0)
+}
+
+// Rearm points the clock at the oldest statement still in flight. A zero
+// oldest is the same as Stop.
+func (c *StatementClock) Rearm(oldest time.Time) {
+	if c == nil {
+		return
+	}
+
+	if oldest.IsZero() {
+		c.since.Store(0)
+
+		return
+	}
+
+	c.since.Store(oldest.UnixNano())
+}
+
+// Since returns when the oldest in-flight statement was forwarded, or the zero
+// time when the session is idle.
+func (c *StatementClock) Since() time.Time {
+	if c == nil {
+		return time.Time{}
+	}
+
+	ns := c.since.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+
+	return time.Unix(0, ns)
+}
+
+// Running reports whether a statement is currently being timed.
+func (c *StatementClock) Running() bool {
+	return c != nil && c.since.Load() != 0
+}
 
 // DefaultLimitPollInterval is how often the watchdog re-evaluates limits when
 // no explicit interval is given. Small enough to cut a runaway stream promptly,
@@ -79,6 +189,14 @@ type LimitGuard struct {
 	// there is no revocation to watch.
 	revoked *atomic.Bool
 
+	// statementLimit is the grant's per-statement time limit (0 = none), and
+	// statementGrace the margin past it the watchdog allows the server-side
+	// setting to do the job first. statementClock is the session's shared
+	// in-flight marker; nil when nothing drives one.
+	statementLimit time.Duration
+	statementGrace time.Duration
+	statementClock *StatementClock
+
 	// now is the clock, injectable for deterministic tests. Defaults to
 	// time.Now.
 	now func() time.Time
@@ -118,6 +236,73 @@ func (g *LimitGuard) WithRevocation(revoked *atomic.Bool) *LimitGuard {
 	return g
 }
 
+// WithStatementTimeout arms the per-statement watchdog: once clock reports a
+// statement has been executing upstream for longer than limit+grace, Check
+// returns ErrStatementTimeout. Returns the guard for fluent construction.
+//
+// A non-positive limit or a nil clock disarms it, so callers can wire this
+// unconditionally and let the grant decide.
+func (g *LimitGuard) WithStatementTimeout(limit, grace time.Duration, clock *StatementClock) *LimitGuard {
+	if g == nil {
+		return g
+	}
+
+	if limit <= 0 || clock == nil {
+		return g
+	}
+
+	if grace < 0 {
+		grace = 0
+	}
+
+	g.statementLimit = limit
+	g.statementGrace = grace
+	g.statementClock = clock
+
+	return g
+}
+
+// StatementLimit reports the armed per-statement limit, zero when none is.
+// Read by the session for the error text it shows the client.
+func (g *LimitGuard) StatementLimit() time.Duration {
+	if g == nil {
+		return 0
+	}
+
+	return g.statementLimit
+}
+
+// statementOverrun returns how long the oldest in-flight statement has been
+// running when it is past limit+grace, and zero otherwise.
+func (g *LimitGuard) statementOverrun() time.Duration {
+	if g.statementLimit <= 0 || g.statementClock == nil {
+		return 0
+	}
+
+	since := g.statementClock.Since()
+	if since.IsZero() {
+		return 0
+	}
+
+	elapsed := g.now().Sub(since)
+	if elapsed <= g.statementLimit+g.statementGrace {
+		return 0
+	}
+
+	return elapsed
+}
+
+// StatementOverrun reports how long the in-flight statement has been running,
+// when it is already past the limit — the number the termination record and the
+// client-facing error quote. Zero when nothing is over.
+func (g *LimitGuard) StatementOverrun() time.Duration {
+	if g == nil {
+		return 0
+	}
+
+	return g.statementOverrun()
+}
+
 // liveBytes returns this session's cumulative client-side bytes so far.
 func (g *LimitGuard) liveBytes() int64 {
 	var total int64
@@ -155,6 +340,13 @@ func (g *LimitGuard) Check() error {
 		return ErrGrantExpired
 	}
 
+	// Last: the three above mean the grant itself is over, which is the more
+	// consequential fact about the session. This one means the grant is fine
+	// and one statement was not.
+	if g.statementOverrun() > 0 {
+		return ErrStatementTimeout
+	}
+
 	return nil
 }
 
@@ -175,7 +367,7 @@ func (g *LimitGuard) Watch(ctx context.Context, interval time.Duration, onViolat
 	// Nothing to enforce — avoid spinning a pointless ticker for the lifetime
 	// of the session. A revocation flag is itself something to watch, so keep
 	// polling whenever one is attached even if the grant carries no limits.
-	if g.maxBytes == nil && g.expiresAt.IsZero() && g.revoked == nil {
+	if g.maxBytes == nil && g.expiresAt.IsZero() && g.revoked == nil && g.statementClock == nil {
 		return
 	}
 

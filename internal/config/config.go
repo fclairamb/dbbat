@@ -985,6 +985,22 @@ type Config struct {
 	// only if SlackNotify is enabled.
 	PublicURL string `koanf:"public_url"`
 
+	// StatementTimeout is the deployment's default per-statement time limit,
+	// as a Go duration ("30s", "5m"). Empty or "0" — the default — means no
+	// instance-wide limit, so an upgrade never starts cancelling statements
+	// on its own.
+	//
+	// It is the *lowest* of the three layers: the operator-set
+	// limits.statement_timeout store parameter wins over it (the same way
+	// public.* wins over DBB_LISTEN_*), and a grant definition's own
+	// statement_timeout_seconds wins over both — including an explicit 0,
+	// which is how a dump or ETL definition stays usable.
+	//
+	// A malformed value reads as "no limit" rather than as some built-in
+	// default: this setting kills live database sessions, so a typo must
+	// never mean "kill sooner". Load warns about it.
+	StatementTimeout string `koanf:"statement_timeout"`
+
 	// Dump holds session packet dump configuration.
 	Dump DumpConfig `koanf:"dump"`
 
@@ -1059,6 +1075,34 @@ const (
 	defaultKeyDirPerm  = 0o700
 	defaultKeyFilePerm = 0o600
 )
+
+// StatementTimeoutDuration parses StatementTimeout into a duration. Zero means
+// "no instance-wide limit", which is also what a malformed value resolves to —
+// see the field doc for why a typo must never shorten the limit.
+func (c *Config) StatementTimeoutDuration() time.Duration {
+	if c == nil {
+		return 0
+	}
+
+	d, err := time.ParseDuration(c.StatementTimeout)
+	if err != nil || d <= 0 {
+		return 0
+	}
+
+	return d
+}
+
+// StatementTimeoutMisconfigured reports that StatementTimeout was set to
+// something that is neither empty nor "0" nor a usable positive duration — i.e.
+// the limit silently ends up disabled and the operator probably did not mean
+// that. Same contract as QueryStorageConfig.RetentionMisconfigured.
+func (c *Config) StatementTimeoutMisconfigured() bool {
+	if c == nil {
+		return false
+	}
+
+	return c.StatementTimeout != "" && c.StatementTimeout != "0" && c.StatementTimeoutDuration() <= 0
+}
 
 // DefaultBaseURL is the default base URL path for the frontend.
 const DefaultBaseURL = "/app"
