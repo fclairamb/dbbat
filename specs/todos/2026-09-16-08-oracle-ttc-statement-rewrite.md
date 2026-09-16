@@ -121,3 +121,53 @@ holds recordings of each client shape, so the exact locator can be unit-tested
 against every frame in the corpus before any of it goes on a wire
 (`sql_extraction_survey_test.go` is the model: it computes a per-shape verdict
 across the whole corpus).
+
+## Implementation Plan
+
+Ordered so that nothing is written to a wire before the reading of that wire is
+proven against the recorded corpus.
+
+1. **Exact locator, read-only.** `ttc_rewrite_locate.go`: a `stmtLocation`
+   naming the op offset, the SQL-length field's offset/width/encoding
+   (compressed int, OCI wide `ub4 = sqlLen*3`, `decodeVarLen` for OALL8), the
+   CLR blob's offset/extent/variant, the text's offset and extent, and whether
+   the client counts a trailing NUL. Certainty comes from a **round-trip
+   identity check**, not from a search heuristic: the locator re-encodes the
+   length field and the CLR blob from the values it read and refuses unless the
+   re-encoding reproduces the client's own bytes exactly. Anything ambiguous
+   (two candidate CLR blobs, a chunk convention that does not re-encode,
+   a header walk that does not land) refuses.
+2. **Corpus verdict test** mirroring `sql_extraction_survey_test.go`: a
+   per-recording, per-shape verdict over every `testdata/` frame, run before any
+   rewrite code exists. A shape the locator cannot certify is reported as
+   refused, never as a best-effort answer.
+3. **Length-field writers.** `ttc_rewrite.go`: compressed int (whose encoded
+   width changes with the value, so the splice must shift the tail), OCI wide
+   `ub4 = len*3` little-endian (fixed width), OALL8 `decodeVarLen` (1 byte /
+   `0xFE`+2BE / `0xFF`+4BE, width changes). Each writer is unit-tested for both
+   "the tag fits the current width" and "the tag widens the field".
+4. **CLR rewrite across the chunk boundary.** Short form under the limit, the
+   `0xFE`-chunked long form at or past it, in the variant the session
+   negotiated (`s.clientBigClrChunks`). The short→long crossing a ~40-byte tag
+   provokes is an explicit, tested case.
+5. **v315+ TNS packet writer.** `encodeTNSPacket` emits only the legacy 2-byte
+   header; add the 4-byte-length form and make a rewritten packet carry no
+   stale `Raw` (which `writeTNSPacket` prefers).
+6. **Re-fragmentation.** The rewrite happens after `collectStatementMessage`,
+   so `execFragmentShortfall` / `oall8FragmentShortfall` keep reading the
+   client's own declared length untouched; only the outgoing packets are re-cut
+   to the negotiated SDU.
+7. **Per-session tag/no-tag decision.** One session-level state, decided once on
+   the first statement-carrying frame and logged once. A session whose shape the
+   locator cannot certify runs untagged start to finish.
+8. **`clientToUpstream` injection**, between the `blocked` check and the
+   `for _, frag := range msg.packets` write loop.
+9. **Cursor re-execution**: a test proving a re-exec frame (cursor id, no SQL)
+   is untouched and that the tracker does not care that `trackedCursor.sql`
+   holds the client's text while the upstream cursor holds the tagged one.
+10. **`DBB_QUERY_TAGGING_ORACLE`** (`off` default, `user`), separate from
+    `DBB_QUERY_TAGGING`, same koanf pattern, invalid value = startup failure.
+11. **Docs**: rewrite docs/oracle.md's "measured, affordable, and still not
+    wired" section, plus website configuration reference.
+12. **Integration pass**: `make test-e2e-oracle` across go-ora, JDBC thin,
+    python-oracledb, sqlcl and sqlplus, with `V$SQL` queried in-suite.
