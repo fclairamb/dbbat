@@ -501,7 +501,7 @@ set it wrote the consumer that reads it. Appending dbbat's tag into the value
 (or promoting it to a sub-document) would hand that consumer something it never
 agreed to; overwriting it would lose their trace id. Skipping costs little
 here: the profiler *also* records `appName`, which dbbat tags on every session,
-so a command it declines to tag is still attributable — from the neighbouring
+so a command it declines to tag is still attributable — from the neighboring
 column.
 
 **Which commands are tagged.** An allowlist: `find`, `aggregate`, `count`,
@@ -511,7 +511,7 @@ MongoDB documents, and the ones whose profiler entries are worth attributing.
 The handshake, auth and teardown chatter is absent for the same reason it is
 exempt from `maxTimeMS` — none of it is a statement a user wrote — and an
 allowlist rather than an exemption list because several other commands reject
-fields they do not recognise, and an observability nicety must never be why a
+fields they do not recognize, and an observability nicety must never be why a
 command fails.
 
 **What it does not change.** The `queries` table, the tamper-evident audit
@@ -528,3 +528,9 @@ document element by element on the raw BSON and the message is re-serialized
 `querytag.go`), so a command that carries both a deadline and a tag is rebuilt
 a single time and a command that needs neither is forwarded as the very bytes
 that arrived.
+
+The tag is ~80 bytes, which matters only at the wire ceiling: a command already
+within ~80 bytes of `maxWireMessageSize` (48 MB, three times the 16 MB document
+limit) is refused rather than truncated once tagging is on. Nothing else in the
+proxy grows a forwarded command, and the refusal is a normal blocked-command
+error reply, logged like any other.
