@@ -1,5 +1,5 @@
-import { useRef, useCallback } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { useRef, useCallback, useEffect } from "react";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import {
   useConnections,
   useUsers,
@@ -49,14 +49,18 @@ export const Route = createFileRoute("/_authenticated/connections/")({
     grant_definition_uid: asString(search.grant_definition_uid),
     grant_uid: asString(search.grant_uid),
     grant_provenance: asString(search.grant_provenance),
+    uid_suffix: asString(search.uid_suffix),
   }),
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
   const search = Route.useSearch();
-  const { before, size, active } = search;
+  const { before, size, active, uid_suffix } = search;
   const navigate = Route.useNavigate();
+  // Generic navigate, not Route.useNavigate: this one leaves the connections
+  // list's own search schema for the detail route's `$uid` param.
+  const navigateAway = useNavigate();
   // Server-side, all of it. Narrowing an already-fetched page under-reports
   // the instant the matching rows are not in the current one.
   const { data: connections, isLoading, refetch } = useConnections({
@@ -69,7 +73,22 @@ function ConnectionsPage() {
     grant_definition_uid: search.grant_definition_uid,
     grant_uid: search.grant_uid,
     grant_provenance: search.grant_provenance,
+    uid_suffix,
   });
+
+  // A uid-suffix search identifies at most one connection by construction
+  // (the whole point of the tag is that it is unique per session). When it
+  // does, skip the list and go straight to the detail page — pasting a
+  // pg_stat_activity tag should feel like following a link, not like
+  // reading a one-row table.
+  useEffect(() => {
+    if (uid_suffix && connections && connections.length === 1) {
+      void navigateAway({
+        to: "/connections/$uid",
+        params: { uid: connections[0].uid },
+      });
+    }
+  }, [uid_suffix, connections, navigateAway]);
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
   const { data: serverGroups } = useServerGroups();
@@ -255,6 +274,7 @@ function ConnectionsPage() {
         serverGroups={serverGroups}
         grantDefinitions={grantDefinitions}
         showActive
+        showUidSuffix
       />
 
       <DataTable

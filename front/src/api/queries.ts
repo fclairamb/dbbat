@@ -1049,6 +1049,13 @@ export function useConnections(filters?: SessionFilters & {
    * shareable URL honest about what was asked for.
    */
   active?: true;
+  /**
+   * The last 12 hex characters of a connection uid — the "c=" tag dbbat
+   * stamps on the upstream application/program name (e.g.
+   * `pg_stat_activity.application_name`). Connections-only, like `active`:
+   * queries has no uid of its own to match on.
+   */
+  uid_suffix?: string;
 }) {
   return useQuery({
     queryKey: ["connections", filters],

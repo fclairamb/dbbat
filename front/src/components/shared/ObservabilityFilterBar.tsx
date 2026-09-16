@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { MultiSelect } from "@/components/shared/MultiSelect";
@@ -48,10 +50,110 @@ export type ObservabilityFilters = {
    * rather than spelling it out.
    */
   active?: true;
+  /**
+   * `/connections` only: the last 12 hex characters of a connection uid —
+   * the "c=" tag dbbat stamps on the upstream application/program name
+   * (`pg_stat_activity.application_name` and its four sibling columns). A
+   * DBA pastes it straight from there to jump to this connection.
+   */
+  uid_suffix?: string;
 };
 
 /** Radix Select has no empty value, so "no filter" needs a sentinel. */
 const ANY = "__any__";
+
+/**
+ * A bare 12-hex-character uid suffix, or the "c=" tag pasted verbatim out of
+ * a pg_stat_activity row (or its MySQL/Oracle/MSSQL/Mongo equivalent) —
+ * `dbbat/0.28.1 @florent c=3f9a1c7b2e4d for psql` and `3f9a1c7b2e4d` both
+ * extract to `3f9a1c7b2e4d`. Whitespace around either form is ignored.
+ * Returns null when the input matches neither shape, so the caller can
+ * refuse it the same way the API does rather than sending a query the store
+ * will reject.
+ */
+export function extractUidSuffix(raw: string): string | null {
+  const trimmed = raw.trim();
+
+  const tagMatch = /c=([0-9a-f]{12})\b/i.exec(trimmed);
+  if (tagMatch) {
+    return tagMatch[1].toLowerCase();
+  }
+
+  if (/^[0-9a-f]{12}$/i.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+
+  return null;
+}
+
+function UidSuffixSearch({
+  value,
+  onSubmit,
+}: {
+  value?: string;
+  onSubmit: (uidSuffix: string | undefined) => void;
+}) {
+  // Local draft, committed on submit — a filter this specific should not
+  // fire a request per keystroke, unlike the selects beside it. The URL
+  // stays the source of truth for the *committed* value: the parent remounts
+  // this component (via `key`) whenever it changes from outside, so a
+  // browser back/forward or a shared link resets the draft without an
+  // effect syncing prop to state.
+  const [draft, setDraft] = useState(value ?? "");
+  const [invalid, setInvalid] = useState(false);
+
+  const submit = () => {
+    if (draft.trim() === "") {
+      setInvalid(false);
+      onSubmit(undefined);
+
+      return;
+    }
+
+    const suffix = extractUidSuffix(draft);
+    if (!suffix) {
+      setInvalid(true);
+
+      return;
+    }
+
+    setInvalid(false);
+    onSubmit(suffix);
+  };
+
+  return (
+    <div className="space-y-1">
+      <Label htmlFor="filter-uid-suffix" className="text-xs text-muted-foreground">
+        Find by connection uid
+      </Label>
+      <form
+        className="flex items-center gap-1"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        <Input
+          id="filter-uid-suffix"
+          data-testid="filter-uid-suffix"
+          placeholder="c=3f9a1c7b2e4d or 3f9a1c7b2e4d"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          className="h-9 w-56 font-mono text-sm"
+          aria-invalid={invalid}
+        />
+        <Button type="submit" variant="secondary" size="sm" data-testid="filter-uid-suffix-submit">
+          Find
+        </Button>
+      </form>
+      {invalid && (
+        <p className="text-xs text-destructive" data-testid="filter-uid-suffix-error">
+          Enter a 12-character uid suffix, or paste the &quot;c=&quot; tag.
+        </p>
+      )}
+    </div>
+  );
+}
 
 const PROVENANCE_OPTIONS = [
   { value: "approved", label: "Approved by a human" },
@@ -131,6 +233,7 @@ export function ObservabilityFilterBar({
   grantDefinitions,
   showApprovalStatus = false,
   showActive = false,
+  showUidSuffix = false,
 }: {
   filters: ObservabilityFilters;
   /** Applies a partial change. The route merges it and resets the cursor. */
@@ -142,6 +245,8 @@ export function ObservabilityFilterBar({
   showApprovalStatus?: boolean;
   /** `/connections` only: a statement has no open/closed state. */
   showActive?: boolean;
+  /** `/connections` only: a statement has no uid of its own to search by. */
+  showUidSuffix?: boolean;
 }) {
   const provenance = filters.grant_provenance
     ? filters.grant_provenance.split(",").filter(Boolean)
@@ -155,7 +260,8 @@ export function ObservabilityFilterBar({
     Boolean(filters.grant_definition_uid) ||
     Boolean(filters.grant_uid) ||
     provenance.length > 0 ||
-    Boolean(filters.approval_status);
+    Boolean(filters.approval_status) ||
+    Boolean(filters.uid_suffix);
 
   const clearAll = () =>
     onChange({
@@ -167,6 +273,7 @@ export function ObservabilityFilterBar({
       grant_uid: undefined,
       grant_provenance: undefined,
       approval_status: undefined,
+      uid_suffix: undefined,
     });
 
   return (
@@ -287,6 +394,17 @@ export function ObservabilityFilterBar({
             </div>
           </div>
         )}
+
+        {showUidSuffix && (
+          <UidSuffixSearch
+            // Remounts (clearing any in-progress draft) whenever the
+            // committed value changes from outside — a browser back/forward
+            // or a shared link — instead of an effect syncing prop to state.
+            key={filters.uid_suffix ?? ""}
+            value={filters.uid_suffix}
+            onSubmit={(uid_suffix) => onChange({ uid_suffix })}
+          />
+        )}
       </div>
 
       {(filters.grant_uid || hasAny) && (
@@ -301,6 +419,21 @@ export function ObservabilityFilterBar({
                 onClick={() => onChange({ grant_uid: undefined })}
                 data-testid="filter-grant-uid-clear"
                 aria-label="Clear grant filter"
+              >
+                <X className="h-3 w-3" />
+              </Button>
+            </Badge>
+          )}
+          {filters.uid_suffix && (
+            <Badge variant="secondary" className="gap-1">
+              uid ends in {filters.uid_suffix}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-4 w-4 p-0 hover:bg-transparent"
+                onClick={() => onChange({ uid_suffix: undefined })}
+                data-testid="filter-uid-suffix-clear"
+                aria-label="Clear uid suffix filter"
               >
                 <X className="h-3 w-3" />
               </Button>
