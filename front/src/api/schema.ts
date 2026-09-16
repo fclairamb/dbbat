@@ -1338,6 +1338,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/connections/{uid}/terminate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * End a live proxied session
+         * @description Terminates one live session: dbbat cancels whatever statement is
+         *     running upstream, then drops both legs of the connection.
+         *
+         *     **`POST .../terminate`, not `DELETE /connections/{uid}`.** The session
+         *     is not the row. `DELETE` would read as deleting the ledger entry, which
+         *     retention owns and which the audit chain's
+         *     `connection.opened`/`connection.closed` pair exists to protect.
+         *
+         *     **Terminating is not revoking.** The grant is untouched, so the user can
+         *     reconnect immediately under it. Use `DELETE /grants/{uid}` to withdraw
+         *     the access itself — that ends *every* session of that user on that
+         *     database, this ends one.
+         *
+         *     **`202`, not `200`.** The replica serving this call is not necessarily
+         *     the one serving the session: `connections.run_id` says who is. The
+         *     request is written to the connection row, this replica signals its own
+         *     live sessions immediately, and the replica that owns the session acts on
+         *     it within about two seconds. `local` in the response says which of the
+         *     two happened.
+         *
+         *     The optional `reason` is recorded on the connection row and in the
+         *     `connection.terminated` audit entry. It is never shown to the client
+         *     whose session is ending.
+         *
+         *     **Requires admin role.**
+         */
+        post: operations["terminateConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/connections/{uid}/dump": {
         parameters: {
             query?: never;
@@ -3580,10 +3627,10 @@ export interface components {
              */
             bytes_transferred: number;
             /**
-             * @description Why *dbbat* ended this session, when dbbat is what ended it. Absent — the ordinary case — means the client or the network did.
+             * @description Why *dbbat* ended this session, when dbbat is what ended it. Absent — the ordinary case — means the client or the network did. `admin_terminated` is `POST /connections/{uid}/terminate`; `instance_lost` means nobody ended it — the process serving it died and the crash reconcile closed the row on its behalf.
              * @enum {string|null}
              */
-            termination_reason?: "statement_timeout" | "grant_expired" | "quota_exceeded" | "grant_revoked" | "admin_terminated" | null;
+            termination_reason?: "statement_timeout" | "grant_expired" | "quota_exceeded" | "grant_revoked" | "admin_terminated" | "instance_lost" | null;
             /** @description Whether the proxy→upstream leg of this session was actually encrypted. The server's ssl_mode states a policy, not an outcome: the opportunistic modes (`prefer`, and the empty default) offer TLS and fall back to plaintext when the target refuses, so only the session knows which way it went. Always false for Oracle, whose proxy relays the client's own TNS Connect descriptor over a plain socket. */
             upstream_tls?: boolean;
             /**
@@ -3591,6 +3638,18 @@ export interface components {
              * @description The access grant this session authenticated under — the auth-time selection, pinned for the life of the connection and never updated afterwards. Null on connections that predate this column, or whose grant has since been deleted (revocation does not clear it — only deletion, which does not otherwise happen, does).
              */
             grant_uid?: string | null;
+            /**
+             * Format: date-time
+             * @description When an admin asked for this session to end, through `POST /connections/{uid}/terminate`. It is an *intent*, not an outcome: the replica serving the API call is not necessarily the one serving the session, so this is written first and the owning replica acts on it within a couple of seconds. A session that closed on its own in between keeps this set with no `termination_reason`.
+             */
+            terminate_requested_at?: string | null;
+            /**
+             * Format: uuid
+             * @description The admin who asked. Null when nobody did.
+             */
+            terminate_requested_by?: string | null;
+            /** @description That admin's free text, never shown to the client whose session is ending. Distinct from `termination_reason`, which is the closed vocabulary describing what actually happened. */
+            terminate_reason?: string | null;
         };
         ConnectionDetail: components["schemas"]["Connection"] & {
             dump: components["schemas"]["DumpMetadata"];
@@ -3612,6 +3671,13 @@ export interface components {
              *     disabled, the default, it is always true.
              */
             statements_retained: boolean;
+            /** @description The admin named by `terminate_requested_by`, resolved to a username so the page can say "terminated by alice". Absent when nobody asked for this session to end, and when the account that did has since been deleted. */
+            terminated_by?: components["schemas"]["TerminationRequester"] | null;
+        };
+        TerminationRequester: {
+            /** Format: uuid */
+            uid: string;
+            username: string;
         };
         GrantSummary: {
             /**
@@ -4399,6 +4465,7 @@ export type DeviceConsentInfo = components['schemas']['DeviceConsentInfo'];
 export type DeviceConsentRequest = components['schemas']['DeviceConsentRequest'];
 export type Connection = components['schemas']['Connection'];
 export type ConnectionDetail = components['schemas']['ConnectionDetail'];
+export type TerminationRequester = components['schemas']['TerminationRequester'];
 export type GrantSummary = components['schemas']['GrantSummary'];
 export type DumpMetadata = components['schemas']['DumpMetadata'];
 export type Query = components['schemas']['Query'];
@@ -6567,6 +6634,54 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    terminateConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description Why, for the audit log. Optional; an absent or empty body is a termination with no stated reason. */
+                    reason?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description The session is live and the termination was requested */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        message: string;
+                        /** @description True when this replica was serving the session and signaled it directly, so it is already tearing down. False means the session belongs to another replica, which picks the request up on its next poll (about two seconds), or that it was already terminating from an earlier request. */
+                        local: boolean;
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The connection is already closed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };

@@ -107,9 +107,14 @@ func TestSessionRegistry_TerminateTwiceKeepsFirstReason(t *testing.T) {
 
 	// The poller re-reads the same request row every tick until the session is
 	// gone, so a second signal is the normal case — it must not rewrite the
-	// reason that actually ended the session.
-	if !r.Terminate(conn, TerminationRequest{Reason: "grant_revoked", By: "bob"}) {
-		t.Fatal("second Terminate should still report the session as live")
+	// reason that actually ended the session, and it must report "nothing new"
+	// so the poller does not log a termination every two seconds.
+	if r.Terminate(conn, TerminationRequest{Reason: "grant_revoked", By: "bob"}) {
+		t.Fatal("second Terminate should report false: nothing new was signaled")
+	}
+
+	if !r.Live(conn) {
+		t.Fatal("the session is still registered, so Live() should be true")
 	}
 
 	if got := h.Request(); got != first {

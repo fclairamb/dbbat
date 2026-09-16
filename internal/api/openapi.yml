@@ -2627,6 +2627,92 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /connections/{uid}/terminate:
+    parameters:
+      - $ref: '#/components/parameters/ConnectionUID'
+
+    post:
+      tags:
+        - Connections
+      summary: End a live proxied session
+      description: |
+        Terminates one live session: dbbat cancels whatever statement is
+        running upstream, then drops both legs of the connection.
+
+        **`POST .../terminate`, not `DELETE /connections/{uid}`.** The session
+        is not the row. `DELETE` would read as deleting the ledger entry, which
+        retention owns and which the audit chain's
+        `connection.opened`/`connection.closed` pair exists to protect.
+
+        **Terminating is not revoking.** The grant is untouched, so the user can
+        reconnect immediately under it. Use `DELETE /grants/{uid}` to withdraw
+        the access itself — that ends *every* session of that user on that
+        database, this ends one.
+
+        **`202`, not `200`.** The replica serving this call is not necessarily
+        the one serving the session: `connections.run_id` says who is. The
+        request is written to the connection row, this replica signals its own
+        live sessions immediately, and the replica that owns the session acts on
+        it within about two seconds. `local` in the response says which of the
+        two happened.
+
+        The optional `reason` is recorded on the connection row and in the
+        `connection.terminated` audit entry. It is never shown to the client
+        whose session is ending.
+
+        **Requires admin role.**
+      operationId: terminateConnection
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 1000
+                  description: >-
+                    Why, for the audit log. Optional; an absent or empty body is
+                    a termination with no stated reason.
+      responses:
+        '202':
+          description: The session is live and the termination was requested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  local:
+                    type: boolean
+                    description: >-
+                      True when this replica was serving the session and
+                      signaled it directly, so it is already tearing down. False
+                      means the session belongs to another replica, which picks
+                      the request up on its next poll (about two seconds), or
+                      that it was already terminating from an earlier request.
+                required:
+                  - message
+                  - local
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The connection is already closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /connections/{uid}/dump:
     parameters:
       - $ref: '#/components/parameters/ConnectionUID'
@@ -6300,9 +6386,13 @@ components:
             - quota_exceeded
             - grant_revoked
             - admin_terminated
+            - instance_lost
           description: >-
             Why *dbbat* ended this session, when dbbat is what ended it. Absent
             — the ordinary case — means the client or the network did.
+            `admin_terminated` is `POST /connections/{uid}/terminate`;
+            `instance_lost` means nobody ended it — the process serving it died
+            and the crash reconcile closed the row on its behalf.
         upstream_tls:
           type: boolean
           description: >-
@@ -6323,6 +6413,30 @@ components:
             updated afterwards. Null on connections that predate this column,
             or whose grant has since been deleted (revocation does not clear
             it — only deletion, which does not otherwise happen, does).
+        terminate_requested_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When an admin asked for this session to end, through
+            `POST /connections/{uid}/terminate`. It is an *intent*, not an
+            outcome: the replica serving the API call is not necessarily the
+            one serving the session, so this is written first and the owning
+            replica acts on it within a couple of seconds. A session that
+            closed on its own in between keeps this set with no
+            `termination_reason`.
+        terminate_requested_by:
+          type: string
+          format: uuid
+          nullable: true
+          description: The admin who asked. Null when nobody did.
+        terminate_reason:
+          type: string
+          nullable: true
+          description: >-
+            That admin's free text, never shown to the client whose session is
+            ending. Distinct from `termination_reason`, which is the closed
+            vocabulary describing what actually happened.
       required:
         - uid
         - user_id
@@ -6369,10 +6483,34 @@ components:
                 lifetime count and does not settle it either. True means
                 retention cannot explain a missing statement — with retention
                 disabled, the default, it is always true.
+            terminated_by:
+              allOf:
+                - $ref: '#/components/schemas/TerminationRequester'
+              nullable: true
+              description: >-
+                The admin named by `terminate_requested_by`, resolved to a
+                username so the page can say "terminated by alice". Absent when
+                nobody asked for this session to end, and when the account that
+                did has since been deleted.
           required:
             - dump
             - grant
             - statements_retained
+
+    # TerminationRequester names the admin behind terminate_requested_by, so a
+    # connection detail page does not have to fetch a user to render "terminated
+    # by alice".
+    TerminationRequester:
+      type: object
+      properties:
+        uid:
+          type: string
+          format: uuid
+        username:
+          type: string
+      required:
+        - uid
+        - username
 
     # GrantSummary is the small slice of AccessGrant the UI needs to show
     # "under which grant did this session run?" on a connection detail page
