@@ -39,9 +39,16 @@ import (
 // a one-byte statement.
 const execHeaderMinLen = 12
 
-// execMaxSQLLen bounds a plausible statement length. Oracle's own limit is
-// 64K for the SQL text of a single statement; anything past 1MB means the walk
-// landed on the wrong bytes.
+// execMaxSQLLen bounds a plausible statement length: anything past 1MB means
+// the walk landed on the wrong bytes.
+//
+// It used to justify itself with "Oracle's own limit is 64K for the SQL text of
+// a single statement". That was folklore and it is wrong — a real 23ai parses a
+// 128 MB statement (measured; see maxTaggableStatementBytes and docs/oracle.md).
+// 1MB is dbbat's own choice about what it is willing to *read*, not a limit of
+// the server's, and it is what bounds reassembly (maxStatementReassembly) and
+// tagging (maxTaggableStatementBytes) too. A statement past it is still
+// forwarded — it is decoded partially, and not tagged.
 const execMaxSQLLen = 1 << 20
 
 // isPiggybackExecHeader reports whether ttcPayload opens with the v315+
