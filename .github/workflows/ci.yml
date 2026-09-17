@@ -197,7 +197,7 @@ jobs:
         run: go vet -tags integration ./...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v7.1.0
+        uses: codecov/codecov-action@v7.1.1
         with:
           files: coverage.out
         continue-on-error: true # Don't fail if codecov is not configured
