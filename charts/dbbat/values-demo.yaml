@@ -55,6 +55,14 @@ extraEnv:
       secretKeyRef:
         name: dbbat-secret
         key: demo-target-db
+  # sqlcommenter-style statement tagging, so the demo shows what the target's
+  # own tooling (pg_stat_statements, RDS Performance Insights) sees. Off in the
+  # chart default because it changes the bytes the database receives; here the
+  # target is the disposable sample store, so there is nothing to protect.
+  # Oracle has its own switch (DBB_QUERY_TAGGING_ORACLE) and this does not
+  # reach it.
+  - name: DBB_QUERY_TAGGING
+    value: "true"
 
 # =============================================================================
 # Resources
