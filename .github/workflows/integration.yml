@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   integration:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       # One protocol failing should not hide the state of the others.
       fail-fast: false
@@ -84,7 +84,7 @@ jobs:
   # gating separately.
   oracle:
     name: oracle (${{ matrix.label }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       # One leg failing should not hide the state of the others.
       fail-fast: false
@@ -142,7 +142,7 @@ jobs:
   # 1m09s wall for the whole suite with a warm image, nothing reported. The 40m
   # budget is unchanged.
   kubernetes:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
 
