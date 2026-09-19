@@ -442,6 +442,18 @@ and cursor `0`, so no frame that yields a statement today changes classification
 — measured across the whole corpus in
 `TestOJDBC6ReexecDoesNotDisturbTheParsePath`.
 
+The enforcement is pinned by **replaying** that recording through the real
+intercept pipeline, in both directions, so the cursor id is learned off the
+server's own responses exactly as it is live (`exec_no_statement_reexec_test.go`).
+It is not pinned by a live ojdbc6 session, and that is a limitation rather than
+a choice: **ojdbc6 cannot log in through dbbat at all**. Driven through the
+`startOracleThroughProxy` fixture it dies in the AUTH exchange —
+`Invalid Packet Lenght` at `T4CTTIoauthenticate.doOSESSKEY` — which reproduces
+with this section's only pre-auth change reverted, so it is a separate and
+older limitation of the AUTH leg on a v310 session. The recording exists
+because the capture tool relays bytes rather than proxying them. See
+`specs/todos/2026-09-19-03-oracle-ojdbc6-auth-fails-through-the-proxy.md`.
+
 **None of them sends the SQL-less `OALL8` (func `0x0E`, SQL length 0)** the gate
 was originally written against — that is the legacy pre-v315 framing of the same
 idea. It is still handled (`decodeOALL8` → `OALL8NoSQLError`), kept as defence in
