@@ -45,6 +45,19 @@ func WithMaxBytesTransferred(maxBytes int64) GrantOption {
 	}
 }
 
+// WithMaxQueryCounts puts a statement-count quota on the definition — the
+// budget checkQuotas enforces *between* commands, synchronously, in the same
+// step a statement's own controls run in. It is the counterpart of
+// WithMaxBytesTransferred and deliberately not interchangeable with it: the
+// byte budget is the limit watchdog's, enforced from its own goroutine mid-call,
+// so only this one can say "the next statement was refused" without racing a
+// timer.
+func WithMaxQueryCounts(maxQueries int64) GrantOption {
+	return func(def *store.GrantDefinition) {
+		def.MaxQueryCounts = &maxQueries
+	}
+}
+
 // WithStatementTimeout puts a per-statement time limit on the definition, in
 // seconds. Zero is meaningful here and is *not* "unset": it means "no limit,
 // overriding the instance-wide default", which is the state a dump or ETL

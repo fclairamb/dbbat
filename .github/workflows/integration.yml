@@ -142,6 +142,31 @@ jobs:
           echo "$OJDBC_SHA256  $jar" | sha256sum --check --strict
           echo "ORACLE_TEST_OJDBC_JAR=$jar" >> "$GITHUB_ENV"
 
+      # And the *oldest* driver still obtainable, which is a different shape
+      # rather than an older one of the same: ojdbc6 11.2.0.4 negotiates TNS
+      # version 310, so every packet dbbat frames itself has to carry the legacy
+      # 2-byte length, the challenge has to be the 6949 one, and none of the
+      # 23ai server capabilities the AUTH leg reads may be assumed of it. All
+      # four of those were wrong at once until 2026-09-19 and the client could
+      # not log in at all; the corpus fixture it produced
+      # (testdata/ojdbc6_legacy.pcapng) was recorded through a byte relay, so
+      # nothing in CI exercised the login until this jar was here to do it.
+      #
+      # Same fetch rules as the driver above: pinned and digest-verified,
+      # because the job then executes it. OJDBC6_JAR is what turns
+      # TestIntegration_OJDBC6ThroughTheProxy from a skip into a run.
+      - name: Fetch the legacy ojdbc6 driver
+        env:
+          OJDBC6_VERSION: 11.2.0.4
+          OJDBC6_SHA256: e70213917b5f0d7448072836da07c709930b89dd4b0cc14a1eef814836747900
+        run: |
+          set -euo pipefail
+          jar="$RUNNER_TEMP/ojdbc6-$OJDBC6_VERSION.jar"
+          curl -fsSL --retry 3 --retry-all-errors -o "$jar" \
+            "https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc6/$OJDBC6_VERSION/ojdbc6-$OJDBC6_VERSION.jar"
+          echo "$OJDBC6_SHA256  $jar" | sha256sum --check --strict
+          echo "OJDBC6_JAR=$jar" >> "$GITHUB_ENV"
+
       # -race, matching `make test-e2e-oracle`. This suite is the only one that
       # runs two proxy goroutines over one session, and it hid two live races
       # on the in-flight query for as long as it ran without the detector.
