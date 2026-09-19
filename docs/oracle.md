@@ -597,6 +597,42 @@ the cursor is never learned. That second failure is not theoretical:
 > overwrite that changes the SQL behind an id is logged at WARN
 > (`cursor id recycled onto a different statement`) instead of passing silently.
 
+##### The one cursor id that cannot be learned: a REF cursor
+
+Everything above reads the id off the response to a statement dbbat **saw
+parsed**. A `SYS_REFCURSOR` has no such statement on the wire:
+
+```sql
+PROCEDURE dbbat_learn_refcur(p OUT SYS_REFCURSOR) AS
+BEGIN
+  OPEN p FOR SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 5;
+END;
+```
+
+`OPEN p FOR …` runs inside the procedure body. The server allots the cursor
+while executing the call — `BEGIN dbbat_learn_refcur(:1); END;` — and hands its
+id back in that call's **out-bind data**, not in an OER the scan looks at. There
+is nothing to find, and nothing to attach it to if there were: the only
+statement text dbbat holds is the call, never the `SELECT` the cursor runs.
+
+So every fetch the client then drives on that cursor names an id the tracker
+does not hold, and takes the same route as any other unidentifiable execution
+(`refuseUnknownCursor`): forwarded with a WARN under a permissive grant,
+**refused with `ORA-01031`** under one carrying `read_only`, `block_ddl` or
+approval patterns. The rule is right; on this shape the outcome is a limitation
+rather than an attack being stopped, and it is the one known case where ordinary
+read-only work is refused. Closing it means decoding the id out of the out-bind
+and gating the fetches against the call — a feature, filed as
+`specs/todos/2026-09-19-05-oracle-learn-ref-cursor-ids-from-out-binds.md`.
+
+It is measured rather than described. Five drives produce **exactly five**
+unknown cursors, on both thin clients, with a different id each time (the server
+hands out a fresh one per `OPEN`), and
+`TestIntegration_CursorIDLearningMissRate` brackets that step with the proxy's
+own untracked counter and requires the count to equal the number of drives. The
+exemption is therefore bounded on both sides: a genuine learning miss landing in
+the same window fails the test instead of being absorbed by it.
+
 #### Closing cursors
 
 A client tells the server it is done with cursors through the **close-cursors
@@ -1039,12 +1075,18 @@ interleaved on one session, DML, an anonymous PL/SQL block, a REF cursor, a
 statement retried after it failed, and a statement cache churned past 40
 statements. It counts the proxy's own log records.
 
-Against `gvenzl/oracle-free:23-slim`, after the sequence-number fix:
+Against `gvenzl/oracle-free:23-slim`, measured 2026-09-19:
 
-| Client | Parses seen | Cursor ids learned | Re-executions | Naming an unknown cursor |
-|--------|-------------|--------------------|---------------|--------------------------|
-| `go-ora` v3 | 57 | 53 | 64 | **0** |
-| `python-oracledb` thin 3.4.2 | 58 | 55 | 60 | **0** |
+| Client | Parses seen | Cursor ids learned | Re-executions of a parsed cursor | Naming an unknown cursor | REF-cursor drives |
+|--------|-------------|--------------------|----------------------------------|--------------------------|-------------------|
+| `go-ora` v3 | 57 | 53 | 64 | **0** | 5 |
+| `python-oracledb` thin 3.4.2 | 58 | 55 | 64 | **0** | 5 |
+
+The last two columns are the same five frames counted twice, and the split is
+the point. A drive of a server-opened REF cursor *does* name a cursor the
+tracker has no entry for — five of them per client, one per drive — but it is
+not a learning miss: there was never a parse to learn from. See "The one cursor
+id that cannot be learned" above. Everything else, on both clients, resolves.
 
 The parses that learned nothing are **exactly** the statements that failed
 (`DROP TABLE` on a missing table, three retries of a `SELECT` on a missing
