@@ -47,6 +47,22 @@ v315+ Data packet header:
 
 This is the single most important thing to get right. If you read the length as 2 bytes, you get 0, and the packet appears empty.
 
+**And it cuts both ways.** `readTNSPacket` has always handled both forms on the
+read side — a non-zero ub2 at `[0:2]` means legacy, zero means read a ub4 at
+`[0:4]` — but everything dbbat *writes* was framed v315+ unconditionally, which
+is the mirror-image bug: a client that negotiated a pre-v315 session reads the
+length out of `[0:2]`, gets 0, and refuses the packet before a single TTC byte
+is looked at (`Invalid Packet Lenght`, thrown by `oracle.net.ns.Packet`). The
+form is now read off the Accept's version field — `acceptUsesLegacyLength`,
+recorded as `session.tnsLegacyLength` — and honoured by every packet dbbat
+frames itself: the O5LOGON challenge, the re-fragmented AUTH OK, every
+synthesized OER, and the break/reset markers. One flag covers **both** legs,
+because the Connect and the Accept are relayed byte for byte and dbbat sits
+inside a single agreement between the client and the upstream.
+
+Relayed packets are unaffected either way: `writeTNSPacket` prefers `pkt.Raw`,
+so a packet dbbat merely forwards keeps whatever header it arrived with.
+
 ### Connect Data Offset
 
 The connect descriptor offset at payload bytes 18-19 is from the **start of the full TNS packet** (including the 8-byte header). When indexing into the payload (which starts after the header), subtract 8.
@@ -2559,7 +2575,9 @@ three now work), so it is gone rather than duplicated.
 The short version: all four supported client families — go-ora,
 python-oracledb thin, SQLcl/ojdbc and sqlplus / OCI instant client —
 authenticate, query and capture end-to-end against Oracle 23ai through the
-proxy. Against Oracle 19c the historical behaviour still applies.
+proxy. A fifth shape, the **pre-v315** one (ojdbc6 11.2.0.4, TNS 310),
+authenticates and queries as of 2026-09-19 — capture on it is not claimed; see
+"Pre-v315 clients". Against Oracle 19c the historical behaviour still applies.
 
 **19c is not covered end to end, and cannot be:** there is no licence-free 19c
 image to start a container from. What *is* covered on 19c, off the recorded 19c
@@ -2580,6 +2598,11 @@ silently — but that only compiles them.
 ```bash
 # default image: gvenzl/oracle-free:23-slim (Oracle 23ai Free; amd64 + arm64)
 make test-e2e-oracle
+
+# with the legacy client's driver, so TestIntegration_OJDBC6ThroughTheProxy runs
+# rather than skips (CI fetches this jar itself)
+curl -O https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc6/11.2.0.4/ojdbc6-11.2.0.4.jar
+OJDBC6_JAR=$PWD/ojdbc6-11.2.0.4.jar make test-e2e-oracle
 
 # pin the older 18c XE image — amd64 only, does not boot on Apple Silicon
 ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim go test -tags integration -timeout 40m ./internal/proxy/oracle/
@@ -2844,6 +2867,7 @@ Verified end-to-end (authenticate + query + observability capture) against Oracl
 | python-oracledb thin | thin | ✅ works | FAST_AUTH de-pipelined; verifier 18453 |
 | SQLcl 26.1.2 (ojdbc) | thin | ✅ works | classic O5LOGON; verifier 18453 |
 | sqlplus / OCI instant client | thick | ✅ works | auth + query work via the **wide** (4-byte LE) TTC encoding, with **no dependency on OOB/`DISABLE_OOB`** — verified locally against Oracle 23ai and through an OOB-stripping TCP relay (a NodePort/NLB stand-in). See "OCI wide encoding" and "OCI break/reset before AUTH Phase 2" below |
+| ojdbc6 11.2.0.4 | thin, **pre-v315** | ✅ works (since 2026-09-19) | TNS 310: legacy 2-byte packet lengths, verifier 6949, no `UseBigClrChunks`, no `customHash`. It could not log in at all before that date — see "Pre-v315 clients" below |
 
 Go (`go-ora`) additionally has **bind values** captured end-to-end against
 Oracle 23ai Free, which no other client family is ground-truth-verified for yet.
@@ -2866,11 +2890,65 @@ table rather than in it:
 
 Each API key now stores **both** verifiers (`api_keys.o5logon_verifier` 6949 and
 `o5logon_verifier_18453` + `o5logon_salt_18453`). When the upstream's Set Protocol
-response advertises `customHash` (23ai), `authenticateClient` switches the O5LOGON server
+response advertises `customHash` (23ai) **and the client is v315+**,
+`authenticateClient` switches the O5LOGON server
 to the 18453 (PBKDF2 / HMAC-SHA512) challenge — `AUTH_PBKDF2_CSK_SALT`,
 `AUTH_PBKDF2_VGEN_COUNT`, `AUTH_PBKDF2_SDER_COUNT`, `AUTH_GLOBALLY_UNIQUE_DBID`,
 `AUTH_SESSKEY` flag 0 — which modern thin clients require. Legacy go-ora reads the
-verifier type from the challenge's `AUTH_VFR_DATA` flag and uses 6949.
+verifier type from the challenge's `AUTH_VFR_DATA` flag and uses 6949; a pre-v315
+client is given 6949 outright (`clientSupportsVerifier18453`).
+
+#### Pre-v315 clients
+
+A client that negotiates TNS < 315 is a genuinely different shape, not an older
+one of the same. ojdbc6 11.2.0.4 is the concrete case — the oldest Oracle driver
+still obtainable from a package repository, and the one
+`testdata/ojdbc6_legacy.pcapng` was recorded with. Until 2026-09-19 it could not
+complete O5LOGON through dbbat at all, dying at `T4CTTIoauthenticate.doOSESSKEY`
+with `Invalid Packet Lenght`.
+
+Behind that wall stood three more, each invisible until the one in front of it
+fell, and each the *same* mistake: a capability read off the **server** and
+applied to the session. Oracle 23ai advertises everything to everyone; the
+client half of each condition was simply missing.
+
+| What was assumed | What a v310 session actually is | How it failed |
+|---|---|---|
+| 4-byte packet length on everything dbbat writes | 2-byte length at `[0:2]` | `Invalid Packet Lenght` at `doOSESSKEY` — the client never read a TTC byte |
+| `customHash` (caps[4]&0x20) ⇒ offer verifier 18453 | password version 12C does not exist before 12.1 / TNS 315 | the client closed the socket rather than answer; `Protocol violation: [0]` from `doOAUTH` |
+| the hand-built 6949 end-of-call Summary (32 bytes of tail) | this client parses **30** | two surplus zeros left in its TTC read buffer, read as the *next* call's message code — the same `Protocol violation: [0]` |
+| `UseBigClrChunks` (caps[37]&0x20) | not implemented; a 96-byte value goes out as `fe 40 <64> 20 <32> 00`, single-byte chunk lengths | the Phase 2 parse walked off the end — "missing AUTH_SESSKEY", surfaced to the user as ORA-01017 for a correct password |
+| `customHash` ⇒ derive the upstream password key with PBKDF2 | the classic challenge a v310 Phase 1 draws carries no `AUTH_PBKDF2_CSK_SALT` at all | PBKDF2 over an empty salt; the **upstream** answered ORA-01017 |
+
+The fixes are correspondingly narrow. `session.tnsLegacyLength` (read from the
+Accept) picks the packet-length form; `clientSupportsVerifier18453` adds the
+version to the customHash bit; `observeBigClrChunks` refuses to record the
+capability for a pre-v315 session; and `finishUpstreamAuth` derives customHash
+from whether the upstream's own challenge carried PBKDF2 material rather than
+from the bit alone — a gate that can only ever turn it *off*, and only when the
+material it needs is absent.
+
+The Summary is not a third hard-coded capture. A pre-v315 session now runs
+`beginUpstreamAuth` **before** challenging the client and reuses the live
+upstream's trailing summary bytes, exactly as a wide/OCI session already does
+and for the identical reason: the real server sized that summary for the caps
+this very client negotiated. See `clientChallengeTrailer`.
+
+Verified live, both halves, by `TestIntegration_OJDBC6ThroughTheProxy`
+(`legacy_client_integration_test.go`): the driver logs in, runs a plain
+statement and a bound `PreparedStatement` twice, its SQL-less `03 5e`
+re-execution reaches the re-execution gate and gets a `queries` row of its own,
+and an exhausted grant refuses a later re-execution as an ORA error the driver
+renders. Skipped without `OJDBC6_JAR`; CI fetches the jar (pinned and
+digest-verified), so it runs rather than skips.
+
+One thing this does **not** claim: pre-v315 coverage beyond login and the
+statement paths above. Bind capture and row capture have not been measured on
+this client. The statement *tag* is better off than that but still short of
+live: every one of the recording's frames locates and round-trips in
+`TestSurveyStatementRewriteCorpus`, so the locator reads this client's framing,
+but no live tagged session has been driven through it — and a shape the locator
+could not certify would run untagged rather than wrong, which is the design.
 
 #### Proxy-mode robustness (must never crash on a malformed packet)
 
