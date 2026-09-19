@@ -3088,6 +3088,13 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	// later re-execution be gated against the right statement.
 	s.learnCursorID(ttcPayload)
 
+	// And the one cursor id that never rides an OER: a `SYS_REFCURSOR` the
+	// server opened inside a procedure body and reported in the call's bind
+	// output. Without it, every fetch the client drives on that cursor names an
+	// id the tracker does not hold — ORA-01031 under a restrictive grant, for
+	// ordinary read-only application code. See learnRefCursorIDs.
+	s.learnRefCursorIDs(ttcPayload)
+
 	switch funcCode { //nolint:exhaustive // only handling response-related codes
 	case TTCFuncQueryResult:
 		s.handleQueryResultV2(ttcPayload)

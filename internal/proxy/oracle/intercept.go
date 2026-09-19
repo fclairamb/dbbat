@@ -26,8 +26,17 @@ import (
 // — each one is a chance to learn a cursor id, which is what the measurement
 // counts it for.
 const (
-	logMsgQueryIntercepted         = "query intercepted"
-	logMsgLearnedCursorID          = "learned server-assigned cursor id"
+	logMsgQueryIntercepted = "query intercepted"
+	logMsgLearnedCursorID  = "learned server-assigned cursor id"
+
+	// logMsgLearnedRefCursorID is deliberately its own record rather than a
+	// field on logMsgLearnedCursorID: this id came out of a call's bind output
+	// rather than off an OER, and it stands for the *call* rather than for the
+	// statement the cursor actually runs. Counting the two together would make
+	// the cursor-id learning measurement unable to tell them apart, which is the
+	// distinction TestIntegration_CursorIDLearningMissRate exists to keep.
+	logMsgLearnedRefCursorID = "learned a REF cursor id from a call's bind output"
+
 	logMsgReexecGated              = "intercepted cursor re-execution"
 	logMsgUntrackedCursorForwarded = "forwarding a re-execution of an untracked cursor: " +
 		"the grant carries no statement-shaped control"
@@ -156,6 +165,13 @@ type trackedCursor struct {
 	bindValues []string
 	parsedAt   time.Time
 	columns    []columnDef // Column definitions from first response (for multi-fetch)
+
+	// fromRefCursorBind marks an entry learned from a call's bind output rather
+	// than from a parse dbbat saw — a `SYS_REFCURSOR` (see learnRefCursorIDs).
+	// Its sql is the call's, annotated, so it reads as a PL/SQL block; the flag
+	// is what stops the locator from being offered this execution's own row
+	// stream as if it were another call's out-binds.
+	fromRefCursorBind bool
 }
 
 // oracleQueryTracker manages per-session cursor state and pending queries.
@@ -174,6 +190,10 @@ type pendingOracleQuery struct {
 	queryUID       uuid.UUID // Set after query record is created in DB
 	queryPersisted bool      // True after query record is created
 	lastRow        []string  // Last captured row values (for continuation packet duplicate tracking)
+
+	// refCursorsLearned is set once this execution's bind output has yielded
+	// REF cursor ids, so the rest of its response packets are not walked again.
+	refCursorsLearned bool
 
 	// rowSink batches this query's captured rows through the shared writer.
 	// Created by persistQueryRecord, i.e. only once the parent queries row
@@ -624,6 +644,86 @@ func (s *session) learnCursorID(ttcPayload []byte) {
 		slog.Uint64("cursor_id", uint64(cursorID)),
 		slog.String("sql", truncateSQL(pending.cursor.sql, 200)),
 	)
+}
+
+// refCursorNote is appended to the SQL a cursor learned from a call's bind
+// output carries. It is a SQL comment, so the static validators and the approval
+// patterns — which run on the comment-stripped scratch copy
+// (shared.NormalizeSQL / matchableSQL) — match exactly what they matched when
+// the call itself was gated, while /queries stops implying dbbat saw a statement
+// it never did.
+//
+// The text it annotates is the **call**, deliberately. The `OPEN p FOR SELECT …`
+// inside the procedure never crossed the wire, so the SELECT is not something
+// dbbat can know; the call is, it is the statement the grant already gated once,
+// and it is the right thing to charge this execution's quota and audit row to.
+const refCursorNote = " /* dbbat: a SYS_REFCURSOR this call returned; the cursor's own " +
+	"statement was opened inside the procedure and never crossed the wire */"
+
+// markRefCursorStatement annotates the call a REF cursor was handed back by.
+func markRefCursorStatement(sql string) string {
+	return sql + refCursorNote
+}
+
+// learnRefCursorIDs records the cursor ids the server reported as
+// `SYS_REFCURSOR` out-binds of the PL/SQL call currently in flight, so the
+// fetches the client then drives on them resolve instead of being refused.
+//
+// This is the one cursor id that has no OER to be read off — see
+// refcursor_bind.go — and until it existed a REF cursor was the single known
+// shape where ordinary read-only application code met refuseUnknownCursor's
+// fail-closed branch and became ORA-01031.
+//
+// Two gates keep it from running anywhere it could misfire, and neither is
+// cosmetic:
+//
+//   - **only while a PL/SQL call is in flight.** A `0x07` message is also what
+//     carries ordinary row data, so a locator offered every response would be
+//     walking rows. An out-bind REF cursor can only come back from an anonymous
+//     block or a CALL, which is a property of the statement dbbat already holds.
+//   - **never while the in-flight statement is itself a learned REF cursor.**
+//     Its text starts with the call's `BEGIN`, so it would pass the gate above
+//     while what is actually streaming back is the cursor's rows.
+//
+// Learning is one-shot per execution: once a call has yielded ids, its remaining
+// response packets are left alone. A fresh execution of the same call gets a
+// fresh pending query and so a fresh chance, which is what keeps up with the
+// server handing out a new id per `OPEN`.
+//
+// Runs on the upstream leg, so the caller holds trackerMu (see
+// interceptUpstreamMessage).
+func (s *session) learnRefCursorIDs(ttcPayload []byte) {
+	pending := s.tracker.pendingQuery
+	if pending == nil || pending.cursor == nil || pending.refCursorsLearned {
+		return
+	}
+
+	if pending.cursor.fromRefCursorBind || !statementIsAPLSQLCall(pending.cursor.sql) {
+		return
+	}
+
+	ids := refCursorIDsInBindOutput(ttcPayload)
+	if len(ids) == 0 {
+		return
+	}
+
+	pending.refCursorsLearned = true
+	sql := markRefCursorStatement(pending.cursor.sql)
+
+	for _, id := range ids {
+		s.rememberCursor(id, &trackedCursor{
+			cursorID:          id,
+			sql:               sql,
+			bindValues:        pending.cursor.bindValues,
+			parsedAt:          time.Now(),
+			fromRefCursorBind: true,
+		})
+
+		s.logger.DebugContext(s.ctx, logMsgLearnedRefCursorID,
+			slog.Uint64("cursor_id", uint64(id)),
+			slog.String("sql", truncateSQL(sql, 200)),
+		)
+	}
 }
 
 // flushPendingQuery completes any outstanding query that hasn't been finalized.

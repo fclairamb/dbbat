@@ -18,14 +18,20 @@ package oracle
 import (
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
 	go_ora "github.com/sijms/go-ora/v3"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/dump"
 )
 
 // refCursorProcedure is the procedure both captures call. The `OPEN p FOR …`
@@ -227,13 +233,26 @@ func TestCapture_JDBCThinRefCursor(t *testing.T) {
 	t.Logf("capture written to %s (%d drives)", outPath, refCursorDrives)
 }
 
+// ociRefCursorBindOutputFixture is where TestCapture_SQLPlusRefCursor leaves the
+// OCI evidence: the call responses, as TNS Data payloads, in the same hex form
+// as the other `oci_bundled_*.hex` fixtures.
+//
+// It is a hex fixture rather than a recording on purpose. `testdata/*.pcapng` is
+// a corpus several whole-corpus surveys enumerate, and sqlplus's PL/SQL call
+// carries an exec frame the exact statement locator cannot certify — a finding
+// of its own, filed separately, and not something to fold into this spec by
+// lowering a survey's floor. The bytes this file actually needs are the two
+// bind-output responses, so those are what it keeps.
+const ociRefCursorBindOutputFixture = "testdata/oci_refcursor_bind_output.hex"
+
 // TestCapture_SQLPlusRefCursor records sqlplus (OCI thick) driving the same
-// procedure, so the fixture set covers the fixed-width encoding too. Skipped
-// when sqlplus is not on PATH.
+// procedure and writes its call responses to ociRefCursorBindOutputFixture, so
+// the fixture set covers the fixed-width encoding too. Skipped when sqlplus is
+// not on PATH.
 func TestCapture_SQLPlusRefCursor(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_REFCURSOR_SQLPLUS", "testdata/sqlplus_refcursor.pcapng")
+	outPath := filepath.Join(t.TempDir(), "sqlplus_refcursor.pcapng")
 
 	requireOracleReachable(t, oracleAddr)
 
@@ -270,5 +289,64 @@ EXIT
 	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
 	require.NoError(t, w.Close())
 
-	t.Logf("capture written to %s", outPath)
+	writeBindOutputHexFixture(t, outPath, ociRefCursorBindOutputFixture)
+}
+
+// writeBindOutputHexFixture distils a recording down to the server payloads that
+// answer a call with an IO vector — the bind-output responses — and writes them
+// as one hex line each, the form recordedFrames reads.
+func writeBindOutputHexFixture(t *testing.T, dumpPath, outPath string) {
+	t.Helper()
+
+	r, err := dump.OpenReader(dumpPath)
+	require.NoError(t, err)
+
+	defer func() { _ = r.Close() }()
+
+	body := "# sqlplus (OCI thick, Instant Client) calling\n" +
+		"#   PROCEDURE dbbat_cap_refcur(p OUT SYS_REFCURSOR)\n" +
+		"# through dbbat against Oracle 23ai Free. One line per server response that\n" +
+		"# opens with the IO vector (TTC message 0x0b): the TNS Data payload, two\n" +
+		"# data-flag bytes first, exactly as extractTTCPayload receives it.\n" +
+		"#\n" +
+		"# These are the same REF cursor descriptors the thin recordings carry, marshaled\n" +
+		"# in the wide/fixed-width OCI encoding — four-byte little-endian integers where a\n" +
+		"# thin client sends compressed ones. refCursorIDsInBindOutput refuses them at the\n" +
+		"# first field rather than reading a number out of the wrong encoding, which is\n" +
+		"# what TestOCIRefCursorBindOutputYieldsNoID pins.\n" +
+		"#\n" +
+		"# Regenerate with:\n" +
+		"#   go test -tags capture -run TestCapture_SQLPlusRefCursor ./internal/proxy/oracle/\n"
+
+	frames := 0
+
+	for {
+		pkt, err := r.ReadPacket()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		require.NoError(t, err)
+
+		if pkt.Direction != dump.DirServerToClient {
+			continue
+		}
+
+		tns, err := parseTNSFromDumpPacket(pkt.Data)
+		if err != nil || tns.Type != TNSPacketTypeData {
+			continue
+		}
+
+		if ttc := extractTTCPayload(tns.Payload); len(ttc) == 0 || ttc[0] != ttcMsgIOVector {
+			continue
+		}
+
+		body += hex.EncodeToString(tns.Payload) + "\n"
+		frames++
+	}
+
+	require.Positive(t, frames, "the sqlplus session must have answered at least one call")
+	require.NoError(t, os.WriteFile(outPath, []byte(body), 0o600))
+
+	t.Logf("%d bind-output responses written to %s", frames, outPath)
 }

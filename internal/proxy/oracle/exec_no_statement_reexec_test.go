@@ -240,7 +240,9 @@ func TestDumpReplay_OJDBC6ReexecOfAnUntrackedCursorFailsClosed(t *testing.T) {
 func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	t.Parallel()
 
-	var statements, reexecs int
+	var statements int
+
+	reexecs := map[string]int{}
 
 	for _, name := range surveyCorpus(t) {
 		for _, ttc := range surveyClientTTC(t, loadTestDump(t, name)) {
@@ -259,7 +261,7 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 					assert.Truef(t, frameCarriesStatement(body),
 						"%s: a frame carrying %q must stay a statement frame", name, truncateSQL(sql, 60))
 				case reexec:
-					reexecs++
+					reexecs[name]++
 
 					assert.Falsef(t, frameCarriesStatement(body),
 						"%s: a frame declaring no statement is not a statement frame", name)
@@ -268,10 +270,23 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 		}
 	}
 
-	t.Logf("exec ops across the corpus: %d carrying a statement, %d re-executing a cursor", statements, reexecs)
+	t.Logf("exec ops across the corpus: %d carrying a statement, %v re-executing a cursor", statements, reexecs)
 
 	assert.Positive(t, statements, "the corpus must still be full of ordinary statements")
-	assert.Equal(t, 1, reexecs, "and carry exactly the one SQL-less execute ojdbc6 sent")
+
+	// Per recording rather than a total, because the two sources of a SQL-less
+	// execute are different things and a total would let one drift into the
+	// other: ojdbc6 re-running a PreparedStatement, and a thin client **driving
+	// a REF cursor** the server opened inside a procedure. The REF-cursor
+	// recordings each call the procedure three times; python-oracledb also
+	// re-drives a cursor it has already exhausted, which is why its count is
+	// five rather than three.
+	assert.Equal(t, map[string]int{
+		"ojdbc6_legacy.pcapng":         1,
+		"go_ora_refcursor.pcapng":      3,
+		"jdbc_thin_refcursor.pcapng":   3,
+		"python_thin_refcursor.pcapng": 5,
+	}, reexecs, "only these recordings carry an execute that declares no statement")
 }
 
 // TestExecNoStatementCursorRefusesWhatItCannotRead pins the reading's edges,

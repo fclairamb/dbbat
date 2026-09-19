@@ -25,8 +25,14 @@ const (
 	goOraRefCursorDump      = "go_ora_refcursor.pcapng"
 	pythonThinRefCursorDump = "python_thin_refcursor.pcapng"
 	jdbcThinRefCursorDump   = "jdbc_thin_refcursor.pcapng"
-	sqlplusRefCursorDump    = "sqlplus_refcursor.pcapng"
 )
+
+// ociRefCursorBindOutputs is the OCI half of the same session, kept as a hex
+// fixture of the two call responses rather than as a recording: sqlplus's PL/SQL
+// call also carries an exec frame the exact statement locator cannot certify,
+// which is a finding of its own and not one to fold into `testdata/*.pcapng` —
+// a corpus several whole-corpus surveys enumerate and hold to 100%.
+const ociRefCursorBindOutputs = "testdata/oci_refcursor_bind_output.hex"
 
 // serverTTCPayloads returns the TTC payloads of every server→client Data packet
 // in a recording, in order.
@@ -143,8 +149,8 @@ func TestDumpReplay_RefCursorIDsMatchTheCursorsTheClientDrives(t *testing.T) {
 // capture build tag).
 const refCursorDrivesInFixtures = 3
 
-// TestDumpReplay_RefCursorLocatorRefusesTheOCIEncoding pins the documented gap
-// rather than leaving it to be discovered.
+// TestOCIRefCursorBindOutputYieldsNoID pins the documented gap rather than
+// leaving it to be discovered.
 //
 // sqlplus marshals the identical field list in the wide/fixed-width OCI encoding
 // — four-byte little-endian integers where a thin client sends compressed ones —
@@ -153,11 +159,22 @@ const refCursorDrivesInFixtures = 3
 // behaviour it had before this existed (the drive stays an untracked cursor),
 // whereas a number read out of the wrong encoding would gate a fetch against the
 // wrong statement. See docs/oracle.md, "Learning a REF cursor's id".
-func TestDumpReplay_RefCursorLocatorRefusesTheOCIEncoding(t *testing.T) {
+//
+// The fixture is checked for being what it claims first: these really are the
+// bind-output responses of a call, leading with the IO vector, or the refusal
+// below would prove nothing.
+func TestOCIRefCursorBindOutputYieldsNoID(t *testing.T) {
 	t.Parallel()
 
-	assert.Empty(t, recordedRefCursorIDs(t, sqlplusRefCursorDump),
-		"the OCI/wide encoding must yield no id at all rather than a mis-decoded one")
+	for i, payload := range recordedFrames(t, ociRefCursorBindOutputs) {
+		ttc := extractTTCPayload(payload)
+		require.NotEmptyf(t, ttc, "frame %d must carry a TTC message", i)
+		require.Equalf(t, byte(ttcMsgIOVector), ttc[0],
+			"frame %d must be a call's bind-output response", i)
+
+		assert.Emptyf(t, refCursorIDsInBindOutput(ttc),
+			"frame %d: the OCI/wide encoding must yield no id at all rather than a mis-decoded one", i)
+	}
 }
 
 // TestDumpReplay_RefCursorLocatorIsSilentOnOrdinaryTraffic is the false-positive

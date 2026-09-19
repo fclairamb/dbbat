@@ -1,5 +1,7 @@
 package oracle
 
+import "strings"
+
 // Learning the cursor id of a `SYS_REFCURSOR` a stored procedure hands back.
 //
 // Every other cursor id dbbat knows is read off the OER that ends the call
@@ -255,4 +257,59 @@ func readRefCursorDescriptor(c *dcursor, modern bool) (uint16, bool) {
 	}
 
 	return uint16(cursorID), true
+}
+
+// plsqlCallPrefixes are the statement openings that can return an out-bind. A
+// `SYS_REFCURSOR` comes back from an anonymous block or a CALL and from nothing
+// else, so a statement that does not open with one of these has no bind output
+// for the walk above to be offered.
+var plsqlCallPrefixes = []string{"BEGIN", "DECLARE", "CALL"}
+
+// statementIsAPLSQLCall reports whether sql is a statement that could hand back
+// a REF cursor out-bind. It is a cheap gate, not a parser: its job is to keep
+// refCursorIDsInBindOutput away from the responses of ordinary queries, whose
+// row data travels in the very same `0x07` message.
+//
+// Leading comments are skipped the way the proxy's own comment-aware scanner
+// does — a statement dbbat itself annotated, or one a client prefixed with a
+// hint, must still be recognized.
+func statementIsAPLSQLCall(sql string) bool {
+	rest := strings.ToUpper(strings.TrimSpace(sql))
+
+	for {
+		switch {
+		case strings.HasPrefix(rest, "--"):
+			if i := strings.IndexAny(rest, "\r\n"); i >= 0 {
+				rest = strings.TrimSpace(rest[i+1:])
+
+				continue
+			}
+
+			return false
+		case strings.HasPrefix(rest, "/*"):
+			i := strings.Index(rest[2:], "*/")
+			if i < 0 {
+				return false
+			}
+
+			rest = strings.TrimSpace(rest[2+i+2:])
+
+			continue
+		}
+
+		break
+	}
+
+	for _, prefix := range plsqlCallPrefixes {
+		if !strings.HasPrefix(rest, prefix) {
+			continue
+		}
+
+		after := rest[len(prefix):]
+		if after == "" || after[0] == ' ' || after[0] == '\t' || after[0] == '\n' || after[0] == '\r' {
+			return true
+		}
+	}
+
+	return false
 }
