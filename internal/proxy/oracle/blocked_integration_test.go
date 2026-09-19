@@ -443,6 +443,29 @@ func oracleTestOJDBCJar(t *testing.T) string {
 	return ""
 }
 
+// requireTestJava resolves a JVM for the JDBC probes, or "" when this machine
+// has none.
+//
+// The asymmetry with oracleTestOJDBCJar's own rule is deliberate and has the
+// same motive: once ojdbcJarEnv is set — CI sets it on every Oracle leg — the
+// coverage has been asked for, and a JDK missing from under it must be a red
+// suite rather than a quieter one. Without the variable a missing JVM is just
+// an environment fact and the caller skips.
+func requireTestJava(t *testing.T) string {
+	t.Helper()
+
+	java, err := exec.LookPath("java")
+	if err == nil {
+		return java
+	}
+
+	if os.Getenv(ojdbcJarEnv) != "" {
+		t.Fatalf("%s is set but there is no java on PATH to run the JDBC probe with: %v", ojdbcJarEnv, err)
+	}
+
+	return ""
+}
+
 // TestIntegration_BlockedStatementRefusesJDBCThin is the fourth client, and the
 // one the fix shipped without: the three verified against a live server needed
 // three different encodings of the same summary object, so JDBC thin being a
@@ -455,13 +478,14 @@ func oracleTestOJDBCJar(t *testing.T) string {
 // capability rule predicts which client gets which, so the day a driver upgrade
 // moves JDBC to a shape dbbat has never emitted, this is what says so.
 //
-// Skipped when no ojdbc jar is reachable (see ojdbcJarEnv), which is the case in
-// CI; the byte-level fixtures in ttc_oer_encode_test.go carry the same evidence
-// there.
+// Skipped when no ojdbc jar is reachable (see ojdbcJarEnv); the byte-level
+// fixtures in ttc_oer_encode_test.go carry the same evidence then. CI fetches a
+// jar and exports the variable, so on every Oracle leg this runs rather than
+// skips.
 func TestIntegration_BlockedStatementRefusesJDBCThin(t *testing.T) {
-	java, err := exec.LookPath("java")
-	if err != nil {
-		t.Skipf("java unavailable: %v", err)
+	java := requireTestJava(t)
+	if java == "" {
+		t.Skip("java not available")
 	}
 
 	jar := oracleTestOJDBCJar(t)
@@ -478,7 +502,7 @@ func TestIntegration_BlockedStatementRefusesJDBCThin(t *testing.T) {
 	// indistinguishable from a refusal at the assertion below.
 	_, _ = env.db.ExecContext(ctx, "DROP TABLE dbbat_blocked_probe")
 
-	_, err = env.db.ExecContext(ctx, "CREATE TABLE dbbat_blocked_probe (id NUMBER)")
+	_, err := env.db.ExecContext(ctx, "CREATE TABLE dbbat_blocked_probe (id NUMBER)")
 	require.NoError(t, err, "the seed DDL must be allowed under an unrestricted grant")
 
 	env.replaceGrant(t, []string{store.ControlReadOnly})

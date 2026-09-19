@@ -104,6 +104,44 @@ jobs:
         with:
           go-version: "1.27.1"
 
+      # The JDK the JDBC probes run under. The runner image ships one, but
+      # pinning it is the point: `java Tag.java` single-file source mode is what
+      # the probes use, and which JDK compiles them decides which ojdbc build
+      # they can load.
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # The ojdbc thin driver, which is the `bare` on-wire shape — the one where
+      # the TTC header's length field is the statement's ONLY declared length,
+      # with no CLR prefix repeating it. Nothing else dbbat runs would catch a
+      # second copy of that length hiding elsewhere in an ojdbc frame: the
+      # corpus test proves the frames dbbat recorded, this proves the frames
+      # ojdbc sends today.
+      #
+      # There is no packaged driver to look up the way python-oracledb is
+      # importable or sqlplus is bundled in the Oracle image, so it is fetched —
+      # pinned by version and verified by digest, since it is a jar this job
+      # then executes. 23.26 is the driver generation matching the client
+      # bundled in gvenzl/oracle-free:23-slim.
+      #
+      # ORACLE_TEST_OJDBC_JAR below is what turns the JDBC tests from skips into
+      # runs, and requireTestJava makes a JDK missing from under it a failure
+      # rather than a quieter suite — the same rule
+      # ORACLE_TEST_REQUIRE_OCI_CLIENT applies to sqlplus.
+      - name: Fetch the Oracle JDBC thin driver
+        env:
+          OJDBC_VERSION: 23.26.3.0.0
+          OJDBC_SHA256: 764cc3f88454d1be117e155d01ed617467b984c9c68f13090dd6083799d2bb8c
+        run: |
+          set -euo pipefail
+          jar="$RUNNER_TEMP/ojdbc11-$OJDBC_VERSION.jar"
+          curl -fsSL --retry 3 --retry-all-errors -o "$jar" \
+            "https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/$OJDBC_VERSION/ojdbc11-$OJDBC_VERSION.jar"
+          echo "$OJDBC_SHA256  $jar" | sha256sum --check --strict
+          echo "ORACLE_TEST_OJDBC_JAR=$jar" >> "$GITHUB_ENV"
+
       # -race, matching `make test-e2e-oracle`. This suite is the only one that
       # runs two proxy goroutines over one session, and it hid two live races
       # on the in-flight query for as long as it ran without the detector.

@@ -516,13 +516,14 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 // requireOJDBC resolves the JDK and the ojdbc jar, skipping when either is
 // missing — the same rule TestIntegration_BlockedStatementRefusesJDBCThin
 // applies, and for the same reason: there is no packaged Oracle JDBC driver to
-// look up, so CI has none.
+// look up. With ORACLE_TEST_OJDBC_JAR set, which is what CI does, neither is
+// allowed to be a skip any more (see requireTestJava).
 func requireOJDBC(t *testing.T) (string, string) {
 	t.Helper()
 
-	java, err := exec.LookPath("java")
-	if err != nil {
-		t.Skipf("java unavailable: %v", err)
+	java := requireTestJava(t)
+	if java == "" {
+		t.Skip("java not available")
 	}
 
 	jar := oracleTestOJDBCJar(t)
