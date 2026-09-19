@@ -199,24 +199,7 @@ func (s *session) finishUpstreamAuth() error {
 	password := s.database.Password // decrypted in beginUpstreamAuth
 	mode := uint32(logonModeNoNewPass)
 
-	// The challenge dbbat actually got back decides whether the customHash
-	// derivation applies — not the capability bit on its own. Both customHash
-	// branches of derivePasswordEncKey run PBKDF2 over AUTH_PBKDF2_CSK_SALT, so a
-	// challenge that carries no such salt cannot be answered that way at all;
-	// taking the bit's word for it derived the password key from an empty salt
-	// and the upstream answered ORA-01017.
-	//
-	// It is reachable because caps[4]&0x20 is the *server's* bit and 23ai sets it
-	// for every caller, while the challenge is shaped for the client: dbbat
-	// forwards the client's own Phase 1 upstream, so a pre-v315 client such as
-	// ojdbc6 draws the classic three-pair 6949 challenge — AUTH_SESSKEY,
-	// AUTH_VFR_DATA, AUTH_GLOBALLY_UNIQUE_DBID and no PBKDF2 material anywhere.
-	// The gate only ever turns customHash off, and only when the material it
-	// needs is absent, so every 19c/23ai session that does carry the salt is
-	// untouched.
-	customHash := s.upstreamCustomHash && authResp.pbkdf2ChkSalt != ""
-
-	sec, err := buildSecretsFromPhase1Response(authResp, customHash)
+	sec, err := buildSecretsFromPhase1Response(authResp, s.upstreamCustomHashApplies(authResp))
 	if err != nil {
 		return fmt.Errorf("interpret AUTH Phase 1 response: %w", err)
 	}
@@ -248,6 +231,27 @@ func (s *session) finishUpstreamAuth() error {
 		slog.Bool("custom_hash", sec.customHash))
 
 	return nil
+}
+
+// upstreamCustomHashApplies reports whether the upstream AUTH exchange can use
+// the customHash key derivation: the challenge dbbat actually got back decides,
+// not the capability bit on its own.
+//
+// Both customHash branches of derivePasswordEncKey run PBKDF2 over
+// AUTH_PBKDF2_CSK_SALT, so a challenge that carries no such salt cannot be
+// answered that way at all; taking the bit's word for it derived the password
+// key from an empty salt and the upstream answered ORA-01017.
+//
+// It is reachable because caps[4]&0x20 is the *server's* bit and 23ai sets it
+// for every caller, while the challenge is shaped for the client: dbbat forwards
+// the client's own Phase 1 upstream, so a pre-v315 client such as ojdbc6 draws
+// the classic three-pair 6949 challenge — AUTH_SESSKEY, AUTH_VFR_DATA,
+// AUTH_GLOBALLY_UNIQUE_DBID and no PBKDF2 material anywhere.
+//
+// The gate only ever turns customHash *off*, and only when the material it needs
+// is absent, so every 19c/23ai session that does carry the salt is untouched.
+func (s *session) upstreamCustomHashApplies(resp *upstreamAuthResponse) bool {
+	return s.upstreamCustomHash && resp != nil && resp.pbkdf2ChkSalt != ""
 }
 
 // sendUpstreamAuthPhase1 writes the upstream-facing AUTH Phase 1 packet.
