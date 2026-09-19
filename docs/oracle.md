@@ -2395,9 +2395,8 @@ version-pinned, digest-verified `ojdbc11` from Maven Central and export the
 variable, so every JDBC test in this package runs there rather than skipping —
 and with the variable set a missing JDK is a failure rather than a quieter suite
 (`requireTestJava`), the same rule `ORACLE_TEST_REQUIRE_OCI_CLIENT` applies to
-sqlplus. SQLcl is a download rather than an artifact CI can fetch cleanly, so it
-stays a developer-machine client; it is the same wire shape as the jar, and what
-it buys is client-version coverage.
+sqlplus. SQLcl is a download rather than an artifact CI can fetch cleanly, so
+it stays a developer-machine client — a decision, recorded below.
 
 **One failure only a real server could find.** The first run of that suite hit
 `ORA-03120: two-task conversion routine: integer overflow` on any statement past
@@ -2419,6 +2418,62 @@ The bytes of the tag itself are `shared.NewUserQueryTagger`'s and are pinned by
 to equal character length. It is **58 bytes** for the integration fixture
 (`user='cursorprobe'` and a generated grant slug), which is the figure the
 boundary probe below places itself from rather than assuming.
+
+#### Why SQLcl is a developer-machine client
+
+`TestIntegration_StatementTagFromSQLcl` skips on every CI runner, and that is a
+decision rather than the residue of what was easy to fetch. The same shape — a
+test that is green by proving nothing everywhere except a developer's laptop —
+is what `ORACLE_TEST_REQUIRE_OCI_CLIENT` exists to have closed for sqlplus, so
+leaving it open here needs a reason on the record.
+
+The two routes that would need no click-through are both gone (checked
+2026-09-19): `oracle-actions/run-sql` is not a repository in the
+`oracle-actions` organization, and `@oracle/sqlcl` is not published on npm —
+the scope is empty, and the `sqlcl` hits in the registry are third-party
+wrappers that download the same zip from Oracle. What *is* fetchable is the zip
+itself: `download.oracle.com/otn_software/java/sqldeveloper/sqlcl-<v>.zip`
+serves 200 with no cookie and no license gate, so wiring it up is possible.
+This is a judgement about cost, not about feasibility.
+
+It is not worth it, for three reasons that compound:
+
+- **The shape is already covered, live, on every leg.** SQLcl *is* ojdbc thin
+  underneath. The `compressed`/`bare` shape is proved against a real 23ai by
+  `TestIntegration_StatementTagFromJDBCThin`, which CI runs with a
+  version-pinned, digest-verified jar, and against recorded bytes by
+  `sqlcl_regression_test.go` — a corpus captured from SQLcl. What CI would gain
+  is the *version* of the bundled driver, not a shape.
+- **The pin is not maintainable at that gain.** `sqlcl-latest.zip` is 116 MB
+  and moves under you, so it cannot carry the digest this repo requires of an
+  artifact CI then executes (the ojdbc jar's rule, and the exact-version rule in
+  `.github/workflows/CLAUDE.md`). A versioned URL can, but the build-number
+  suffix is not derivable from the version — of four plausible version strings
+  tried by hand, two resolved and two 404'd — so every bump is a hunt on
+  Oracle's download page for a second Oracle artifact nobody upgrades
+  deliberately. Against 92 MB fetched or cache-restored on three nightly legs.
+- **The failure it would catch is already bounded.** A bundled driver that
+  emits a frame shape the locator has never seen does not corrupt anything: the
+  gate refuses to tag a shape it cannot certify byte for byte, and that session
+  runs untagged start to finish with a log line saying so. The cost of not
+  noticing early is a session that loses its tag, not one that breaks.
+
+So SQLcl stays the local escape hatch it is, named by `ORACLE_TEST_SQLCL` (or a
+`sql` on `PATH` that identifies itself as SQLcl) — and setting that variable is
+itself the request for the coverage, so from then on nothing is allowed to
+skip: a path that is not there, a launcher that will not start, and one that
+starts without saying `SQLcl` are all failures, on `requireTestJava`'s rule.
+There is no `ORACLE_TEST_REQUIRE_SQLCL` to go with them, because that shape
+exists for a client CI asks for without naming a path, and no CI leg asks for
+this one.
+
+The thing that actually gates the `bare` shape in CI is the ojdbc11 pin in
+`.github/workflows/integration.yml` — `23.26.3.0.0`, chosen to match the client
+bundled in `gvenzl/oracle-free:23-slim` rather than the `23.7.0.25.01` SQLcl
+26.1.0 ships. Those already differ, which is the version coverage being given
+up, stated as a number. Moving that pin is the whole maintenance this decision
+leaves behind: it is where a newer driver generation gets exercised, and the
+lever to reach for the day SQLcl's bundled one drifts far enough to matter.
 
 ### How long a statement Oracle will actually parse
 
@@ -2547,6 +2602,7 @@ once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 | `ORACLE_TEST_IMAGE` | Container image to start (default `gvenzl/oracle-free:23-slim`) |
 | `ORACLE_TEST_SERVICE` | PDB service name; inferred from the image otherwise (`XEPDB1` for XE, `FREEPDB1` for Free, `ORCLPDB1` for enterprise) |
 | `ORACLE_TEST_OJDBC_JAR` | Oracle JDBC driver jar for the JDBC-thin refusal case; without it (and without an `ojdbc*.jar` on `CLASSPATH`) that one test skips |
+| `ORACLE_TEST_SQLCL` | A SQLcl launcher for the SQLcl tagging probe. Set on no CI leg by design (see "Why SQLcl is a developer-machine client"); setting it is the request for the coverage, so from then on a launcher that is absent, will not start, or does not say `SQLcl` is a failure rather than a skip. Unset, a `sql` on `PATH` that identifies itself as SQLcl is still used, and a machine with none skips |
 | `ORACLE_TEST_REQUIRE_OCI_CLIENT` | `1` turns "no OCI client available" from a skip into a failure. Set on every Oracle leg in CI — see below |
 | `ORACLE_TEST_OCI_CLIENT` | Pins where sqlplus comes from: `path` (an install on `PATH`) or `container` (the one bundled in the Oracle image). Unset = auto, `PATH` first |
 
