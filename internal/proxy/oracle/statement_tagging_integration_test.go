@@ -726,19 +726,56 @@ SELECT 'tagged=' || COUNT(*) FROM v$sql WHERE sql_text LIKE '%dbbat' || '_sqlcl_
 EXIT
 `
 
+// sqlclVersionDeadline bounds the identification probe below. SQLcl is a JVM
+// launcher, so `-V` is seconds rather than milliseconds — but a wedged one is
+// one of the ways this client "stops working", and a hang until the package
+// timeout would report that as the whole suite dying rather than as SQLcl.
+const sqlclVersionDeadline = 2 * time.Minute
+
+// sqlclVersionOutput asks a launcher what it is. A `sql` is a common enough
+// name to be something else entirely (a shell alias, another vendor's tool),
+// so nothing is believed to be SQLcl until it says so itself.
+func sqlclVersionOutput(path string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), sqlclVersionDeadline)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, path, "-V").CombinedOutput()
+
+	return string(out), err
+}
+
 // oracleTestSQLcl resolves a SQLcl launcher, or "" when this machine has none.
 //
-// A sqlclEnv that points at something which is not there is a failure rather
-// than a skip, on the same rule as ojdbcJarEnv: it is someone asking for this
-// coverage and not getting it. A bare `sql` on PATH is a common enough name to
-// be something else entirely (a shell alias, another vendor's tool), so it has
-// to say `SQLcl` when asked for its version before it is believed.
+// sqlclEnv is this client's require switch, exactly as ojdbcJarEnv is the JDK's
+// in requireTestJava: setting it is someone asking for this coverage, so every
+// way of then not getting it — a path that is not there, a launcher that will
+// not start, one that starts but turns out not to be SQLcl — is a failure
+// rather than a skip. Only the last of those used to be checked, and only on
+// the PATH branch, so an explicit path at a broken install produced a murky
+// exec error from the probe itself and a *broken install on PATH* produced a
+// silent skip.
+//
+// There is deliberately no separate ORACLE_TEST_REQUIRE_SQLCL knob the way
+// there is for the OCI client. That one exists because CI sets it on every
+// Oracle leg while naming no path; no CI leg runs SQLcl at all (see
+// docs/oracle.md, "Why SQLcl is a developer-machine client"), so the only
+// caller who can ask for this coverage is a developer who already had to name
+// a launcher — which makes sqlclEnv itself the request, with nothing left for
+// a second variable to say.
+//
+// Without the variable, a machine that has no SQLcl is just an environment
+// fact and the caller skips.
 func oracleTestSQLcl(t *testing.T) string {
 	t.Helper()
 
 	if path := os.Getenv(sqlclEnv); path != "" {
 		_, err := os.Stat(path)
 		require.NoErrorf(t, err, "%s points at a launcher that is not there", sqlclEnv)
+
+		out, err := sqlclVersionOutput(path)
+		require.NoErrorf(t, err, "%s points at a launcher that will not run:\n%s", sqlclEnv, out)
+		require.Containsf(t, out, "SQLcl",
+			"%s points at something that does not identify itself as SQLcl:\n%s", sqlclEnv, out)
 
 		return path
 	}
@@ -748,8 +785,8 @@ func oracleTestSQLcl(t *testing.T) string {
 		return ""
 	}
 
-	out, err := exec.Command(sqlcl, "-V").CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "SQLcl") {
+	out, err := sqlclVersionOutput(sqlcl)
+	if err != nil || !strings.Contains(out, "SQLcl") {
 		return ""
 	}
 
@@ -763,7 +800,10 @@ func oracleTestSQLcl(t *testing.T) string {
 // `bare` corpus fixtures were captured from (sqlcl_regression_test.go).
 //
 // Skipped when no SQLcl is reachable, which is most machines and every CI
-// runner today; the jar-driven test above is the one CI is wired for.
+// runner — by decision, not by accident: see docs/oracle.md, "Why SQLcl is a
+// developer-machine client". The jar-driven test above is the one CI is wired
+// for, and it is what gates the `bare` shape there. Set sqlclEnv and this stops
+// being allowed to skip for any reason.
 func TestIntegration_StatementTagFromSQLcl(t *testing.T) {
 	sqlcl := oracleTestSQLcl(t)
 	if sqlcl == "" {
