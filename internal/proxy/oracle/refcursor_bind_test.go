@@ -64,9 +64,10 @@ func serverTTCPayloads(t *testing.T, name string) [][]byte {
 func recordedRefCursorIDs(t *testing.T, name string) []uint16 {
 	t.Helper()
 
-	var ids []uint16
+	payloads := serverTTCPayloads(t, name)
+	ids := make([]uint16, 0, len(payloads))
 
-	for _, ttc := range serverTTCPayloads(t, name) {
+	for _, ttc := range payloads {
 		ids = append(ids, refCursorIDsInBindOutput(ttc)...)
 	}
 
@@ -156,7 +157,7 @@ const refCursorDrivesInFixtures = 3
 // — four-byte little-endian integers where a thin client sends compressed ones —
 // and the compressed walk refuses it at its first field rather than reading a
 // number out of it. That refusal is the safe outcome: an OCI session keeps the
-// behaviour it had before this existed (the drive stays an untracked cursor),
+// behavior it had before this existed (the drive stays an untracked cursor),
 // whereas a number read out of the wrong encoding would gate a fetch against the
 // wrong statement. See docs/oracle.md, "Learning a REF cursor's id".
 //

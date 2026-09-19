@@ -33,13 +33,13 @@ var refCursorBindOutput = []byte{
 
 const refCursorCall = "BEGIN dbbat_learn_refcur(:1); END;"
 
-// sessionMidCall returns a session with `sql` in flight, as it is while the
-// server's response to that statement is being read.
-func sessionMidCall(t *testing.T, sql string, controls ...string) *session {
+// sessionMidCall returns a session with the REF-cursor call in flight, as it is
+// while the server's response to that statement is being read.
+func sessionMidCall(t *testing.T, controls ...string) *session {
 	t.Helper()
 
 	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{Controls: controls}})
-	cursor := &trackedCursor{cursorID: 6, sql: sql, parsedAt: time.Now()}
+	cursor := &trackedCursor{cursorID: 6, sql: refCursorCall, parsedAt: time.Now()}
 	s.tracker.cursors[6] = cursor
 	s.tracker.pendingQuery = &pendingOracleQuery{cursor: cursor, startTime: time.Now()}
 
@@ -58,7 +58,7 @@ func sessionMidCall(t *testing.T, sql string, controls ...string) *session {
 func TestLearnRefCursorIDs_TracksTheCursorAgainstTheCall(t *testing.T) {
 	t.Parallel()
 
-	s := sessionMidCall(t, refCursorCall)
+	s := sessionMidCall(t)
 
 	s.learnRefCursorIDs(refCursorBindOutput)
 
@@ -86,11 +86,11 @@ func TestLearnRefCursorIDs_ResolvesTheDriveThatUsedToBeRefused(t *testing.T) {
 
 	drive := buildPiggybackReexec(7)
 
-	refused := sessionMidCall(t, refCursorCall, store.ControlReadOnly)
+	refused := sessionMidCall(t, store.ControlReadOnly)
 	require.ErrorIs(t, refused.handlePiggybackReexec(drive), ErrUnknownCursor,
 		"without the bind output the drive is still refused — the fail-closed rule is unchanged")
 
-	s := sessionMidCall(t, refCursorCall, store.ControlReadOnly)
+	s := sessionMidCall(t, store.ControlReadOnly)
 	s.learnRefCursorIDs(refCursorBindOutput)
 
 	require.NoError(t, s.handlePiggybackReexec(drive))
@@ -106,11 +106,11 @@ func TestLearnRefCursorIDs_ResolvesTheDriveThatUsedToBeRefused(t *testing.T) {
 func TestLearnRefCursorIDs_LeavesAnUnlearnedCursorRefused(t *testing.T) {
 	t.Parallel()
 
-	s := sessionMidCall(t, refCursorCall, store.ControlReadOnly)
+	s := sessionMidCall(t, store.ControlReadOnly)
 	s.learnRefCursorIDs(refCursorBindOutput)
 
-	assert.ErrorIs(t, s.handlePiggybackReexec(buildPiggybackReexec(31)), ErrUnknownCursor)
-	assert.ErrorIs(t, s.handleCursorReexec(31), ErrUnknownCursor)
+	require.ErrorIs(t, s.handlePiggybackReexec(buildPiggybackReexec(31)), ErrUnknownCursor)
+	require.ErrorIs(t, s.handleCursorReexec(31), ErrUnknownCursor)
 }
 
 // TestLearnRefCursorIDs_OnlyRunsWhereABindOutputCanExist pins the two gates that
@@ -154,7 +154,7 @@ func TestLearnRefCursorIDs_OnlyRunsWhereABindOutputCanExist(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			s := sessionMidCall(t, refCursorCall)
+			s := sessionMidCall(t)
 			tc.prepare(s)
 
 			s.learnRefCursorIDs(refCursorBindOutput)

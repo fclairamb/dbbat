@@ -56,7 +56,7 @@ const refCursorMaxColumns = 1000
 //
 // Anything else returns nil, and so does a walk that does not land cleanly on
 // the message that follows the block. Returning nil costs only the pre-existing
-// behaviour — the drive stays an untracked cursor — while a wrong id costs a
+// behavior — the drive stays an untracked cursor — while a wrong id costs a
 // mis-gated statement, so every bound here is deliberately the strict one.
 func refCursorIDsInBindOutput(ttcPayload []byte) []uint16 {
 	start, ok := bindOutputBodyStart(ttcPayload)
@@ -98,7 +98,8 @@ func bindOutputBodyStart(ttcPayload []byte) (int, bool) {
 // The vector is go-ora's ResultSet.load followed by one direction byte per
 // bind:
 //
-//	[0x0b] skip:byte count:cint(2) hi:cint(4) rows:cint(4) uac:cint(2) dlc dlc
+//	[0x0b] skip:byte count:cint(2) hi:cint(4) rows:cint(4) uac:cint(2)
+//	       bitvector:dlc  spare:dlc
 //	       count x direction:byte   [0x07]
 //
 // The count is the *bind* count, so it is small; a payload that does not put a
@@ -186,7 +187,7 @@ func refCursorIDsAt(ttc []byte, start int, modern bool) []uint16 {
 // type": this is the one check that catches a walk which consumed the wrong
 // number of version-gated trailing fields, and a wide set would let exactly that
 // drift through. A shape that lands somewhere else learns nothing and keeps the
-// behaviour it had before this existed — which is the safe direction.
+// behavior it had before this existed — which is the safe direction.
 func landedAfterBindOutput(ttc []byte, pos int) bool {
 	if pos == len(ttc) {
 		return true
@@ -209,8 +210,8 @@ func landedAfterBindOutput(ttc []byte, pos int) bool {
 //	len:byte maxRowSize:cint colCount:cint
 //	[1 byte] colCount x column-describe record
 //	dlc
-//	cint cint          TTCVersion >= 3
-//	cint cint          TTCVersion >= 4
+//	two cints          TTCVersion >= 3
+//	two more           TTCVersion >= 4
 //	dlc                TTCVersion >= 5
 //	cursorID:cint
 //
