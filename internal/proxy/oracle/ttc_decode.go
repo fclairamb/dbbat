@@ -369,6 +369,31 @@ func (e *OALL8NoSQLError) Error() string {
 // Unwrap makes errors.Is(err, ErrOALL8NoSQL) true.
 func (e *OALL8NoSQLError) Unwrap() error { return ErrOALL8NoSQL }
 
+// ErrPiggybackExecNoSQL is ErrOALL8NoSQL for the op modern clients actually
+// send: a *well-formed* `03 5e` execute whose header declares a statement
+// length of zero. Same meaning — the client is re-executing a cursor it already
+// parsed — and the same reason for not being a decode failure: a frame dbbat
+// cannot parse is forwarded ungated, and this one parsed fine.
+//
+// Match it with errors.Is; use errors.As on *PiggybackExecNoSQLError to recover
+// the cursor id.
+var ErrPiggybackExecNoSQL = errors.New("piggyback exec carries no SQL text (cursor re-execution)")
+
+// PiggybackExecNoSQLError is ErrPiggybackExecNoSQL for one specific cursor.
+// It is OALL8NoSQLError's counterpart on the v315+ execute op — see
+// execNoStatementCursor for the recording that turned this frame up, and for
+// what it was doing before it had a name (going upstream ungated).
+type PiggybackExecNoSQLError struct {
+	CursorID uint16
+}
+
+func (e *PiggybackExecNoSQLError) Error() string {
+	return fmt.Sprintf("%s: cursor %d", ErrPiggybackExecNoSQL.Error(), e.CursorID)
+}
+
+// Unwrap makes errors.Is(err, ErrPiggybackExecNoSQL) true.
+func (e *PiggybackExecNoSQLError) Unwrap() error { return ErrPiggybackExecNoSQL }
+
 // ErrNotCursorReexec reports that a payload is not a decodable piggyback
 // cursor re-execution (wrong sub-op, truncated, or a cursor id of zero — which
 // would mean "allocate a new cursor", not "re-run that one").
@@ -903,7 +928,17 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	// The header carries the statement's length, so read that first and take
 	// the run it names. Everything below is the pre-2026-08 heuristic, kept for
 	// a header shape no recording produces — see decodeExecStatement.
-	stmt, _ := decodeExecStatementText(ttcPayload)
+	stmt, located := decodeExecStatementText(ttcPayload)
+
+	// A header that walks cleanly and declares **no** statement is not a frame
+	// this decode failed on: it is a re-execution of a cursor already parsed,
+	// and it gets reported as such so the caller can gate it against that
+	// cursor's SQL instead of waving it through. See execNoStatementCursor.
+	if !located {
+		if cursorID, reexec := execNoStatementCursor(ttcPayload); reexec {
+			return nil, &PiggybackExecNoSQLError{CursorID: cursorID}
+		}
+	}
 
 	// Strategy: scan the payload for SQL text. Different Oracle client drivers
 	// (oracledb thin, JDBC thin) place the SQL at slightly different offsets
@@ -1080,6 +1115,14 @@ func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 		if sql, ok := decodeExecStatement(ttcPayload[end:]); ok {
 			return &OALL8Result{SQL: sql}, nil
 		}
+	}
+
+	// Same reading as decodePiggybackExecSQL's, for the same reason: an execute
+	// stapled behind a close list that declares no statement is a re-execution,
+	// not an undecodable frame, and the op a client picks must not change
+	// whether the gate sees it.
+	if cursorID, reexec := execNoStatementCursor(ttcPayload); reexec {
+		return nil, &PiggybackExecNoSQLError{CursorID: cursorID}
 	}
 
 	// Scan for SQL text at known offsets across client drivers.

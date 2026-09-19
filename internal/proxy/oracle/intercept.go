@@ -650,7 +650,18 @@ func (s *session) flushPendingQuery() {
 func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 	result, err := decodePiggybackExecSQL(ttcPayload)
 	if err != nil {
+		// A `03 5e` whose header declares a zero-length statement is a
+		// re-execution of a cursor already parsed — ojdbc6's way of re-running a
+		// PreparedStatement — not a frame dbbat failed to read. It is gated
+		// against that cursor's SQL, exactly like the SQL-less OALL8 and the
+		// `03 4e` / `03 04` piggyback. See execNoStatementCursor.
+		var noSQL *PiggybackExecNoSQLError
+		if errors.As(err, &noSQL) {
+			return s.handleCursorReexec(noSQL.CursorID)
+		}
+
 		s.logger.DebugContext(s.ctx, "failed to decode piggyback exec", slog.Any("error", err))
+
 		return nil // Don't block on decode failure
 	}
 
@@ -741,6 +752,13 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 func (s *session) handleJDBCExec(ttcPayload []byte) error {
 	result, err := decodeExecSQL(ttcPayload)
 	if err != nil {
+		// The stapled-execute twin of the frame handlePiggybackExec gates: an
+		// execute declaring no statement is a re-execution of a tracked cursor.
+		var noSQL *PiggybackExecNoSQLError
+		if errors.As(err, &noSQL) {
+			return s.handleCursorReexec(noSQL.CursorID)
+		}
+
 		s.logger.DebugContext(s.ctx, "failed to decode JDBC exec", slog.Any("error", err))
 		// Don't block on decode failure — let it pass through, as OALL8 does.
 		// See the Oracle caveat in docs/approvals.md.

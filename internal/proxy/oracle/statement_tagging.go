@@ -253,6 +253,15 @@ func frameCarriesStatement(ttcPayload []byte) bool {
 		return false
 	}
 
+	// An execute whose header declares a zero-length statement carries none —
+	// it re-runs a cursor already parsed (execNoStatementCursor). Asked before
+	// the op switch because it answers for both execute framings, and because
+	// getting it wrong is what made the locator look like it was failing on
+	// ojdbc6's re-execution instead of correctly finding nothing to locate.
+	if _, reexec := execNoStatementCursor(ttcPayload); reexec {
+		return false
+	}
+
 	switch TTCFunctionCode(ttcPayload[0]) { //nolint:exhaustive // only the statement-carrying ops matter here
 	case TTCFuncPiggyback:
 		return IsPiggybackExecSQL(ttcPayload)

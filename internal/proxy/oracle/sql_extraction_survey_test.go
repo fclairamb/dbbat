@@ -138,6 +138,7 @@ func TestSurveyPreciseDecodeCoverage(t *testing.T) {
 	var (
 		ops, precise, legacyOnly, neither  int
 		agree, legacyFragment, legacyOther int
+		reexecs                            int
 	)
 
 	for _, name := range surveyCorpus(t) {
@@ -145,6 +146,17 @@ func TestSurveyPreciseDecodeCoverage(t *testing.T) {
 
 		for _, ttc := range surveyClientTTC(t, td) {
 			for _, body := range surveyExecOps(ttc) {
+				// An exec op that declares no statement carries none to find:
+				// it re-runs a cursor already parsed (ojdbc6, packet #20 of
+				// ojdbc6_legacy.pcapng). Counting it here would demand a
+				// statement out of a frame that has none, which is exactly the
+				// misreading that let it travel upstream ungated.
+				if _, reexec := execNoStatementCursor(body); reexec {
+					reexecs++
+
+					continue
+				}
+
 				ops++
 
 				exact, ok := decodeExecStatement(body)
@@ -182,6 +194,7 @@ func TestSurveyPreciseDecodeCoverage(t *testing.T) {
 
 	t.Logf("=== precise decode vs the legacy window+keyword scan ===")
 	t.Logf("exec ops in the corpus:              %d", ops)
+	t.Logf("  (plus SQL-less re-executions:      %d, no statement to find)", reexecs)
 	t.Logf("  precise (header length) decode:    %d", precise)
 	t.Logf("  legacy scan only:                  %d", legacyOnly)
 	t.Logf("  neither:                           %d", neither)
@@ -415,6 +428,12 @@ func TestSurveyUnnameableReexecution(t *testing.T) {
 
 func surveyIsCursorReexec(ttc []byte) bool {
 	if _, err := decodeCursorReexec(ttc); err == nil {
+		return true
+	}
+
+	// The third shape: an execute op declaring a zero-length statement, which is
+	// how ojdbc6 re-runs a PreparedStatement. See execNoStatementCursor.
+	if _, ok := execNoStatementCursor(ttc); ok {
 		return true
 	}
 

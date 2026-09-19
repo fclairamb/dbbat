@@ -48,13 +48,26 @@ const (
 // rewriting at all — too large and the upstream refuses the packet with
 // ORA-12592, too small and every tagged statement is pointlessly fragmented —
 // so a session whose Accept does not parse simply never tags.
+// The length guard is the legacy field's, not the v315+ one's, and that is
+// measured rather than tidied: a pre-v315 Accept is **32 bytes end to end** —
+// ojdbc6 11.2.0.4 negotiates version 310 and its Accept stops right where the
+// ub4 would start (testdata/ojdbc6_legacy.pcapng, packet #1) — so requiring room
+// for a field that layout does not have refused an Accept whose ub2 at [12:14]
+// says 8192 perfectly clearly. The ub4 is bounds-checked where it is read
+// instead.
 func acceptNegotiatedSDU(raw []byte) (int, bool) {
-	if len(raw) < acceptSDUOffset+4 || TNSPacketType(raw[4]) != TNSPacketTypeAccept {
+	const legacySDUEnd = 14
+
+	if len(raw) < legacySDUEnd || TNSPacketType(raw[4]) != TNSPacketTypeAccept {
 		return 0, false
 	}
 
 	sdu := int(binary.BigEndian.Uint16(raw[12:14]))
 	if sdu == 0 {
+		if len(raw) < acceptSDUOffset+4 {
+			return 0, false
+		}
+
 		sdu = int(binary.BigEndian.Uint32(raw[acceptSDUOffset : acceptSDUOffset+4]))
 	}
 

@@ -188,11 +188,41 @@ func execSQLLengthField(body []byte) (execSQLLenField, bool) {
 		return field, true
 	}
 
+	header, ok := execThinHeader(body)
+	if !ok || header.sqlLen.value <= 0 {
+		return execSQLLenField{}, false
+	}
+
+	return header.sqlLen, true
+}
+
+// execThinHeaderFields is a thin (compressed-int) exec header walked to the end
+// of its statement-length field.
+//
+// It exists because a length of **zero** is not the same answer as "this header
+// does not walk", and the two used to be spelled the same way. A `03 5e`
+// declaring no statement at all is a client re-executing a cursor it already
+// parsed — ojdbc6 sends exactly that, see execNoStatementCursor — so the walk
+// reports the value it read and lets each caller decide: the decoder wants a
+// statement and refuses zero, the re-execution reading wants zero and nothing
+// else.
+type execThinHeaderFields struct {
+	// cursorID is the cursor the exec names, as the header declares it. It is
+	// 0 on a parse that asks the server to allocate one.
+	cursorID int
+	// sqlLen is the statement-length field, value included; value 0 means the
+	// header declared no statement.
+	sqlLen execSQLLenField
+}
+
+// execThinHeader walks the thin exec header of body. See execSQLLength for the
+// layout, and execThinHeaderFields for why it is one walk rather than two.
+func execThinHeader(body []byte) (execThinHeaderFields, bool) {
 	// Guarded rather than relying on the caller's execHeaderMinLen check: this
 	// function has a second entry point in the tests, and an unconditional
 	// index is the shape that cost a panic below.
 	if len(body) <= 3 {
-		return execSQLLenField{}, false
+		return execThinHeaderFields{}, false
 	}
 
 	pos := 3
@@ -203,15 +233,15 @@ func execSQLLengthField(body []byte) (execSQLLenField, bool) {
 	// options
 	_, n := readCompressedInt(body[pos:])
 	if n == 0 {
-		return execSQLLenField{}, false
+		return execThinHeaderFields{}, false
 	}
 
 	pos += n
 
 	// cursor id
-	_, n = readCompressedInt(body[pos:])
+	cursorID, n := readCompressedInt(body[pos:])
 	if n == 0 {
-		return execSQLLenField{}, false
+		return execThinHeaderFields{}, false
 	}
 
 	pos += n
@@ -223,17 +253,89 @@ func execSQLLengthField(body []byte) (execSQLLenField, bool) {
 	// contain the panic, but containment means the frame is forwarded ungated,
 	// which is the bypass class this decode exists to close.
 	if pos >= len(body) {
-		return execSQLLenField{}, false
+		return execThinHeaderFields{}, false
 	}
 
 	pos++
 
 	sqlLen, n := readCompressedInt(body[pos:])
-	if n == 0 || sqlLen <= 0 || sqlLen > execMaxSQLLen {
-		return execSQLLenField{}, false
+	if n == 0 || sqlLen < 0 || sqlLen > execMaxSQLLen {
+		return execThinHeaderFields{}, false
 	}
 
-	return execSQLLenField{value: sqlLen, at: pos, width: n, kind: stmtLenCompressed}, true
+	return execThinHeaderFields{
+		cursorID: cursorID,
+		sqlLen:   execSQLLenField{value: sqlLen, at: pos, width: n, kind: stmtLenCompressed},
+	}, true
+}
+
+// execNoStatementCursor reports the cursor id of an execute op that declares a
+// **zero-length** statement — the client re-running a cursor it already parsed,
+// with no statement text on the wire.
+//
+// This is a third re-execution shape, alongside the SQL-less OALL8
+// (decodeOALL8 → OALL8NoSQLError) and the `03 4e` / `03 04` piggyback
+// (decodeCursorReexec). It was found on 2026-09-19 in an **ojdbc6 11.2.0.4**
+// recording (testdata/ojdbc6_legacy.pcapng, packet #20): that driver re-executes
+// a PreparedStatement by resending the parse op, `03 5e`, with its statement
+// length set to zero:
+//
+//	03 5e 06 02 80 60 01 03 00 00 01 01 0d 00 …
+//	      ^seq  ^options  ^cursor 3 ^flag ^sqlLen = 0
+//
+// Until then that frame decoded as "could not find SQL text", and a decode
+// failure is forwarded ungated — so from the second execution of any prepared
+// statement on, read_only, block_ddl, ValidateOracleQuery, the approval
+// patterns, the `queries` row and the quota all applied to the parse alone.
+//
+// The reading is deliberately narrow, because the cost of a false positive here
+// is a refused re-execution on a client that was working: the header must walk
+// cleanly in the thin encoding, its length field must be an explicit zero, and
+// the cursor id it names must be plausible. Anything else is left to the
+// statement decoders, which is why callers consult this only once those have
+// failed to find a statement.
+//
+// The frame is accepted either as the exec op itself or with the exec stapled
+// behind a close-cursors piggyback, the same two forms decodeExecStatementText
+// reads — a `11 69` twin re-executes just as ungated as a bare `03 5e` would.
+func execNoStatementCursor(ttcPayload []byte) (uint16, bool) {
+	if cursorID, ok := execNoStatementCursorAt(ttcPayload); ok {
+		return cursorID, true
+	}
+
+	if end, ok := closeCursorsEnd(ttcPayload); ok && end < len(ttcPayload) {
+		return execNoStatementCursorAt(ttcPayload[end:])
+	}
+
+	return 0, false
+}
+
+// execNoStatementCursorAt is execNoStatementCursor for a payload that must
+// already begin at the exec op header.
+func execNoStatementCursorAt(body []byte) (uint16, bool) {
+	if !isPiggybackExecHeader(body) {
+		return 0, false
+	}
+
+	// The OCI wide header is not read here: no recording carries a SQL-less one,
+	// and its cursor id does not sit where the thin walk below looks. A frame
+	// that fits it is left alone rather than gated against a guessed cursor.
+	if _, wide := execSQLLengthWideField(body); wide {
+		return 0, false
+	}
+
+	header, ok := execThinHeader(body)
+	if !ok || header.sqlLen.value != 0 {
+		return 0, false
+	}
+
+	// Cursor 0 means "allocate one", which is a parse, not a re-execution —
+	// the same reading decodeCursorReexec refuses, and for the same reason.
+	if header.cursorID <= 0 || header.cursorID > cursorReexecMaxID {
+		return 0, false
+	}
+
+	return uint16(header.cursorID), true
 }
 
 // execSQLLengthWideField reads the statement length out of the OCI wide exec header.
