@@ -155,6 +155,11 @@ linters:
       locale: US
       ignore-rules:
         - someword
+        # Oracle's own error text, quoted verbatim: the ojdbc thin driver really
+        # does throw `Invalid Packet Lenght`. The comments that name it are how
+        # the next person greps from the stack trace to the code, so the typo is
+        # load-bearing. See docs/oracle.md, "Pre-v315 clients".
+        - lenght
     nakedret:
       max-func-lines: 30
     prealloc:

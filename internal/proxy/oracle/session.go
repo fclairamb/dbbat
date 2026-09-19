@@ -83,7 +83,7 @@ type session struct {
 	// tnsLegacyLength records that this session negotiated a **pre-v315** TNS,
 	// where every packet after the Accept carries its length in the 2-byte field
 	// at [0:2] instead of the 4-byte one at [0:4]. Read off the Accept the
-	// pre-auth relay forwards (see acceptUsesLegacyLength) and honoured by every
+	// pre-auth relay forwards (see acceptUsesLegacyLength) and honored by every
 	// packet dbbat frames itself, on both legs.
 	//
 	// It is one flag for both directions on purpose: the Connect and the Accept
