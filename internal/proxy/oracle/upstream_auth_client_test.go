@@ -831,7 +831,7 @@ func TestReframeAuthOKSplitsAtOriginalBoundaries(t *testing.T) {
 		merged[patchStart+i] = 0xEE
 	}
 
-	out := reframeAuthOK(merged, dataFlags, fragLens)
+	out := reframeAuthOK(merged, dataFlags, fragLens, false)
 
 	if bytes.Equal(out, merged) {
 		t.Fatalf("reframeAuthOK did not re-fragment a two-fragment AUTH OK")
@@ -902,7 +902,7 @@ func TestReframeAuthOKPassthrough(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if out := reframeAuthOK(merged, tt.flags, tt.fragLens); !bytes.Equal(out, merged) {
+			if out := reframeAuthOK(merged, tt.flags, tt.fragLens, false); !bytes.Equal(out, merged) {
 				t.Fatalf("reframeAuthOK must return the merged packet unchanged, got %x", out)
 			}
 		})

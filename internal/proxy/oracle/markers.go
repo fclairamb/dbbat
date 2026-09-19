@@ -52,8 +52,27 @@ func isResetMarker(pkt *TNSPacket) bool {
 //	[8]   = 0x01           marker count
 //	[9]   = 0x00           reserved
 //	[10]  = 0x02           marker type = reset
-func buildResetMarker() []byte {
-	return []byte{0x00, 0x00, 0x00, 0x0B, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, markerTypeReset}
+//
+// legacyLength swaps that envelope for the pre-v315 one — the same 11 bytes with
+// the length in [0:2] instead of [0:4] — which is the only form a client that
+// negotiated TNS 310 will read. See session.tnsLegacyLength.
+func buildResetMarker(legacyLength bool) []byte {
+	return buildMarker(markerTypeReset, legacyLength)
+}
+
+// buildMarker frames an 11-byte TNS Control/Marker packet in either length form.
+func buildMarker(markerType byte, legacyLength bool) []byte {
+	const markerPacketLen = 11
+
+	pkt := []byte{0x00, 0x00, 0x00, 0x00, byte(TNSPacketTypeControl), 0x00, 0x00, 0x00, 0x01, 0x00, markerType}
+
+	if legacyLength {
+		pkt[1] = markerPacketLen
+	} else {
+		pkt[3] = markerPacketLen
+	}
+
+	return pkt
 }
 
 // buildBreakMarker returns the raw bytes of a TNS Break Marker packet — the
@@ -68,6 +87,6 @@ func buildResetMarker() []byte {
 // statement nobody will read — but the socket close immediately after is what
 // the enforcement actually rests on, and the end-to-end suite has not yet proven
 // the marker alone ends the call. See docs/oracle.md.
-func buildBreakMarker() []byte {
-	return []byte{0x00, 0x00, 0x00, 0x0B, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, markerTypeBreak}
+func buildBreakMarker(legacyLength bool) []byte {
+	return buildMarker(markerTypeBreak, legacyLength)
 }

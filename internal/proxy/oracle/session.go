@@ -80,6 +80,17 @@ type session struct {
 	// PBKDF2 path.
 	upstreamCustomHash bool
 
+	// tnsLegacyLength records that this session negotiated a **pre-v315** TNS,
+	// where every packet after the Accept carries its length in the 2-byte field
+	// at [0:2] instead of the 4-byte one at [0:4]. Read off the Accept the
+	// pre-auth relay forwards (see acceptUsesLegacyLength) and honoured by every
+	// packet dbbat frames itself, on both legs.
+	//
+	// It is one flag for both directions on purpose: the Connect and the Accept
+	// are relayed byte for byte, so the client and the upstream negotiated the
+	// same version with each other and dbbat sits inside that one agreement.
+	tnsLegacyLength bool
+
 	// clientWideEncoding records whether the client encodes TTC AUTH key/value
 	// lengths as fixed 4-byte little-endian integers (OCI / sqlplus) rather than
 	// the compressed form (thin clients). Detected from AUTH Phase 1 and used to
@@ -464,17 +475,31 @@ func (s *session) run() error {
 		return fmt.Errorf("%w: %w", ErrClientAuthFailed, err)
 	}
 
-	// Step 4b: For OCI (wide-encoding) clients, drive AUTH Phase 1 against the
+	// Step 4b: For OCI (wide-encoding) clients — and for pre-v315 ones — drive
+	// AUTH Phase 1 against the
 	// upstream BEFORE challenging the client. The upstream's challenge carries
 	// the end-of-call summary shaped for the exact TTC caps this client
 	// negotiated (the relay forwarded them verbatim); dbbat's client challenge
 	// reuses those bytes. A wrong-width summary (the old hard-coded capture)
 	// leaves unread bytes in the OCI client's TTC buffer, and the client aborts
 	// the AUTH call with a break/reset marker exchange — the "sqlplus stalls
-	// before AUTH Phase 2" failure. Thin clients keep the proven hand-built
-	// summaries and the original ordering. (The dialect itself was read off
-	// Phase 1 above, before step 4a could refuse anything.)
-	if s.clientWideEncoding {
+	// before AUTH Phase 2" failure. (The dialect itself was read off Phase 1
+	// above, before step 4a could refuse anything.)
+	//
+	// A pre-v315 client is here for the identical reason, arrived at from the
+	// other end: ojdbc6 11.2.0.4 parses a *shorter* fixed Summary than the
+	// hand-built 6949 capture (30 bytes of tail where dbbat writes 32, measured
+	// against 23ai Free — testdata/ojdbc6_legacy.pcapng packet #009), leaves the
+	// two surplus zeros in its TTC read buffer, and reads the first of them as
+	// the message code of the *next* call: `Protocol violation: [0]` thrown from
+	// T4CTTIfun.receive during doOAUTH, before AUTH Phase 2 is ever flushed.
+	// Borrowing the live upstream's summary is strictly better than adding a
+	// third hard-coded capture beside the two in buildAuthChallengeEndMarker —
+	// the upstream sized it for the caps this very client negotiated.
+	//
+	// Modern thin clients (go-ora, python-oracledb thin, JDBC thin) keep the
+	// proven hand-built summaries and the original ordering.
+	if s.clientWideEncoding || s.tnsLegacyLength {
 		if err := s.beginUpstreamAuth(); err != nil {
 			return fmt.Errorf("upstream auth failed: %w", err)
 		}
@@ -528,7 +553,7 @@ func (s *session) run() error {
 	// back reproduces what a direct client accepts. No-op for single-packet
 	// (thin-client) AUTH OKs.
 	if len(s.upstreamAuthOKResponse) > 0 {
-		authOK = reframeAuthOK(authOK, s.upstreamAuthOKFlags, s.upstreamAuthOKFragLens)
+		authOK = reframeAuthOK(authOK, s.upstreamAuthOKFlags, s.upstreamAuthOKFragLens, s.tnsLegacyLength)
 	}
 
 	if _, err := s.clientConn.Write(authOK); err != nil {
@@ -625,6 +650,30 @@ func (s *session) startDumpIfConfigured(upstreamAddr string) {
 
 	s.dump = dw
 	s.clientConn = dump.NewWriteTapConn(s.clientConn, dw, dump.DirServerToClient)
+}
+
+// encodeSessionDataPacket wraps a TTC payload in a TNS Data packet framed the
+// way *this* session's peers framed theirs: the legacy 2-byte length on a
+// pre-v315 session, the v315+ 4-byte one otherwise.
+//
+// Every packet dbbat builds rather than relays goes through here. Writing the
+// v315+ form unconditionally is what made ojdbc6 11.2.0.4 — which negotiates
+// TNS version 310 — fail its login with `Invalid Packet Lenght`: the driver
+// reads the length out of [0:2], the 4-byte form leaves those two bytes zero,
+// and a zero-length packet is rejected before a single TTC byte is looked at.
+func (s *session) encodeSessionDataPacket(payload []byte) []byte {
+	return encodeDataPacketForSession(payload, s.tnsLegacyLength)
+}
+
+// encodeDataPacketForSession is encodeSessionDataPacket without a session, for
+// the two builders that are handed the flag instead of holding one.
+func encodeDataPacketForSession(payload []byte, legacyLength bool) []byte {
+	if legacyLength {
+		// The legacy form is exactly what encodeTNSPacket has always written.
+		return encodeTNSPacket(TNSPacketTypeData, payload)
+	}
+
+	return encodeV315DataPacket(payload)
 }
 
 // encodeV315DataPacket wraps a TTC payload in a v315+ TNS Data packet.
@@ -1017,7 +1066,7 @@ func (s *session) readPhase2Packet() (*TNSPacket, error) {
 		}
 
 		if isResetMarker(phase2Pkt) && sawBreak {
-			if _, err := s.clientConn.Write(buildResetMarker()); err != nil {
+			if _, err := s.clientConn.Write(buildResetMarker(s.tnsLegacyLength)); err != nil {
 				return nil, fmt.Errorf("failed to send reset marker: %w", err)
 			}
 
@@ -1221,7 +1270,7 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	primary := verifiers[0]
 
 	o5 := NewO5LogonServer(primary.O5LogonSalt, primary.decryptedVerifier)
-	if s.upstreamCustomHash && len(primary.decryptedVerifier18453) > 0 {
+	if s.clientSupportsVerifier18453() && len(primary.decryptedVerifier18453) > 0 {
 		o5.UseVerifier18453(primary.salt18453, primary.decryptedVerifier18453)
 	}
 
@@ -1256,9 +1305,10 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	s.logger.DebugContext(s.ctx, "AUTH challenge payload",
 		slog.Int("len", len(challengePayload)),
 		slog.String("hex_head", fmt.Sprintf("%x", challengePayload[:min(len(challengePayload), 60)])))
-	// Write as raw v315+ TNS Data packet (4-byte length header, not 2-byte)
-	// After Accept, all packets must use v315+ format.
-	challengeRaw := encodeV315DataPacket(challengePayload)
+	// Framed the way this session's Accept said to: the v315+ 4-byte length for
+	// a modern client, the legacy 2-byte one for a pre-v315 client such as
+	// ojdbc6 — which is the packet it was failing to read at OSESSKEY.
+	challengeRaw := s.encodeSessionDataPacket(challengePayload)
 	if _, err := s.clientConn.Write(challengeRaw); err != nil {
 		return fmt.Errorf("failed to send AUTH challenge: %w", err)
 	}
@@ -1311,6 +1361,30 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	return nil
 }
 
+// clientSupportsVerifier18453 reports whether this client can answer the modern
+// PBKDF2/HMAC-SHA512 O5LOGON challenge rather than the legacy 6949 one.
+//
+// The server's own capability (`upstreamCustomHash`, caps[4]&0x20 off the Set
+// Protocol reply) is necessary and was, until a pre-v315 client was actually
+// driven through the proxy, treated as sufficient. It is not: 23ai advertises
+// customHash to everyone, so an ojdbc6 11.2.0.4 session was answered with an
+// 18453 challenge it has no code to answer — it read the dictionary, found a
+// verifier type from a database release four years its junior, and closed the
+// socket with an EOF-flagged 10-byte packet instead of sending AUTH Phase 2
+// ("Protocol violation: [0]" out of `T4CTTIoauthenticate.doOAUTH`).
+//
+// The client half of the condition is the TNS version, and the two boundaries
+// are the same boundary rather than two that happen to line up: password
+// version 12C (verifier type 18453) and the extended 4-byte packet length both
+// arrive with Oracle 12.1, which is TNS 315. So a session negotiating below 315
+// is by construction a pre-12c client, and gets the challenge a real server
+// gives it — which is what 23ai Free itself sends this driver when it is dialed
+// directly (`testdata/ojdbc6_legacy.pcapng` packet #009: AUTH_VFR_DATA flagged
+// 0x1b25 = 6949, from the same server, on the same day).
+func (s *session) clientSupportsVerifier18453() bool {
+	return s.upstreamCustomHash && !s.tnsLegacyLength
+}
+
 // clientChallengeTrailer returns the end-of-call summary appended to the AUTH
 // challenge dbbat sends the client.
 //
@@ -1323,12 +1397,13 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 // AUTH call with a break/reset marker exchange, stalling before AUTH Phase 2
 // (historically mis-attributed to the TCP-urgent OOB probe; see docs/oracle.md).
 //
-// For wide-encoding (OCI) clients the session therefore runs upstream AUTH
-// Phase 1 first (beginUpstreamAuth) and reuses the live upstream challenge's
-// summary bytes, which the real server sized for these exact caps. Thin clients
-// keep the proven hand-built summaries.
+// For wide-encoding (OCI) clients — and for pre-v315 ones, whose fixed Summary
+// is two bytes shorter than the hand-built 6949 capture — the session therefore
+// runs upstream AUTH Phase 1 first (beginUpstreamAuth) and reuses the live
+// upstream challenge's summary bytes, which the real server sized for these
+// exact caps. Modern thin clients keep the proven hand-built summaries.
 func (s *session) clientChallengeTrailer(verifierType int) []byte {
-	if s.clientWideEncoding && s.upstreamAuthResp != nil {
+	if (s.clientWideEncoding || s.tnsLegacyLength) && s.upstreamAuthResp != nil {
 		if t := s.upstreamAuthResp.challengeTrailer; len(t) > 0 && t[0] == byte(TTCFuncOERR) {
 			return t
 		}
@@ -2041,7 +2116,7 @@ func (s *session) breakUpstreamStatement() {
 		return
 	}
 
-	if _, err := s.upstreamConn.Write(buildBreakMarker()); err != nil {
+	if _, err := s.upstreamConn.Write(buildBreakMarker(s.tnsLegacyLength)); err != nil {
 		s.logger.DebugContext(s.ctx, "failed to send the upstream break marker",
 			slog.Any("error", err))
 
@@ -2052,7 +2127,7 @@ func (s *session) breakUpstreamStatement() {
 	// follows with a reset to resynchronize the stream. Sent immediately rather
 	// than after reading the server's acknowledgement, because the relay
 	// goroutine owns the upstream reader and this session is going away.
-	if _, err := s.upstreamConn.Write(buildResetMarker()); err != nil {
+	if _, err := s.upstreamConn.Write(buildResetMarker(s.tnsLegacyLength)); err != nil {
 		s.logger.DebugContext(s.ctx, "failed to send the upstream reset marker",
 			slog.Any("error", err))
 
@@ -3134,6 +3209,11 @@ func (s *session) nextOERFrame() (oerShape, int, byte) {
 		shape.endOfResponse = s.clientWideEncoding
 		shape.fixedWidth64 = s.clientWide64Encoding
 	}
+
+	// Outside the learned/unlearned split on purpose: this is the TNS envelope,
+	// negotiated at the Accept, not a property of the summary object an upstream
+	// OER could teach.
+	shape.legacyLength = s.tnsLegacyLength
 
 	return shape, s.oerSeq, s.oerCallNumber
 }

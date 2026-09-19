@@ -81,6 +81,12 @@ type oerShape struct {
 	// this whole change is about, one layer up. Learned; never assumed.
 	endOfResponse bool
 
+	// legacyLength selects the pre-v315 TNS envelope — the 2-byte packet length
+	// at [0:2] — for the frame this shape is encoded into. Not learned and not
+	// learnable off an OER body: it is the session's negotiated TNS version,
+	// stamped by nextOERFrame from the Accept. See session.tnsLegacyLength.
+	legacyLength bool
+
 	// tailLearned records that extraTailFields, fixedWidth and endOfResponse
 	// came from a real upstream OER rather than the default.
 	tailLearned bool
@@ -335,7 +341,11 @@ func encodeOERPacket(shape oerShape, sum oerSummary) []byte {
 	// parked on a byte-perfect OER until it was framed this way. The AUTH reject
 	// has always been framed this way, for the same reason spelled out one layer
 	// down: a legacy-framed reject surfaces as ORA-12566 with no useful reason.
-	return encodeV315DataPacket(payload)
+	//
+	// A pre-v315 session is the mirror image of all of that and gets the legacy
+	// form, because that is what *its* client reads. Not a fallback and not a
+	// guess: shape.legacyLength comes from the version in the session's Accept.
+	return encodeDataPacketForSession(payload, shape.legacyLength)
 }
 
 // oerErrorText renders the message an OER carries — "ORA-NNNNN: reason", the

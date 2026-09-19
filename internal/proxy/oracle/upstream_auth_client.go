@@ -199,7 +199,24 @@ func (s *session) finishUpstreamAuth() error {
 	password := s.database.Password // decrypted in beginUpstreamAuth
 	mode := uint32(logonModeNoNewPass)
 
-	sec, err := buildSecretsFromPhase1Response(authResp, s.upstreamCustomHash)
+	// The challenge dbbat actually got back decides whether the customHash
+	// derivation applies — not the capability bit on its own. Both customHash
+	// branches of derivePasswordEncKey run PBKDF2 over AUTH_PBKDF2_CSK_SALT, so a
+	// challenge that carries no such salt cannot be answered that way at all;
+	// taking the bit's word for it derived the password key from an empty salt
+	// and the upstream answered ORA-01017.
+	//
+	// It is reachable because caps[4]&0x20 is the *server's* bit and 23ai sets it
+	// for every caller, while the challenge is shaped for the client: dbbat
+	// forwards the client's own Phase 1 upstream, so a pre-v315 client such as
+	// ojdbc6 draws the classic three-pair 6949 challenge — AUTH_SESSKEY,
+	// AUTH_VFR_DATA, AUTH_GLOBALLY_UNIQUE_DBID and no PBKDF2 material anywhere.
+	// The gate only ever turns customHash off, and only when the material it
+	// needs is absent, so every 19c/23ai session that does carry the salt is
+	// untouched.
+	customHash := s.upstreamCustomHash && authResp.pbkdf2ChkSalt != ""
+
+	sec, err := buildSecretsFromPhase1Response(authResp, customHash)
 	if err != nil {
 		return fmt.Errorf("interpret AUTH Phase 1 response: %w", err)
 	}
@@ -370,11 +387,11 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 	return s.writeUpstreamPayload(full)
 }
 
-// writeUpstreamPayload writes a v315+ TNS Data packet whose payload is given
-// in full (including the leading 2 data-flag bytes). Used by Phase 1
-// forwarding so the client's data-flag bits are preserved verbatim.
+// writeUpstreamPayload writes a TNS Data packet whose payload is given in full
+// (including the leading 2 data-flag bytes). Used by Phase 1 forwarding so the
+// client's data-flag bits are preserved verbatim.
 func (s *session) writeUpstreamPayload(payload []byte) error {
-	pkt := encodeV315DataPacket(payload)
+	pkt := s.encodeSessionDataPacket(payload)
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH: writing packet (preserved flags)",
 		slog.Int("pkt_len", len(pkt)),
@@ -391,14 +408,14 @@ func (s *session) writeUpstreamPayload(payload []byte) error {
 // packets. OCI sends wideAuthDataFlags instead — see upstream_auth_client_wide.go.
 var thinAuthDataFlags = []byte{0x00, 0x00}
 
-// writeUpstreamData wraps a TTC body in a v315+ TNS Data packet with the given
+// writeUpstreamData wraps a TTC body in a TNS Data packet with the given
 // data-flag prefix and writes it to the upstream socket.
 func (s *session) writeUpstreamData(body, dataFlags []byte) error {
 	payload := make([]byte, 0, ttcDataFlagsSize+len(body))
 	payload = append(payload, dataFlags...)
 	payload = append(payload, body...)
 
-	pkt := encodeV315DataPacket(payload)
+	pkt := s.encodeSessionDataPacket(payload)
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH: writing packet",
 		slog.Int("pkt_len", len(pkt)),
@@ -493,7 +510,7 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 			}
 
 			if isResetMarker(pkt) && sawBreak {
-				if _, err := s.upstreamConn.Write(buildResetMarker()); err != nil {
+				if _, err := s.upstreamConn.Write(buildResetMarker(s.tnsLegacyLength)); err != nil {
 					return nil, nil, fmt.Errorf("send upstream reset marker: %w", err)
 				}
 
@@ -531,7 +548,7 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 			merged = append(merged, dataFlags...)
 			merged = append(merged, buf...)
 
-			return resp, encodeV315DataPacket(merged), nil
+			return resp, s.encodeSessionDataPacket(merged), nil
 		}
 	}
 }
@@ -546,10 +563,11 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 // same-length in-place replacement, splitting at the original TTC offsets keeps
 // every fragment valid even when the patched value straddles a boundary.
 //
-// mergedPacket is a v315 Data packet: 8-byte header + 2-byte data flags + TTC.
-// When there are 0/1 fragments, or the sizes don't add up, mergedPacket is
-// returned unchanged.
-func reframeAuthOK(mergedPacket, dataFlags []byte, fragTTCLens []int) []byte {
+// mergedPacket is a Data packet: 8-byte header + 2-byte data flags + TTC, framed
+// in the session's own length form — which is also the form every fragment is
+// re-emitted in, hence legacyLength. When there are 0/1 fragments, or the sizes
+// don't add up, mergedPacket is returned unchanged.
+func reframeAuthOK(mergedPacket, dataFlags []byte, fragTTCLens []int, legacyLength bool) []byte {
 	if len(fragTTCLens) <= 1 || len(dataFlags) != ttcDataFlagsSize {
 		return mergedPacket
 	}
@@ -573,7 +591,7 @@ func reframeAuthOK(mergedPacket, dataFlags []byte, fragTTCLens []int) []byte {
 		frag := make([]byte, 0, ttcDataFlagsSize+n)
 		frag = append(frag, dataFlags...)
 		frag = append(frag, ttc[pos:pos+n]...)
-		out = append(out, encodeV315DataPacket(frag)...)
+		out = append(out, encodeDataPacketForSession(frag, legacyLength)...)
 		pos += n
 	}
 

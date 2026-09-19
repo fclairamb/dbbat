@@ -26,6 +26,33 @@ const (
 // TNS header size in bytes.
 const tnsHeaderSize = 8
 
+// tnsExtendedLengthVersion is the TNS version from which a packet's length is
+// the 4-byte big-endian field at [0:4] rather than the 2-byte one at [0:2].
+// Below it — ojdbc6 11.2.0.4 negotiates 310 — both peers write and expect the
+// 2-byte field, and a packet framed the other way is refused before its body is
+// looked at (`Invalid Packet Lenght` out of `oracle.net.ns.Packet`).
+const tnsExtendedLengthVersion = 315
+
+// acceptTNSVersionOffset is where a TNS Accept carries the negotiated version,
+// as a big-endian ub2: the first field of the Accept payload. Present in every
+// Accept, pre-v315 ones included — a v310 Accept is 32 bytes end to end and
+// still starts with it.
+const acceptTNSVersionOffset = 8
+
+// acceptUsesLegacyLength reports whether the session an Accept packet closes
+// frames its packets with the legacy 2-byte length, and whether the Accept could
+// be read at all. A session whose Accept does not parse is left on the v315+
+// form, which is what every client dbbat had before this was distinguished.
+func acceptUsesLegacyLength(raw []byte) (bool, bool) {
+	if len(raw) < acceptTNSVersionOffset+2 || TNSPacketType(raw[4]) != TNSPacketTypeAccept {
+		return false, false
+	}
+
+	version := binary.BigEndian.Uint16(raw[acceptTNSVersionOffset : acceptTNSVersionOffset+2])
+
+	return version < tnsExtendedLengthVersion, true
+}
+
 // TNS errors.
 var (
 	ErrTNSHeaderTooShort = errors.New("TNS header too short: need at least 8 bytes")

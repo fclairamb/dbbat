@@ -76,6 +76,19 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 		s.logger.DebugContext(s.ctx, "pre-auth relay: stripped FAST_AUTH/END_OF_RESPONSE from Accept")
 	}
 
+	// The negotiated packet-length form, for every packet dbbat frames itself
+	// rather than relays. Read here because this Accept is the one both peers
+	// actually agreed on — it is the upstream's answer to the client's own
+	// forwarded Connect, and it is forwarded to the client verbatim.
+	if legacy, ok := acceptUsesLegacyLength(acceptPkt.Raw); ok {
+		s.tnsLegacyLength = legacy
+
+		if legacy {
+			s.logger.DebugContext(s.ctx, "pre-auth relay: pre-v315 session, framing with the legacy 2-byte packet length",
+				slog.Int("accept_version", int(binary.BigEndian.Uint16(acceptPkt.Raw[acceptTNSVersionOffset:acceptTNSVersionOffset+2]))))
+		}
+	}
+
 	// The negotiated packet size, kept for the one thing that ever writes a
 	// client message dbbat did not receive: a statement re-cut to hold the
 	// per-user tag (statement_tagging.go). A session whose Accept does not yield
@@ -218,9 +231,7 @@ func (s *session) pumpPreAuthUpstream(upstream net.Conn) error {
 			s.upstreamCustomHash = true
 		}
 
-		if observeBigClrChunksFlag(pkt.Raw) {
-			s.clientBigClrChunks = true
-		}
+		s.observeBigClrChunks(pkt.Raw)
 
 		// The Set Protocol reply carries the capabilities that shape the TTC
 		// summary object, which is what a refusal dbbat synthesizes has to
@@ -404,9 +415,7 @@ func drainUpstreamToClient(s *session, upstream net.Conn) error {
 			s.upstreamCustomHash = true
 		}
 
-		if observeBigClrChunksFlag(pkt.Raw) {
-			s.clientBigClrChunks = true
-		}
+		s.observeBigClrChunks(pkt.Raw)
 
 		s.observeOERServerCaps(pkt.Raw)
 
@@ -463,6 +472,27 @@ func stripAcceptModernAuthFlags(raw []byte) bool {
 	binary.BigEndian.PutUint32(raw[acceptFlagsOffset:acceptFlagsOffset+4], flags&^uint32(mask))
 
 	return true
+}
+
+// observeBigClrChunks records the UseBigClrChunks capability off an upstream
+// pre-auth packet — but only for a client that can possibly have negotiated it.
+//
+// The bit is read out of the *server's* capability array, which 23ai advertises
+// to every caller, so it needs a client-side half exactly as the customHash bit
+// does (see clientSupportsVerifier18453). A pre-v315 client predates the
+// capability outright: ojdbc6 11.2.0.4 writes its 96-byte AUTH_SESSKEY as
+// `fe 40 <64> 20 <32> 00` — the 0xFE long form with *single-byte* chunk lengths
+// — and reading those lengths as compressed ints walked the parse off the end of
+// the value. That surfaced as "AUTH Phase 2: missing AUTH_SESSKEY", and the
+// client was told ORA-01017 for a password that was perfectly correct.
+func (s *session) observeBigClrChunks(raw []byte) {
+	if s.tnsLegacyLength {
+		return
+	}
+
+	if observeBigClrChunksFlag(raw) {
+		s.clientBigClrChunks = true
+	}
 }
 
 // encodeTNSDataV315 frames a TNS Data payload using the v315+ 4-byte length
