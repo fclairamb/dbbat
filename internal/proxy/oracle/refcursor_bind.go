@@ -220,18 +220,33 @@ func landedAfterBindOutput(ttc []byte, pos int) bool {
 // a descriptor is rejected before the id is ever read — and the id itself must
 // be a plausible 16-bit cursor. The walk is left where it stopped on failure;
 // the caller discards the whole result rather than reusing a partial one.
+//
+// **A descriptor with no columns is refused**, and that bound is doing real
+// work rather than tidying up. go-ora's RefCursor.load tolerates `colCount == 0`
+// (the column loop is simply skipped), but a zero there would skip the only
+// structural proof this walk has: without a single column record to align on,
+// what remains is "a short run of small integers ending on a nonzero one that
+// lands on 0x04/0x08" — which the bind output of a call with **scalar** OUT
+// parameters can satisfy, and which the session gate admits (that call is a
+// PL/SQL block, so learnRefCursorIDs offers it here). Planting the id that would
+// come out of it is the wrong-entry failure this whole file is bounded against:
+// rememberCursor overwrites, so a collision with a tracked cursor would replace
+// a real statement's text with the call's — and an anonymous PL/SQL block passes
+// `read_only`, where the statement it displaced might not have.
+//
+// It costs nothing measurable: a `SYS_REFCURSOR` is a query's result set, and no
+// recording holds one with zero columns.
+// TestScalarOutBindsYieldNoRefCursorID is the other half of this bound.
 func readRefCursorDescriptor(c *dcursor, modern bool) (uint16, bool) {
 	c.byte() // descriptor length, informational: the fields below are self-sizing
 	c.cint() // max row size
 
 	colCount := c.cint()
-	if c.err || colCount < 0 || colCount > refCursorMaxColumns {
+	if c.err || colCount <= 0 || colCount > refCursorMaxColumns {
 		return 0, false
 	}
 
-	if colCount > 0 {
-		c.byte()
-	}
+	c.byte()
 
 	for range colCount {
 		_, typ := parseColumnDescribe(c, modern)

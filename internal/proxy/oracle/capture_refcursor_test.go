@@ -11,7 +11,7 @@
 // A `SYS_REFCURSOR` handed back by a stored procedure is the one cursor id that
 // never rides an OER: the server opens it inside the procedure body while
 // executing the call, and reports it in that call's **out-bind** data. These
-// recordings are what refCursorIDsInRowData was written against — see
+// recordings are what refCursorIDsInBindOutput was written against — see
 // refcursor_bind_test.go and docs/oracle.md, "Learning a REF cursor's id".
 package oracle
 
@@ -47,6 +47,128 @@ END;`
 // one, because the server hands out a **fresh** id per OPEN and the locator has
 // to keep up rather than latch onto the first.
 const refCursorDrives = 3
+
+// scalarOutBindProcedure is the shape the locator must stay **silent** on, and
+// the reason it has a capture of its own: a PL/SQL call with ordinary scalar OUT
+// parameters is a bind-output response arriving while a `BEGIN … END;` is in
+// flight, which is exactly what learnRefCursorIDs' session gate admits. Nothing
+// in it is a cursor, so nothing may be learned from it.
+const scalarOutBindProcedure = `CREATE OR REPLACE PROCEDURE dbbat_cap_scalarout(
+  n OUT NUMBER, s OUT VARCHAR2, m OUT NUMBER) AS
+BEGIN
+  n := 7;
+  s := 'seven';
+  m := 42;
+END;`
+
+// TestCapture_GoOraScalarOutBinds records go-ora calling that procedure, three
+// times so the recording carries the re-execution shape too.
+func TestCapture_GoOraScalarOutBinds(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_SCALAROUT", "testdata/go_ora_scalar_outbinds.pcapng")
+
+	requireOracleReachable(t, oracleAddr)
+
+	w := newCaptureWriter(t, outPath, "capture-go-ora-scalar-outbinds")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	dsn := fmt.Sprintf("oracle://system:oracle@%s/%s", relayAddr, oracleService)
+	db, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	ctx := t.Context()
+
+	_, err = db.ExecContext(ctx, scalarOutBindProcedure)
+	require.NoError(t, err)
+
+	stmt, err := db.PrepareContext(ctx, "BEGIN dbbat_cap_scalarout(:1, :2, :3); END;")
+	require.NoError(t, err)
+
+	for i := range refCursorDrives {
+		var (
+			n, m int64
+			s    string
+		)
+
+		_, err := stmt.ExecContext(ctx,
+			go_ora.Out{Dest: &n}, go_ora.Out{Dest: &s, Size: 32}, go_ora.Out{Dest: &m})
+		require.NoErrorf(t, err, "call %d", i+1)
+		require.Equal(t, int64(7), n)
+		require.Equal(t, "seven", s)
+		require.Equal(t, int64(42), m)
+	}
+
+	require.NoError(t, stmt.Close())
+
+	_, _ = db.ExecContext(ctx, "DROP PROCEDURE dbbat_cap_scalarout")
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s (%d calls)", outPath, refCursorDrives)
+}
+
+// pythonScalarOutBindScript is the same shape through python-oracledb thin.
+const pythonScalarOutBindScript = `
+import sys, oracledb
+dsn = sys.argv[1]
+calls = int(sys.argv[2])
+with oracledb.connect(user="system", password="oracle", dsn=dsn, retry_count=0) as conn:
+    cur = conn.cursor()
+    cur.execute("""CREATE OR REPLACE PROCEDURE dbbat_cap_scalarout(
+  n OUT NUMBER, s OUT VARCHAR2, m OUT NUMBER) AS
+BEGIN
+  n := 7;
+  s := 'seven';
+  m := 42;
+END;""")
+    for _ in range(calls):
+        n = cur.var(oracledb.NUMBER)
+        s = cur.var(oracledb.STRING)
+        m = cur.var(oracledb.NUMBER)
+        cur.callproc("dbbat_cap_scalarout", [n, s, m])
+        assert n.getvalue() == 7 and s.getvalue() == "seven" and m.getvalue() == 42
+    cur.execute("DROP PROCEDURE dbbat_cap_scalarout")
+print("ok")
+`
+
+// TestCapture_PythonThinScalarOutBinds records the same call through
+// python-oracledb thin, whose out-bind encoding is its own.
+func TestCapture_PythonThinScalarOutBinds(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_SCALAROUT_PY", "testdata/python_thin_scalar_outbinds.pcapng")
+	python := captureEnv("PYTHON_BIN", "python3")
+
+	requireOracleReachable(t, oracleAddr)
+
+	if out, err := exec.Command(python, "-c", "import oracledb").CombinedOutput(); err != nil {
+		t.Skipf("python-oracledb unavailable via %s: %v (%s)", python, err, out)
+	}
+
+	w := newCaptureWriter(t, outPath, "capture-python-thin-scalar-outbinds")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	script := writeTempScript(t, pythonScalarOutBindScript)
+
+	cmd := exec.CommandContext(t.Context(), python, script,
+		fmt.Sprintf("%s/%s", relayAddr, oracleService), fmt.Sprint(refCursorDrives))
+
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "python client failed: %s", out)
+	t.Logf("python client: %s", out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s (%d calls)", outPath, refCursorDrives)
+}
 
 // TestCapture_GoOraRefCursor records go-ora calling a procedure with an
 // `OUT SYS_REFCURSOR` and then driving the cursor it gets back.
