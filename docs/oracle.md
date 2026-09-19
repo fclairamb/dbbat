@@ -597,7 +597,7 @@ the cursor is never learned. That second failure is not theoretical:
 > overwrite that changes the SQL behind an id is logged at WARN
 > (`cursor id recycled onto a different statement`) instead of passing silently.
 
-##### The one cursor id that cannot be learned: a REF cursor
+##### Learning a REF cursor's id: the one that never rides an OER
 
 Everything above reads the id off the response to a statement dbbat **saw
 parsed**. A `SYS_REFCURSOR` has no such statement on the wire:
@@ -610,28 +610,90 @@ END;
 ```
 
 `OPEN p FOR …` runs inside the procedure body. The server allots the cursor
-while executing the call — `BEGIN dbbat_learn_refcur(:1); END;` — and hands its
-id back in that call's **out-bind data**, not in an OER the scan looks at. There
-is nothing to find, and nothing to attach it to if there were: the only
-statement text dbbat holds is the call, never the `SELECT` the cursor runs.
-
-So every fetch the client then drives on that cursor names an id the tracker
-does not hold, and takes the same route as any other unidentifiable execution
+while executing the call — `BEGIN dbbat_learn_refcur(:1); END;` — and reports its
+id in that call's **bind output**, not in an OER the scan looks at. Until dbbat
+decoded that, every fetch the client drove on the cursor named an id the tracker
+did not hold and took the same route as any other unidentifiable execution
 (`refuseUnknownCursor`): forwarded with a WARN under a permissive grant,
 **refused with `ORA-01031`** under one carrying `read_only`, `block_ddl` or
-approval patterns. The rule is right; on this shape the outcome is a limitation
-rather than an attack being stopped, and it is the one known case where ordinary
-read-only work is refused. Closing it means decoding the id out of the out-bind
-and gating the fetches against the call — a feature, filed as
-`specs/todos/2026-09-19-05-oracle-learn-ref-cursor-ids-from-out-binds.md`.
+approval patterns. The rule was right and the outcome was wrong — a REF cursor is
+how PL/SQL returns a result set, and `read_only` is the most common restrictive
+grant there is.
 
-It is measured rather than described. Five drives produce **exactly five**
-unknown cursors, on both thin clients, with a different id each time (the server
-hands out a fresh one per `OPEN`), and
-`TestIntegration_CursorIDLearningMissRate` brackets that step with the proxy's
-own untracked counter and requires the count to equal the number of drives. The
-exemption is therefore bounded on both sides: a genuine learning miss landing in
-the same window fails the test instead of being absorbed by it.
+`refCursorIDsInBindOutput` (`internal/proxy/oracle/refcursor_bind.go`) reads the
+id instead. **Four recordings came first**
+(`internal/proxy/oracle/capture_refcursor_test.go`): go-ora, python-oracledb
+thin, JDBC thin and sqlplus, each calling the same procedure three times so the
+server hands out a fresh id per `OPEN` and a locator that latched onto the first
+would be caught.
+
+The id is the last field of a **REF cursor descriptor**, and that descriptor is
+byte-for-byte the describe body dbbat already parses (`describe.go`) with the
+cursor id appended — `RefCursor.load` and `case 16:` in go-ora's `command.go` are
+the same field list:
+
+```
+[0x07]                      bind-output message
+  len        byte
+  maxRowSize cint
+  colCount   cint
+  [1 byte]   colCount x column-describe record
+  dlc
+  cint cint          TTCVersion >= 3
+  cint cint          TTCVersion >= 4
+  dlc                TTCVersion >= 5
+  cursorID   cint    <- the REF cursor
+```
+
+On a call's **first** execution that message is preceded by the IO vector
+(`0x0b`), which names each bind's direction; on a re-execution it is the
+payload's leading byte. Both are walked — never scanned. A scan here would be the
+wrong tool twice over: a `0x07` message is also what carries ordinary row data,
+and a wrong id planted in the tracker lets a fetch resolve against another
+statement's grant and text, which is worse than the refusal it replaces. So the
+walk is bounded the way `findPlausibleOERInResponse` is: every column type must
+be a known `TNSType`, the id must be a plausible 16-bit cursor, and the walk must
+**land** on the message that follows the block (the summary object `0x04`, or the
+return-parameter message `0x08` — the two measured). Anything else learns
+nothing.
+
+What makes the field the *right* one rather than merely a consistently decoded
+one is agreement with the client: `TestDumpReplay_RefCursorIDsMatchTheCursors
+TheClientDrives` requires every id read out of a bind output to be the id the
+client's very next frame drives — three drives, three independent driver
+implementations (go-ora 2/7/5, python-oracledb thin 4/2/4, JDBC thin 4/4/4). The
+false-positive half is measured too: the locator is run over eighteen recordings
+that have no REF cursor in them and must stay silent on all of them.
+
+**What the learned cursor stands for is the call**, annotated:
+
+```
+BEGIN dbbat_learn_refcur(:1); END; /* dbbat: a SYS_REFCURSOR this call returned;
+the cursor's own statement was opened inside the procedure and never crossed the wire */
+```
+
+The `SELECT` inside the procedure is not something dbbat can know. The call is,
+it is the statement the grant already gated once, and it is the right thing to
+charge this execution's quota and `/queries` row to. The note is a SQL comment,
+like `partialStatementNote`, so the static validators and the approval patterns
+match exactly what they matched when the call itself ran, while `/queries` stops
+implying dbbat saw a statement it never did.
+
+Two gates keep the locator where it belongs (`learnRefCursorIDs`): it runs only
+while the in-flight statement is a PL/SQL call — `BEGIN`, `DECLARE` or `CALL`,
+the only shapes that can carry an out-bind — and never while that statement is
+itself a learned REF cursor, whose annotated text starts with the call's `BEGIN`
+but whose response is its own row stream.
+
+**sqlplus is the documented gap.** OCI marshals the identical field list in the
+wide/fixed-width encoding — four-byte little-endian integers where a thin client
+sends compressed ones — and the compressed walk refuses it at its first field
+rather than reading a number out of it. An OCI session therefore keeps exactly
+the behaviour it had before: the drive stays an untracked cursor, refused under a
+restrictive grant. The recording is kept as
+`testdata/oci_refcursor_bind_output.hex` and the refusal is pinned by
+`TestOCIRefCursorBindOutputYieldsNoID`; closing it is
+`specs/todos/2026-09-19-06-oracle-refcursor-id-in-the-oci-encoding.md`.
 
 #### Closing cursors
 
@@ -1077,16 +1139,18 @@ statements. It counts the proxy's own log records.
 
 Against `gvenzl/oracle-free:23-slim`, measured 2026-09-19:
 
-| Client | Parses seen | Cursor ids learned | Re-executions of a parsed cursor | Naming an unknown cursor | REF-cursor drives |
-|--------|-------------|--------------------|----------------------------------|--------------------------|-------------------|
-| `go-ora` v3 | 57 | 53 | 64 | **0** | 5 |
-| `python-oracledb` thin 3.4.2 | 58 | 55 | 64 | **0** | 5 |
+| Client | Parses seen | Cursor ids learned | Re-executions | Naming an unknown cursor | REF-cursor drives |
+|--------|-------------|--------------------|---------------|--------------------------|-------------------|
+| `go-ora` v3 | 57 | 53 | 69 | **0** | 5 (all resolved) |
+| `python-oracledb` thin 3.4.2 | 58 | 55 | 69 | **0** | 5 (all resolved) |
 
-The last two columns are the same five frames counted twice, and the split is
-the point. A drive of a server-opened REF cursor *does* name a cursor the
-tracker has no entry for — five of them per client, one per drive — but it is
-not a learning miss: there was never a parse to learn from. See "The one cursor
-id that cannot be learned" above. Everything else, on both clients, resolves.
+The REF-cursor column used to be an *exemption* subtracted from the denominator:
+five drives, five unknown cursors, one per drive, because there was never a parse
+to learn from. `refCursorIDsInBindOutput` closed that — the id comes out of the
+call's bind output — so the drives are now inside the count and the count is
+zero. The measurement still brackets that step with both counters, and requires
+the drives to resolve as well as requiring nothing to go untracked: a workload
+that quietly stopped driving the cursor at all cannot pass as a fix.
 
 The parses that learned nothing are **exactly** the statements that failed
 (`DROP TABLE` on a missing table, three retries of a `SELECT` on a missing

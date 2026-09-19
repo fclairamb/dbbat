@@ -160,15 +160,18 @@ The boundaries, all deliberate:
   named a cursor dbbat could not resolve. Numbers and method in
   `docs/oracle.md`, "Cursor-id learning".
 
-  One shape is **outside** that claim and is refused here as a result: a
+  One shape used to be **outside** that claim and refused here as a result: a
   `SYS_REFCURSOR`. The server opens it inside the procedure body, so no parse
-  ever crosses the proxy and the id arrives in the call's out-bind rather than
-  in an OER — there is nothing to learn, on any client. Under a grant carrying
-  `read_only`, `block_ddl` or approval patterns, driving a REF cursor therefore
-  gets `ORA-01031`. That is this bullet's rule working as written, and it is the
-  one known case where it refuses ordinary read-only work; see `docs/oracle.md`,
-  "The one cursor id that cannot be learned", and
-  `specs/todos/2026-09-19-05-oracle-learn-ref-cursor-ids-from-out-binds.md`.
+  ever crosses the proxy and the id arrives in the call's bind output rather
+  than in an OER — so under a grant carrying `read_only`, `block_ddl` or
+  approval patterns, driving a REF cursor got `ORA-01031`. That was this
+  bullet's rule working as written on the one known case where it refused
+  ordinary read-only work. dbbat now decodes the bind output and gates the
+  drives against the **call** — the statement this grant already gated once —
+  so they resolve like any other re-execution. See `docs/oracle.md`, "Learning a
+  REF cursor's id". A **thick/OCI** client (sqlplus, Instant Client) marshals
+  that bind output in the wide encoding, which is not decoded yet, so a REF
+  cursor driven from one is still refused here.
 
   Note what that measurement did **not** close: the stale-entry half is still
   open, and it is listed above as a live gap. The refusal here only covers the
