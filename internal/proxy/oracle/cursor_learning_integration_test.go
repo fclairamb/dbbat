@@ -329,10 +329,20 @@ type cursorWorkloadOutcome struct {
 	// that: it must now be zero.
 	untrackedDuringRefCursor int
 
-	// resolvedDuringRefCursor is how many re-executions did resolve while that
-	// step ran, which is what makes the zero above a fix rather than a workload
-	// that quietly stopped driving anything.
-	resolvedDuringRefCursor int
+	// refCursorIDsLearned is how many ids learnRefCursorIDs read out of a bind
+	// output over the **whole** workload, not just this step. Asserted equal to
+	// refCursorDrives, in both directions: one short is a drive that would be
+	// refused under a restrictive grant, one extra is the false positive every
+	// bound in refcursor_bind.go exists to prevent — an id planted against a
+	// call, which rememberCursor would let overwrite a tracked statement.
+	refCursorIDsLearned int
+
+	// resolvedTheRefCursor is how many re-executions resolved to the *annotated
+	// call* — the text a REF cursor drive is charged to. It is what makes the
+	// zero above a fix rather than a workload that quietly stopped driving
+	// anything, and it is counted by statement rather than by window so the
+	// call's own re-executions are not folded in.
+	resolvedTheRefCursor int
 }
 
 // runCursorWorkloads drives every shape the spec named as a stress on cursor-id
@@ -473,7 +483,6 @@ func runCursorWorkloads(t *testing.T, env *oracleThroughProxy) cursorWorkloadOut
 	//    to resolve and *nothing* to go untracked.
 	t.Run("ref cursor", func(t *testing.T) {
 		untrackedBefore := env.logs.count(logMsgUntrackedCursorForwarded)
-		resolvedBefore := env.logs.count(logMsgReexecGated)
 
 		exec(`CREATE OR REPLACE PROCEDURE dbbat_learn_refcur(p OUT SYS_REFCURSOR) AS
 BEGIN
@@ -512,7 +521,15 @@ END;`)
 		// drive above has already been counted by the time the loop ends.
 		outcome.refCursorDrives = reexecRuns
 		outcome.untrackedDuringRefCursor = env.logs.count(logMsgUntrackedCursorForwarded) - untrackedBefore
-		outcome.resolvedDuringRefCursor = env.logs.count(logMsgReexecGated) - resolvedBefore
+
+		// By statement rather than by window: the annotated call is a text only a
+		// REF cursor drive can resolve to, so counting it needs no bracketing and
+		// cannot absorb the call's own re-executions.
+		for _, sql := range env.logs.sqlsFor(logMsgReexecGated) {
+			if sql == truncateSQL(markRefCursorStatement(call), 200) {
+				outcome.resolvedTheRefCursor++
+			}
+		}
 
 		// Both texts: re-executions of the call itself resolve to the call, and
 		// drives of the cursor it handed back resolve to the annotated copy
@@ -567,6 +584,10 @@ END;`)
 	})
 
 	outcome.expected = expected
+
+	// Over the whole workload rather than bracketed around the step: the point
+	// is that nothing *else* in it learned a REF cursor id either.
+	outcome.refCursorIDsLearned = env.logs.count(logMsgLearnedRefCursorID)
 
 	return outcome
 }
@@ -631,8 +652,9 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 	t.Logf("  cursor ids learned:                   %d", learned)
 	t.Logf("  re-executions resolved to their SQL:  %d", resolved)
 	t.Logf("  re-executions naming an unknown id:   %d", untracked)
-	t.Logf("  REF cursor drives:                    %d (resolved %d, unknown %d)",
-		work.refCursorDrives, work.resolvedDuringRefCursor, work.untrackedDuringRefCursor)
+	t.Logf("  REF cursor drives:                    %d (ids learned %d, resolved %d, unknown %d)",
+		work.refCursorDrives, work.refCursorIDsLearned, work.resolvedTheRefCursor,
+		work.untrackedDuringRefCursor)
 	t.Logf("  re-executions refused:                %d", refused)
 
 	if learnable > 0 {
@@ -674,8 +696,18 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 	assert.Zero(t, work.untrackedDuringRefCursor,
 		"a REF cursor's id is read out of the call's bind output (learnRefCursorIDs), so driving one "+
 			"must no longer name a cursor dbbat cannot resolve")
-	assert.GreaterOrEqual(t, work.resolvedDuringRefCursor, work.refCursorDrives,
-		"each of the %d drives must have resolved to the call it came back from", work.refCursorDrives)
+	assert.Equal(t, work.refCursorDrives, work.resolvedTheRefCursor,
+		"each of the %d drives must have resolved to the annotated call it came back from",
+		work.refCursorDrives)
+
+	// Exact in both directions, over the whole workload: the REF-cursor step is
+	// the only thing in it that opens a REF cursor, so one *extra* learned id
+	// would be a false positive planted against some other PL/SQL call's bind
+	// output — the failure every bound in refcursor_bind.go is written against,
+	// and one a "how many drives resolved" count would not notice.
+	assert.Equal(t, work.refCursorDrives, work.refCursorIDsLearned,
+		"the workload opens exactly %d REF cursors, so exactly %d ids may be learned from a bind output",
+		work.refCursorDrives, work.refCursorDrives)
 
 	// The sharper claim, and the one that catches a learning miss even when a
 	// recycled cursor id hides it behind a stale tracker entry: every statement
@@ -960,9 +992,11 @@ func TestIntegration_CursorIDLearningMissRate_PythonThin(t *testing.T) {
 	// The inversion, on the client the spec singles out. Every drive of the
 	// server-opened REF cursor used to name a cursor dbbat was never shown;
 	// each one must now have had its id read out of the call's bind output.
-	assert.GreaterOrEqual(t, refCursorIDs, pythonThinRefCursorDrives,
-		"each of the %d REF cursor drives must have had its id learned from the call's bind output",
-		pythonThinRefCursorDrives)
+	assert.Equal(t, pythonThinRefCursorDrives, refCursorIDs,
+		"the workload opens exactly %d REF cursors, so exactly %d ids may be learned from a bind "+
+			"output — one short is a drive that would be refused under a restrictive grant, one extra "+
+			"is a false positive planted against another PL/SQL call",
+		pythonThinRefCursorDrives, pythonThinRefCursorDrives)
 }
 
 // runPythonThinWorkload writes one of the python-oracledb scripts to a temp file
@@ -1121,8 +1155,8 @@ END;`)
 	assert.Equal(t, untrackedForwardedBefore, env.logs.count(logMsgUntrackedCursorForwarded),
 		"nor may it name a cursor dbbat could not resolve")
 
-	assert.GreaterOrEqual(t, env.logs.count(logMsgLearnedRefCursorID)-refCursorIDsBefore, drives,
-		"each of the %d calls must have reported its REF cursor id in its bind output", drives)
+	assert.Equal(t, drives, env.logs.count(logMsgLearnedRefCursorID)-refCursorIDsBefore,
+		"exactly one id per call: %d calls, %d ids — no fewer, and no spurious extra", drives, drives)
 
 	// And the drives are charged to the call, annotated — never to the `SELECT`
 	// inside the procedure, which never crossed the wire.

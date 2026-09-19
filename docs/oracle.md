@@ -661,9 +661,32 @@ What makes the field the *right* one rather than merely a consistently decoded
 one is agreement with the client: `TestDumpReplay_RefCursorIDsMatchTheCursors
 TheClientDrives` requires every id read out of a bind output to be the id the
 client's very next frame drives — three drives, three independent driver
-implementations (go-ora 2/7/5, python-oracledb thin 4/2/4, JDBC thin 4/4/4). The
-false-positive half is measured too: the locator is run over eighteen recordings
-that have no REF cursor in them and must stay silent on all of them.
+implementations (go-ora 2/7/5, python-oracledb thin 4/2/4, JDBC thin 4/4/4).
+
+The false-positive half is measured too, and it is where the **at least one
+column** bound comes from. go-ora's `RefCursor.load` tolerates a zero column
+count — it simply skips the loop — and so did this walk, which meant a
+descriptor with no columns was accepted on nothing but "a short run of small
+integers ending on a nonzero one that lands on a message byte": fifteen bytes,
+all but one of them zero, used to yield cursor 3. That is reachable rather than
+theoretical, because the session gate offers this walk **every** bind-output
+response arriving while a PL/SQL call is in flight — and a call with ordinary
+scalar OUT parameters is one. An id planted from such a response would be
+attributed to the call, and `rememberCursor` overwrites, so it could displace a
+tracked statement's text with an anonymous PL/SQL block's — and a block passes
+`read_only` where the statement it displaced might not have. Requiring a column
+restores `isKnownTNSType`'s alignment proof as a mandatory bound on every
+accepted descriptor, and costs nothing real: a `SYS_REFCURSOR` is a query's
+result set, and no recording holds one with zero columns.
+
+So the shape is recorded rather than argued about.
+`go_ora_scalar_outbinds.pcapng` and `python_thin_scalar_outbinds.pcapng` call
+`BEGIN dbbat_cap_scalarout(:1, :2, :3); END;` — `OUT NUMBER`, `OUT VARCHAR2`,
+`OUT NUMBER` — three times each, and `TestScalarOutBindsYieldNoRefCursorID`
+requires real bind-output responses in them and not one id out of any.
+Everything else is swept by `surveyCorpus` minus the three REF-cursor fixtures,
+so a recording added to `testdata/` is opted into the false-positive sweep
+automatically instead of being silently exempt.
 
 **What the learned cursor stands for is the call**, annotated:
 

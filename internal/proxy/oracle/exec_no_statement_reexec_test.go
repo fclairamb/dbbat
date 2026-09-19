@@ -277,10 +277,15 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// Per recording rather than a total, because the two sources of a SQL-less
 	// execute are different things and a total would let one drift into the
 	// other: ojdbc6 re-running a PreparedStatement, and a thin client **driving
-	// a REF cursor** the server opened inside a procedure. The REF-cursor
-	// recordings each call the procedure three times; python-oracledb also
-	// re-drives a cursor it has already exhausted, which is why its count is
-	// five rather than three.
+	// a REF cursor** the server opened inside a procedure.
+	//
+	// The REF-cursor recordings each call the procedure three times, so three
+	// drives apiece. python-oracledb's count is five because *it* also
+	// re-executes the call itself this way — calls 2 and 3 of `begin
+	// dbbat_cap_refcur(:1); end;` go out as a statement-less `03 5e` naming
+	// cursor 5, stapled behind its close-cursors piggyback, where go-ora and
+	// JDBC send a `03 04` piggyback re-execution instead (which is a different
+	// frame and counted nowhere here).
 	assert.Equal(t, map[string]int{
 		"ojdbc6_legacy.pcapng":         1,
 		"go_ora_refcursor.pcapng":      3,
