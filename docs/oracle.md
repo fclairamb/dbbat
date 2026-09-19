@@ -2293,9 +2293,35 @@ as `wide-ub4`/`clr-short`).
 `statement_tagging_integration_test.go` then puts it on a real 23ai: the tag read
 back out of `V$SQL`, 25 executions of one statement landing on one SQL_ID,
 statements padded across the 252-byte CLR boundary, a 20 KB statement re-cut into
-several packets, and the same probe driven through **sqlplus (OCI)** and
-**python-oracledb thin** as well as go-ora. ojdbc thin needs a driver jar
-(`ORACLE_TEST_OJDBC_JAR`) and is covered live only where one is present.
+several packets, and the same probe driven through **sqlplus (OCI)**,
+**python-oracledb thin**, **ojdbc thin** and **SQLcl** as well as go-ora.
+
+The last two are the `compressed`/**`bare`** shape, and they were the shape the
+feature shipped without a live run for — which mattered more here than the
+corpus count suggests, because `bare` is the one where the TTC header's length
+field is the statement's *only* declared length, so a second copy hiding
+elsewhere in an ojdbc frame would have been caught by nothing dbbat runs.
+Measured 2026-09-19 against `gvenzl/oracle-free:23-slim`: **tagged, parsed and
+executed**, the tag read back out of `V$SQL`, with ojdbc11 23.7.0.25.01 (the
+driver SQLcl 26.1.0 bundles) and SQLcl 26.1.0 itself.
+`TestIntegration_StatementTagFromJDBCThin` also carries the cardinality half of
+the cost argument for this client class specifically: **25 executions of one
+prepared statement, one SQL_ID**. go-ora resends the statement text on every
+execution, so its version of that measurement says nothing about a client that
+prepares once and re-executes — a tag that varied per execution, or a rewrite
+applied inconsistently across a session, shows up only here.
+
+There is no packaged Oracle JDBC driver to look up, so the jar is named by
+`ORACLE_TEST_OJDBC_JAR` (or found on `CLASSPATH`), and SQLcl by
+`ORACLE_TEST_SQLCL` (or a `sql` on `PATH` that identifies itself as SQLcl).
+The nightly Oracle legs of `.github/workflows/integration.yml` fetch a
+version-pinned, digest-verified `ojdbc11` from Maven Central and export the
+variable, so every JDBC test in this package runs there rather than skipping —
+and with the variable set a missing JDK is a failure rather than a quieter suite
+(`requireTestJava`), the same rule `ORACLE_TEST_REQUIRE_OCI_CLIENT` applies to
+sqlplus. SQLcl is a download rather than an artifact CI can fetch cleanly, so it
+stays a developer-machine client; it is the same wire shape as the jar, and what
+it buys is client-version coverage.
 
 **One failure only a real server could find.** The first run of that suite hit
 `ORA-03120: two-task conversion routine: integer overflow` on any statement past
