@@ -308,26 +308,31 @@ func (e *oracleThroughProxy) revokeAllGrantsLive(t *testing.T) {
 // cursorWorkloadOutcome is what runCursorWorkloads reports back.
 //
 // It is a struct rather than the bare statement list it used to be because the
-// workload contains one shape whose cursor id dbbat can never have learned —
-// the REF cursor the server opens inside PL/SQL — and telling those
-// re-executions apart from a real learning miss is the whole point of the
-// measurement. See TestIntegration_CursorIDLearningMissRate.
+// workload contains one shape dbbat learns differently from all the others — the
+// REF cursor the server opens inside PL/SQL, whose id comes back in the call's
+// bind output rather than in an OER — and that step is measured in its own right
+// rather than folded into the total. See TestIntegration_CursorIDLearningMissRate.
 type cursorWorkloadOutcome struct {
-	// expected are the statements the client parsed *through the proxy* and
-	// then re-executed by cursor id. Every resolved re-execution must name one
-	// of these.
+	// expected are the statements a resolved re-execution may name: the ones the
+	// client parsed *through the proxy*, plus the annotated call a REF cursor
+	// drive is charged to.
 	expected []string
 
 	// refCursorDrives is how many times the workload drove a server-opened REF
-	// cursor. Each drive is a fetch naming an id that crossed the proxy only as
-	// opaque out-bind bytes, so each one is expected to be untracked.
+	// cursor.
 	refCursorDrives int
 
-	// untrackedDuringRefCursor is how many re-executions actually named an
-	// unknown cursor while that step ran. Measured rather than assumed: the
-	// test compares it against refCursorDrives, so a genuine learning miss
-	// landing inside the same window is a failure rather than an excuse.
+	// untrackedDuringRefCursor is how many re-executions named an unknown cursor
+	// while that step ran. It used to be *required* to equal refCursorDrives —
+	// the id was structurally unlearnable, so every drive was an ORA-01031
+	// waiting to happen under a restrictive grant. learnRefCursorIDs inverted
+	// that: it must now be zero.
 	untrackedDuringRefCursor int
+
+	// resolvedDuringRefCursor is how many re-executions did resolve while that
+	// step ran, which is what makes the zero above a fix rather than a workload
+	// that quietly stopped driving anything.
+	resolvedDuringRefCursor int
 }
 
 // runCursorWorkloads drives every shape the spec named as a stress on cursor-id
@@ -459,15 +464,16 @@ func runCursorWorkloads(t *testing.T, env *oracleThroughProxy) cursorWorkloadOut
 	// 6. A REF cursor: the server opens a cursor dbbat never saw parsed, and the
 	//    client then fetches from it by id alone.
 	//
-	//    This is the one shape in the workload whose cursor id is *structurally*
-	//    unlearnable. `OPEN p FOR …` runs inside the procedure body, so no parse
-	//    for that statement ever crosses the wire: the id is allotted
-	//    server-side and handed back inside the call's out-bind, not in an OER
-	//    findCursorIDInResponse could read it from. Every drive of it therefore
-	//    names a cursor the tracker does not hold — which is why the step is
-	//    bracketed by the untracked counter rather than just run.
+	//    `OPEN p FOR …` runs inside the procedure body, so no parse for that
+	//    statement ever crosses the wire: the id is allotted server-side and
+	//    handed back in the call's **bind output**, where learnRefCursorIDs
+	//    reads it. Until that existed every drive named a cursor the tracker did
+	//    not hold, which is ORA-01031 under a restrictive grant — so the step is
+	//    bracketed by both counters, and the assertions below require the drives
+	//    to resolve and *nothing* to go untracked.
 	t.Run("ref cursor", func(t *testing.T) {
 		untrackedBefore := env.logs.count(logMsgUntrackedCursorForwarded)
+		resolvedBefore := env.logs.count(logMsgReexecGated)
 
 		exec(`CREATE OR REPLACE PROCEDURE dbbat_learn_refcur(p OUT SYS_REFCURSOR) AS
 BEGIN
@@ -501,13 +507,17 @@ END;`)
 			require.NoError(t, cursor.Close())
 		}
 
-		// The WARN is emitted on the client leg, before the frame is forwarded
-		// and long before the client gets its rows back, so every drive above
-		// has already been counted by the time the loop ends.
+		// Both records are emitted on the client leg, before the frame is
+		// forwarded and long before the client gets its rows back, so every
+		// drive above has already been counted by the time the loop ends.
 		outcome.refCursorDrives = reexecRuns
 		outcome.untrackedDuringRefCursor = env.logs.count(logMsgUntrackedCursorForwarded) - untrackedBefore
+		outcome.resolvedDuringRefCursor = env.logs.count(logMsgReexecGated) - resolvedBefore
 
-		expected = append(expected, call)
+		// Both texts: re-executions of the call itself resolve to the call, and
+		// drives of the cursor it handed back resolve to the annotated copy
+		// learnRefCursorIDs planted (refCursorNote).
+		expected = append(expected, call, markRefCursorStatement(call))
 	})
 
 	// 7. A statement that fails, retried. This is the one shape the measurement
@@ -580,15 +590,18 @@ END;`)
 // client actually ran, because an anchored scan that learns the *wrong* id is a
 // worse failure than one that learns none.
 //
-// One shape in the workload is deliberately outside that claim, and naming it is
-// half of what makes the claim true: a **REF cursor** is opened by `OPEN p FOR …`
-// *inside* a stored procedure, so the statement it runs never crosses the proxy
-// as a parse and its id is handed to the client in the call's out-bind rather
-// than in an OER. There is nothing for findCursorIDInResponse to read, on any
-// client, by any locator — so those drives are not learning misses, they are
-// executions of a cursor dbbat was never shown. They are counted separately and
-// required to account for *every* unknown cursor; the learnable remainder is
-// asserted at zero.
+// One shape in the workload used to be outside that claim, and it is the reason
+// the REF-cursor step is still bracketed by its own counters: a **REF cursor** is
+// opened by `OPEN p FOR …` *inside* a stored procedure, so the statement it runs
+// never crosses the proxy as a parse and its id is handed to the client in the
+// call's bind output rather than in an OER. There was nothing for
+// findCursorIDInResponse to read, so every drive named a cursor dbbat had never
+// been shown — and this test required exactly that, one unknown cursor per drive.
+//
+// learnRefCursorIDs reads the id out of the bind output instead, and the
+// requirement is inverted: the drives resolve, to the call they were handed back
+// by, and the whole corpus of re-executions is now held to zero unknowns with no
+// exemption subtracted from it.
 func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 	env := startOracleThroughProxy(t, nil)
 
@@ -608,20 +621,18 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 
 	reexecs := resolved + untracked
 
-	// The denominator the miss rate is actually about: re-executions of a cursor
-	// the client parsed through the proxy. A REF cursor drive is not in it —
-	// see the doc comment — so counting it there would report a learning failure
-	// for a cursor no amount of learning could have caught.
-	learnable := reexecs - work.untrackedDuringRefCursor
-	missed := untracked - work.untrackedDuringRefCursor
+	// No exemption is subtracted any more: every re-execution in the workload,
+	// REF cursor drives included, is a cursor dbbat is expected to have learned.
+	learnable := reexecs
+	missed := untracked
 
 	t.Logf("cursor-id learning measurement (image=%s):", oracleTestImage())
 	t.Logf("  parses seen (query intercepted):      %d", parses)
 	t.Logf("  cursor ids learned:                   %d", learned)
 	t.Logf("  re-executions resolved to their SQL:  %d", resolved)
 	t.Logf("  re-executions naming an unknown id:   %d", untracked)
-	t.Logf("    of which server-opened REF cursors: %d (over %d drives)",
-		work.untrackedDuringRefCursor, work.refCursorDrives)
+	t.Logf("  REF cursor drives:                    %d (resolved %d, unknown %d)",
+		work.refCursorDrives, work.resolvedDuringRefCursor, work.untrackedDuringRefCursor)
 	t.Logf("  re-executions refused:                %d", refused)
 
 	if learnable > 0 {
@@ -653,17 +664,18 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 	// under a restrictive grant, so a single one is a real refusal of ordinary
 	// work.
 	assert.Zero(t, missed,
-		"cursor-id learning missed %d of %d learnable re-executions; failing the piggyback path closed "+
-			"would turn each of those into ORA-01031", missed, learnable)
+		"cursor-id learning missed %d of %d re-executions; the piggyback path fails closed, so each "+
+			"of those is an ORA-01031 for ordinary work", missed, learnable)
 
-	// And the exemption is bounded from the other side: every unknown cursor the
-	// run saw has to be one of the REF-cursor drives, one per drive. Without
-	// this the subtraction above would be an excuse rather than an attribution —
-	// a genuine miss landing inside the REF-cursor window would be silently
-	// absorbed by it.
-	assert.Equal(t, work.refCursorDrives, work.untrackedDuringRefCursor,
-		"each drive of a server-opened REF cursor names one cursor dbbat was never shown, and nothing "+
-			"else in this workload may name an unknown cursor")
+	// The inversion, asserted from both sides. The REF-cursor step used to be
+	// *required* to produce one unknown cursor per drive; it must now produce
+	// none — and it must produce resolutions, so that a workload which quietly
+	// stopped driving the cursor at all cannot pass as a fix.
+	assert.Zero(t, work.untrackedDuringRefCursor,
+		"a REF cursor's id is read out of the call's bind output (learnRefCursorIDs), so driving one "+
+			"must no longer name a cursor dbbat cannot resolve")
+	assert.GreaterOrEqual(t, work.resolvedDuringRefCursor, work.refCursorDrives,
+		"each of the %d drives must have resolved to the call it came back from", work.refCursorDrives)
 
 	// The sharper claim, and the one that catches a learning miss even when a
 	// recycled cursor id hides it behind a stale tracker entry: every statement
@@ -793,12 +805,12 @@ func assertTrackerStaysBounded(t *testing.T, env *oracleThroughProxy, parses int
 // It is a script rather than a Go driver because there is no Go implementation
 // of what is being measured — how *that* client drives the wire.
 //
-// The REF cursor lives in its own script (pythonThinRefCursorWorkload) for the
-// same reason runCursorWorkloads brackets its own REF-cursor step: that shape is
-// the only one whose cursor id dbbat can never have learned, and the measurement
-// has to attribute those drives rather than total them in. A Go subtest can
-// snapshot the counter mid-workload; a python process cannot, so the split is
-// the boundary instead.
+// The REF cursor used to live in a second script, because its drives were the
+// one shape whose cursor id dbbat could never have learned and the measurement
+// had to attribute them rather than total them in — a Go subtest can snapshot a
+// counter mid-workload, a python process cannot, so the split was the boundary
+// instead. learnRefCursorIDs removed the need: the drives resolve like every
+// other re-execution, so step 6 is back where it belongs.
 const pythonThinWorkload = `
 import sys
 import oracledb
@@ -838,7 +850,17 @@ for i in range(5):
     cur.execute("BEGIN INSERT INTO dbbat_py_probe VALUES (:1); END;", [1000 + i])
 conn.commit()
 
-# 6. a REF cursor — its own script, see pythonThinRefCursorWorkload
+# 6. a REF cursor: the server opens it inside the procedure body, so its id
+#    reaches the proxy only in the call's bind output
+cur.execute("""CREATE OR REPLACE PROCEDURE dbbat_py_refcur(p OUT SYS_REFCURSOR) AS
+BEGIN
+  OPEN p FOR SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 5;
+END;""")
+for _ in range(5):
+    out = cur.var(oracledb.CURSOR)
+    cur.callproc("dbbat_py_refcur", [out])
+    out.getvalue().fetchall()
+cur.execute("DROP PROCEDURE dbbat_py_refcur")
 
 # 7. a statement that fails, retried: its OER carries a real ORA code, so no
 #    cursor id is read off it
@@ -865,40 +887,8 @@ conn.close()
 print("ok")
 `
 
-// pythonThinRefCursorWorkload is step 6 of the workload above, on its own
-// session: a stored procedure that opens a REF cursor, driven
-// pythonThinRefCursorDrives times.
-//
-// Every drive fetches from a cursor the *server* opened inside the procedure
-// body. No parse for `OPEN p FOR …` ever reaches the proxy and the id comes back
-// in the call's out-bind rather than in an OER, so each drive necessarily names
-// a cursor dbbat holds no statement for. That is what the measurement subtracts,
-// and only that.
-const pythonThinRefCursorWorkload = `
-import sys
-import oracledb
-
-host, port, service, user, password = sys.argv[1:6]
-conn = oracledb.connect(user=user, password=password,
-                        dsn=oracledb.makedsn(host, int(port), service_name=service))
-
-cur = conn.cursor()
-
-cur.execute("""CREATE OR REPLACE PROCEDURE dbbat_py_refcur(p OUT SYS_REFCURSOR) AS
-BEGIN
-  OPEN p FOR SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 5;
-END;""")
-for _ in range(5):
-    out = cur.var(oracledb.CURSOR)
-    cur.callproc("dbbat_py_refcur", [out])
-    out.getvalue().fetchall()
-
-cur.execute("DROP PROCEDURE dbbat_py_refcur")
-conn.close()
-print("ok")
-`
-
-// pythonThinRefCursorDrives is the loop count inside pythonThinRefCursorWorkload.
+// pythonThinRefCursorDrives is the loop count of step 6 inside the workload
+// above.
 const pythonThinRefCursorDrives = 5
 
 // TestIntegration_CursorIDLearningMissRate_PythonThin repeats the measurement
@@ -920,40 +910,33 @@ func TestIntegration_CursorIDLearningMissRate_PythonThin(t *testing.T) {
 
 	env := startOracleThroughProxy(t, nil)
 
-	// The parsed-cursor half first, then the counter is read, then the REF
-	// cursor on a fresh session — so the drives that cannot be learned are
-	// attributed instead of totalled in. Same split as runCursorWorkloads'
-	// bracketed subtest.
+	// One session, the whole workload — the REF-cursor step included. It used to
+	// run in a second script so its unlearnable drives could be attributed
+	// instead of totalled in; learnRefCursorIDs made the split unnecessary, and
+	// rejoining it is part of what this test now proves.
 	runPythonThinWorkload(t, env, pythonThinWorkload)
 
 	time.Sleep(2 * time.Second)
 
-	untrackedBeforeRefCursor := env.logs.count(logMsgUntrackedCursorForwarded)
-
-	runPythonThinWorkload(t, env, pythonThinRefCursorWorkload)
-
-	time.Sleep(2 * time.Second)
-
 	var (
-		parses    = env.logs.count(logMsgQueryIntercepted)
-		learned   = env.logs.count(logMsgLearnedCursorID)
-		resolved  = env.logs.count(logMsgReexecGated)
-		untracked = env.logs.count(logMsgUntrackedCursorForwarded)
+		parses       = env.logs.count(logMsgQueryIntercepted)
+		learned      = env.logs.count(logMsgLearnedCursorID)
+		refCursorIDs = env.logs.count(logMsgLearnedRefCursorID)
+		resolved     = env.logs.count(logMsgReexecGated)
+		untracked    = env.logs.count(logMsgUntrackedCursorForwarded)
 	)
 
-	untrackedDuringRefCursor := untracked - untrackedBeforeRefCursor
-
 	reexecs := resolved + untracked
-	learnable := reexecs - untrackedDuringRefCursor
-	missed := untracked - untrackedDuringRefCursor
+	learnable := reexecs
+	missed := untracked
 
 	t.Logf("cursor-id learning measurement, python-oracledb thin (image=%s):", oracleTestImage())
 	t.Logf("  parses seen (query intercepted):      %d", parses)
 	t.Logf("  cursor ids learned:                   %d", learned)
+	t.Logf("  REF cursor ids learned:               %d (over %d drives)",
+		refCursorIDs, pythonThinRefCursorDrives)
 	t.Logf("  re-executions resolved to their SQL:  %d", resolved)
 	t.Logf("  re-executions naming an unknown id:   %d", untracked)
-	t.Logf("    of which server-opened REF cursors: %d (over %d drives)",
-		untrackedDuringRefCursor, pythonThinRefCursorDrives)
 
 	if learnable > 0 {
 		t.Logf("  learning miss rate (learnable ids):   %d/%d", missed, learnable)
@@ -972,10 +955,14 @@ func TestIntegration_CursorIDLearningMissRate_PythonThin(t *testing.T) {
 
 	assert.Positive(t, reexecs, "python-oracledb must have produced cursor re-executions")
 	assert.Zero(t, missed,
-		"cursor-id learning missed %d of %d learnable python-oracledb re-executions", missed, learnable)
-	assert.Equal(t, pythonThinRefCursorDrives, untrackedDuringRefCursor,
-		"each drive of a server-opened REF cursor names one cursor dbbat was never shown, and nothing "+
-			"else in this workload may name an unknown cursor")
+		"cursor-id learning missed %d of %d python-oracledb re-executions", missed, learnable)
+
+	// The inversion, on the client the spec singles out. Every drive of the
+	// server-opened REF cursor used to name a cursor dbbat was never shown;
+	// each one must now have had its id read out of the call's bind output.
+	assert.GreaterOrEqual(t, refCursorIDs, pythonThinRefCursorDrives,
+		"each of the %d REF cursor drives must have had its id learned from the call's bind output",
+		pythonThinRefCursorDrives)
 }
 
 // runPythonThinWorkload writes one of the python-oracledb scripts to a temp file
@@ -1053,4 +1040,92 @@ func TestIntegration_CursorReexecUnderReadOnlyIsNotBrokenByTheGate(t *testing.T)
 		"no ordinary read-only re-execution may be refused as an untracked cursor")
 	assert.Zero(t, env.logs.count(logMsgUntrackedCursorForwarded),
 		"no ordinary read-only re-execution may name a cursor dbbat could not resolve")
+}
+
+// TestIntegration_RefCursorUnderReadOnlyCompletes is the case the gap actually
+// cost, from the user's side, and the one this test file did not exercise until
+// learnRefCursorIDs landed.
+//
+// A `SYS_REFCURSOR` is how PL/SQL returns a result set: ordinary, read-only
+// application code. Its id is allotted inside the procedure body and reported in
+// the call's bind output, so before that was decoded every drive of one named a
+// cursor the tracker did not hold — and `read_only`, the most common restrictive
+// grant there is, turned each of them into ORA-01031. This is the test that would
+// have caught it.
+//
+// The call is driven several times on purpose: the server hands out a fresh
+// cursor per `OPEN`, so a locator that latched onto the first id would pass the
+// first drive and refuse the rest.
+func TestIntegration_RefCursorUnderReadOnlyCompletes(t *testing.T) {
+	env := startOracleThroughProxy(t, nil)
+
+	ctx := context.Background()
+
+	// The procedure is created first, while the grant still allows DDL: a DDL is
+	// not what is being measured, and read_only would (correctly) refuse it. The
+	// grant is then narrowed and a *fresh* session opened, because the grant is
+	// resolved once, at auth.
+	_, err := env.db.ExecContext(ctx, `CREATE OR REPLACE PROCEDURE dbbat_ro_refcur(p OUT SYS_REFCURSOR) AS
+BEGIN
+  OPEN p FOR SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 5;
+END;`)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _, _ = env.db.ExecContext(context.Background(), "DROP PROCEDURE dbbat_ro_refcur") })
+
+	env.replaceGrant(t, []string{store.ControlReadOnly})
+
+	client := env.newClient(t)
+
+	const call = "BEGIN dbbat_ro_refcur(:1); END;"
+
+	stmt, err := client.PrepareContext(ctx, call)
+	require.NoError(t, err)
+
+	defer func() { _ = stmt.Close() }()
+
+	const drives = 5
+
+	// Only what this session did: the DDL above ran on the same proxy, and its
+	// records are already in the handler.
+	untrackedRefusedBefore := env.logs.count(logMsgUntrackedCursorRefused)
+	untrackedForwardedBefore := env.logs.count(logMsgUntrackedCursorForwarded)
+	refCursorIDsBefore := env.logs.count(logMsgLearnedRefCursorID)
+
+	for i := 0; i < drives; i++ {
+		var cursor go_ora.RefCursor
+
+		_, err := stmt.ExecContext(ctx, go_ora.Out{Dest: &cursor})
+		require.NoErrorf(t, err, "read-only call %d", i)
+
+		ds, err := cursor.Query()
+		require.NoErrorf(t, err, "read-only REF cursor drive %d — this is the ORA-01031 the gap caused", i)
+
+		rows := 0
+
+		row := make([]driver.Value, len(ds.Columns()))
+		for ds.Next(row) == nil {
+			rows++
+		}
+
+		assert.Equalf(t, 5, rows, "drive %d must return the procedure's five rows", i)
+
+		require.NoError(t, ds.Close())
+		require.NoError(t, cursor.Close())
+	}
+
+	time.Sleep(2 * time.Second)
+
+	assert.Equal(t, untrackedRefusedBefore, env.logs.count(logMsgUntrackedCursorRefused),
+		"driving a REF cursor under read_only must not be refused as an untracked cursor")
+	assert.Equal(t, untrackedForwardedBefore, env.logs.count(logMsgUntrackedCursorForwarded),
+		"nor may it name a cursor dbbat could not resolve")
+
+	assert.GreaterOrEqual(t, env.logs.count(logMsgLearnedRefCursorID)-refCursorIDsBefore, drives,
+		"each of the %d calls must have reported its REF cursor id in its bind output", drives)
+
+	// And the drives are charged to the call, annotated — never to the `SELECT`
+	// inside the procedure, which never crossed the wire.
+	assert.Contains(t, env.logs.sqlsFor(logMsgReexecGated), truncateSQL(markRefCursorStatement(call), 200),
+		"a REF cursor drive is gated against the call it came back from, and says so")
 }
