@@ -75,3 +75,56 @@ re-enable.
 5. **Flip `oall8RewriteEnabled` and delete `TestOALL8RewriteIsDisabled`**, adding
    a live e2e case that drives the OALL8 client through a tagging proxy and reads
    the tag back out of `V$SQL`, as the three shipped shapes already do.
+
+## Blocked — step 1 was attempted and the client does not appear to exist
+
+Measured 2026-09-19. Nothing below step 1 was done, because step 1 says not to.
+
+**What was driven.** `ojdbc6 11.2.0.4` is the oldest Oracle driver still reachable
+from a package repository (Maven Central,
+`com.oracle.database.jdbc:ojdbc6:11.2.0.4`; the `com.oracle:ojdbc14:10.2.0.4.0`
+coordinate that looks like a 10.2 driver is a **554-byte licence stub**, not a
+jar). Oracle 23ai Free still accepts it. It was recorded through the repo's own
+capture relay — the harness is committed as
+`internal/proxy/oracle/capture_legacy_oall8_test.go`, reproducible with
+`OJDBC6_JAR=… go test -tags capture -run TestCapture_LegacyOALL8 ./internal/proxy/oracle/`.
+
+**Result: a genuinely pre-v315 session that sends no OALL8.**
+
+- The session negotiates **TNS version 310** (ACCEPT payload `01 36`), below the
+  315 the rest of this tree calls the boundary.
+- Every statement it sends is the piggyback exec dbbat already covers: three
+  statement frames, all `compressed/bare` — `03 5e` for the first statement,
+  `11 69`-stapled for the rest. **Zero frames start with `0x0E`.**
+
+**And Oracle's own driver says `0x0E` is not what OALL8 means.** In that same
+jar, `oracle.jdbc.driver.T4C8Oall` — the class named after OALL8 — constructs a
+`T4CTTIfun` of message type **3** with function code **94 = 0x5E**
+(`javap -c` on the constructor). So "OALL8" in Oracle's vocabulary *is* the
+`03 5e` frame this package already locates, rewrites and proves live; the
+`TTCFuncOALL8 = 0x0E` constant here names some other, older op, and
+`decodeOALL8`'s layout for it remains a guess nothing has ever corroborated.
+
+**What would unblock it**, and why none of it was available:
+
+- a pre-v315 *thin* client: falsified above — pre-v315 does not imply `0x0E`, so
+  "pin a thin client to a low TTC version" is not a route to this frame;
+- an Oracle 9i/10g client (OCI media or `classes12.jar`): Oracle-licensed, not on
+  Maven Central, not installable from any package manager here, and a client that
+  old is below what either available server (23ai Free, XE 18.4) accepts.
+
+**So the honest next decision is not "capture it", it is "keep it or delete it".**
+Either someone produces a `0x0E` frame from a real client and this spec resumes
+at step 2, or the op is accepted as unidentified and the whole `0x0E` statement
+path — decoder, rewriter, gate — is deleted rather than carried as defence in
+depth against a frame no evidence says exists. The flag stays off either way; it
+costs no coverage today.
+
+**A real bug fell out of the attempt** and is filed separately:
+`specs/todos/2026-09-19-02-oracle-piggyback-exec-5e-reexec-ungated.md`. ojdbc6
+re-executes a prepared statement as `03 5e` **with no statement text**, a shape
+`IsPiggybackCursorReexec` does not recognise (it knows only sub-ops `0x4e` and
+`0x04`) and `handlePiggybackExec` forwards ungated on its decode failure. That is
+`read_only`, `block_ddl` and every approval pattern skipped from the second
+execution on — the hole the SQL-less `OALL8` path exists to close, open on the
+op clients actually use.

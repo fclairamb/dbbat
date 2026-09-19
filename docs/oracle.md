@@ -421,6 +421,35 @@ was originally written against — that is the legacy pre-v315 framing of the sa
 idea. It is still handled (`decodeOALL8` → `OALL8NoSQLError`), kept as defence in
 depth for older clients, but it was not observed from any client tested here.
 
+###### And an actually pre-v315 client does not send it either
+
+Measured 2026-09-19 with **ojdbc6 11.2.0.4** (Maven Central,
+`com.oracle.database.jdbc:ojdbc6`, the oldest Oracle driver still reachable from
+a package repository — the `com.oracle:ojdbc14:10.2.0.4.0` coordinate is a
+554-byte licence stub) against Oracle 23ai Free, recorded with
+`internal/proxy/oracle/capture_legacy_oall8_test.go`:
+
+- the session negotiates **TNS version 310** (ACCEPT payload `01 36`), genuinely
+  below the 315 boundary, and
+- every statement it sends is still the piggyback exec — `03 5e`, and the
+  `11 69`-stapled twin — in the `compressed/bare` shape the rewriter already
+  covers. **No frame starts with `0x0E`.**
+
+Oracle's own driver says the same thing about the name: in that jar,
+`oracle.jdbc.driver.T4C8Oall` — the class named after OALL8 — builds a
+`T4CTTIfun` of message type 3 with function code 94, i.e. **`03 5e`**. So the op
+Oracle calls OALL8 is the one dbbat already locates, rewrites and proves live,
+and `TTCFuncOALL8 = 0x0E` here names an older op that no observed client emits.
+`decodeOALL8`'s layout for it has never been corroborated by a recording, which
+is why `oall8RewriteEnabled` is off — see
+`specs/todos/2026-09-16-11-oracle-tag-oall8-rewrite.md`.
+
+That session did turn up a frame worth fixing: ojdbc6 re-executes a prepared
+statement as `03 5e` **with no statement text**, which is neither of the two
+re-execution shapes below, and `handlePiggybackExec` forwards it ungated on the
+decode failure —
+`specs/todos/2026-09-19-02-oracle-piggyback-exec-5e-reexec-ungated.md`.
+
 **Those two frames are the whole gate.** There used to be a third reading, and
 the intent behind it was sound — *a fetch arriving with no query in flight is a
 re-execution, so gate it like a statement, while a fetch continuing a query
