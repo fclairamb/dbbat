@@ -163,6 +163,11 @@ func IsPiggybackExecSQL(ttcPayload []byte) bool {
 // docs/oracle.md): sub-op 0x4e for a SELECT, sub-op 0x04 for anything else.
 // The SQL-less OALL8 that decodeOALL8 reports is the same idea in the legacy
 // (pre-v315) framing.
+//
+// It is not the whole set, and reading it as such is what left a hole: ojdbc6
+// re-executes under the *parse* sub-op 0x5e with the statement omitted, which no
+// sub-op test can see. That frame is classified by its declared statement length
+// instead — execNoStatementCursor.
 func IsPiggybackCursorReexec(ttcPayload []byte) bool {
 	if len(ttcPayload) < 2 {
 		return false

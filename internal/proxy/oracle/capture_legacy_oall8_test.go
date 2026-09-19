@@ -31,13 +31,16 @@
 // `03 5e` frame dbbat already tags, and nothing observed anywhere emits a
 // statement frame whose first byte is 0x0E.
 //
-// The recording is deliberately **not** a corpus fixture, which is why the
-// default output path is a temporary file rather than `testdata/`: the session
-// also carries an ojdbc6 prepared-statement re-execution sent as `03 5e` with no
-// statement text, which `frameCarriesStatement` counts and the locator (rightly)
-// refuses — so dropping the file into `testdata/` trips the coverage floor in
-// `TestSurveyStatementRewriteCorpus`. That frame is its own finding; see
-// `specs/todos/2026-09-19-02-oracle-piggyback-exec-5e-reexec-ungated.md`.
+// The recording **is** a corpus fixture — `testdata/ojdbc6_legacy.pcapng`, kept
+// under `CAPTURE_OUT_LEGACY_OALL8` if you want it elsewhere. It could not be one
+// at first: the session also carries an ojdbc6 prepared-statement re-execution
+// sent as `03 5e` with no statement text, which `frameCarriesStatement` counted
+// as a statement frame while the locator (rightly) found nothing in it to
+// locate, so the file tripped the coverage floor in
+// `TestSurveyStatementRewriteCorpus`. That frame turned out to be its own
+// finding — it was going upstream ungated — and fixing the classifier
+// (`execNoStatementCursor`) fixed the survey too. See
+// `exec_no_statement_reexec_test.go` and docs/oracle.md, "Cursor re-execution".
 package oracle
 
 import (
@@ -100,7 +103,7 @@ func TestCapture_LegacyOALL8(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
 	outPath := captureEnv("CAPTURE_OUT_LEGACY_OALL8",
-		filepath.Join(os.TempDir(), "ojdbc6_legacy.pcapng"))
+		filepath.Join("testdata", "ojdbc6_legacy.pcapng"))
 
 	jar := captureEnv("OJDBC6_JAR", "")
 	if jar == "" {

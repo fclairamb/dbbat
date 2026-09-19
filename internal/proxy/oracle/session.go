@@ -2312,9 +2312,9 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 		// third re-execution reading here — "a fetch arriving with no query in
 		// flight is a re-execution" — but it was written against a layout no
 		// Oracle client sends (see the note on TTCFuncOFETCH in ttc.go), so it
-		// only ever fired on misparsed piggybacks. It is gone; the two real
-		// re-execution frames (the SQL-less OALL8 and the 03/0x4e|0x04
-		// piggyback) are unaffected.
+		// only ever fired on misparsed piggybacks. It is gone; the three real
+		// re-execution frames (the SQL-less OALL8, the 03/0x4e|0x04 piggyback,
+		// and the 03 5e that declares no statement) are unaffected.
 		//
 		// Its companion guarantee outlives it and needs no guard: "a fetch that
 		// merely continues a result set already streaming is never re-gated,

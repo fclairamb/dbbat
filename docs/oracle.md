@@ -411,10 +411,36 @@ go test -tags capture -timeout 300s -run 'TestCapture_.*Reexec' -v ./internal/pr
 | go-ora v3 (prepared INSERT) | **yes** | func `0x03` sub `0x04` | `testdata/go_ora_dml_cursor_reexec.pcapng` |
 | python-oracledb thin (plain `cur.execute()` loop) | **yes** — no prepared-statement API needed, its per-connection statement cache does it | func `0x03` sub `0x4e` | `testdata/python_thin_cursor_reexec.pcapng` |
 | JDBC thin / ojdbc11 (cached `PreparedStatement`) | **yes** | func `0x03` sub `0x4e` | `testdata/jdbc_thin_cursor_reexec.pcapng` |
+| JDBC thin / **ojdbc6 11.2.0.4** (`PreparedStatement`) | **yes**, and not under either sub-op above | func `0x03` sub **`0x5e`**, statement length `0` | `testdata/ojdbc6_legacy.pcapng` |
 | sqlplus / OCI thick | **no** — resends the full statement text on every run | func `0x11` sub `0x69` with SQL | `testdata/sqlplus_cursor_reexec.pcapng` |
 
 So this is not an exotic shape: it is what every thin client does by default, and
 python-oracledb reaches it without the caller asking for a prepared statement.
+
+The ojdbc6 row is the counter-example that broke the "every thin client sends
+`0x4e`" reading, and it is worth reading as a warning about sub-op tables in
+general. That driver re-executes under the **parse** op, `03 5e`, with the
+statement simply omitted — nothing in the header says "re-execution" except its
+length field reading zero:
+
+```
+03 5e 06 02 80 60 01 03 00 00 01 01 0d 00 …   58 bytes, no SQL
+      ^seq  ^options  ^cursor 3 ^flag ^sqlLen = 0
+```
+
+`IsPiggybackExecSQL` said yes (it tests the sub-op byte and nothing else), the
+statement decoders found no statement, and that combination used to mean
+"undecodable, forward it" — so from the **second** execution of a prepared
+statement on, `read_only`, `block_ddl`, `ValidateOracleQuery`, the approval
+patterns, the `queries` row and the quota all applied to the parse alone. The
+two cases are now told apart on the wire rather than by sub-op
+(`execNoStatementCursor`): a clean zero-length header plus a plausible cursor id
+becomes `PiggybackExecNoSQLError`, the counterpart of `OALL8NoSQLError`, and both
+execute handlers hand it to `handleCursorReexec`. The reading is consulted only
+once the statement decoders have found nothing, and refuses the OCI wide header
+and cursor `0`, so no frame that yields a statement today changes classification
+— measured across the whole corpus in
+`TestOJDBC6ReexecDoesNotDisturbTheParsePath`.
 
 **None of them sends the SQL-less `OALL8` (func `0x0E`, SQL length 0)** the gate
 was originally written against — that is the legacy pre-v315 framing of the same
@@ -444,13 +470,22 @@ and `TTCFuncOALL8 = 0x0E` here names an older op that no observed client emits.
 is why `oall8RewriteEnabled` is off — see
 `specs/todos/2026-09-16-11-oracle-tag-oall8-rewrite.md`.
 
-That session did turn up a frame worth fixing: ojdbc6 re-executes a prepared
-statement as `03 5e` **with no statement text**, which is neither of the two
-re-execution shapes below, and `handlePiggybackExec` forwards it ungated on the
-decode failure —
-`specs/todos/2026-09-19-02-oracle-piggyback-exec-5e-reexec-ungated.md`.
+That session did turn up a frame worth fixing, and it is now fixed: ojdbc6
+re-executes a prepared statement as `03 5e` **with no statement text**, which is
+neither of the two re-execution shapes below, and `handlePiggybackExec` used to
+forward it ungated on the decode failure. It is the third gated frame — see the
+ojdbc6 row and the paragraph under the client table above. The recording is a
+corpus fixture (`testdata/ojdbc6_legacy.pcapng`), which it could not be while
+`frameCarriesStatement` counted that frame as statement-carrying and the locator
+rightly found nothing in it to locate.
 
-**Those two frames are the whole gate.** There used to be a third reading, and
+Adding it to the corpus caught one more thing, unrelated to the gate: a pre-v315
+Accept is **32 bytes end to end**, so `acceptNegotiatedSDU` requiring room for
+the v315+ ub4 at `[32:36]` refused an Accept whose legacy ub2 at `[12:14]` says
+8192 plainly. The length guard is now the legacy field's and the ub4 is
+bounds-checked where it is read, so an ojdbc6 session can be tagged at all.
+
+**Three frames are the whole gate.** There used to be a fourth reading, and
 the intent behind it was sound — *a fetch arriving with no query in flight is a
 re-execution, so gate it like a statement, while a fetch continuing a query
 already in flight is left alone*. What it was wired to was not: the decoder
@@ -2145,7 +2180,7 @@ all five protocols.
 ## Known Limitations
 
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
-- **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the two re-execution frames that are real (the SQL-less `OALL8` and the `03/0x4e|0x04` piggyback) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
+- **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the three re-execution frames that are real (the SQL-less `OALL8`, the `03/0x4e|0x04` piggyback, and the `03 5e` whose statement length is zero — ojdbc6's) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
 - **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. That now includes a failure raised **mid-fetch**, once column definitions are decoded — measured at 14 900 rows into a 20 000-row fetch on **four** clients, and accepted there only when the OER also names the cursor whose rows are streaming; see "A failure raised mid-fetch". "Every client" includes the OCI ones (sqlplus, Instant Client, SQL*Developer over OCI) only since `decodeOERFieldsAtLayout`: they marshal the summary object fixed-width, dbbat read TTC compressed integers only, and until then *every* failing statement on those clients — mid-fetch or not — was recorded as a success. A **successful** OCI call is a separate reading again, added later still (`decodeFixedStatusOERAt`): the standalone summary object that ends every OCI fetch reports ORA-01403 with a bare `CallStatus 0x1`, so until it was read, an OCI statement was completed by the *next* one's `flushPendingQuery` — no `rows_affected`, and a `duration_ms` measuring the client's think time. See "a successful call on an OCI client" for the predicate and its measured bounds. What is still not covered is a mid-fetch failure whose OER names a *different* cursor (none has been observed; it fails closed to the old no-error behaviour and logs a DEBUG line), any mid-fetch failure on a client not captured, and — the one to know about — **an OCI DML's `rows_affected`, which is still NULL**: its summary object is *embedded in a Response* with a populated logical-rowid DLC, a third fixed-width layout the RetCode anchor refuses (`sqlplus_midfetch_fail.pcapng` packet #31), so the statement is closed by the next one's flush. That is out of scope of the status reading above and tracked by the gated `TestIntegration_DMLRowCountLandsFromItsOwnOEROCI`; see "What is still NULL: an OCI DML's `rows_affected`". See `ttc_oer.go`.

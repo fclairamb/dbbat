@@ -403,10 +403,11 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 }
 
 // refuseUnknownCursor decides what to do with a re-execution naming a cursor
-// dbbat never saw parsed. Both frames that can only be identified by cursor id
-// route through here — the SQL-less OALL8 and the piggyback re-execution every
-// modern thin client sends — so the wire op a client picks cannot change the
-// answer. The statement it would run is unknown, so:
+// dbbat never saw parsed. All three frames that can only be identified by cursor
+// id route through here — the SQL-less OALL8, the piggyback re-execution every
+// modern thin client sends, and the `03 5e` declaring no statement that ojdbc6
+// sends (execNoStatementCursor) — so the wire op a client picks cannot change
+// the answer. The statement it would run is unknown, so:
 //
 //   - under a grant carrying statement-shaped controls, it fails closed — a
 //     restrictive grant must not be bypassable by an execution the proxy cannot
@@ -476,8 +477,9 @@ func (s *session) hasStatementControls() bool {
 // pending query for this execution. Same order as the SQL-carrying path, so a
 // re-execution is enforced exactly like the parse that created the cursor.
 //
-// This is the single quota-check insertion point for both re-execution frames:
-// the SQL-less OALL8 (handleCursorReexec) and the piggyback re-execution
+// This is the single quota-check insertion point for every re-execution frame:
+// the SQL-less OALL8 and the statement-less `03 5e` (both via
+// handleCursorReexec) and the piggyback re-execution
 // (handlePiggybackReexec). Each resolves its cursor before delegating here,
 // which is deliberate — a cursor dbbat never saw parsed keeps answering
 // refuseUnknownCursor even when the grant is also exhausted. That refusal is
