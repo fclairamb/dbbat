@@ -88,3 +88,77 @@ id that cannot be learned"), which is honest but not a fix.
 - `internal/proxy/oracle/cursor_learning_integration_test.go` — both measurements
 - `docs/oracle.md` — "The one cursor id that cannot be learned: a REF cursor"
 - `docs/approvals.md` — the untracked-cursor bullet
+
+## Implementation Plan
+
+### What the recordings say
+
+Four fixtures were recorded against Oracle Free 23ai before a line of decoder
+was written (`internal/proxy/oracle/capture_refcursor_test.go`):
+`go_ora_refcursor.pcapng`, `python_thin_refcursor.pcapng`,
+`jdbc_thin_refcursor.pcapng`, `sqlplus_refcursor.pcapng`. All four call the same
+procedure three times, so the server hands out a **fresh** id per `OPEN` and a
+locator that latched onto the first would be caught.
+
+The id is not in an OER. It is the last field of a **REF cursor descriptor**
+inside the call's bind-output message (TTC message type `0x07`), and that
+descriptor is byte-for-byte the describe body dbbat already parses
+(`describe.go`), plus a trailing cursor id — `RefCursor.load` and `case 16:` in
+go-ora's `command.go` are the same field list:
+
+```
+[0x07]                      bind-output message
+  len        byte
+  maxRowSize cint
+  colCount   cint
+  [1 byte]   colCount x column-describe record   (parseColumnDescribe)
+  dlc
+  cint cint          TTCVersion >= 3
+  cint cint          TTCVersion >= 4
+  dlc                TTCVersion >= 5
+  cursorID   cint    <- the REF cursor
+```
+
+On the **first** call the `0x07` message is preceded by the IO-vector message
+`0x0b` (bind directions); on a re-execution it is the payload's leading byte.
+Both were walked by hand and the id checked against the very next client frame —
+the drive's `03 5e … 02 80 50 01 <id>` — for every recording: go-ora 2 then 7,
+python-thin 4, jdbc-thin 4. The OER of the same response names a *different*
+cursor (6 for go-ora's second call): that one is the call's own, which
+`learnCursorID` already reads.
+
+sqlplus marshals the identical field list in the **wide/fixed-width** OCI
+encoding (4-byte little-endian instead of compressed ints), which the compressed
+walk refuses at its first field. That stays a documented gap rather than a
+guessed second decoder.
+
+### Steps
+
+1. `internal/proxy/oracle/refcursor_bind.go` — `refCursorIDsInBindOutput`, a
+   deterministic walk (never a scan): the `0x0b` IO vector if present, then the
+   `0x07` body, then one descriptor per out-bind, reusing `dcursor` and
+   `parseColumnDescribe` (classic tail first, then modern, exactly as
+   `parseColumnDescribes` does). Bounds: every column type must be a known
+   TNSType, the id must be a plausible 16-bit cursor, and the walk must **land**
+   on a terminator (end of payload, or an OER `0x04` / Response `0x08` message
+   byte, optionally past the one trailing cint PL/SQL appends). A walk that does
+   not land cleanly learns nothing.
+2. `refcursor_bind_test.go` — replay all four fixtures, asserting the exact ids
+   against the ids the next client frame drives, and asserting the OCI recording
+   yields none.
+3. `intercept.go` — `learnRefCursorIDs`, called from `interceptUpstreamMessage`
+   next to `learnCursorID`. It runs only while the pending statement is a PL/SQL
+   call (`BEGIN`/`DECLARE`/`CALL`) that is not itself a REF-cursor entry, and
+   only until it has learned something for that call.
+4. The learned cursor carries the **call**'s SQL plus `refCursorNote` — a SQL
+   comment, like `partialStatementNote`, so the validators and approval patterns
+   match what they would have matched anyway while `/queries` stops implying the
+   inner `SELECT` was on the wire.
+5. `regateCursor` is untouched: the entry is an ordinary tracker entry, so a
+   drive resolves and is re-gated against the call.
+6. Tests: invert `refCursorDrives == untrackedDuringRefCursor` in both
+   `TestIntegration_CursorIDLearningMissRate` measurements, rejoin the split
+   python script, add a REF cursor under `read_only` next to
+   `TestIntegration_CursorReexecUnderReadOnlyIsNotBrokenByTheGate`, and confirm
+   `trackerPeakBound` still holds. `docs/oracle.md` and `docs/approvals.md` lose
+   the "cannot be learned" language.
