@@ -317,11 +317,19 @@ func execNoStatementCursorAt(body []byte) (uint16, bool) {
 		return 0, false
 	}
 
-	// The OCI wide header is not read here: no recording carries a SQL-less one,
-	// and its cursor id does not sit where the thin walk below looks. A frame
-	// that fits it is left alone rather than gated against a guessed cursor.
+	// A wide header that declares a statement is a parse, not a re-execution —
+	// the same answer the thin walk gives for a non-zero length, and it must be
+	// taken before the SQL-less wide reading below, whose own guard is the
+	// absence of that statement.
 	if _, wide := execSQLLengthWideField(body); wide {
 		return 0, false
+	}
+
+	// The OCI wide header carries its cursor id in the header prefix rather than
+	// where the thin walk looks, so it gets its own reading. See
+	// execWideNoStatementCursor.
+	if cursorID, ok := execWideNoStatementCursor(body); ok {
+		return cursorID, true
 	}
 
 	header, ok := execThinHeader(body)
@@ -336,6 +344,83 @@ func execNoStatementCursorAt(body []byte) (uint16, bool) {
 	}
 
 	return uint16(header.cursorID), true
+}
+
+// The OCI wide exec header, by offset. execSQLLengthWideField and
+// execWideNoStatementCursor read different fields of the same header, so the
+// layout is written once: a second copy of these numbers is how the gate would
+// come to read one field while the length walk validates another.
+//
+//	[0..2]   03 5e seq
+//	[3]      0x01                  constant
+//	[4]      seq+1                 the NEXT TTC message's sequence number
+//	[5..8]   options               uint32 little-endian
+//	[9..12]  cursorID              uint32 little-endian   <- the re-execution
+//	[13..20] fe x8                 the statement's pointer sentinel
+//	[21..24] sqlLen*3              uint32 little-endian   <- the parse
+const (
+	execWideCursorIDAt = 9
+	execWideSentinelAt = 13
+	execWideSQLLenAt   = execWideSentinelAt + 8
+)
+
+// execWideNoStatementCursor reports the cursor id of an OCI (wide) execute op
+// that declares **no statement** — sqlplus, Instant Client or SQL*Developer
+// over OCI re-running a cursor it already parsed, which is how every `PRINT rc`
+// of a REF cursor and every repeat of an ordinary prepared statement reaches
+// the wire on those clients.
+//
+// It is the wide twin of the thin reading in execNoStatementCursorAt, and it
+// exists because that reading refused this header outright: the frame decoded
+// as "could not find SQL text", a decode failure is forwarded ungated, and so
+// from the second execution of any cursor on an OCI session read_only,
+// block_ddl, the approval patterns, the `queries` row and the quota all applied
+// to the parse alone.
+//
+// Where the id sits was measured, not guessed. The eight bytes after the pad —
+// which execSQLLengthWideField only ever had to skip, and so calls "options" —
+// are two little-endian uint32s, and the second is the cursor id. Two witnesses
+// agree, independently of this walk:
+//
+//   - across the whole recorded corpus, that field is zero on every wide exec
+//     that carries a statement (a parse asks the server to allocate a cursor)
+//     and non-zero on exactly the two that carry none;
+//   - those two ids, 2 and 5, are the ids refCursorIDsInBindOutput reads out of
+//     the call responses recorded beside them in the same session and in the
+//     same order — a part of the wire this walk never touches. See
+//     TestDumpReplay_OCIRefCursorIDsMatchTheCursorsTheClientDrives.
+//
+// The reading is as narrow as the thin one, for the same reason: a false
+// positive refuses a re-execution on a client that was working. The header pad
+// must fit, the statement's pointer sentinel must be **absent** (a SQL-less
+// frame writes zeros where a parse writes `fe x8`), and the id must be plausible
+// — non-zero, because zero is a parse, and within cursorReexecMaxID.
+func execWideNoStatementCursor(body []byte) (uint16, bool) {
+	if len(body) < execWideSQLLenAt {
+		return 0, false
+	}
+
+	if body[3] != closeCursorsPointer || body[4] != body[2]+1 {
+		return 0, false
+	}
+
+	// Zeros where a statement-carrying frame puts the sentinel. Requiring them
+	// rather than merely taking execSQLLengthWideField's refusal is what keeps a
+	// header this walk does not understand — a truncated one, or a shape a future
+	// client invents — from being gated against whatever those four bytes hold.
+	for i := range closeCursorsWideSentinel {
+		if body[execWideSentinelAt+i] != 0 {
+			return 0, false
+		}
+	}
+
+	cursorID := uint32(body[execWideCursorIDAt]) | uint32(body[execWideCursorIDAt+1])<<8 |
+		uint32(body[execWideCursorIDAt+2])<<16 | uint32(body[execWideCursorIDAt+3])<<24
+	if cursorID == 0 || cursorID > cursorReexecMaxID {
+		return 0, false
+	}
+
+	return uint16(cursorID), true
 }
 
 // execSQLLengthWideField reads the statement length out of the OCI wide exec header.
@@ -361,9 +446,8 @@ const wideCharWidth = 3
 // execSQLLengthField does: a decoder needs the number, an encoder needs the span.
 func execSQLLengthWideField(body []byte) (execSQLLenField, bool) {
 	const (
-		optionsLen   = 8
-		sentinelAt   = 5 + optionsLen
-		sqlLenAt     = sentinelAt + 8
+		sentinelAt   = execWideSentinelAt
+		sqlLenAt     = execWideSQLLenAt
 		minWideBytes = sqlLenAt + 4
 	)
 
