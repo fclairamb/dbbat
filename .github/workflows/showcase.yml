@@ -48,7 +48,7 @@ jobs:
   # ===========================================================================
   generate:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
     permissions:
       contents: write
@@ -136,7 +136,7 @@ jobs:
   # ===========================================================================
   rot-guard:
     if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please-')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     continue-on-error: true # informational only — must never block a merge
     steps:
