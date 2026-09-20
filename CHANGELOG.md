@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.29.0](https://github.com/fclairamb/dbbat/compare/v0.28.0...v0.29.0) (2026-09-16)
+
+
+### Features
+
+* per-statement time limits, session termination, statement tagging, and connection attribution
+
+  Triggered by an incident where an unbounded AI-agent statement lagged a production replica 20
+  minutes with no way for an admin to end it.
+
+  **Per-statement time limits** (`DBB_STATEMENT_TIMEOUT`, with a per-grant-definition override):
+  a server-side hint plus a proxy-side watchdog across all five protocols, cancelling the
+  statement upstream before disconnecting the session.
+
+  **Terminate a live session** (`POST /connections/{uid}/terminate`, admin only) — and a fix for
+  a real pre-existing bug: revoking a grant only killed sessions on the replica that served the
+  API call, never the others behind the same load balancer.
+
+  **Slack alerts** on a dbbat-initiated termination (timeout, admin action, quota), coalesced so
+  a reconnect loop can't flood the channel.
+
+  **Connection attribution**: the upstream session name now carries a `c=<connection-uid>` tag
+  and `GET /connections?uid_suffix=` looks it up, so a DBA staring at `pg_stat_activity` can jump
+  straight to the dbbat connection page. MongoDB's own client-declared app name is now forwarded
+  upstream instead of being dropped.
+
+  **Statement tagging** (`DBB_QUERY_TAGGING`, opt-in, off by default): a sqlcommenter-style
+  comment naming the dbbat user/connection/grant, prepended to statements on PostgreSQL, MySQL
+  and MongoDB's `comment` field, so RDS Performance Insights / `pg_stat_statements` / the Atlas
+  profiler can attribute load correctly instead of everything showing as the one shared database
+  role. The `queries` table, the audit chain, and approval-hold pattern matching always see the
+  client's own text — only the wire carries the tag.
+
+  **Oracle**: measured on a real instance that a per-connection tag costs one unbounded cursor
+  per session while a per-user tag plateaus at one per identity, then built the wire-level
+  statement rewriter this required — Oracle relays client bytes untouched everywhere else —
+  behind `DBB_QUERY_TAGGING_ORACLE=user`, off by default.
+
+  ([#388](https://github.com/fclairamb/dbbat/issues/388)) ([4a0fdcf](https://github.com/fclairamb/dbbat/commit/4a0fdcf7a3db650575ff71d31d1aa158561bc903))
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/gopacket/gopacket to v1.7.2 ([#381](https://github.com/fclairamb/dbbat/issues/381)) ([e734c59](https://github.com/fclairamb/dbbat/commit/e734c59cfe6a8b8c23d9bc461cd07aa39d568d43))
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.8.0 ([#379](https://github.com/fclairamb/dbbat/issues/379)) ([4d616b5](https://github.com/fclairamb/dbbat/commit/4d616b57bcc9ffe571cc721cfd0006b48d9161ce))
+* **deps:** update module github.com/urfave/cli/v3 to v3.12.0 ([#380](https://github.com/fclairamb/dbbat/issues/380)) ([e792094](https://github.com/fclairamb/dbbat/commit/e7920946833c7a4cfd3015cbc1b3f300c7341497))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.9.1 ([#377](https://github.com/fclairamb/dbbat/issues/377)) ([e49d833](https://github.com/fclairamb/dbbat/commit/e49d833a055cb494b247f2b6ee21f817a0a65c1b))
+
 ## [0.28.0](https://github.com/fclairamb/dbbat/compare/v0.27.0...v0.28.0) (2026-09-09)
 
 
