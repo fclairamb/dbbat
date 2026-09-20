@@ -515,10 +515,14 @@ sizes — the same split the AUTH key/value fields have). The reading requires a
 **sixteen** bytes where the sentinel and that length go to be zero, so the three
 parses recorded in the same session stay parses.
 
-Which of the three readings a session gets is asked of the shape it learned off
-its own AUTH exchange (`oerShape.fixedWidth64`, seeded by `usesWide64OpHeader`
-on the client's Phase 1), never sniffed from the frame. That is not tidiness:
-the three exec headers are each other's near-misses, and a frame offered two
+Which of the three readings a session gets is asked of
+**`session.clientWide64Encoding`** — read off the client's own AUTH Phase 1 by
+`usesWide64OpHeader`, before any statement runs — and never sniffed from the
+frame. It is that flag rather than `oerShape.fixedWidth64` because an exec
+header is a *client* frame: the shape's flag describes the **server**'s summary
+object, learned later and from the other direction, and it is what the
+bind-output walk keys on instead. That split is not tidiness either way: the
+three exec headers are each other's near-misses, and a frame offered two
 layouts is a frame with two chances to yield a plausible cursor id — which,
 resolved, gates it against another statement's grant and text.
 

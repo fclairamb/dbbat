@@ -313,13 +313,18 @@ const ociDescribeQuery = `SELECT CAST(1 AS NUMBER(10,2)) AS n2,
        dbbat_cap_obj(1, 'x') AS obj
   FROM dual;`
 
-// oci64DescribeFixture is the 64-bit dialect's describe evidence, and it is not
-// a nicety: the fixed-width column record is *wider* in that dialect, and every
-// field whose width differs is zero-valued in an ordinary two-column REF cursor.
-// The type-rich query above is what turns those runs of zeros into measurable
-// boundaries — a charset id of 873, a maximum character length of 4000, a
-// collation id of 16382, a 16-byte object type OID — which is what
-// describeColumnLayoutWide64 is pinned against.
+// oci64DescribeFixture is the 64-bit dialect's describe evidence. **Nothing
+// reads it yet**, and that is the honest status rather than an oversight: the
+// fixed-width column record is wider in that dialect, and the recording is what
+// turns the field boundaries from runs of zeros into measurable ones — a
+// charset id of 873, a maximum character length of 4000, a collation id of
+// 16382, a 16-byte object type OID. It is not enough on its own, because one
+// column carries all three of the variable-length fields at once, so the
+// walk that would consume it is deferred together with the columns it needs:
+// specs/todos/2026-09-21-01-oracle-wide64-column-record-layout.md, which starts
+// by extending the query above. It is recorded now because it comes free with
+// the session that records everything else, and re-recording it later would
+// mean re-recording all of them.
 const oci64DescribeFixture = "testdata/oci64_describe.hex"
 
 // ociDescribeObjectType is the object type ociDescribeQuery's last column needs.
