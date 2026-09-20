@@ -68,7 +68,7 @@ func recordedRefCursorIDs(t *testing.T, name string) []uint16 {
 	ids := make([]uint16, 0, len(payloads))
 
 	for _, ttc := range payloads {
-		ids = append(ids, refCursorIDsInBindOutput(ttc)...)
+		ids = append(ids, refCursorIDsInBindOutput(thinOERShape(), ttc)...)
 	}
 
 	return ids
@@ -173,7 +173,7 @@ func TestOCIRefCursorBindOutputYieldsNoID(t *testing.T) {
 		require.Equalf(t, byte(ttcMsgIOVector), ttc[0],
 			"frame %d must be a call's bind-output response", i)
 
-		assert.Emptyf(t, refCursorIDsInBindOutput(ttc),
+		assert.Emptyf(t, refCursorIDsInBindOutput(thinOERShape(), ttc),
 			"frame %d: the OCI/wide encoding must yield no id at all rather than a mis-decoded one", i)
 	}
 }
@@ -257,11 +257,11 @@ func TestScalarOutBindsYieldNoRefCursorID(t *testing.T) {
 			bindOutputs := 0
 
 			for _, ttc := range serverTTCPayloads(t, name) {
-				if _, ok := bindOutputBodyStart(ttc); ok {
+				if _, ok := bindOutputBodyStart(ttc, false); ok {
 					bindOutputs++
 				}
 
-				assert.Emptyf(t, refCursorIDsInBindOutput(ttc),
+				assert.Emptyf(t, refCursorIDsInBindOutput(thinOERShape(), ttc),
 					"a call with only scalar OUT parameters must yield no REF cursor id: % x", ttc)
 			}
 
@@ -279,7 +279,7 @@ func TestRefCursorIDsInBindOutput_RefusesWhatItCannotAccountFor(t *testing.T) {
 
 	good := recordedGoOraRefCursorDescriptor()
 
-	require.Equal(t, []uint16{7}, refCursorIDsInBindOutput(good),
+	require.Equal(t, []uint16{7}, refCursorIDsInBindOutput(thinOERShape(), good),
 		"the fixture this table mutates must itself decode")
 
 	truncated := func(n int) []byte { return good[:len(good)-n] }
@@ -314,7 +314,7 @@ func TestRefCursorIDsInBindOutput_RefusesWhatItCannotAccountFor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Empty(t, refCursorIDsInBindOutput(tc.payload))
+			assert.Empty(t, refCursorIDsInBindOutput(thinOERShape(), tc.payload))
 		})
 	}
 }
@@ -333,13 +333,13 @@ func TestRefCursorIDsInBindOutput_RefusesAZeroCursorID(t *testing.T) {
 	t.Parallel()
 
 	good := recordedGoOraRefCursorDescriptor()
-	require.Equal(t, []uint16{7}, refCursorIDsInBindOutput(good), "the fixture must itself decode")
+	require.Equal(t, []uint16{7}, refCursorIDsInBindOutput(thinOERShape(), good), "the fixture must itself decode")
 
 	zeroed := make([]byte, len(good))
 	copy(zeroed, good)
 	zeroed[len(good)-7] = 0x00 // the cursor id's length byte: a zero-length cint is 0
 
-	assert.Empty(t, refCursorIDsInBindOutput(zeroed))
+	assert.Empty(t, refCursorIDsInBindOutput(thinOERShape(), zeroed))
 }
 
 // TestRefCursorIDsInBindOutput_RefusesADescriptorWithNoColumns pins the bound
@@ -375,7 +375,7 @@ func TestRefCursorIDsInBindOutput_RefusesADescriptorWithNoColumns(t *testing.T) 
 		0x04, // and it lands on the summary object
 	}
 
-	assert.Empty(t, refCursorIDsInBindOutput(payload),
+	assert.Empty(t, refCursorIDsInBindOutput(thinOERShape(), payload),
 		"a descriptor with no columns offers no alignment proof at all, so its id is not trustworthy")
 }
 

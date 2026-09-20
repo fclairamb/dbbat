@@ -69,7 +69,7 @@ func capturedRowStreamPayloads(t *testing.T) ([]columnDef, [][]byte) {
 				continue
 			}
 
-			result := decodeQueryResultV2(ttcPayload)
+			result := decodeQueryResultV2(ttcPayload, false)
 			if result == nil || len(result.Columns) == 0 {
 				continue
 			}

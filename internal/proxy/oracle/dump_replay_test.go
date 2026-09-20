@@ -546,7 +546,7 @@ func TestDumpReplay_QueryResultParsing(t *testing.T) {
 
 				case TTCFuncQueryResult:
 					queryResultCount++
-					result := decodeQueryResultV2(ttcPayload)
+					result := decodeQueryResultV2(ttcPayload, false)
 					if result != nil {
 						columnsFound += len(result.Columns)
 						rowsFound += len(result.Rows)
@@ -606,7 +606,7 @@ func TestDumpReplay_NoTNSParsePanics(t *testing.T) {
 				case TTCFuncResponse:
 					_, _ = decodeTTCResponse(ttcPayload)
 				case TTCFuncQueryResult:
-					_ = decodeQueryResultV2(ttcPayload)
+					_ = decodeQueryResultV2(ttcPayload, false)
 				case TTCFuncPiggyback:
 					if IsPiggybackExecSQL(ttcPayload) {
 						_, _ = decodePiggybackExecSQL(ttcPayload)

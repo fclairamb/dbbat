@@ -89,7 +89,7 @@ func TestParseColumnDescribes(t *testing.T) {
 			td := loadTestDump(t, tc.file)
 			ttc := firstQueryResultFor(t, td, tc.marker)
 
-			got := parseColumnDescribes(ttc)
+			got := parseColumnDescribes(ttc, false)
 			require.NotNil(t, got, "parser should succeed on a real describe")
 			assert.Equal(t, tc.want, got)
 		})
@@ -120,7 +120,7 @@ func TestDecodeQueryResultV2_RealColumnNames(t *testing.T) {
 			td := loadTestDump(t, tc.file)
 			ttc := firstQueryResultFor(t, td, tc.marker)
 
-			result := decodeQueryResultV2(ttc)
+			result := decodeQueryResultV2(ttc, false)
 			require.NotNil(t, result)
 			assert.Equal(t, tc.want, result.Columns)
 		})
@@ -132,9 +132,9 @@ func TestDecodeQueryResultV2_RealColumnNames(t *testing.T) {
 func TestParseColumnDescribes_Fallback(t *testing.T) {
 	t.Parallel()
 
-	assert.Nil(t, parseColumnDescribes(nil))
-	assert.Nil(t, parseColumnDescribes([]byte{0x06, 0x01, 0x02}), "not a describe (func != 0x10)")
-	assert.Nil(t, parseColumnDescribes([]byte{0x10}), "truncated header")
+	assert.Nil(t, parseColumnDescribes(nil, false))
+	assert.Nil(t, parseColumnDescribes([]byte{0x06, 0x01, 0x02}, false), "not a describe (func != 0x10)")
+	assert.Nil(t, parseColumnDescribes([]byte{0x10}, false), "truncated header")
 	// A describe header claiming columns but with no record bytes must bail.
-	assert.Nil(t, parseColumnDescribes([]byte{0x10, 0x00, 0x01, 0x02, 0x01, 0x03, 0x00}))
+	assert.Nil(t, parseColumnDescribes([]byte{0x10, 0x00, 0x01, 0x02, 0x01, 0x03, 0x00}, false))
 }

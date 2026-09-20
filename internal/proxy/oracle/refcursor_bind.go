@@ -58,8 +58,20 @@ const refCursorMaxColumns = 1000
 // the message that follows the block. Returning nil costs only the pre-existing
 // behavior — the drive stays an untracked cursor — while a wrong id costs a
 // mis-gated statement, so every bound here is deliberately the strict one.
-func refCursorIDsInBindOutput(ttcPayload []byte) []uint16 {
-	start, ok := bindOutputBodyStart(ttcPayload)
+// The walk below reads **two** encodings of that same field list. A thin client
+// gets TTC compressed integers; an OCI one (sqlplus, Instant Client,
+// SQL*Developer over OCI) gets fixed-width little-endian ones, per call site,
+// exactly as it gets a fixed-width summary object (decodeOERFixedFieldsAt).
+// Which encoding to read is asked of the **session** — `shape.fixedWidth`,
+// learned off the upstream's own AUTH exchange long before any statement runs —
+// and never sniffed from the payload. That is not tidiness: offering a thin
+// client's bytes a second layout to be mistaken for is precisely how a run of
+// small integers would become a cursor id, and the same rule is what keeps the
+// OER decoder honest.
+func refCursorIDsInBindOutput(shape oerShape, ttcPayload []byte) []uint16 {
+	wide := shape.fixedWidth
+
+	start, ok := bindOutputBodyStart(ttcPayload, wide)
 	if !ok {
 		return nil
 	}
@@ -68,16 +80,16 @@ func refCursorIDsInBindOutput(ttcPayload []byte) []uint16 {
 	// does; try the classic layout first so nothing regresses for a client that
 	// negotiates it, then the modern one (what 23ai sends every thin client in
 	// the corpus). Same order, and the same reason, as parseColumnDescribes.
-	if ids := refCursorIDsAt(ttcPayload, start, false); ids != nil {
+	if ids := refCursorIDsAt(ttcPayload, start, false, wide); ids != nil {
 		return ids
 	}
 
-	return refCursorIDsAt(ttcPayload, start, true)
+	return refCursorIDsAt(ttcPayload, start, true, wide)
 }
 
 // bindOutputBodyStart returns the offset of the first byte *inside* the
 // bind-output block, walking the IO vector ahead of it when one is present.
-func bindOutputBodyStart(ttcPayload []byte) (int, bool) {
+func bindOutputBodyStart(ttcPayload []byte, wide bool) (int, bool) {
 	if len(ttcPayload) == 0 {
 		return 0, false
 	}
@@ -86,7 +98,7 @@ func bindOutputBodyStart(ttcPayload []byte) (int, bool) {
 	case ttcMsgBindOutput:
 		return 1, true
 	case ttcMsgIOVector:
-		return afterIOVector(ttcPayload)
+		return afterIOVector(ttcPayload, wide)
 	default:
 		return 0, false
 	}
@@ -105,17 +117,17 @@ func bindOutputBodyStart(ttcPayload []byte) (int, bool) {
 // The count is the *bind* count, so it is small; a payload that does not put a
 // bind-output message right after that many bytes has not been understood and
 // is refused.
-func afterIOVector(ttc []byte) (int, bool) {
-	c := &dcursor{buf: ttc, pos: 1}
+func afterIOVector(ttc []byte, wide bool) (int, bool) {
+	c := &dcursor{buf: ttc, pos: 1, wide: wide}
 
 	c.byte()
 
-	count := c.cint()
-	count += c.cint() * 0x100
+	count := c.intw(2)
+	count += c.intw(4) * 0x100
 
-	c.cint() // row count
-	c.cint() // UAC buffer length
-	c.dlc()  // bit vector
+	c.intw(4) // row count
+	c.intw(2) // UAC buffer length
+	c.dlc()   // bit vector
 	c.dlc()
 
 	if c.err || count < 0 || count > refCursorMaxColumns {
@@ -136,8 +148,8 @@ func afterIOVector(ttc []byte) (int, bool) {
 // refCursorIDsAt walks the descriptors in a bind-output body under one of the
 // two column-record layouts, and returns their cursor ids — or nil if anything
 // about the walk is not fully accounted for.
-func refCursorIDsAt(ttc []byte, start int, modern bool) []uint16 {
-	c := &dcursor{buf: ttc, pos: start}
+func refCursorIDsAt(ttc []byte, start int, modern, wide bool) []uint16 {
+	c := &dcursor{buf: ttc, pos: start, wide: wide}
 
 	var ids []uint16
 
@@ -160,7 +172,7 @@ func refCursorIDsAt(ttc []byte, start int, modern bool) []uint16 {
 
 		after := c.pos
 
-		c.cint()
+		c.intw(2)
 
 		if c.err {
 			return nil
@@ -238,10 +250,10 @@ func landedAfterBindOutput(ttc []byte, pos int) bool {
 // recording holds one with zero columns.
 // TestScalarOutBindsYieldNoRefCursorID is the other half of this bound.
 func readRefCursorDescriptor(c *dcursor, modern bool) (uint16, bool) {
-	c.byte() // descriptor length, informational: the fields below are self-sizing
-	c.cint() // max row size
+	c.byte()  // descriptor length, informational: the fields below are self-sizing
+	c.intw(4) // max row size
 
-	colCount := c.cint()
+	colCount := c.intw(4)
 	if c.err || colCount <= 0 || colCount > refCursorMaxColumns {
 		return 0, false
 	}
@@ -260,14 +272,14 @@ func readRefCursorDescriptor(c *dcursor, modern bool) (uint16, bool) {
 	// TTCVersion >= 3 and >= 4. Every client in the corpus negotiates past both;
 	// one that did not would leave the walk short and fail the landing check
 	// rather than reading an id out of the wrong field.
-	c.cint()
-	c.cint()
-	c.cint()
-	c.cint()
+	c.intw(4)
+	c.intw(4)
+	c.intw(4)
+	c.intw(4)
 
 	c.dlc() // TTCVersion >= 5
 
-	cursorID := c.cint()
+	cursorID := c.intw(4)
 	if c.err || cursorID <= 0 || cursorID > cursorReexecMaxID {
 		return 0, false
 	}

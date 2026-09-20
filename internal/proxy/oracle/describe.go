@@ -50,7 +50,11 @@ type columnDesc struct {
 // the payload is not a describe, the column count is implausible, a record runs
 // off the end, or a decoded type code is not a known TNSType (a strong signal of
 // a misaligned parse). A clean parse therefore yields trustworthy names+types.
-func parseColumnDescribes(ttcPayload []byte) []columnDesc {
+//
+// `wide` says the session speaks the fixed-width OCI encoding, and it comes from
+// the session's learned oerShape rather than from anything in the payload — see
+// describeWireLayout.
+func parseColumnDescribes(ttcPayload []byte, wide bool) []columnDesc {
 	// The per-column record has version-dependent trailing fields. Classic
 	// servers / lower-TTCVersion clients (go-ora, python-oracledb thin) end the
 	// record after two trailing ints; modern ones (Oracle 23ai negotiating a high
@@ -58,11 +62,11 @@ func parseColumnDescribes(ttcPayload []byte) []columnDesc {
 	// annotations block, and three further ints. Try the classic layout first
 	// (so thin clients never regress); if it misaligns — a record runs off the
 	// end or yields an unknown TTC type — retry with the modern layout.
-	if cols := parseColumnDescribesMode(ttcPayload, false); cols != nil {
+	if cols := parseColumnDescribesMode(ttcPayload, false, wide); cols != nil {
 		return cols
 	}
 
-	return parseColumnDescribesMode(ttcPayload, true)
+	return parseColumnDescribesMode(ttcPayload, true, wide)
 }
 
 // parseColumnDescribesMode decodes the column records using either the classic
@@ -70,13 +74,13 @@ func parseColumnDescribes(ttcPayload []byte) []columnDesc {
 // — so the caller falls back / retries — whenever the payload is not a describe,
 // the count is implausible, a record runs off the end, or a decoded type code is
 // not a known TNSType (a strong signal of a misaligned parse).
-func parseColumnDescribesMode(ttcPayload []byte, modern bool) []columnDesc {
-	count, start, ok := describeColumnLayout(ttcPayload)
+func parseColumnDescribesMode(ttcPayload []byte, modern, wide bool) []columnDesc {
+	count, start, ok := describeWireLayout(ttcPayload, wide)
 	if !ok || count <= 0 || count > 1000 {
 		return nil
 	}
 
-	c := &dcursor{buf: ttcPayload, pos: start}
+	c := &dcursor{buf: ttcPayload, pos: start, wide: wide}
 	cols := make([]columnDesc, 0, count)
 
 	for range count {
@@ -89,6 +93,58 @@ func parseColumnDescribesMode(ttcPayload []byte, modern bool) []columnDesc {
 	}
 
 	return cols
+}
+
+// describeWireLayout is describeColumnLayout for whichever encoding the session
+// speaks.
+func describeWireLayout(ttc []byte, wide bool) (int, int, bool) {
+	if wide {
+		return describeColumnLayoutWide(ttc)
+	}
+
+	return describeColumnLayout(ttc)
+}
+
+// describeColumnLayoutWide is describeColumnLayout for the fixed-width OCI
+// encoding:
+//
+//	[0x10] [size cint→ub4] [size bytes] [maxRowSize ub4] [colCount ub4] [1 skip byte] [records...]
+//
+// Two things differ from the compressed header, and both are measured rather
+// than assumed (an sqlplus describe of a one-column SELECT, recorded through the
+// capture relay against 23ai): the prefix's own length is a four-byte
+// little-endian field instead of a single byte, and so are the two integers
+// after it. The prefix itself is raw bytes, not a CLR — the 23 bytes it carried
+// were a 16-byte identifier followed by a 7-byte Oracle DATE, with no length
+// marker in front of them.
+func describeColumnLayoutWide(ttc []byte) (int, int, bool) {
+	if len(ttc) < 3 || ttc[0] != byte(TTCFuncQueryResult) {
+		return 0, 0, false
+	}
+
+	c := &dcursor{buf: ttc, pos: 1, wide: true}
+
+	size := c.intw(4)
+	if c.err || size < 0 || c.pos+size > len(ttc) {
+		return 0, 0, false
+	}
+
+	c.pos += size
+
+	c.intw(4) // maxRowSize
+
+	count := c.intw(4)
+	if c.err || count <= 0 {
+		return 0, 0, false
+	}
+
+	c.pos++ // the byte after colCount precedes the first record
+
+	if c.err || c.pos > len(ttc) {
+		return 0, 0, false
+	}
+
+	return count, c.pos, true
 }
 
 // describeColumnLayout walks the describe header and returns the column count
@@ -153,10 +209,16 @@ func isKnownTNSType(t int) bool {
 // dcursor is a forward, fail-safe byte cursor over a describe payload. Any
 // out-of-bounds read sets err and makes subsequent reads no-ops, so a malformed
 // record degrades to a parse failure instead of a panic.
+//
+// wide selects the **fixed-width OCI encoding**: the same field list, marshaled
+// as little-endian integers of a per-call-site width instead of TTC compressed
+// ones. It is set from the session's learned oerShape and never from the bytes
+// being read — see refCursorIDsInBindOutput.
 type dcursor struct {
-	buf []byte
-	pos int
-	err bool
+	buf  []byte
+	pos  int
+	err  bool
+	wide bool
 }
 
 func (c *dcursor) byte() int {
@@ -216,10 +278,46 @@ func (c *dcursor) cint() int {
 	return v
 }
 
-// dlc reads a TTC data-length-coded value: a compressed-int length then the
-// CLR-encoded bytes (truncated to that length). Returns nil for an empty field.
+// intw reads an integer of the stated **wire width**: that many little-endian
+// bytes in the fixed-width OCI encoding, a self-sizing TTC compressed integer
+// otherwise (where width is ignored, exactly as go-ora's `GetInt(size, …)`
+// ignores its size argument once the session negotiated compression).
+//
+// The width therefore has to come from the call site, and every caller below
+// names the one go-ora reads that field with. It is the whole difference between
+// the two encodings: a compressed int carries its own length, a fixed-width one
+// does not, so nothing here can be inferred from the payload.
+func (c *dcursor) intw(width int) int {
+	if !c.wide {
+		return c.cint()
+	}
+
+	if c.err || width <= 0 || width > 8 || c.pos+width > len(c.buf) {
+		c.err = true
+
+		return 0
+	}
+
+	v := 0
+	for i := width - 1; i >= 0; i-- {
+		v = v<<8 | int(c.buf[c.pos+i])
+	}
+
+	c.pos += width
+
+	return v
+}
+
+// dlc reads a TTC data-length-coded value: a length then the CLR-encoded bytes
+// (truncated to that length). Returns nil for an empty field.
+//
+// The length is go-ora's `GetDlc`, i.e. `GetInt(4, …)` — a compressed integer on
+// a thin session, a four-byte little-endian one on an OCI session. The CLR that
+// follows it is the same in both: measured on a describe record carrying a
+// 16-byte object type OID, where the four-byte length 16 was followed by a
+// 0x10 CLR marker and then the OID.
 func (c *dcursor) dlc() []byte {
-	length := c.cint()
+	length := c.intw(4)
 	if c.err || length <= 0 {
 		// A negative length means the parse has drifted (e.g. a NUMBER scale's
 		// -127 sentinel was read where a length was expected). Treat it as an
@@ -255,23 +353,40 @@ func parseColumnDescribe(c *dcursor, modern bool) (string, int) {
 	c.byte() // flag
 	c.byte() // precision
 
-	if numberScaleTypes[dataType] {
-		c.cint() // scale (compressed)
-	} else {
+	switch {
+	case c.wide:
+		// One signed byte, whatever the type — the numberScaleTypes split below
+		// exists because a compressed int is the only way to carry the -127
+		// float sentinel, and the fixed-width encoding has no such trouble.
+		// Measured on a NUMBER(10,2) (precision 10, scale 2 in consecutive
+		// bytes) and on `1/3`, whose scale byte is 0x81 = -127.
+		c.byte()
+	case numberScaleTypes[dataType]:
+		c.intw(2) // scale (compressed)
+	default:
 		c.byte() // scale
 	}
 
-	c.cint() // maxLen
-	c.cint() // maxNoOfArrayElements
-	c.cint() // contFlag
-	c.dlc()  // toID
-	c.cint() // version
-	c.cint() // charsetID
-	c.byte() // charsetForm
-	c.cint() // maxCharLen
-	c.cint() // oaccollid (TTCVersion ≥ 8, always true for modern servers)
-	c.byte() // allowNull
-	c.byte() // v7 name length (unused; the DLC below carries the real length)
+	c.intw(4) // maxLen
+	c.intw(4) // maxNoOfArrayElements
+
+	// contFlag. go-ora reads it as `GetInt(8|4)`, but the OCI encoding spends
+	// exactly **five** bytes on it and maxNoOfArrayElements together, and which
+	// of the two owns the fifth cannot be decided from any recording: both are
+	// zero in every column ever captured. What is decided is the total, and it
+	// is decided by the fields on either side — the maxLen before it (4000 on a
+	// VARCHAR2(4000), 22 on a NUMBER) and the type OID DLC after it, whose
+	// four-byte length and 16-byte payload pin where it must end.
+	c.intw(1)
+
+	c.dlc()   // toID
+	c.intw(2) // version
+	c.intw(2) // charsetID
+	c.byte()  // charsetForm (go-ora reads it uncompressed: one byte either way)
+	c.intw(4) // maxCharLen
+	c.intw(4) // oaccollid (TTCVersion ≥ 8, always true for modern servers)
+	c.byte()  // allowNull
+	c.byte()  // v7 name length (unused; the DLC below carries the real length)
 
 	name := c.dlc() // column name
 	c.dlc()         // schema name
@@ -279,8 +394,8 @@ func parseColumnDescribe(c *dcursor, modern bool) (string, int) {
 
 	// Trailing version ints (TTCVersion ≥ 3 and ≥ 6). The classic layout ends
 	// here; go-ora / python-oracledb thin negotiate this with the server.
-	c.cint()
-	c.cint()
+	c.intw(2)
+	c.intw(4)
 
 	if modern {
 		parseColumnDescribeModernTail(c)
@@ -301,18 +416,28 @@ func parseColumnDescribeModernTail(c *dcursor) {
 	c.dlc() // data-use-case domain schema (TTCVersion ≥ 17)
 	c.dlc() // data-use-case domain name (TTCVersion ≥ 17)
 
-	if numAnnotations := c.cint(); numAnnotations > 0 { // TTCVersion ≥ 20
+	if numAnnotations := c.intw(4); numAnnotations > 0 { // TTCVersion ≥ 20
 		c.byte()
-		numAnnotations = c.cint() // re-read count
+		numAnnotations = c.intw(4) // re-read count
 		c.byte()
 
 		for i := 0; i < numAnnotations && !c.err; i++ {
-			c.dlc()  // annotation key
-			c.dlc()  // annotation value
-			c.cint() // annotation flag
+			c.dlc()   // annotation key
+			c.dlc()   // annotation value
+			c.intw(4) // annotation flag
 		}
 
-		c.cint() // trailing length
+		c.intw(4) // trailing length
+	}
+
+	if c.wide {
+		// The three ints below are **not** sent to an OCI client: the same 23ai
+		// server that appends them for a thin one ends the record at the
+		// annotation count here. Measured, and not by inference — the records
+		// of an eight-column REF cursor land exactly on the descriptor's own
+		// 7-byte DATE field, which three more integers of any width would
+		// overshoot.
+		return
 	}
 
 	// Three further version ints the 23ai server appends.

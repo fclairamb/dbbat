@@ -1421,7 +1421,10 @@ type QueryResultV2 struct {
 //     in the first half of the payload (column definition area)
 //  2. Scan for row values: length-prefixed data after the column area
 //  3. Detect ORA-01403 as end-of-data (not an error)
-func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
+//
+// wide says the session speaks the fixed-width OCI encoding; it comes from the
+// session's learned oerShape, never from these bytes.
+func decodeQueryResultV2(ttcPayload []byte, wide bool) *QueryResultV2 {
 	if len(ttcPayload) < 20 {
 		return nil
 	}
@@ -1438,7 +1441,7 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 	// the heuristic scanner misses) and the authoritative count. Fall back to
 	// scanning + padding when the records don't parse (e.g. an unexpected server
 	// layout) so behavior never regresses.
-	if descs := parseColumnDescribes(ttcPayload); descs != nil {
+	if descs := parseColumnDescribes(ttcPayload, wide); descs != nil {
 		result.Columns = describeColumnNames(descs)
 		result.ColumnTypes = describeColumnTypes(descs)
 	} else {
