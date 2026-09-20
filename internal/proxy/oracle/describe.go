@@ -108,15 +108,15 @@ func describeWireLayout(ttc []byte, wide bool) (int, int, bool) {
 // describeColumnLayoutWide is describeColumnLayout for the fixed-width OCI
 // encoding:
 //
-//	[0x10] [size cint→ub4] [size bytes] [maxRowSize ub4] [colCount ub4] [1 skip byte] [records...]
+//	[0x10] [size ub4] [size bytes] [maxRowSize ub4] [colCount ub4] [1 skip byte] [records...]
 //
-// Two things differ from the compressed header, and both are measured rather
-// than assumed (an sqlplus describe of a one-column SELECT, recorded through the
-// capture relay against 23ai): the prefix's own length is a four-byte
-// little-endian field instead of a single byte, and so are the two integers
-// after it. The prefix itself is raw bytes, not a CLR — the 23 bytes it carried
-// were a 16-byte identifier followed by a 7-byte Oracle DATE, with no length
-// marker in front of them.
+// Everything it does differently is measured rather than assumed, on sqlplus
+// describes recorded through the capture relay against 23ai
+// (testdata/oci_describe.hex): the prefix's own length is a four-byte
+// little-endian field where the compressed header has a single byte, and so are
+// the two integers after it. The prefix stays raw bytes rather than a CLR — the
+// 23 bytes it carried were a 16-byte identifier followed by a 7-byte Oracle
+// DATE, with no length marker in front of them.
 func describeColumnLayoutWide(ttc []byte) (int, int, bool) {
 	if len(ttc) < 3 || ttc[0] != byte(TTCFuncQueryResult) {
 		return 0, 0, false
