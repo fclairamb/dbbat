@@ -269,8 +269,10 @@ func matchesWide64TailSignature(ttc []byte, at int) bool {
 }
 
 // isOracleDateRun reports whether seven bytes are an Oracle DATE as the server
-// writes one: excess-100 century and year, then month, day, and hour/minute/
-// second stored one greater than they are.
+// writes one: century and year-within-century both excess-100, then month and
+// day as themselves, then hour, minute and second stored one greater than they
+// are. Measured on the recorded describe timestamp — `78 7e 09 14 16 29 02` is
+// 0x78-100 = 20 and 0x7e-100 = 26, i.e. 2026-09-20 21:40:01.
 //
 // It is the half of the anchor that does the work. Five signature bytes alone
 // are a run a payload could hold by accident; five plus seven bytes that have
@@ -283,7 +285,7 @@ func isOracleDateRun(b []byte) bool {
 	century, year, month, day, hour, minute, second := b[0], b[1], b[2], b[3], b[4], b[5], b[6]
 
 	return century >= 100 && century <= 200 &&
-		year >= 1 && year <= 200 &&
+		year >= 100 && year <= 199 &&
 		month >= 1 && month <= 12 &&
 		day >= 1 && day <= 31 &&
 		hour >= 1 && hour <= 24 &&

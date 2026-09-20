@@ -368,12 +368,17 @@ func writeDescribeHexFixture(t *testing.T, dumpPath, outPath string) {
 }
 
 // writeStatementFrameHexFixture keeps every client frame of a recording whose
-// payload contains marker, as one hex line each.
+// payload contains one of markers, as one hex line each.
 //
 // The selection is by the statement's own text, never by decoding the frame:
 // which frames land in a fixture that a decoder is then pinned against must not
 // depend on that decoder, or the check is the decoder agreeing with itself.
-func writeStatementFrameHexFixture(t *testing.T, dumpPath, outPath, marker string) {
+//
+// It takes more than one marker because a session's statements do not all have
+// the same shape — a PL/SQL call and an ordinary query reach the wire as the
+// same op with different bind and option fields — so a fixture that has to
+// stand for "every parse" can be asked for several.
+func writeStatementFrameHexFixture(t *testing.T, dumpPath, outPath string, markers ...string) {
 	t.Helper()
 
 	body := "# The client frames of the same session that carry a statement, picked by\n" +
@@ -388,7 +393,7 @@ func writeStatementFrameHexFixture(t *testing.T, dumpPath, outPath, marker strin
 	frames := 0
 
 	eachRecordedTNSPayload(t, dumpPath, func(clientToServer bool, payload []byte) {
-		if !clientToServer || !bytes.Contains(payload, []byte(marker)) {
+		if !clientToServer || !containsAnyMarker(payload, markers) {
 			return
 		}
 
@@ -396,8 +401,20 @@ func writeStatementFrameHexFixture(t *testing.T, dumpPath, outPath, marker strin
 		frames++
 	})
 
-	require.Positive(t, frames, "the session must have sent at least one frame carrying %q", marker)
+	require.GreaterOrEqual(t, frames, len(markers),
+		"the session must have sent a frame for each of %v", markers)
 	require.NoError(t, os.WriteFile(outPath, []byte(body), 0o600))
 
 	t.Logf("%d statement-carrying client frames written to %s", frames, outPath)
+}
+
+// containsAnyMarker reports whether payload carries any of the statement texts.
+func containsAnyMarker(payload []byte, markers []string) bool {
+	for _, marker := range markers {
+		if bytes.Contains(payload, []byte(marker)) {
+			return true
+		}
+	}
+
+	return false
 }

@@ -198,7 +198,9 @@ func TestDumpReplay_OCI64DriveReadsTheCursorTheClientIsDriving(t *testing.T) {
 //
 // The fixture is the same session's own statement-carrying frames, picked out of
 // the recording by searching for the statement's text rather than by decoding
-// anything.
+// anything. Ordinary queries on this dialect are covered live instead, by
+// TestIntegration_RepeatedStatementFromSQLPlusUnderReadOnly: a repeated SELECT
+// must not be refused, which is the same claim from the other end.
 func TestOCI64ExecCarryingAStatementIsNeverAReexecution(t *testing.T) {
 	t.Parallel()
 
