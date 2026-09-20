@@ -489,11 +489,12 @@ never reached the one that already existed.
 Order mattered here and is worth keeping in mind for the next shape: the gap was
 found *while* implementing the REF-cursor id reading, and closing it first would
 have turned every sqlplus `VARIABLE rc REFCURSOR` / `PRINT rc` into the
-`ORA-01031` that feature exists to prevent. `TestIntegration_RefCursorFrom
-SQLPlusUnderReadOnly` and `TestIntegration_RepeatedStatementFromSQLPlusUnder
-ReadOnly` hold both halves at once, live: the drives are gated, nothing is
-refused as untracked, a repeated read still returns its rows, and a repeated
-write is refused on the repeat exactly as on the first execution.
+`ORA-01031` that feature exists to prevent.
+`TestIntegration_RefCursorFromSQLPlusUnderReadOnly` and
+`TestIntegration_RepeatedStatementFromSQLPlusUnderReadOnly` hold both halves at
+once, live: the drives are gated, nothing is refused as untracked, a repeated
+read still returns its rows, and a repeated write is refused on the repeat
+exactly as on the first execution.
 
 The enforcement is pinned by **replaying** that recording through the real
 intercept pipeline, in both directions, so the cursor id is learned off the
