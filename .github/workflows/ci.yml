@@ -18,7 +18,7 @@ jobs:
   # Lint Job - Go linting with golangci-lint
   # ===========================================================================
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
       - uses: actions/checkout@v7.0.1
@@ -38,7 +38,7 @@ jobs:
   # live web_ session token). Two guards, cheapest first: a hard refusal of
   # capture-file extensions, then a full gitleaks scan of the pushed commits.
   secrets:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
       - uses: actions/checkout@v7.0.1
@@ -76,7 +76,7 @@ jobs:
   # Frontend Job - Build React app with Bun
   # ===========================================================================
   frontend:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
       - uses: actions/checkout@v7.0.1
@@ -167,7 +167,7 @@ jobs:
   # Test Job - Go unit tests with coverage
   # ===========================================================================
   test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
       - uses: actions/checkout@v7.0.1
@@ -206,7 +206,7 @@ jobs:
   # Build Job - Build Go binary with embedded frontend
   # ===========================================================================
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [frontend]
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
@@ -245,7 +245,7 @@ jobs:
   # E2E Tests Job - Playwright tests against the built binary
   # ===========================================================================
   e2e-tests:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [build]
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
