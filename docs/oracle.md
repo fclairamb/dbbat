@@ -3161,6 +3161,17 @@ clients never regress) and retries the modern one only when the classic parse mi
 reference but is stale for 23ai — the three extra trailing ints were recovered empirically
 from a real SQLcl describe (`sqlcl_regression_test.go`).
 
+`parseColumnDescribes` takes a second axis now — the **encoding** — and reads the
+fixed-width OCI records too (`describeColumnLayoutWide`, pinned by
+`TestOCIDescribeRecordsParse` against an eight-column sqlplus describe). It is a
+capability rather than a behaviour change so far: `decodeQueryResultV2` still asks for
+the compressed reading, so an OCI session's column names still come from the heuristic
+scanner. Turning it on is a one-word change with a measured consequence — an OCI session
+whose describes parse learns its columns and therefore enters a **row stream** over
+packets it used to walk past, six of which lead with a `0x04` that `decodeOERAt` accepts
+(`TestDumpReplay_MidStreamOERFalsePositiveRate`). That is its own change, filed in
+`specs/todos/`.
+
 Once columns parse, rows are located independently by `scanRowValues`. A second, latent bug
 surfaced there: `parseRowStream` treated a leading `0x08` as the end-of-rows footer, but
 `0x08` is also a valid column-value length (an 8-byte first value such as the string
