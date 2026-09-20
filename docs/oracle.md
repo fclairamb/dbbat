@@ -850,7 +850,9 @@ over it. Recorded from one live session
   schema and type names are absent too — and the corpus holds exactly **one**
   column with any of those three non-empty, so the three effects cannot be
   separated. Widening the record walk would mean shipping offsets no recording
-  can falsify.
+  can falsify. Closing that — by recording the columns that separate them — is
+  `specs/todos/2026-09-21-01-oracle-wide64-column-record-layout.md`, and it is
+  also what would let `parseColumnDescribes` read this dialect at all.
 
 So the column records are not parsed at all. The walk is header-driven at both
 ends and anchors the middle on the trailing block's own signature: a DLC of
