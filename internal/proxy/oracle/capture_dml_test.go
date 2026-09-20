@@ -36,66 +36,6 @@ func captureEnv(key, fallback string) string {
 	return fallback
 }
 
-// relayTNS forwards TNS packets in one direction, recording each to the dump.
-func relayTNS(t *testing.T, src, dst net.Conn, w *dump.Writer, dir byte, done chan<- struct{}) {
-	t.Helper()
-
-	defer func() { done <- struct{}{} }()
-
-	for {
-		pkt, err := readTNSPacket(src)
-		if err != nil {
-			return // EOF or closed connection ends the relay
-		}
-
-		if err := w.WritePacket(dir, pkt.Raw); err != nil {
-			t.Logf("dump write error: %v", err)
-		}
-
-		if err := writeTNSPacket(dst, pkt); err != nil {
-			return
-		}
-	}
-}
-
-// startCaptureRelay stands up a recording TNS relay in front of oracleAddr and
-// returns the local host:port a client should dial. Every packet is forwarded
-// to Oracle and recorded (both directions) to w. The listener is closed on test
-// cleanup; the caller owns w and must Close it once the session has drained.
-func startCaptureRelay(t *testing.T, oracleAddr string, w *dump.Writer) string {
-	t.Helper()
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-
-	t.Cleanup(func() { _ = listener.Close() })
-
-	go func() {
-		for {
-			clientConn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-
-			upstreamConn, err := net.Dial("tcp", oracleAddr)
-			if err != nil {
-				_ = clientConn.Close()
-				return
-			}
-
-			done := make(chan struct{}, 2)
-			go relayTNS(t, clientConn, upstreamConn, w, dump.DirClientToServer, done)
-			go relayTNS(t, upstreamConn, clientConn, w, dump.DirServerToClient, done)
-			<-done
-			_ = clientConn.Close()
-			_ = upstreamConn.Close()
-			<-done
-		}
-	}()
-
-	return listener.Addr().String()
-}
-
 // TestCapture_GoOraLargeResult records a go-ora session fetching a multi-packet
 // result set in a single array fetch (PREFETCH_ROWS forces the whole set into
 // one execute response that spans many TNS Data packets). It is the fixture for

@@ -25,8 +25,6 @@ import (
 
 	_ "github.com/sijms/go-ora/v3"
 	"github.com/stretchr/testify/require"
-
-	"github.com/fclairamb/dbbat/internal/dump"
 )
 
 // reexecQuery is deliberately trivial and side-effect free: the fixture is
@@ -48,21 +46,6 @@ func requireOracleReachable(t *testing.T, addr string) {
 	}
 
 	_ = probe.Close()
-}
-
-// newCaptureWriter opens a dump writer for a capture, failing the test if the
-// path cannot be written.
-func newCaptureWriter(t *testing.T, outPath, sessionID string) *dump.Writer {
-	t.Helper()
-
-	w, err := dump.NewWriter(outPath, dump.Header{
-		SessionID: sessionID,
-		Protocol:  dump.ProtocolOracle,
-		StartTime: time.Now(),
-	}, 32*1024*1024)
-	require.NoError(t, err)
-
-	return w
 }
 
 // TestCapture_GoOraCursorReexec records go-ora running one prepared statement

@@ -8,6 +8,17 @@
 //	# wait for "DATABASE IS READY TO USE!" in docker logs
 //	go test -tags capture -timeout 300s -run TestCapture_.*RefCursor -v ./internal/proxy/oracle/
 //
+// The sqlplus captures take a second run, because "the OCI encoding" is two
+// encodings and each needs its own evidence (see isCloseCursorsWide8Header):
+//
+//	ORACLE_TEST_OCI_CLIENT=container go test -tags capture -timeout 300s \
+//	    -run TestCapture_SQLPlus -v ./internal/proxy/oracle/
+//
+// which drives the sqlplus bundled in the Oracle image instead of one on PATH.
+// Which fixture pair a run writes is decided by the **recorded bytes**, never by
+// which side of the container boundary the client came from — the gvenzl images
+// bundle different client versions, so the flavor is not the dialect.
+//
 // A `SYS_REFCURSOR` handed back by a stored procedure is the one cursor id that
 // never rides an OER: the server opens it inside the procedure body while
 // executing the call, and reports it in that call's **out-bind** data. These
@@ -18,20 +29,17 @@ package oracle
 import (
 	"database/sql"
 	"database/sql/driver"
-	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	go_ora "github.com/sijms/go-ora/v3"
 	"github.com/stretchr/testify/require"
-
-	"github.com/fclairamb/dbbat/internal/dump"
 )
 
 // refCursorProcedure is the procedure both captures call. The `OPEN p FOR …`
@@ -355,59 +363,176 @@ func TestCapture_JDBCThinRefCursor(t *testing.T) {
 	t.Logf("capture written to %s (%d drives)", outPath, refCursorDrives)
 }
 
-// ociRefCursorBindOutputFixture is where TestCapture_SQLPlusRefCursor leaves the
-// OCI evidence: the call responses, as TNS Data payloads, in the same hex form
-// as the other `oci_bundled_*.hex` fixtures.
-//
-// It is a hex fixture rather than a recording on purpose. `testdata/*.pcapng` is
-// a corpus several whole-corpus surveys enumerate, and sqlplus's PL/SQL call
-// carries an exec frame the exact statement locator cannot certify — a finding
-// of its own, filed separately, and not something to fold into this spec by
-// lowering a survey's floor. The bytes this file actually needs are the two
-// bind-output responses, so those are what it keeps.
-const ociRefCursorBindOutputFixture = "testdata/oci_refcursor_bind_output.hex"
+// The OCI evidence is kept as hex fixtures rather than as recordings on
+// purpose. `testdata/*.pcapng` is a corpus several whole-corpus surveys
+// enumerate, and sqlplus's PL/SQL call carries an exec frame the exact
+// statement locator cannot certify — a finding of its own, filed separately,
+// and not something to fold in by lowering a survey's floor. The bytes these
+// tests actually need are the bind-output responses and the client frame that
+// follows each, so those are what is kept. The paths themselves, and why there
+// are two sets of them, are in oci_fixture_capture_test.go.
 
-// ociRefCursorDrivesFixture is the other half of that evidence, and the half
-// that makes it falsifiable: the client frame that follows each of those
-// responses — the `PRINT rc` that drives the cursor the call just handed back.
-//
-// The id the walk reads is only *a* number until something independent says it
-// is the right one. For the three thin clients that something is the client's
-// own next frame (TestDumpReplay_RefCursorIDsMatchTheCursorsTheClientDrives);
-// this is the same check for the OCI encoding, and it is why the recording can
-// no longer be distilled down to its server side.
-//
-// The selection is positional rather than decoded — the next client Data frame
-// after each bind-output response — so nothing about which frames end up here
-// depends on the decoder under test.
-const ociRefCursorDrivesFixture = "testdata/oci_refcursor_drives.hex"
+// ociCaptureContainerEnv names the running Oracle container a `container`
+// capture execs into — the one the file header tells you to start.
+const ociCaptureContainerEnv = "ORACLE_CONTAINER"
 
-// ociScalarOutBindFixture is the negative half: the same client, the same
-// `BEGIN … END;` shape, ordinary **scalar** OUT parameters. It is the shape the
-// session gate genuinely admits and that is not a REF cursor, so it is where a
-// fixed-width walk that accepts too much would show up — and the fixed-width
-// encoding spends four zero bytes where the compressed one spends one, which
-// makes a run of zeros that much easier to mistake for a descriptor.
-const ociScalarOutBindFixture = "testdata/oci_scalar_outbind_bind_output.hex"
+// ociCaptureHostGateway is the name that container resolves back to the Docker
+// host, which is where the capture relay listens.
+const ociCaptureHostGateway = "host.docker.internal"
 
-// TestCapture_SQLPlusRefCursor records sqlplus (OCI thick) driving the same
-// procedure and writes its call responses to ociRefCursorBindOutputFixture, so
-// the fixture set covers the fixed-width encoding too. Skipped when sqlplus is
-// not on PATH.
-func TestCapture_SQLPlusRefCursor(t *testing.T) {
+// ociCaptureScriptPath is where a script is dropped inside that container. /tmp
+// is writable by the `oracle` user the image runs as.
+const ociCaptureScriptPath = "/tmp/dbbat_cap_oci.sql"
+
+// ociCaptureClient is an sqlplus a capture can drive, wherever it lives.
+//
+// bindHost is the address the relay must listen on for this client to reach it,
+// and dialHost is what the client puts in its connect string. They differ for
+// the container-hosted one and only for it.
+type ociCaptureClient struct {
+	label    string
+	bindHost string
+	dialHost string
+	run      func(t *testing.T, connect, script string) (string, error)
+}
+
+// sqlplusCaptureClient picks where sqlplus comes from, honouring the same
+// variable the live suite uses (ociClientEnv in oci_client_integration_test.go)
+// so "run the capture the way CI runs the tests" is one spelling, not two.
+// Unset prefers a client on PATH, exactly as plannedOCIClient does.
+func sqlplusCaptureClient(t *testing.T) *ociCaptureClient {
+	t.Helper()
+
+	want := os.Getenv("ORACLE_TEST_OCI_CLIENT")
+
+	if want != "container" {
+		sqlplus, err := exec.LookPath("sqlplus")
+		if err == nil {
+			return hostSQLPlusCaptureClient(sqlplus)
+		}
+
+		if want == "path" {
+			t.Skipf("sqlplus unavailable on PATH: %v", err)
+		}
+	}
+
+	return containerSQLPlusCaptureClient(t)
+}
+
+// hostSQLPlusCaptureClient wraps an sqlplus found on PATH.
+func hostSQLPlusCaptureClient(sqlplus string) *ociCaptureClient {
+	return &ociCaptureClient{
+		label:    "sqlplus on PATH (" + sqlplus + ")",
+		bindHost: "127.0.0.1",
+		dialHost: "127.0.0.1",
+		run: func(t *testing.T, connect, script string) (string, error) {
+			t.Helper()
+
+			path := writeTempScript(t, script)
+
+			out, err := exec.CommandContext(t.Context(), sqlplus, "-S", connect, "@"+path).CombinedOutput()
+
+			return string(out), err
+		},
+	}
+}
+
+// containerSQLPlusCaptureClient wraps the sqlplus bundled in the running Oracle
+// container, reached over `docker exec` and dialing the relay back out over the
+// host gateway.
+//
+// Both facts are probed before the capture starts, because each is an
+// environment fact rather than a finding: that the image bundles a usable
+// sqlplus at all, and that the container can open a TCP connection back to the
+// host. Letting either through would land as a bewildering TNS error in the
+// middle of a recording.
+func containerSQLPlusCaptureClient(t *testing.T) *ociCaptureClient {
+	t.Helper()
+
+	container := captureEnv(ociCaptureContainerEnv, "dbbat-ora-cap")
+
+	if out, err := exec.Command("docker", "exec", container, "sqlplus", "-v").CombinedOutput(); err != nil {
+		t.Skipf("no usable sqlplus in container %s: %v (%s)", container, err, out)
+	}
+
+	probe := "exec 3<>/dev/tcp/" + ociCaptureHostGateway + "/1"
+	if out, err := exec.Command("docker", "exec", container, "bash", "-c",
+		"getent hosts "+ociCaptureHostGateway+" >/dev/null || "+probe).CombinedOutput(); err != nil {
+		t.Skipf("container %s cannot resolve %s: %v (%s)", container, ociCaptureHostGateway, err, out)
+	}
+
+	return &ociCaptureClient{
+		label:    "sqlplus bundled in container " + container,
+		bindHost: "0.0.0.0",
+		dialHost: ociCaptureHostGateway,
+		run: func(t *testing.T, connect, script string) (string, error) {
+			t.Helper()
+
+			// Written through the container's own shell rather than `docker cp`,
+			// which lands the file owned by root while sqlplus runs as `oracle`
+			// and then reports SP2-0310 "unable to open file" — a failure that
+			// reads as a client problem and is not one.
+			write := exec.CommandContext(t.Context(), "docker", "exec", "-i", container,
+				"bash", "-c", "cat > "+ociCaptureScriptPath)
+			write.Stdin = strings.NewReader(script)
+
+			if out, err := write.CombinedOutput(); err != nil {
+				return string(out), err
+			}
+
+			out, err := exec.CommandContext(t.Context(), "docker", "exec", container,
+				"sqlplus", "-S", connect, "@"+ociCaptureScriptPath).CombinedOutput()
+
+			return string(out), err
+		},
+	}
+}
+
+// runSQLPlusCapture records one sqlplus script end to end and returns the
+// recording's path.
+//
+// The relay's port is what the client dials; its *address* is not, because a
+// wildcard-bound listener reports 0.0.0.0 and no client can dial that.
+func runSQLPlusCapture(t *testing.T, client *ociCaptureClient, sessionID, script string) string {
+	t.Helper()
+
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := filepath.Join(t.TempDir(), "sqlplus_refcursor.pcapng")
+
+	// The recording itself is scratch — only the hex fixtures distilled out of it
+	// are kept — but CAPTURE_KEEP_DUMP_DIR leaves it somewhere durable, which is
+	// what you want the first time a client turns out to speak a dialect the
+	// distillation does not expect.
+	outPath := filepath.Join(captureEnv("CAPTURE_KEEP_DUMP_DIR", t.TempDir()), sessionID+".pcapng")
 
 	requireOracleReachable(t, oracleAddr)
 
-	sqlplus, err := exec.LookPath("sqlplus")
-	if err != nil {
-		t.Skipf("sqlplus unavailable: %v", err)
-	}
+	t.Logf("OCI capture client: %s", client.label)
 
-	w := newCaptureWriter(t, outPath, "capture-sqlplus-refcursor")
-	relayAddr := startCaptureRelay(t, oracleAddr, w)
+	w := newCaptureWriter(t, outPath, sessionID)
+	relayAddr := startCaptureRelayOn(t, client.bindHost, oracleAddr, w)
+
+	_, port, err := net.SplitHostPort(relayAddr)
+	require.NoError(t, err)
+
+	connect := fmt.Sprintf("system/oracle@//%s:%s/%s", client.dialHost, port, oracleService)
+
+	out, err := client.run(t, connect, script)
+	require.NoErrorf(t, err, "sqlplus failed: %s", out)
+	t.Logf("sqlplus: %s", out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	return outPath
+}
+
+// TestCapture_SQLPlusRefCursor records sqlplus (OCI thick) driving the same
+// procedure and writes its call responses to the fixture pair of whichever OCI
+// dialect the recording turns out to hold, so the fixture set covers both
+// fixed-width encodings. Skipped when no sqlplus can be reached.
+func TestCapture_SQLPlusRefCursor(t *testing.T) {
+	client := sqlplusCaptureClient(t)
 
 	body := refCursorProcedure + `
 /
@@ -422,19 +547,14 @@ DROP PROCEDURE dbbat_cap_refcur;
 EXIT
 `
 
-	script := writeTempScript(t, body)
+	outPath := runSQLPlusCapture(t, client, "capture-sqlplus-refcursor", body)
 
-	cmd := exec.CommandContext(t.Context(), sqlplus, "-S",
-		fmt.Sprintf("system/oracle@//%s/%s", relayAddr, oracleService), "@"+script)
+	bindOutputs, drives := ociRefCursorBindOutputFixture, ociRefCursorDrivesFixture
+	if recordedDialectIsWide64(t, outPath) {
+		bindOutputs, drives = oci64RefCursorBindOutputFixture, oci64RefCursorDrivesFixture
+	}
 
-	out, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "sqlplus failed: %s", out)
-	t.Logf("sqlplus: %s", out)
-
-	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
-	require.NoError(t, w.Close())
-
-	writeBindOutputHexFixture(t, outPath, ociRefCursorBindOutputFixture, ociRefCursorDrivesFixture)
+	writeBindOutputHexFixture(t, outPath, bindOutputs, drives)
 }
 
 // TestCapture_SQLPlusScalarOutBinds records sqlplus calling a procedure with
@@ -443,19 +563,7 @@ EXIT
 // cursor, so nothing may be learned from it —
 // TestOCIScalarOutBindsYieldNoRefCursorID.
 func TestCapture_SQLPlusScalarOutBinds(t *testing.T) {
-	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
-	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := filepath.Join(t.TempDir(), "sqlplus_scalar_outbinds.pcapng")
-
-	requireOracleReachable(t, oracleAddr)
-
-	sqlplus, err := exec.LookPath("sqlplus")
-	if err != nil {
-		t.Skipf("sqlplus unavailable: %v", err)
-	}
-
-	w := newCaptureWriter(t, outPath, "capture-sqlplus-scalar-outbinds")
-	relayAddr := startCaptureRelay(t, oracleAddr, w)
+	client := sqlplusCaptureClient(t)
 
 	body := scalarOutBindProcedure + `
 /
@@ -471,103 +579,12 @@ DROP PROCEDURE dbbat_cap_scalarout;
 EXIT
 `
 
-	script := writeTempScript(t, body)
+	outPath := runSQLPlusCapture(t, client, "capture-sqlplus-scalar-outbinds", body)
 
-	cmd := exec.CommandContext(t.Context(), sqlplus, "-S",
-		fmt.Sprintf("system/oracle@//%s/%s", relayAddr, oracleService), "@"+script)
-
-	out, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "sqlplus failed: %s", out)
-	t.Logf("sqlplus: %s", out)
-
-	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
-	require.NoError(t, w.Close())
-
-	writeBindOutputHexFixture(t, outPath, ociScalarOutBindFixture, "")
-}
-
-// writeBindOutputHexFixture distils a recording down to the server payloads that
-// answer a call with an IO vector — the bind-output responses — and writes them
-// as one hex line each, the form recordedFrames reads.
-//
-// When drivesPath is non-empty it also writes, in the same order, the **client**
-// frame that immediately follows each of those responses. That pairing is the
-// cross-check the decoder is held to, and it is positional on purpose: which
-// frames land in the fixture must not depend on any decode, or the check would
-// be the decoder agreeing with itself.
-func writeBindOutputHexFixture(t *testing.T, dumpPath, outPath, drivesPath string) {
-	t.Helper()
-
-	r, err := dump.OpenReader(dumpPath)
-	require.NoError(t, err)
-
-	defer func() { _ = r.Close() }()
-
-	body := "# sqlplus (OCI thick, Instant Client) calling a procedure with an OUT parameter\n" +
-		"# through dbbat against Oracle 23ai Free. One line per server response that\n" +
-		"# opens with the IO vector (TTC message 0x0b): the TNS Data payload, two\n" +
-		"# data-flag bytes first, exactly as extractTTCPayload receives it.\n" +
-		"#\n" +
-		"# These carry the same field list the thin recordings do, marshaled in the\n" +
-		"# wide/fixed-width OCI encoding — little-endian integers of a per-call-site\n" +
-		"# width where a thin client sends compressed ones.\n" +
-		"#\n" +
-		"# Regenerate with:\n" +
-		"#   go test -tags capture -run TestCapture_SQLPlus ./internal/proxy/oracle/\n"
-
-	drives := "# The client frame that follows each response in the fixture next to this\n" +
-		"# one, in the same order: the `PRINT rc` that drives the REF cursor the call\n" +
-		"# just handed back. Selected by position, never by decoding them.\n" +
-		"#\n" +
-		"# Regenerate with:\n" +
-		"#   go test -tags capture -run TestCapture_SQLPlusRefCursor ./internal/proxy/oracle/\n"
-
-	frames, driveCount, wantDrive := 0, 0, false
-
-	for {
-		pkt, err := r.ReadPacket()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-
-		require.NoError(t, err)
-
-		tns, err := parseTNSFromDumpPacket(pkt.Data)
-		if err != nil || tns.Type != TNSPacketTypeData {
-			continue
-		}
-
-		if pkt.Direction == dump.DirClientToServer {
-			if wantDrive {
-				drives += hex.EncodeToString(tns.Payload) + "\n"
-				driveCount++
-				wantDrive = false
-			}
-
-			continue
-		}
-
-		if ttc := extractTTCPayload(tns.Payload); len(ttc) == 0 || ttc[0] != ttcMsgIOVector {
-			continue
-		}
-
-		body += hex.EncodeToString(tns.Payload) + "\n"
-		frames++
-		wantDrive = drivesPath != ""
+	fixture := ociScalarOutBindFixture
+	if recordedDialectIsWide64(t, outPath) {
+		fixture = oci64ScalarOutBindFixture
 	}
 
-	require.Positive(t, frames, "the sqlplus session must have answered at least one call")
-	require.NoError(t, os.WriteFile(outPath, []byte(body), 0o600))
-
-	t.Logf("%d bind-output responses written to %s", frames, outPath)
-
-	if drivesPath == "" {
-		return
-	}
-
-	require.Equal(t, frames, driveCount,
-		"every recorded response must be followed by a client frame, or the pairing is not a pairing")
-	require.NoError(t, os.WriteFile(drivesPath, []byte(drives), 0o600))
-
-	t.Logf("%d drive frames written to %s", driveCount, drivesPath)
+	writeBindOutputHexFixture(t, outPath, fixture, "")
 }

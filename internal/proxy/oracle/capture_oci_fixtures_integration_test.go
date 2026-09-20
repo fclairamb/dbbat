@@ -1,0 +1,166 @@
+//go:build integration
+
+package oracle
+
+import (
+	"context"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+// ociFixtureCaptureEnv opts a run into re-recording the OCI hex fixtures. It is
+// off by default because this is capture tooling wearing the integration tag,
+// not a test: it rewrites files under testdata/ that every other test in the
+// package is pinned against.
+const ociFixtureCaptureEnv = "ORACLE_CAPTURE_OCI_FIXTURES"
+
+// TestCapture_OCIFixturesThroughDBBat re-records the OCI REF-cursor fixture
+// pair, and the scalar-out-bind negative beside it, from a session that goes
+// **through dbbat** rather than through a bare relay.
+//
+//	ORACLE_CAPTURE_OCI_FIXTURES=1 ORACLE_TEST_OCI_CLIENT=container \
+//	  go test -tags integration -run TestCapture_OCIFixturesThroughDBBat ./internal/proxy/oracle/
+//
+// It exists because on the 64-bit OCI dialect those are not the same bytes —
+// see ociFixtureProvenance, which is the measurement, not the preference. The
+// standalone harness in capture_refcursor_test.go stays the cheaper route for
+// the 4-byte dialect and for anything about what a client marshals; this one is
+// the route for anything dbbat has to *read*.
+//
+// The recording tap sits in front of the proxy, so what lands in the fixture is
+// byte-for-byte what interceptClientMessage receives. Which fixture pair it
+// lands in is decided by the recorded frames themselves (recordedDialectIsWide64),
+// never by which client was asked for.
+func TestCapture_OCIFixturesThroughDBBat(t *testing.T) {
+	if os.Getenv(ociFixtureCaptureEnv) != "1" {
+		t.Skipf("set %s=1 to re-record the OCI fixtures", ociFixtureCaptureEnv)
+	}
+
+	env := startOracleThroughProxyForOCI(t, nil)
+	oci := requireOCIClient(t, env)
+
+	ctx := context.Background()
+
+	_, err := env.db.ExecContext(ctx, refCursorCaptureProcedure)
+	require.NoError(t, err)
+
+	defer func() { _, _ = env.db.ExecContext(ctx, "DROP PROCEDURE dbbat_cap_refcur") }()
+
+	_, err = env.db.ExecContext(ctx, scalarOutBindCaptureProcedure)
+	require.NoError(t, err)
+
+	defer func() { _, _ = env.db.ExecContext(ctx, "DROP PROCEDURE dbbat_cap_scalarout") }()
+
+	refCursorDump := recordOCIScriptThroughProxy(t, env, oci, "capture-oci-refcursor", `SET PAGESIZE 0
+SET FEEDBACK OFF
+VARIABLE rc REFCURSOR
+BEGIN dbbat_cap_refcur(:rc); END;
+/
+PRINT rc
+BEGIN dbbat_cap_refcur(:rc); END;
+/
+PRINT rc
+EXIT
+`)
+
+	scalarDump := recordOCIScriptThroughProxy(t, env, oci, "capture-oci-scalarout", `SET PAGESIZE 0
+SET FEEDBACK OFF
+VARIABLE n NUMBER
+VARIABLE s VARCHAR2(32)
+VARIABLE m NUMBER
+BEGIN dbbat_cap_scalarout(:n, :s, :m); END;
+/
+BEGIN dbbat_cap_scalarout(:n, :s, :m); END;
+/
+PRINT n
+EXIT
+`)
+
+	bindOutputs, drives, scalars := ociRefCursorBindOutputFixture, ociRefCursorDrivesFixture, ociScalarOutBindFixture
+	if recordedDialectIsWide64(t, refCursorDump) {
+		bindOutputs, drives, scalars =
+			oci64RefCursorBindOutputFixture, oci64RefCursorDrivesFixture, oci64ScalarOutBindFixture
+	}
+
+	writeBindOutputHexFixture(t, refCursorDump, bindOutputs, drives)
+	writeBindOutputHexFixture(t, scalarDump, scalars, "")
+}
+
+// refCursorCaptureProcedure and scalarOutBindCaptureProcedure are the two
+// procedures the hex fixtures are recorded against. They are spelled out here
+// rather than shared with capture_refcursor_test.go because that file is behind
+// the `capture` tag and this one is behind `integration`; the bodies have to
+// stay identical, which is what the comment is for.
+const (
+	refCursorCaptureProcedure = `CREATE OR REPLACE PROCEDURE dbbat_cap_refcur(p OUT SYS_REFCURSOR) AS
+BEGIN
+  OPEN p FOR SELECT LEVEL AS n, 'row-' || LEVEL AS label FROM dual CONNECT BY LEVEL <= 5;
+END;`
+
+	scalarOutBindCaptureProcedure = `CREATE OR REPLACE PROCEDURE dbbat_cap_scalarout(
+  n OUT NUMBER, s OUT VARCHAR2, m OUT NUMBER) AS
+BEGIN
+  n := 7;
+  s := 'seven';
+  m := 42;
+END;`
+)
+
+// recordOCIScriptThroughProxy runs one sqlplus script against a recording relay
+// placed in front of the proxy, and returns the recording's path.
+func recordOCIScriptThroughProxy(
+	t *testing.T, env *oracleThroughProxy, oci *ociClient, sessionID, script string,
+) string {
+	t.Helper()
+
+	dir := captureFixtureDir(t)
+	outPath := filepath.Join(dir, sessionID+".pcapng")
+
+	w := newCaptureWriter(t, outPath, sessionID)
+
+	bind := "127.0.0.1"
+	if oci.kind == ociClientContainer {
+		bind = "0.0.0.0"
+	}
+
+	relayAddr := startCaptureRelayOn(t, bind, net.JoinHostPort(env.host, strconv.Itoa(env.port)), w)
+
+	_, portText, err := net.SplitHostPort(relayAddr)
+	require.NoError(t, err)
+
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+
+	runCtx, cancel := context.WithTimeout(context.Background(), refusalDeadline)
+	defer cancel()
+
+	out, runErr := oci.runAt(t, runCtx, script, oci.proxyHost, port)
+	require.NoErrorf(t, runErr, "%s never came back:\n%s", oci.label, out)
+
+	t.Logf("%s output:\n%s", oci.label, out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	return outPath
+}
+
+// captureFixtureDir is where the raw recordings land. They are scratch — only
+// the hex distilled out of them is kept — but CAPTURE_KEEP_DUMP_DIR leaves them
+// somewhere durable, which is what you want the first time a client turns out
+// to speak a dialect the distillation does not expect.
+func captureFixtureDir(t *testing.T) string {
+	t.Helper()
+
+	if dir := os.Getenv("CAPTURE_KEEP_DUMP_DIR"); dir != "" {
+		return dir
+	}
+
+	return t.TempDir()
+}
