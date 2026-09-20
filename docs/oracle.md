@@ -428,7 +428,8 @@ go test -tags capture -timeout 300s -run 'TestCapture_.*Reexec' -v ./internal/pr
 | python-oracledb thin (plain `cur.execute()` loop) | **yes** — no prepared-statement API needed, its per-connection statement cache does it | func `0x03` sub `0x4e` | `testdata/python_thin_cursor_reexec.pcapng` |
 | JDBC thin / ojdbc11 (cached `PreparedStatement`) | **yes** | func `0x03` sub `0x4e` | `testdata/jdbc_thin_cursor_reexec.pcapng` |
 | JDBC thin / **ojdbc6 11.2.0.4** (`PreparedStatement`) | **yes**, and not under either sub-op above | func `0x03` sub **`0x5e`**, statement length `0` | `testdata/ojdbc6_legacy.pcapng` |
-| sqlplus / OCI thick | **no** — resends the full statement text on every run | func `0x11` sub `0x69` with SQL | `testdata/sqlplus_cursor_reexec.pcapng` |
+| sqlplus / OCI thick (ordinary statement) | **no** — resends the full statement text on every run | func `0x11` sub `0x69` with SQL | `testdata/sqlplus_cursor_reexec.pcapng` |
+| sqlplus / OCI thick (`PRINT rc` on a REF cursor) | **yes** — it has no text to resend | func `0x03` sub `0x5e` in the **wide** header, no statement | `testdata/oci_refcursor_drives.hex` |
 
 So this is not an exotic shape: it is what every thin client does by default, and
 python-oracledb reaches it without the caller asking for a prepared statement.
@@ -457,6 +458,42 @@ once the statement decoders have found nothing, and refuses the OCI wide header
 and cursor `0`, so no frame that yields a statement today changes classification
 — measured across the whole corpus in
 `TestOJDBC6ReexecDoesNotDisturbTheParsePath`.
+
+The same op in the **wide (OCI) header** is the fourth shape, and it stayed open
+eight days longer than the thin one. `execNoStatementCursorAt` refused that
+header outright — its cursor id does not sit where the thin walk looks — so a
+SQL-less wide exec decoded as "could not find SQL text" and was forwarded
+ungated, which on an OCI session is every re-execution of every cursor: a REF
+cursor driven by `PRINT rc`, and an ordinary prepared statement re-run:
+
+```
+03 5e 0f 01 10   40 00 00 00 02 00 00 00   00 00 00 00 00 00 00 00   00 00 00 00
+      ^seq ^pad  ^options     ^cursor 2    ^no pointer sentinel      ^sqlLen = 0
+```
+
+The id is the **second** of the two little-endian `uint32`s after the pad — the
+eight bytes `execSQLLengthWideField` only ever had to skip, and so calls
+"options". Where it sits was measured against two witnesses that share no code
+with the walk: across the recorded corpus that field is zero on every wide exec
+carrying a statement (a parse asks the server to allocate a cursor) and non-zero
+on exactly the two that carry none, and those two ids are the ones
+`refCursorIDsInBindOutput` reads out of the call responses recorded beside them,
+in the same order. `execWideNoStatementCursor` reads it as narrowly as the thin
+walk reads its own — the `[0x01][seq+1]` pad must fit, the statement's 8-byte
+pointer sentinel must be **absent** (a SQL-less frame writes zeros there), and
+the id must be non-zero and within `cursorReexecMaxID` — and hands the result to
+the same `execNoStatementCursor` → `PiggybackExecNoSQLError` →
+`handleCursorReexec` path the thin shape uses. No new policy; the frame simply
+never reached the one that already existed.
+
+Order mattered here and is worth keeping in mind for the next shape: the gap was
+found *while* implementing the REF-cursor id reading, and closing it first would
+have turned every sqlplus `VARIABLE rc REFCURSOR` / `PRINT rc` into the
+`ORA-01031` that feature exists to prevent. `TestIntegration_RefCursorFrom
+SQLPlusUnderReadOnly` and `TestIntegration_RepeatedStatementFromSQLPlusUnder
+ReadOnly` hold both halves at once, live: the drives are gated, nothing is
+refused as untracked, a repeated read still returns its rows, and a repeated
+write is refused on the repeat exactly as on the first execution.
 
 The enforcement is pinned by **replaying** that recording through the real
 intercept pipeline, in both directions, so the cursor id is learned off the
@@ -747,13 +784,16 @@ is a far longer run of zeros for a drifting walk to find a descriptor in. Not on
 id may come out of it. `TestIntegration_RefCursorFromSQLPlusUnderReadOnly` runs
 the whole path live.
 
-> One caveat the live test is explicit about: on an OCI session the drive itself
-> is **not gated today**. It is an exec op in the wide header declaring no
-> statement, and `execNoStatementCursorAt` refuses to read that header, so the
-> frame reaches neither `refuseUnknownCursor` nor the grant. Closing that is
-> filed in `specs/todos/`, deliberately after this — gating the drive before the
-> id was learnable would have turned every sqlplus REF cursor into the
-> `ORA-01031` this feature exists to prevent.
+The drive itself is gated, and only became so once the id above was learnable.
+It is an exec op in the wide header declaring no statement, which
+`execNoStatementCursorAt` used to refuse to read — so the frame reached neither
+`refuseUnknownCursor` nor the grant, and from the second execution of any cursor
+on an OCI session every statement-shaped control applied to the parse alone.
+`execWideNoStatementCursor` closes that (see "Cursor re-execution"), and
+the live test now requires both `PRINT rc` drives to reach the re-execution gate
+with nothing refused as untracked. The order mattered: gating the drive before
+the id was learnable would have turned every sqlplus REF cursor into the
+`ORA-01031` this feature exists to prevent.
 
 #### Closing cursors
 
@@ -2374,7 +2414,7 @@ all five protocols.
 ## Known Limitations
 
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
-- **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the three re-execution frames that are real (the SQL-less `OALL8`, the `03/0x4e|0x04` piggyback, and the `03 5e` whose statement length is zero — ojdbc6's) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
+- **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the re-execution frames that are real (the SQL-less `OALL8`, the `03/0x4e|0x04` piggyback, and the `03 5e` declaring no statement in either the thin header — ojdbc6's — or the wide one — sqlplus driving a cursor) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
 - **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. That now includes a failure raised **mid-fetch**, once column definitions are decoded — measured at 14 900 rows into a 20 000-row fetch on **four** clients, and accepted there only when the OER also names the cursor whose rows are streaming; see "A failure raised mid-fetch". "Every client" includes the OCI ones (sqlplus, Instant Client, SQL*Developer over OCI) only since `decodeOERFieldsAtLayout`: they marshal the summary object fixed-width, dbbat read TTC compressed integers only, and until then *every* failing statement on those clients — mid-fetch or not — was recorded as a success. A **successful** OCI call is a separate reading again, added later still (`decodeFixedStatusOERAt`): the standalone summary object that ends every OCI fetch reports ORA-01403 with a bare `CallStatus 0x1`, so until it was read, an OCI statement was completed by the *next* one's `flushPendingQuery` — no `rows_affected`, and a `duration_ms` measuring the client's think time. See "a successful call on an OCI client" for the predicate and its measured bounds. What is still not covered is a mid-fetch failure whose OER names a *different* cursor (none has been observed; it fails closed to the old no-error behaviour and logs a DEBUG line), any mid-fetch failure on a client not captured, and — the one to know about — **an OCI DML's `rows_affected`, which is still NULL**: its summary object is *embedded in a Response* with a populated logical-rowid DLC, a third fixed-width layout the RetCode anchor refuses (`sqlplus_midfetch_fail.pcapng` packet #31), so the statement is closed by the next one's flush. That is out of scope of the status reading above and tracked by the gated `TestIntegration_DMLRowCountLandsFromItsOwnOEROCI`; see "What is still NULL: an OCI DML's `rows_affected`". See `ttc_oer.go`.

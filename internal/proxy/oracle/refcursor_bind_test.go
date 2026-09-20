@@ -198,8 +198,10 @@ func ociRefCursorBindOutputIDs(t *testing.T) []uint16 {
 //
 // It is deliberately written out here rather than taken from a decoder: this is
 // the independent witness the walk under test is checked against, so it must not
-// share code with it. (dbbat itself does not read this field yet — see
-// execNoStatementCursorAt, which refuses the wide header outright.)
+// share code with it. dbbat reads the same field for its own purposes in
+// execWideNoStatementCursor — which is checked against this hand-walk rather
+// than trusted to agree with it, see
+// TestDumpReplay_OCIDriveReadsTheCursorTheClientIsDriving.
 func ociDrivenCursorID(t *testing.T, ttc []byte) uint16 {
 	t.Helper()
 

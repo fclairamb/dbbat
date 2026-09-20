@@ -423,11 +423,13 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 }
 
 // refuseUnknownCursor decides what to do with a re-execution naming a cursor
-// dbbat never saw parsed. All three frames that can only be identified by cursor
-// id route through here — the SQL-less OALL8, the piggyback re-execution every
-// modern thin client sends, and the `03 5e` declaring no statement that ojdbc6
-// sends (execNoStatementCursor) — so the wire op a client picks cannot change
-// the answer. The statement it would run is unknown, so:
+// dbbat never saw parsed. Every frame that can only be identified by cursor id
+// routes through here — the SQL-less OALL8, the piggyback re-execution every
+// modern thin client sends, and the `03 5e` declaring no statement, in ojdbc6's
+// thin header and in the wide one an OCI client drives a cursor with
+// (execNoStatementCursor) — so neither the wire op a client picks nor the
+// encoding it writes can change the answer. The statement it would run is
+// unknown, so:
 //
 //   - under a grant carrying statement-shaped controls, it fails closed — a
 //     restrictive grant must not be bypassable by an execution the proxy cannot
