@@ -54,16 +54,16 @@ EXIT
 // ORA-01031 this whole feature exists to prevent, so "gated twice" and "refused
 // never" have to hold at once.
 //
-// Both halves are the **4-byte OCI dialect** only, and the test says so out
-// loud rather than asserting them at whichever client the runner happens to
-// have. "The OCI encoding" is two encodings (see isCloseCursorsWide8Header):
-// the Instant Client this work was captured from writes 4-byte integers after a
-// 5-byte op header, and the sqlplus bundled in gvenzl/oracle-free 23.26 — which
-// is the client CI uses, reached back over host.docker.internal — writes 8-byte
-// ones after a 17-byte header. Measured on 2026-09-20, the 64-bit dialect
-// learns no REF cursor id and so gates no drive; that gap is filed in
-// specs/todos/ and pinned below as the *measured* state, so closing it fails
-// this test rather than passing unnoticed.
+// Both halves now hold on **both OCI dialects**, and the test still reads which
+// one it is talking to rather than assuming. "The OCI encoding" is two
+// encodings (see isCloseCursorsWide8Header): the Instant Client this work was
+// captured from writes 4-byte integers after a 5-byte op header, and the
+// sqlplus bundled in gvenzl/oracle-free 23.26 — which is the client CI uses,
+// reached back over host.docker.internal — writes 8-byte ones after a 17-byte
+// header. Measured on 2026-09-20 the 64-bit dialect learned no id and gated no
+// drive, which is the gap refcursor_bind_wide64.go and
+// execWide64NoStatementCursor closed; the dialect is still read off the proxy's
+// own AUTH log, so a run that regresses on one client says which one.
 func TestIntegration_RefCursorFromSQLPlusUnderReadOnly(t *testing.T) {
 	env := startOracleThroughProxyForOCI(t, nil)
 	oci := requireOCIClient(t, env)
@@ -101,17 +101,7 @@ END;`)
 	assert.Zero(t, env.logs.count(logMsgUntrackedCursorRefused),
 		"no drive may name a cursor dbbat could not resolve")
 
-	if ociSessionSpeaksWide64(t, env) {
-		t.Log("64-bit OCI dialect: pinning the measured gap, not the claim")
-
-		assert.Zero(t, env.logs.count(logMsgLearnedRefCursorID),
-			"the bind-output walk does not fit this dialect yet; if it does now, the claims "+
-				"below must replace this pin (see specs/todos/, oracle wide64 REF cursor)")
-		assert.Zero(t, env.logs.count(logMsgReexecGated),
-			"and with no id learned there is nothing for a drive to resolve to")
-
-		return
-	}
+	t.Logf("OCI dialect: 64-bit=%v", ociSessionSpeaksWide64(t, env))
 
 	assert.Equal(t, 2, env.logs.count(logMsgLearnedRefCursorID),
 		"the two calls must each have had their REF cursor id read out of the bind output")
