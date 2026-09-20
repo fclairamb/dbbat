@@ -300,8 +300,12 @@ func execThinHeader(body []byte) (execThinHeaderFields, bool) {
 // behind a close-cursors piggyback, the same two forms decodeExecStatementText
 // reads — a `11 69` twin re-executes just as ungated as a bare `03 5e` would.
 // wide64 says the session has learned its client writes the 64-bit OCI op
-// header (oerShape.fixedWidth64, seeded from the client's own AUTH framing —
-// usesWide64OpHeader). It selects that dialect's reading and **only** it: the
+// header. Its source is `session.clientWide64Encoding`, read off the client's
+// own AUTH Phase 1 (usesWide64OpHeader) — which is the right half of the
+// evidence here, because an exec header is a *client* frame: the shape's
+// fixedWidth64 is what the **server**'s summary object looks like, learned
+// later and from the other direction, and it is what the bind-output walk keys
+// on instead. It selects that dialect's reading and **only** it: the
 // three headers below are each other's near-misses, and offering one session's
 // bytes a second layout to be mistaken for is how a run of zeros becomes a
 // cursor id. Same rule, and the same reason, as refCursorIDsInBindOutput.
