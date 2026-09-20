@@ -39,6 +39,20 @@ import "encoding/binary"
 // *no id*, which is the behavior an OCI session had before any of this
 // existed; it does not yield a different number.
 //
+// That last sentence is a guarantee, so the walk is shaped to actually make it
+// one. It reads **one** descriptor and requires it to land; it does not
+// continue past a descriptor that did not. The difference matters because the
+// anchor is a scan where the 4-byte walk is a field walk: there, "did not land"
+// means another descriptor follows contiguously and the walk simply carries on,
+// while here it would mean re-scanning forward for another signature — so a
+// spurious early anchor followed by a re-sync on the real trailing block would
+// return `[wrong id, real id]`, and rememberCursor plants **both**. One wrong
+// id planted over a tracked cursor is the exact failure the whole REF-cursor
+// chain is bounded against, so the second-chance behavior is refused rather
+// than bounded. It costs nothing measurable: a `SYS_REFCURSOR` is one cursor
+// and no recording holds a call returning two. See
+// TestOCI64DecoyTailSignatureYieldsNoID.
+//
 // The cross-check is the same one, and it is what says the field is the right
 // one rather than a consistently decoded one:
 // TestDumpReplay_OCI64RefCursorIDsMatchTheCursorsTheClientDrives pairs the ids
@@ -110,40 +124,33 @@ const (
 )
 
 // refCursorIDsInBindOutputWide64 is refCursorIDsInBindOutput for the 64-bit OCI
-// dialect. It returns the ids in wire order, or nil when the payload is not a
-// bind-output block this walk can account for end to end.
+// dialect. It returns the one id the block carries, or nil when the payload is
+// not a bind-output block this walk can account for end to end.
+//
+// One id, not a list: see the note at the top of this file for why a walk
+// anchored on a scan must not take a second chance after a descriptor that did
+// not land.
 func refCursorIDsInBindOutputWide64(ttcPayload []byte) []uint16 {
 	start, ok := bindOutputBodyStartWide64(ttcPayload)
 	if !ok {
 		return nil
 	}
 
-	var ids []uint16
-
-	for len(ids) < refCursorMaxOutBinds {
-		id, next, ok := wide64RefCursorDescriptor(ttcPayload, start)
-		if !ok {
-			return nil
-		}
-
-		ids = append(ids, id)
-
-		// The block is finished the moment the walk lands on the next TTC
-		// message, with or without the one integer PL/SQL puts between a REF
-		// cursor's descriptor and whatever follows it — the same two-sided
-		// landing check refCursorIDsAt makes.
-		if landedAfterBindOutput(ttcPayload, next) {
-			return ids
-		}
-
-		if landedAfterBindOutput(ttcPayload, next+2) {
-			return ids
-		}
-
-		start = next
+	id, next, ok := wide64RefCursorDescriptor(ttcPayload, start)
+	if !ok {
+		return nil
 	}
 
-	return nil
+	// The block is finished the moment the walk lands on the next TTC message,
+	// with or without the one integer PL/SQL puts between a REF cursor's
+	// descriptor and whatever follows it — the same two-sided landing check
+	// refCursorIDsAt makes. Anything else means the anchor was not the real
+	// trailing block, and the id it produced is discarded rather than kept.
+	if !landedAfterBindOutput(ttcPayload, next) && !landedAfterBindOutput(ttcPayload, next+2) {
+		return nil
+	}
+
+	return []uint16{id}
 }
 
 // bindOutputBodyStartWide64 returns the offset of the first byte inside the
