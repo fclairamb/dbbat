@@ -274,6 +274,16 @@ func TestRefCursorBindOutputIsReadInTheSessionsOwnEncodingOnly(t *testing.T) {
 		"a session that speaks the compressed encoding must not be offered the OCI reading")
 	assert.Empty(t, refCursorIDsInBindOutput(ociOERShape(), thin),
 		"nor the other way round")
+
+	// And not just on the one hand-kept descriptor: the three thin REF-cursor
+	// recordings are the densest source of bind-output blocks in the corpus, and
+	// the fixed-width reading must find nothing in any of them either.
+	for name := range refCursorDumps {
+		for _, ttc := range serverTTCPayloads(t, name) {
+			assert.Emptyf(t, refCursorIDsInBindOutput(ociOERShape(), ttc),
+				"%s: a thin client's REF cursor must not decode under the fixed-width reading", name)
+		}
+	}
 }
 
 // TestOCIScalarOutBindsYieldNoRefCursorID is the fixed-width half of the
@@ -324,6 +334,13 @@ var refCursorDumps = map[string]bool{
 // `testdata/` now opts it in automatically, and a fixture that genuinely holds a
 // REF cursor has to be named above to be excused.
 //
+// **Every recording is swept under both readings**, and not each under its own.
+// Sweeping an OCI recording as compressed and a thin one as fixed-width says
+// nothing about what either would actually be offered, and the corpus is far
+// more interesting than that: it is 30-odd recordings of real row data, real
+// out-binds and real fetches, which is exactly the material a drifting walk
+// would find a descriptor in. Neither reading may find one anywhere.
+//
 // The session-level gate (only while a PL/SQL call is in flight) sits on top of
 // this; this asserts the decoder does not need it to stay quiet.
 func TestDumpReplay_RefCursorLocatorIsSilentOnOrdinaryTraffic(t *testing.T) {
@@ -341,8 +358,19 @@ func TestDumpReplay_RefCursorLocatorIsSilentOnOrdinaryTraffic(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Empty(t, recordedRefCursorIDs(t, name),
-				"a recording with no REF cursor in it must yield no REF cursor id")
+			for _, reading := range []struct {
+				label string
+				shape oerShape
+			}{
+				{label: "compressed", shape: thinOERShape()},
+				{label: "fixed-width", shape: ociOERShape()},
+			} {
+				for _, ttc := range serverTTCPayloads(t, name) {
+					assert.Emptyf(t, refCursorIDsInBindOutput(reading.shape, ttc),
+						"a recording with no REF cursor in it must yield no REF cursor id (%s reading)",
+						reading.label)
+				}
+			}
 		})
 	}
 

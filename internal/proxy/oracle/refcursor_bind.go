@@ -47,7 +47,8 @@ const refCursorMaxColumns = 1000
 //
 // ttcPayload starts at the TTC message-type byte (what extractTTCPayload
 // returns). Two shapes reach here, and both are measured rather than assumed
-// (testdata/{go_ora,python_thin,jdbc_thin}_refcursor.pcapng):
+// (testdata/{go_ora,python_thin,jdbc_thin}_refcursor.pcapng, and
+// testdata/oci_refcursor_bind_output.hex for the encoding below):
 //
 //   - the **first** execution of a call, where the server sends the IO vector
 //     (`0x0b`) naming each bind's direction and then the bind-output block; and
@@ -58,6 +59,7 @@ const refCursorMaxColumns = 1000
 // the message that follows the block. Returning nil costs only the pre-existing
 // behavior — the drive stays an untracked cursor — while a wrong id costs a
 // mis-gated statement, so every bound here is deliberately the strict one.
+//
 // The walk below reads **two** encodings of that same field list. A thin client
 // gets TTC compressed integers; an OCI one (sqlplus, Instant Client,
 // SQL*Developer over OCI) gets fixed-width little-endian ones, per call site,
@@ -110,9 +112,15 @@ func bindOutputBodyStart(ttcPayload []byte, wide bool) (int, bool) {
 // The vector is go-ora's ResultSet.load followed by one direction byte per
 // bind:
 //
-//	[0x0b] skip:byte count:cint(2) hi:cint(4) rows:cint(4) uac:cint(2)
+//	[0x0b] skip:byte count:int(2) hi:int(4) rows:int(4) uac:int(2)
 //	       bitvector:dlc  spare:dlc
 //	       count x direction:byte   [0x07]
+//
+// `int(n)` is dcursor.intw: a compressed integer on a thin session, n
+// little-endian bytes on an OCI one. The two-byte fields are what makes the
+// difference visible — an sqlplus IO vector spends two bytes on a UAC length of
+// zero where a thin one spends a single `00`, and reading it as the latter puts
+// the walk a byte out for the rest of the payload.
 //
 // The count is the *bind* count, so it is small; a payload that does not put a
 // bind-output message right after that many bytes has not been understood and
@@ -219,13 +227,17 @@ func landedAfterBindOutput(ttc []byte, pos int) bool {
 // (`case 16:` in the same file, and describeColumnLayout here) plus the cursor
 // id:
 //
-//	len:byte maxRowSize:cint colCount:cint
+//	len:byte maxRowSize:int(4) colCount:int(4)
 //	[1 byte] colCount x column-describe record
 //	dlc
-//	two cints          TTCVersion >= 3
+//	two int(4)         TTCVersion >= 3
 //	two more           TTCVersion >= 4
 //	dlc                TTCVersion >= 5
-//	cursorID:cint
+//	cursorID:int(4)
+//
+// `int(n)` is dcursor.intw again — a compressed integer, or n little-endian
+// bytes on an OCI session. The cursor id fits sixteen bits either way, so the
+// bound below is the same in both.
 //
 // Every column type must be a known TNSType — the same alignment proof
 // parseColumnDescribesMode relies on, and the reason a run of bytes that is not
