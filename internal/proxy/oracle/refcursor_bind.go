@@ -71,6 +71,14 @@ const refCursorMaxColumns = 1000
 // small integers would become a cursor id, and the same rule is what keeps the
 // OER decoder honest.
 func refCursorIDsInBindOutput(shape oerShape, ttcPayload []byte) []uint16 {
+	// "The OCI encoding" is two encodings, and the 64-bit one needs its own walk
+	// rather than a wider `intw` — see refcursor_bind_wide64.go, which says what
+	// differs and why it cannot be reached from here. Asked of the session's
+	// learned shape, like everything else in this file.
+	if shape.fixedWidth64 {
+		return refCursorIDsInBindOutputWide64(ttcPayload)
+	}
+
 	wide := shape.fixedWidth
 
 	start, ok := bindOutputBodyStart(ttcPayload, wide)

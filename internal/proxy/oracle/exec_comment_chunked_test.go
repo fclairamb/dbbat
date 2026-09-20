@@ -99,7 +99,7 @@ func TestDecodeExecStatement_CommentLedStatement(t *testing.T) {
 func TestDecodePiggybackExec_CommentLedStatement_NotTruncated(t *testing.T) {
 	t.Parallel()
 
-	result, err := decodePiggybackExecSQL(padExecPayload(buildLongPiggybackExec(commentLedRepro)))
+	result, err := decodePiggybackExecSQL(padExecPayload(buildLongPiggybackExec(commentLedRepro)), false)
 	if err != nil {
 		t.Fatalf("decodePiggybackExecSQL: %v", err)
 	}

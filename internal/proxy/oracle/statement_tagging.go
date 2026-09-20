@@ -108,7 +108,7 @@ func (s *session) rewriteStatementMessage(msg *statementFragments) ([][]byte, bo
 	}
 
 	ttc := extractTTCPayload(msg.gate.Payload)
-	if ttc == nil || !frameCarriesStatement(ttc) {
+	if ttc == nil || !frameCarriesStatement(ttc, s.clientWide64Encoding) {
 		return nil, false
 	}
 
@@ -248,7 +248,7 @@ func (s *session) warnStatementTooLongToTag(ttc []byte, runLen, prefixLen int) {
 // say "this was supposed to carry a statement" even when the exact locator
 // cannot find it — that case is precisely the one that must leave the session
 // untagged rather than tag around it.
-func frameCarriesStatement(ttcPayload []byte) bool {
+func frameCarriesStatement(ttcPayload []byte, wide64 bool) bool {
 	if len(ttcPayload) == 0 {
 		return false
 	}
@@ -258,7 +258,7 @@ func frameCarriesStatement(ttcPayload []byte) bool {
 	// the op switch because it answers for both execute framings, and because
 	// getting it wrong is what made the locator look like it was failing on
 	// ojdbc6's re-execution instead of correctly finding nothing to locate.
-	if _, reexec := execNoStatementCursor(ttcPayload); reexec {
+	if _, reexec := execNoStatementCursor(ttcPayload, wide64); reexec {
 		return false
 	}
 

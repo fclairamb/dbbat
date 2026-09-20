@@ -25,7 +25,7 @@ func recordedExec(t *testing.T, file, want string) string {
 		}
 
 		for _, at := range statementOpOffsets(ttc) {
-			result, err := decodeExecSQL(ttc[at:])
+			result, err := decodeExecSQL(ttc[at:], false)
 			if err == nil && result != nil && strings.Contains(strings.ToUpper(result.SQL), strings.ToUpper(want)) {
 				return result.SQL
 			}
@@ -132,7 +132,7 @@ func TestShortExecHeaderDoesNotPanic(t *testing.T) {
 	require.NotPanics(t, func() {
 		_, _ = execSQLLength(payload)
 		_, _ = decodeExecStatement(payload)
-		_ = stapledStatements(payload)
+		_ = stapledStatements(payload, false)
 	})
 
 	sql, ok := decodeExecStatement(payload)
@@ -179,7 +179,7 @@ func TestNonASCIIStatementSurvivesIntact(t *testing.T) {
 	gateSees := func(t *testing.T, sql string) string {
 		t.Helper()
 
-		result, err := decodeExecSQL(buildPiggybackExec(sql))
+		result, err := decodeExecSQL(buildPiggybackExec(sql), false)
 		require.NoError(t, err)
 
 		return result.SQL
@@ -260,7 +260,7 @@ func TestBindCaptureAnchorsOnTheWireBytes(t *testing.T) {
 	frame := buildPiggybackExec(sql)
 	frame = append(frame[:len(frame)-2], bytes.Repeat([]byte{0x1f}, 29)...)
 
-	result, err := decodePiggybackExecSQL(frame)
+	result, err := decodePiggybackExecSQL(frame, false)
 	require.NoError(t, err)
 
 	require.True(t, strings.HasSuffix(result.SQL, ", :1)"),
@@ -321,7 +321,7 @@ func TestBundledOCIFixturesCarryNoStatement(t *testing.T) {
 					continue
 				}
 
-				require.Empty(t, stapledStatements(ttc),
+				require.Empty(t, stapledStatements(ttc, false),
 					"%s frame %d must not read as a statement", path, i)
 			}
 		})
@@ -335,7 +335,7 @@ func TestStapledStatementsGatesEveryExec(t *testing.T) {
 
 	frame := append(buildPiggybackExec("SELECT 1 FROM dual"), buildPiggybackExec("DROP TABLE emp")...)
 
-	assert.Equal(t, []string{"SELECT 1 FROM dual", "DROP TABLE emp"}, stapledStatements(frame))
+	assert.Equal(t, []string{"SELECT 1 FROM dual", "DROP TABLE emp"}, stapledStatements(frame, false))
 }
 
 // TestStapledStatementsDedupes keeps the recorded `11 69 <closes> 03 5e <exec>`
@@ -350,7 +350,7 @@ func TestStapledStatementsDedupes(t *testing.T) {
 			continue
 		}
 
-		if got := stapledStatements(ttc); len(got) > 0 {
+		if got := stapledStatements(ttc, false); len(got) > 0 {
 			assert.Len(t, got, 1, "one stapled execute is one statement: %v", got)
 
 			return

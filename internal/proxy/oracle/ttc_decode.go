@@ -920,7 +920,7 @@ func decodeOALL8(ttcPayload []byte) (*OALL8Result, error) {
 // This function scans for the SQL text by looking for a length-prefixed readable
 // string in the expected region. This is more robust than assuming a fixed offset,
 // since the exact layout may vary by Oracle version.
-func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
+func decodePiggybackExecSQL(ttcPayload []byte, wide64 bool) (*OALL8Result, error) {
 	if len(ttcPayload) < 52 {
 		return nil, fmt.Errorf("%w: piggyback exec needs at least 52 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
 	}
@@ -935,7 +935,7 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	// and it gets reported as such so the caller can gate it against that
 	// cursor's SQL instead of waving it through. See execNoStatementCursor.
 	if !located {
-		if cursorID, reexec := execNoStatementCursor(ttcPayload); reexec {
+		if cursorID, reexec := execNoStatementCursor(ttcPayload, wide64); reexec {
 			return nil, &PiggybackExecNoSQLError{CursorID: cursorID}
 		}
 	}
@@ -1097,7 +1097,7 @@ func isBindNameByte(c byte) bool {
 //
 // The SQL is preceded by a run of zero bytes and its length is encoded with
 // the standard varlen encoding.
-func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
+func decodeExecSQL(ttcPayload []byte, wide64 bool) (*OALL8Result, error) {
 	if len(ttcPayload) < 30 {
 		return nil, fmt.Errorf("%w: exec needs at least 30 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
 	}
@@ -1121,7 +1121,7 @@ func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	// stapled behind a close list that declares no statement is a re-execution,
 	// not an undecodable frame, and the op a client picks must not change
 	// whether the gate sees it.
-	if cursorID, reexec := execNoStatementCursor(ttcPayload); reexec {
+	if cursorID, reexec := execNoStatementCursor(ttcPayload, wide64); reexec {
 		return nil, &PiggybackExecNoSQLError{CursorID: cursorID}
 	}
 

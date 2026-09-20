@@ -2516,7 +2516,7 @@ func (s *session) refusalWouldStrandFragments() bool {
 // recorded as blocked first, so the refusal is in the audit trail exactly like
 // every other one.
 func (s *session) gateUnnameableFrame(ttcPayload []byte) bool {
-	statements := stapledStatements(ttcPayload)
+	statements := stapledStatements(ttcPayload, s.clientWide64Encoding)
 
 	if len(statements) == 0 {
 		s.logger.DebugContext(s.ctx, logMsgUnnamedCallForwarded,
@@ -2656,14 +2656,14 @@ func (s *session) endSessionOnRefusal(ttcPayload []byte, sql string, refusal err
 // 03 5e <exec>` is the recorded shape, and a frame that staples two executes
 // runs both. Duplicates are dropped because the two anchors of that shape name
 // the same execute.
-func stapledStatements(ttcPayload []byte) []string {
+func stapledStatements(ttcPayload []byte, wide64 bool) []string {
 	var (
 		out  []string
 		seen = map[string]struct{}{}
 	)
 
 	for _, at := range statementOpOffsets(ttcPayload) {
-		result, err := decodeExecSQL(ttcPayload[at:])
+		result, err := decodeExecSQL(ttcPayload[at:], wide64)
 		if err != nil || result == nil || result.SQL == "" {
 			continue
 		}

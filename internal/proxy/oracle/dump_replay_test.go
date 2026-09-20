@@ -327,7 +327,7 @@ func TestDumpReplay_PiggybackExecSQL(t *testing.T) {
 				case TTCFuncPiggyback:
 					if IsPiggybackExecSQL(ttcPayload) {
 						piggybackExecCount++
-						result, err := decodePiggybackExecSQL(ttcPayload)
+						result, err := decodePiggybackExecSQL(ttcPayload, false)
 						if err == nil && result != nil {
 							extractedSQL = append(extractedSQL, result.SQL)
 							t.Logf("Piggyback SQL: %s", truncateSQL(result.SQL, 120))
@@ -609,7 +609,7 @@ func TestDumpReplay_NoTNSParsePanics(t *testing.T) {
 					_ = decodeQueryResultV2(ttcPayload)
 				case TTCFuncPiggyback:
 					if IsPiggybackExecSQL(ttcPayload) {
-						_, _ = decodePiggybackExecSQL(ttcPayload)
+						_, _ = decodePiggybackExecSQL(ttcPayload, false)
 					}
 				default: // other function codes not relevant here
 				}
@@ -716,7 +716,7 @@ func extractAllSQL(t *testing.T, td *testDump) []string {
 		switch fc { //nolint:exhaustive // only handling relevant function codes
 		case TTCFuncPiggyback:
 			if IsPiggybackExecSQL(ttcPayload) {
-				result, err := decodePiggybackExecSQL(ttcPayload)
+				result, err := decodePiggybackExecSQL(ttcPayload, false)
 				if err == nil && result != nil {
 					sql = result.SQL
 				}
@@ -728,7 +728,7 @@ func extractAllSQL(t *testing.T, td *testDump) []string {
 			}
 		case TTCFuncOFETCH:
 			if IsExecSQL(ttcPayload) {
-				result, err := decodeExecSQL(ttcPayload)
+				result, err := decodeExecSQL(ttcPayload, false)
 				if err == nil && result != nil {
 					sql = result.SQL
 				}

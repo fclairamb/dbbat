@@ -13,6 +13,7 @@
 package oracle
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -43,6 +44,13 @@ const (
 	oci64RefCursorBindOutputFixture = "testdata/oci64_refcursor_bind_output.hex"
 	oci64RefCursorDrivesFixture     = "testdata/oci64_refcursor_drives.hex"
 	oci64ScalarOutBindFixture       = "testdata/oci64_scalar_outbind_bind_output.hex"
+
+	// oci64ParseExecsFixture is the negative half of the drive reading: the
+	// client frames of the same session that **do** carry a statement. A
+	// re-execution reading that answered on one of these would gate a parse
+	// against whatever four bytes sit where the cursor id goes, and the visible
+	// result is an ORA-01031 on work that used to run.
+	oci64ParseExecsFixture = "testdata/oci64_parse_execs.hex"
 )
 
 // ociFixtureProvenance is why the 64-bit fixtures are recorded through dbbat
@@ -357,4 +365,39 @@ func writeDescribeHexFixture(t *testing.T, dumpPath, outPath string) {
 	require.NoError(t, os.WriteFile(outPath, []byte(body), 0o600))
 
 	t.Logf("%d describe responses written to %s", frames, outPath)
+}
+
+// writeStatementFrameHexFixture keeps every client frame of a recording whose
+// payload contains marker, as one hex line each.
+//
+// The selection is by the statement's own text, never by decoding the frame:
+// which frames land in a fixture that a decoder is then pinned against must not
+// depend on that decoder, or the check is the decoder agreeing with itself.
+func writeStatementFrameHexFixture(t *testing.T, dumpPath, outPath, marker string) {
+	t.Helper()
+
+	body := "# The client frames of the same session that carry a statement, picked by\n" +
+		"# searching the payload for the statement's own text rather than by decoding\n" +
+		"# anything. They are the negative half of the SQL-less exec reading: not one\n" +
+		"# of them may be read as a re-execution.\n" +
+		"#\n" +
+		"# Regenerate with:\n" +
+		"#   ORACLE_CAPTURE_OCI_FIXTURES=1 ORACLE_TEST_OCI_CLIENT=container \\\n" +
+		"#     go test -tags integration -run TestCapture_OCIFixturesThroughDBBat ./internal/proxy/oracle/\n"
+
+	frames := 0
+
+	eachRecordedTNSPayload(t, dumpPath, func(clientToServer bool, payload []byte) {
+		if !clientToServer || !bytes.Contains(payload, []byte(marker)) {
+			return
+		}
+
+		body += hex.EncodeToString(payload) + "\n"
+		frames++
+	})
+
+	require.Positive(t, frames, "the session must have sent at least one frame carrying %q", marker)
+	require.NoError(t, os.WriteFile(outPath, []byte(body), 0o600))
+
+	t.Logf("%d statement-carrying client frames written to %s", frames, outPath)
 }

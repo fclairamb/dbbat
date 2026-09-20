@@ -42,7 +42,7 @@ func TestDumpReplay_Binds(t *testing.T) {
 			continue
 		}
 
-		res, derr := decodePiggybackExecSQL(ttc)
+		res, derr := decodePiggybackExecSQL(ttc, false)
 		if derr != nil || len(res.BindValues) == 0 {
 			continue
 		}

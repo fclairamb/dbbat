@@ -108,7 +108,7 @@ func drivenCursorIDs(t *testing.T, name string) []uint16 {
 			continue // a re-execution of the *call*, not a drive of its REF cursor
 		}
 
-		_, err := decodePiggybackExecSQL(ttc)
+		_, err := decodePiggybackExecSQL(ttc, false)
 
 		var noSQL *PiggybackExecNoSQLError
 		if errors.As(err, &noSQL) {

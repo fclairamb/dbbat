@@ -125,7 +125,7 @@ func TestDecodePiggybackExecSQL(t *testing.T) {
 		t.Parallel()
 		// Real captured payload from oracledb thin client → Oracle 19c
 		payload, _ := hexDecode("035e030280610001011201010d0000000102047fffffff0000000000000000000000010000000000000000000000000000001253454c45435420312046524f4d204455414c0101000000000000010100")
-		result, err := decodePiggybackExecSQL(payload)
+		result, err := decodePiggybackExecSQL(payload, false)
 		require.NoError(t, err)
 		assert.Equal(t, "SELECT 1 FROM DUAL", result.SQL)
 	})
@@ -134,14 +134,14 @@ func TestDecodePiggybackExecSQL(t *testing.T) {
 		t.Parallel()
 		// Captured: SELECT COUNT(*) FROM all_users
 		payload, _ := hexDecode("035e040280610001011e01010d0000000102047fffffff0000000000000000000000010000000000000000000000000000001e53454c45435420434f554e54282a292046524f4d20616c6c5f7573657273010100000000000001010002800000000000")
-		result, err := decodePiggybackExecSQL(payload)
+		result, err := decodePiggybackExecSQL(payload, false)
 		require.NoError(t, err)
 		assert.Equal(t, "SELECT COUNT(*) FROM all_users", result.SQL)
 	})
 
 	t.Run("too short payload", func(t *testing.T) {
 		t.Parallel()
-		_, err := decodePiggybackExecSQL([]byte{0x03, 0x5e, 0x01})
+		_, err := decodePiggybackExecSQL([]byte{0x03, 0x5e, 0x01}, false)
 		assert.Error(t, err)
 	})
 }

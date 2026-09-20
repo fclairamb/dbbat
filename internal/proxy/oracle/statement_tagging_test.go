@@ -67,7 +67,7 @@ func firstCorpusStatementFrame(t *testing.T, name string) []byte {
 	td := loadTestDump(t, name)
 
 	for _, ttc := range surveyClientTTC(t, td) {
-		if frameCarriesStatement(ttc) {
+		if frameCarriesStatement(ttc, false) {
 			return ttc
 		}
 	}
@@ -185,7 +185,7 @@ func TestStatementTaggingDecidesOncePerSession(t *testing.T) {
 	// A frame the exact locator refuses: a 0xFC short-form CLR prefix, which is
 	// a length this encoder will not write.
 	unrewritable := thinExecCLR("SELECT " + strings.Repeat("f", 235) + " FROM dual")
-	require.True(t, frameCarriesStatement(unrewritable))
+	require.True(t, frameCarriesStatement(unrewritable, false))
 
 	_, ok := locateStatementRewrite(unrewritable, false)
 	require.False(t, ok, "the fixture must actually be refused")
@@ -223,7 +223,7 @@ func TestStatementTaggingIgnoresNonStatementFrames(t *testing.T) {
 	skipped := 0
 
 	for _, ttc := range surveyClientTTC(t, td) {
-		if frameCarriesStatement(ttc) {
+		if frameCarriesStatement(ttc, false) {
 			break
 		}
 
@@ -262,7 +262,7 @@ func TestStatementTaggingLeavesCursorReexecutionAlone(t *testing.T) {
 
 			reexec++
 
-			assert.False(t, frameCarriesStatement(ttc),
+			assert.False(t, frameCarriesStatement(ttc, false),
 				"%s: a re-execution carries a cursor id, not a statement", name)
 
 			_, ok := s.rewriteStatementMessage(messageOf(ttc))
@@ -357,7 +357,7 @@ func TestStatementTaggingCertifiedSessionSkipsOneFrameAndKeepsGoing(t *testing.T
 
 	// Statement-carrying, and refused: a 0xFC short-form CLR prefix.
 	unrewritable := thinExecCLR("SELECT " + strings.Repeat("f", 235) + " FROM dual")
-	require.True(t, frameCarriesStatement(unrewritable))
+	require.True(t, frameCarriesStatement(unrewritable, false))
 
 	s := taggedSession(t, 8192)
 
@@ -413,7 +413,7 @@ func TestStatementTaggingRefusesAStatementItCannotGrow(t *testing.T) {
 	require.Len(t, tooLong, maxTaggableStatementBytes)
 
 	oversize := thinExecBare(tooLong)
-	require.True(t, frameCarriesStatement(oversize))
+	require.True(t, frameCarriesStatement(oversize, false))
 
 	_, ok := locateStatementRewrite(oversize, false)
 	require.True(t, ok,

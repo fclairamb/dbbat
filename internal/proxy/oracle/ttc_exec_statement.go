@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"encoding/binary"
 	"strings"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
@@ -298,13 +299,19 @@ func execThinHeader(body []byte) (execThinHeaderFields, bool) {
 // The frame is accepted either as the exec op itself or with the exec stapled
 // behind a close-cursors piggyback, the same two forms decodeExecStatementText
 // reads — a `11 69` twin re-executes just as ungated as a bare `03 5e` would.
-func execNoStatementCursor(ttcPayload []byte) (uint16, bool) {
-	if cursorID, ok := execNoStatementCursorAt(ttcPayload); ok {
+// wide64 says the session has learned its client writes the 64-bit OCI op
+// header (oerShape.fixedWidth64, seeded from the client's own AUTH framing —
+// usesWide64OpHeader). It selects that dialect's reading and **only** it: the
+// three headers below are each other's near-misses, and offering one session's
+// bytes a second layout to be mistaken for is how a run of zeros becomes a
+// cursor id. Same rule, and the same reason, as refCursorIDsInBindOutput.
+func execNoStatementCursor(ttcPayload []byte, wide64 bool) (uint16, bool) {
+	if cursorID, ok := execNoStatementCursorAt(ttcPayload, wide64); ok {
 		return cursorID, true
 	}
 
 	if end, ok := closeCursorsEnd(ttcPayload); ok && end < len(ttcPayload) {
-		return execNoStatementCursorAt(ttcPayload[end:])
+		return execNoStatementCursorAt(ttcPayload[end:], wide64)
 	}
 
 	return 0, false
@@ -312,9 +319,13 @@ func execNoStatementCursor(ttcPayload []byte) (uint16, bool) {
 
 // execNoStatementCursorAt is execNoStatementCursor for a payload that must
 // already begin at the exec op header.
-func execNoStatementCursorAt(body []byte) (uint16, bool) {
+func execNoStatementCursorAt(body []byte, wide64 bool) (uint16, bool) {
 	if !isPiggybackExecHeader(body) {
 		return 0, false
+	}
+
+	if wide64 {
+		return execWide64NoStatementCursor(body)
 	}
 
 	// A wide header that declares a statement is a parse, not a re-execution —
@@ -416,6 +427,93 @@ func execWideNoStatementCursor(body []byte) (uint16, bool) {
 
 	cursorID := uint32(body[execWideCursorIDAt]) | uint32(body[execWideCursorIDAt+1])<<8 |
 		uint32(body[execWideCursorIDAt+2])<<16 | uint32(body[execWideCursorIDAt+3])<<24
+	if cursorID == 0 || cursorID > cursorReexecMaxID {
+		return 0, false
+	}
+
+	return uint16(cursorID), true
+}
+
+// The OCI **64-bit** exec header, by offset. It is the same field list as the
+// 4-byte one above at this dialect's widths, measured on
+// testdata/oci64_refcursor_drives.hex and testdata/oci64_parse_execs.hex —
+// recorded from one live sqlplus 23.26 session through dbbat
+// (capture_oci_fixtures_integration_test.go):
+//
+//	[0..2]   03 5e seq
+//	[3..4]   00 00                 where the 4-byte header puts [0x01][seq+1]
+//	[5..8]   ub4                   the last error number this session saw
+//	[9..16]  sb8 = seq+1           the NEXT TTC message's sequence number
+//	[17..20] options               uint32 little-endian
+//	[21..24] cursorID              uint32 little-endian   <- the re-execution
+//	[25..32] fe x8                 the statement's pointer sentinel
+//	[33..40] sqlLen                uint64 little-endian   <- the parse
+//
+// Two things differ from the 4-byte dialect beyond the widths, and both were
+// measured rather than assumed: the sequence pad is an eight-byte field instead
+// of one byte, and the statement length is the plain byte count rather than
+// three times it (this client sends plain lengths where the Instant Client
+// sends 3x UTF-8 buffer sizes — the same split docs/oracle.md records for the
+// AUTH key/value fields).
+const (
+	execWide64SeqPadAt   = 9
+	execWide64CursorIDAt = 21
+	execWide64SentinelAt = 25
+	execWide64SQLLenAt   = execWide64SentinelAt + 8
+	execWide64MinLen     = execWide64SQLLenAt + 8
+)
+
+// execWide64NoStatementCursor reports the cursor id of a 64-bit OCI execute op
+// that declares **no statement** — the dialect's `PRINT rc` on a REF cursor,
+// and its repeat of any cursor it already parsed.
+//
+// It is the 64-bit twin of execWideNoStatementCursor, and it exists for the
+// same reason that one does: until it landed, such a frame decoded as "could
+// not find SQL text", a decode failure is forwarded ungated, and so from the
+// second execution of any cursor on this dialect read_only, block_ddl, the
+// approval patterns, the `queries` row and the quota all applied to the parse
+// alone. This is the dialect CI runs, so it was the wider exposure of the two.
+//
+// Where the id sits was measured against an independent witness rather than
+// derived from the 4-byte header: it is zero on every recorded frame that
+// carries a statement (a parse asks the server to allocate a cursor) and
+// non-zero on exactly the frames that carry none — and those ids are the ids
+// refCursorIDsInBindOutputWide64 reads out of the call responses recorded
+// beside them, in the same session and the same order. See
+// TestDumpReplay_OCI64DriveReadsTheCursorTheClientIsDriving.
+//
+// The bounds are the 4-byte reading's, adapted: the header's own pad must fit
+// (`00 00`, and an eight-byte "next sequence" that really is this frame's
+// sequence plus one), the statement's pointer sentinel **and** the length field
+// behind it must be absent — sixteen zero bytes where a parse writes `fe x8`
+// and a byte count — and the id must be non-zero and within cursorReexecMaxID.
+// A false positive here refuses a re-execution on a client that was working, so
+// every one of those is required rather than merely preferred.
+func execWide64NoStatementCursor(body []byte) (uint16, bool) {
+	if len(body) < execWide64MinLen {
+		return 0, false
+	}
+
+	if body[3] != 0x00 || body[4] != 0x00 {
+		return 0, false
+	}
+
+	if binary.LittleEndian.Uint64(body[execWide64SeqPadAt:execWide64SeqPadAt+8]) != uint64(body[2])+1 {
+		return 0, false
+	}
+
+	// Zeros where a statement-carrying frame puts the sentinel and its length.
+	// Requiring them, rather than merely taking a length walk's refusal, is what
+	// keeps a header this reading does not understand — a truncated one, or a
+	// shape a future client invents — from being gated against whatever those
+	// four bytes hold.
+	for _, b := range body[execWide64SentinelAt : execWide64SQLLenAt+8] {
+		if b != 0 {
+			return 0, false
+		}
+	}
+
+	cursorID := binary.LittleEndian.Uint32(body[execWide64CursorIDAt : execWide64CursorIDAt+4])
 	if cursorID == 0 || cursorID > cursorReexecMaxID {
 		return 0, false
 	}

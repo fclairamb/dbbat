@@ -218,7 +218,7 @@ func TestOALL8RewriteIsDisabled(t *testing.T) {
 
 	body := oall8Frame("SELECT 1 FROM dual", 3)
 
-	require.True(t, frameCarriesStatement(body),
+	require.True(t, frameCarriesStatement(body, false),
 		"the frame really is a statement-carrying op, so the refusal below is the gate and not a miss")
 
 	_, ok := locateOALL8Rewrite(body, false)

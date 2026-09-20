@@ -41,7 +41,7 @@ func recordedNoStatementExecs(t *testing.T) ([][]byte, []uint16) {
 	)
 
 	for _, ttc := range clientTTCPayloads(t, ojdbc6LegacyDump) {
-		cursorID, ok := execNoStatementCursor(ttc)
+		cursorID, ok := execNoStatementCursor(ttc, false)
 		if !ok {
 			continue
 		}
@@ -83,7 +83,7 @@ func TestDumpReplay_OJDBC6ReexecIsSQLLessAndNamesItsCursor(t *testing.T) {
 	// And there is no statement in it to find, by any of the three readings.
 	assert.NotContains(t, string(ttc), "SELECT", "a re-execution carries no statement text")
 
-	_, err := decodePiggybackExecSQL(ttc)
+	_, err := decodePiggybackExecSQL(ttc, false)
 	require.ErrorIs(t, err, ErrPiggybackExecNoSQL, "it is reported as a re-execution, not as a decode failure")
 
 	var noSQL *PiggybackExecNoSQLError
@@ -248,7 +248,7 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 		for _, ttc := range surveyClientTTC(t, loadTestDump(t, name)) {
 			for _, body := range surveyExecOps(ttc) {
 				sql, located := decodeExecStatement(body)
-				_, reexec := execNoStatementCursor(body)
+				_, reexec := execNoStatementCursor(body, false)
 
 				require.Falsef(t, located && reexec,
 					"%s: a frame whose statement locates must never read as a re-execution: %q",
@@ -258,12 +258,12 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 				case located:
 					statements++
 
-					assert.Truef(t, frameCarriesStatement(body),
+					assert.Truef(t, frameCarriesStatement(body, false),
 						"%s: a frame carrying %q must stay a statement frame", name, truncateSQL(sql, 60))
 				case reexec:
 					reexecs[name]++
 
-					assert.Falsef(t, frameCarriesStatement(body),
+					assert.Falsef(t, frameCarriesStatement(body, false),
 						"%s: a frame declaring no statement is not a statement frame", name)
 				}
 			}
@@ -304,7 +304,7 @@ func TestExecNoStatementCursorRefusesWhatItCannotRead(t *testing.T) {
 	recorded, cursorIDs := recordedNoStatementExecs(t)
 	require.NotEmpty(t, recorded)
 
-	got, ok := execNoStatementCursor(recorded[0])
+	got, ok := execNoStatementCursor(recorded[0], false)
 	require.True(t, ok)
 	require.Equal(t, cursorIDs[0], got)
 
@@ -314,7 +314,7 @@ func TestExecNoStatementCursorRefusesWhatItCannotRead(t *testing.T) {
 		frame := append([]byte(nil), recorded[0]...)
 		frame[7] = 0x00 // the compressed-int cursor id's single value byte
 
-		_, ok := execNoStatementCursor(frame)
+		_, ok := execNoStatementCursor(frame, false)
 		assert.False(t, ok, "cursor 0 means allocate one")
 	})
 
@@ -324,7 +324,7 @@ func TestExecNoStatementCursorRefusesWhatItCannotRead(t *testing.T) {
 		frame := append([]byte(nil), recorded[0]...)
 		frame[9] = 0x01 // sqlLen's compressed-int size byte: one byte of length follows
 
-		_, ok := execNoStatementCursor(frame)
+		_, ok := execNoStatementCursor(frame, false)
 		assert.False(t, ok, "a non-zero length field means the frame is meant to carry a statement")
 	})
 
@@ -334,7 +334,7 @@ func TestExecNoStatementCursorRefusesWhatItCannotRead(t *testing.T) {
 		frame := append([]byte(nil), recorded[0]...)
 		frame[1] = PiggybackSubReexecSel
 
-		_, ok := execNoStatementCursor(frame)
+		_, ok := execNoStatementCursor(frame, false)
 		assert.False(t, ok, "only the execute op is read here; 0x4e has its own decoder")
 	})
 
@@ -346,7 +346,7 @@ func TestExecNoStatementCursorRefusesWhatItCannotRead(t *testing.T) {
 				break
 			}
 
-			_, ok := execNoStatementCursor(recorded[0][:n])
+			_, ok := execNoStatementCursor(recorded[0][:n], false)
 			assert.Falsef(t, ok, "a %d-byte frame must not resolve to a cursor", n)
 		}
 	})

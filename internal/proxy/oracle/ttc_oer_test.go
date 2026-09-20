@@ -170,7 +170,7 @@ func TestDumpReplay_DMLRowCounts(t *testing.T) {
 
 		if pkt.Direction == dump.DirClientToServer {
 			if funcCode == TTCFuncPiggyback && IsPiggybackExecSQL(ttcPayload) {
-				if result, derr := decodePiggybackExecSQL(ttcPayload); derr == nil {
+				if result, derr := decodePiggybackExecSQL(ttcPayload, false); derr == nil {
 					pendingSQL = result.SQL
 				}
 			}

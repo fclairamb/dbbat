@@ -126,7 +126,7 @@ func TestBuildJDBCExecIsRecognizedAsAnExec(t *testing.T) {
 	payload := buildJDBCExec("DELETE FROM emp WHERE id = 1")
 	require.True(t, IsExecSQL(payload), "the fixture must be dispatched as an exec, not as a plain OFETCH")
 
-	decoded, err := decodeExecSQL(payload)
+	decoded, err := decodeExecSQL(payload, false)
 	require.NoError(t, err)
 	assert.Equal(t, "DELETE FROM emp WHERE id = 1", decoded.SQL)
 }

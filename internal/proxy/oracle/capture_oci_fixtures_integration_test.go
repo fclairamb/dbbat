@@ -57,12 +57,22 @@ func TestCapture_OCIFixturesThroughDBBat(t *testing.T) {
 
 	defer func() { _, _ = env.db.ExecContext(ctx, "DROP PROCEDURE dbbat_cap_scalarout") }()
 
+	// Three calls rather than two, with a statement of its own between them: the
+	// server hands out a fresh cursor per OPEN but happily reuses the id it just
+	// freed, and a pairing where every id is the same number is a pairing that
+	// would survive a locator latching onto the first one. The intervening
+	// SELECT takes a cursor out of circulation so the ids actually differ.
 	refCursorDump := recordOCIScriptThroughProxy(t, env, oci, "capture-oci-refcursor", `SET PAGESIZE 0
 SET FEEDBACK OFF
 VARIABLE rc REFCURSOR
 BEGIN dbbat_cap_refcur(:rc); END;
 /
 PRINT rc
+SELECT 'spacer-a' FROM dual;
+BEGIN dbbat_cap_refcur(:rc); END;
+/
+PRINT rc
+SELECT 'spacer-b' FROM dual;
 BEGIN dbbat_cap_refcur(:rc); END;
 /
 PRINT rc
@@ -95,8 +105,9 @@ EXIT
 
 	bindOutputs, drives, scalars := ociRefCursorBindOutputFixture, ociRefCursorDrivesFixture, ociScalarOutBindFixture
 	describe := ociDescribeFixture
+	wide64 := recordedDialectIsWide64(t, refCursorDump)
 
-	if recordedDialectIsWide64(t, refCursorDump) {
+	if wide64 {
 		bindOutputs, drives, scalars =
 			oci64RefCursorBindOutputFixture, oci64RefCursorDrivesFixture, oci64ScalarOutBindFixture
 		describe = oci64DescribeFixture
@@ -105,6 +116,10 @@ EXIT
 	writeBindOutputHexFixture(t, refCursorDump, bindOutputs, drives)
 	writeBindOutputHexFixture(t, scalarDump, scalars, "")
 	writeDescribeHexFixture(t, describeDump, describe)
+
+	if wide64 {
+		writeStatementFrameHexFixture(t, refCursorDump, oci64ParseExecsFixture, "dbbat_cap_refcur")
+	}
 }
 
 // refCursorCaptureProcedure and scalarOutBindCaptureProcedure are the two

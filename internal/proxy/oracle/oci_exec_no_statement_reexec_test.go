@@ -38,7 +38,7 @@ func ociDriveCursorIDs(t *testing.T) []uint16 {
 		ttc := extractTTCPayload(payload)
 		require.NotEmptyf(t, ttc, "frame %d must carry a TTC message", i)
 
-		cursorID, ok := execNoStatementCursor(ttc)
+		cursorID, ok := execNoStatementCursor(ttc, false)
 		require.Truef(t, ok, "drive %d declares no statement, so it must read as a re-execution", i)
 
 		ids = append(ids, cursorID)
@@ -101,7 +101,7 @@ func TestWideExecCarryingAStatementIsNeverAReexecution(t *testing.T) {
 
 				assert.Positivef(t, field.value, "%s: a wide header that fits declares a statement", name)
 
-				_, reexec := execNoStatementCursor(body)
+				_, reexec := execNoStatementCursor(body, false)
 				assert.Falsef(t, reexec,
 					"%s: a wide exec carrying a %d-byte statement must stay a parse", name, field.value)
 
@@ -111,7 +111,7 @@ func TestWideExecCarryingAStatementIsNeverAReexecution(t *testing.T) {
 				assert.Equalf(t, []byte{0, 0, 0, 0}, body[execWideCursorIDAt:execWideCursorIDAt+4],
 					"%s: a parse names no cursor", name)
 
-				assert.Truef(t, frameCarriesStatement(body),
+				assert.Truef(t, frameCarriesStatement(body, false),
 					"%s: and it must still be a statement frame for the gate and the rewriter", name)
 			}
 		}

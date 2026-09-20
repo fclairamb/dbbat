@@ -151,7 +151,7 @@ func TestSurveyPreciseDecodeCoverage(t *testing.T) {
 				// ojdbc6_legacy.pcapng). Counting it here would demand a
 				// statement out of a frame that has none, which is exactly the
 				// misreading that let it travel upstream ungated.
-				if _, reexec := execNoStatementCursor(body); reexec {
+				if _, reexec := execNoStatementCursor(body, false); reexec {
 					reexecs++
 
 					continue
@@ -433,7 +433,7 @@ func surveyIsCursorReexec(ttc []byte) bool {
 
 	// The third shape: an execute op declaring a zero-length statement, which is
 	// how ojdbc6 re-runs a PreparedStatement. See execNoStatementCursor.
-	if _, ok := execNoStatementCursor(ttc); ok {
+	if _, ok := execNoStatementCursor(ttc, false); ok {
 		return true
 	}
 

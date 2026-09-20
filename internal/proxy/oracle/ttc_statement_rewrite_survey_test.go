@@ -55,7 +55,7 @@ func surveyStatementFrames(t *testing.T, name string) statementFrameVerdict {
 	td := loadTestDump(t, name)
 
 	for _, ttc := range surveyClientTTC(t, td) {
-		if !frameCarriesStatement(ttc) {
+		if !frameCarriesStatement(ttc, false) {
 			continue
 		}
 
@@ -171,7 +171,7 @@ func TestSurveyStatementRewritePerClientShape(t *testing.T) {
 		td := loadTestDump(t, name)
 
 		for _, ttc := range surveyClientTTC(t, td) {
-			if !frameCarriesStatement(ttc) {
+			if !frameCarriesStatement(ttc, false) {
 				continue
 			}
 
@@ -246,7 +246,7 @@ func TestSurveyStatementRewriteNulTerminatedOCI(t *testing.T) {
 		td := loadTestDump(t, name)
 
 		for _, ttc := range surveyClientTTC(t, td) {
-			if !frameCarriesStatement(ttc) {
+			if !frameCarriesStatement(ttc, false) {
 				continue
 			}
 

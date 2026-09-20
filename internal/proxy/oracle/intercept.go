@@ -752,7 +752,7 @@ func (s *session) flushPendingQuery() {
 
 // handlePiggybackExec intercepts a v315+ piggyback execute-with-SQL message.
 func (s *session) handlePiggybackExec(ttcPayload []byte) error {
-	result, err := decodePiggybackExecSQL(ttcPayload)
+	result, err := decodePiggybackExecSQL(ttcPayload, s.clientWide64Encoding)
 	if err != nil {
 		// A `03 5e` whose header declares a zero-length statement is a
 		// re-execution of a cursor already parsed — ojdbc6's way of re-running a
@@ -854,7 +854,7 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 // Returns a non-nil error when the statement must not be forwarded; the caller
 // answers the client with a TTC error instead.
 func (s *session) handleJDBCExec(ttcPayload []byte) error {
-	result, err := decodeExecSQL(ttcPayload)
+	result, err := decodeExecSQL(ttcPayload, s.clientWide64Encoding)
 	if err != nil {
 		// The stapled-execute twin of the frame handlePiggybackExec gates: an
 		// execute declaring no statement is a re-execution of a tracked cursor.

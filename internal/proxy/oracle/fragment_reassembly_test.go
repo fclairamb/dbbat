@@ -172,7 +172,7 @@ func TestFragmentedExecDecodesToTheWholeStatement(t *testing.T) {
 	_, whole := decodeExecStatement(fragment)
 	require.False(t, whole, "a fragment cannot yield the declared run — that is the bug")
 
-	prefix, err := decodeExecSQL(fragment)
+	prefix, err := decodeExecSQL(fragment, false)
 	require.NoError(t, err, "it degraded to the keyword scan instead of failing")
 	assert.True(t, prefix.Truncated, "and the prefix now says so")
 	assert.NotEqual(t, sql, prefix.SQL)
