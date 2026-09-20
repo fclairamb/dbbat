@@ -8,16 +8,21 @@
 //	# wait for "DATABASE IS READY TO USE!" in docker logs
 //	go test -tags capture -timeout 300s -run TestCapture_.*RefCursor -v ./internal/proxy/oracle/
 //
-// The sqlplus captures take a second run, because "the OCI encoding" is two
-// encodings and each needs its own evidence (see isCloseCursorsWide8Header):
+// **This harness records the 4-byte OCI dialect only.** It relays straight to
+// the Oracle container, and a 64-bit client recorded that way writes a
+// different sequence pad than it writes through dbbat — so usesWide64OpHeader
+// does not recognize the recording and it would be filed as 4-byte evidence,
+// silently overwriting audited fixtures with bytes from the other dialect. The
+// 64-bit set is recorded through the proxy instead, by
+// TestCapture_OCIFixturesThroughDBBat (`-tags integration`). See
+// ociFixtureProvenance.
 //
-//	ORACLE_TEST_OCI_CLIENT=container go test -tags capture -timeout 300s \
-//	    -run TestCapture_SQLPlus -v ./internal/proxy/oracle/
-//
-// which drives the sqlplus bundled in the Oracle image instead of one on PATH.
-// Which fixture pair a run writes is decided by the **recorded bytes**, never by
-// which side of the container boundary the client came from — the gvenzl images
-// bundle different client versions, so the flavor is not the dialect.
+// So `ORACLE_TEST_OCI_CLIENT` is honoured here as a **declaration of what the
+// run expects to record**, and a run whose bytes disagree is a failure rather
+// than a file written somewhere else: `=path` must produce a 4-byte recording,
+// `=container` a 64-bit one — which, through this relay, it cannot, which is
+// exactly the refusal that sends you to the integration route. Unset means no
+// expectation is declared and whatever the bytes say is filed.
 //
 // A `SYS_REFCURSOR` handed back by a stored procedure is the one cursor id that
 // never rides an OER: the server opens it inside the procedure body while
@@ -394,6 +399,61 @@ type ociCaptureClient struct {
 	bindHost string
 	dialHost string
 	run      func(t *testing.T, connect, script string) (string, error)
+
+	// expectWide64 is the dialect the run **declared** it was going to record,
+	// or nil when ORACLE_TEST_OCI_CLIENT was not set. It is checked against the
+	// recorded bytes before anything is written, so a mismatch refuses instead
+	// of filing the evidence under the other dialect's name — see the file
+	// header, and requireRecordedDialect.
+	expectWide64 *bool
+}
+
+// requireRecordedDialect fails the capture when the recording does not hold the
+// dialect the run said it would.
+//
+// Without it the harness would file whatever the bytes said, and the one shape
+// that gets this wrong is the dangerous one: a 64-bit client recorded through
+// this bare relay does not satisfy usesWide64OpHeader (ociFixtureProvenance),
+// so its bytes would be written over the audited 4-byte fixtures and the only
+// symptom would be pinned tests failing afterwards for no visible reason.
+func requireRecordedDialect(t *testing.T, client *ociCaptureClient, dumpPath string) {
+	t.Helper()
+
+	if client.expectWide64 == nil {
+		return
+	}
+
+	got := recordedDialectIsWide64(t, dumpPath)
+	if got == *client.expectWide64 {
+		return
+	}
+
+	if *client.expectWide64 {
+		t.Fatalf("%s: asked for the 64-bit dialect and recorded a 4-byte-looking session. "+
+			"This harness relays straight to Oracle, where that client writes a sequence pad "+
+			"usesWide64OpHeader does not recognize — record the 64-bit fixtures through the "+
+			"proxy instead: ORACLE_CAPTURE_OCI_FIXTURES=1 ORACLE_TEST_OCI_CLIENT=container "+
+			"go test -tags integration -run TestCapture_OCIFixturesThroughDBBat ./internal/proxy/oracle/",
+			client.label)
+	}
+
+	t.Fatalf("%s: asked for the 4-byte dialect and recorded a 64-bit session; "+
+		"nothing is written, because these bytes belong to the other fixture set", client.label)
+}
+
+// captureDialectExpectation turns ORACLE_TEST_OCI_CLIENT into the dialect a run
+// declares it will record, or nil when it declares nothing.
+func captureDialectExpectation() *bool {
+	yes, no := true, false
+
+	switch os.Getenv("ORACLE_TEST_OCI_CLIENT") {
+	case "container":
+		return &yes
+	case "path":
+		return &no
+	default:
+		return nil
+	}
 }
 
 // sqlplusCaptureClient picks where sqlplus comes from, honouring the same
@@ -422,9 +482,10 @@ func sqlplusCaptureClient(t *testing.T) *ociCaptureClient {
 // hostSQLPlusCaptureClient wraps an sqlplus found on PATH.
 func hostSQLPlusCaptureClient(sqlplus string) *ociCaptureClient {
 	return &ociCaptureClient{
-		label:    "sqlplus on PATH (" + sqlplus + ")",
-		bindHost: "127.0.0.1",
-		dialHost: "127.0.0.1",
+		label:        "sqlplus on PATH (" + sqlplus + ")",
+		bindHost:     "127.0.0.1",
+		dialHost:     "127.0.0.1",
+		expectWide64: captureDialectExpectation(),
 		run: func(t *testing.T, connect, script string) (string, error) {
 			t.Helper()
 
@@ -462,9 +523,10 @@ func containerSQLPlusCaptureClient(t *testing.T) *ociCaptureClient {
 	}
 
 	return &ociCaptureClient{
-		label:    "sqlplus bundled in container " + container,
-		bindHost: "0.0.0.0",
-		dialHost: ociCaptureHostGateway,
+		label:        "sqlplus bundled in container " + container,
+		bindHost:     "0.0.0.0",
+		dialHost:     ociCaptureHostGateway,
+		expectWide64: captureDialectExpectation(),
 		run: func(t *testing.T, connect, script string) (string, error) {
 			t.Helper()
 
@@ -549,6 +611,8 @@ EXIT
 
 	outPath := runSQLPlusCapture(t, client, "capture-sqlplus-refcursor", body)
 
+	requireRecordedDialect(t, client, outPath)
+
 	bindOutputs, drives := ociRefCursorBindOutputFixture, ociRefCursorDrivesFixture
 	if recordedDialectIsWide64(t, outPath) {
 		bindOutputs, drives = oci64RefCursorBindOutputFixture, oci64RefCursorDrivesFixture
@@ -580,6 +644,8 @@ EXIT
 `
 
 	outPath := runSQLPlusCapture(t, client, "capture-sqlplus-scalar-outbinds", body)
+
+	requireRecordedDialect(t, client, outPath)
 
 	fixture := ociScalarOutBindFixture
 	if recordedDialectIsWide64(t, outPath) {
