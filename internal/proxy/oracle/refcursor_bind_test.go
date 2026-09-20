@@ -214,6 +214,11 @@ func ociDrivenCursorID(t *testing.T, ttc []byte) uint16 {
 	require.Equalf(t, closeCursorsPointer, body[3], "the wide exec header's pad byte")
 	require.Equalf(t, body[2]+1, body[4], "the wide exec header's sequence pad")
 
+	// The field is four bytes; a cursor id is sixteen. Insisting on the top half
+	// being zero is what keeps the comparison honest rather than truncating a
+	// number that would not have matched.
+	require.Equalf(t, []byte{0, 0}, body[11:13], "the drive's cursor id must fit sixteen bits")
+
 	return uint16(body[9]) | uint16(body[10])<<8
 }
 
