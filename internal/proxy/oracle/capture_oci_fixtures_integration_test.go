@@ -82,14 +82,29 @@ PRINT n
 EXIT
 `)
 
+	_, err = env.db.ExecContext(ctx, ociDescribeObjectType)
+	require.NoError(t, err)
+
+	defer func() { _, _ = env.db.ExecContext(ctx, "DROP TYPE dbbat_cap_obj") }()
+
+	describeDump := recordOCIScriptThroughProxy(t, env, oci, "capture-oci-describe", `SET PAGESIZE 0
+SET FEEDBACK OFF
+`+ociDescribeQuery+`
+EXIT
+`)
+
 	bindOutputs, drives, scalars := ociRefCursorBindOutputFixture, ociRefCursorDrivesFixture, ociScalarOutBindFixture
+	describe := ociDescribeFixture
+
 	if recordedDialectIsWide64(t, refCursorDump) {
 		bindOutputs, drives, scalars =
 			oci64RefCursorBindOutputFixture, oci64RefCursorDrivesFixture, oci64ScalarOutBindFixture
+		describe = oci64DescribeFixture
 	}
 
 	writeBindOutputHexFixture(t, refCursorDump, bindOutputs, drives)
 	writeBindOutputHexFixture(t, scalarDump, scalars, "")
+	writeDescribeHexFixture(t, describeDump, describe)
 }
 
 // refCursorCaptureProcedure and scalarOutBindCaptureProcedure are the two

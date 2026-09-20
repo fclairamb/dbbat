@@ -283,3 +283,78 @@ func writeBindOutputHexFixture(t *testing.T, dumpPath, outPath, drivesPath strin
 
 	t.Logf("%d drive frames written to %s", driveCount, drivesPath)
 }
+
+// ociDescribeFixture is where TestCapture_SQLPlusDescribe leaves the describe
+// responses of the session below.
+const ociDescribeFixture = "testdata/oci_describe.hex"
+
+// ociDescribeQuery is deliberately wide in types rather than in rows: each
+// column exercises a different corner of the describe record — a NUMBER with a
+// real precision and scale, a VARCHAR2 whose maximum length does not fit a
+// byte, a NUMBER whose scale is the -127 float sentinel, temporal types, a
+// fixed CHAR, a RAW, and an object whose record carries a non-null 16-byte type
+// OID (the one column that proves the toID field is a DLC with a four-byte
+// length rather than a bare CLR).
+const ociDescribeQuery = `SELECT CAST(1 AS NUMBER(10,2)) AS n2,
+       CAST('x' AS VARCHAR2(4000)) AS big,
+       1/3 AS flt,
+       SYSDATE AS d,
+       SYSTIMESTAMP AS ts,
+       CAST('ab' AS CHAR(5)) AS c5,
+       UTL_RAW.CAST_TO_RAW('zz') AS r,
+       dbbat_cap_obj(1, 'x') AS obj
+  FROM dual;`
+
+// oci64DescribeFixture is the 64-bit dialect's describe evidence, and it is not
+// a nicety: the fixed-width column record is *wider* in that dialect, and every
+// field whose width differs is zero-valued in an ordinary two-column REF cursor.
+// The type-rich query above is what turns those runs of zeros into measurable
+// boundaries — a charset id of 873, a maximum character length of 4000, a
+// collation id of 16382, a 16-byte object type OID — which is what
+// describeColumnLayoutWide64 is pinned against.
+const oci64DescribeFixture = "testdata/oci64_describe.hex"
+
+// ociDescribeObjectType is the object type ociDescribeQuery's last column needs.
+const ociDescribeObjectType = `CREATE OR REPLACE TYPE dbbat_cap_obj AS OBJECT (a NUMBER, b VARCHAR2(10))`
+
+// writeDescribeHexFixture keeps every server payload that leads with a describe
+// message, as one hex line each.
+func writeDescribeHexFixture(t *testing.T, dumpPath, outPath string) {
+	t.Helper()
+
+	regenerate := "#   go test -tags capture -run TestCapture_SQLPlusDescribe ./internal/proxy/oracle/\n"
+	if recordedDialectIsWide64(t, dumpPath) {
+		regenerate = "#   ORACLE_CAPTURE_OCI_FIXTURES=1 ORACLE_TEST_OCI_CLIENT=container \\\n" +
+			"#     go test -tags integration -run TestCapture_OCIFixturesThroughDBBat ./internal/proxy/oracle/\n"
+	}
+
+	body := "# Every describe response (TTC message 0x10) of an sqlplus session through\n" +
+		"# dbbat against Oracle 23ai Free: the TNS Data payload, two data-flag bytes\n" +
+		"# first, exactly as extractTTCPayload receives it.\n" +
+		"#\n" +
+		"# The last one describes a deliberately wide set of column types — see\n" +
+		"# ociDescribeQuery — and is what pins the fixed-width column record against\n" +
+		"# real values rather than against runs of zeros.\n" +
+		"#\n" +
+		"# Regenerate with:\n" + regenerate
+
+	frames := 0
+
+	eachRecordedTNSPayload(t, dumpPath, func(clientToServer bool, payload []byte) {
+		if clientToServer {
+			return
+		}
+
+		if ttc := extractTTCPayload(payload); len(ttc) == 0 || ttc[0] != byte(TTCFuncQueryResult) {
+			return
+		}
+
+		body += hex.EncodeToString(payload) + "\n"
+		frames++
+	})
+
+	require.Positive(t, frames, "the sqlplus session must have described at least one query")
+	require.NoError(t, os.WriteFile(outPath, []byte(body), 0o600))
+
+	t.Logf("%d describe responses written to %s", frames, outPath)
+}
