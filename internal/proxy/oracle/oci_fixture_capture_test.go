@@ -187,6 +187,50 @@ func recordedDialectIsWide64(t *testing.T, dumpPath string) bool {
 	return found
 }
 
+// recordedDialectLooksWide64 reports whether a recording's client frames carry
+// the 64-bit op header's **shape**, ignoring the one field that only holds when
+// the session went through dbbat.
+//
+// It exists for the capture harness's guard and for nothing else — production
+// keys on usesWide64OpHeader, which is strictly stronger, and must keep doing
+// so. The guard cannot: the whole hazard it protects against is a 64-bit client
+// recorded through a bare relay, and that recording is exactly the one
+// usesWide64OpHeader refuses (ociFixtureProvenance). Asking the strict reading
+// whether those bytes are 64-bit gets "no", which is true of the reading and
+// false of the client — and filing them as 4-byte evidence on the strength of
+// that answer is the overwrite this guard exists to stop.
+//
+// So it tests the two things the sequence pad does not touch: the 17-byte op
+// header's zeroed bytes 3 and 4, where the 4-byte dialect writes its `0x01`
+// pointer flag and a sequence, and the 8-byte pointer sentinel behind it. A
+// thin client satisfies neither.
+func recordedDialectLooksWide64(t *testing.T, dumpPath string) bool {
+	t.Helper()
+
+	found := false
+
+	eachRecordedTNSPayload(t, dumpPath, func(clientToServer bool, payload []byte) {
+		if !clientToServer || found {
+			return
+		}
+
+		ttc := extractTTCPayload(payload)
+
+		const sentinelAt = closeCursorsWide8HeaderLen
+		if len(ttc) < sentinelAt+len(closeCursorsWideSentinel) {
+			return
+		}
+
+		if ttc[3] != 0x00 || ttc[4] != 0x00 {
+			return
+		}
+
+		found = bytes.Equal(ttc[sentinelAt:sentinelAt+len(closeCursorsWideSentinel)], closeCursorsWideSentinel)
+	})
+
+	return found
+}
+
 // eachRecordedTNSPayload calls visit with every TNS Data payload in a recording,
 // in wire order.
 func eachRecordedTNSPayload(t *testing.T, dumpPath string, visit func(clientToServer bool, payload []byte)) {

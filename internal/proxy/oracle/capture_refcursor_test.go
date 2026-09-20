@@ -17,12 +17,14 @@
 // TestCapture_OCIFixturesThroughDBBat (`-tags integration`). See
 // ociFixtureProvenance.
 //
-// So `ORACLE_TEST_OCI_CLIENT` is honoured here as a **declaration of what the
-// run expects to record**, and a run whose bytes disagree is a failure rather
-// than a file written somewhere else: `=path` must produce a 4-byte recording,
-// `=container` a 64-bit one — which, through this relay, it cannot, which is
-// exactly the refusal that sends you to the integration route. Unset means no
-// expectation is declared and whatever the bytes say is filed.
+// So the recorded dialect is checked against the one the run must produce,
+// **in both directions**, before a byte is written. `=container` must record a
+// 64-bit session — which, through this relay, it cannot, and that refusal is
+// what sends you to the integration route. Everything else, unset included,
+// must record a 4-byte one, because the 4-byte set is what this harness writes:
+// a 64-bit recording arriving here is refused rather than filed under the wrong
+// dialect's name. There is deliberately no "file it wherever the bytes point"
+// case left.
 //
 // A `SYS_REFCURSOR` handed back by a stored procedure is the one cursor id that
 // never rides an OER: the server opens it inside the procedure body while
@@ -400,12 +402,11 @@ type ociCaptureClient struct {
 	dialHost string
 	run      func(t *testing.T, connect, script string) (string, error)
 
-	// expectWide64 is the dialect the run **declared** it was going to record,
-	// or nil when ORACLE_TEST_OCI_CLIENT was not set. It is checked against the
-	// recorded bytes before anything is written, so a mismatch refuses instead
-	// of filing the evidence under the other dialect's name — see the file
-	// header, and requireRecordedDialect.
-	expectWide64 *bool
+	// expectWide64 is the dialect this run must record. It is checked against
+	// the recorded bytes before anything is written, in **both** directions, so
+	// a mismatch refuses instead of filing the evidence under the other
+	// dialect's name — see the file header, and requireRecordedDialect.
+	expectWide64 bool
 }
 
 // requireRecordedDialect fails the capture when the recording does not hold the
@@ -419,16 +420,11 @@ type ociCaptureClient struct {
 func requireRecordedDialect(t *testing.T, client *ociCaptureClient, dumpPath string) {
 	t.Helper()
 
-	if client.expectWide64 == nil {
-		return
-	}
+	if client.expectWide64 {
+		if recordedDialectIsWide64(t, dumpPath) {
+			return
+		}
 
-	got := recordedDialectIsWide64(t, dumpPath)
-	if got == *client.expectWide64 {
-		return
-	}
-
-	if *client.expectWide64 {
 		t.Fatalf("%s: asked for the 64-bit dialect and recorded a 4-byte-looking session. "+
 			"This harness relays straight to Oracle, where that client writes a sequence pad "+
 			"usesWide64OpHeader does not recognize — record the 64-bit fixtures through the "+
@@ -437,23 +433,34 @@ func requireRecordedDialect(t *testing.T, client *ociCaptureClient, dumpPath str
 			client.label)
 	}
 
-	t.Fatalf("%s: asked for the 4-byte dialect and recorded a 64-bit session; "+
-		"nothing is written, because these bytes belong to the other fixture set", client.label)
+	// The 4-byte direction asks the *relaxed* probe, and has to: a 64-bit client
+	// recorded through this relay is precisely the recording usesWide64OpHeader
+	// cannot recognize, so checking with it would answer "4-byte" and file the
+	// bytes it was supposed to refuse. See recordedDialectLooksWide64.
+	if !recordedDialectLooksWide64(t, dumpPath) {
+		return
+	}
+
+	t.Fatalf("%s: this harness writes the 4-byte fixture set and recorded a 64-bit session; "+
+		"nothing is written, because these bytes belong to the other one. Record it through "+
+		"the proxy instead: ORACLE_CAPTURE_OCI_FIXTURES=1 ORACLE_TEST_OCI_CLIENT=container "+
+		"go test -tags integration -run TestCapture_OCIFixturesThroughDBBat ./internal/proxy/oracle/",
+		client.label)
 }
 
-// captureDialectExpectation turns ORACLE_TEST_OCI_CLIENT into the dialect a run
-// declares it will record, or nil when it declares nothing.
-func captureDialectExpectation() *bool {
-	yes, no := true, false
-
-	switch os.Getenv("ORACLE_TEST_OCI_CLIENT") {
-	case "container":
-		return &yes
-	case "path":
-		return &no
-	default:
-		return nil
-	}
+// captureDialectExpectation is the dialect a run must record: the 64-bit one
+// when it asked for the container's client, the 4-byte one otherwise.
+//
+// There is no "no expectation" answer, and that is the point. This harness
+// writes the **4-byte** fixture set, so a recording that is not 4-byte does not
+// belong in it whether or not anyone declared anything — leaving the unset case
+// unchecked would have let a 64-bit client on PATH, or an image whose bundled
+// client changes version, overwrite audited evidence with the other dialect's
+// bytes and give no reason for the pinned tests failing afterwards. Both
+// directions are refusals, so the only way to write a fixture here is to record
+// the dialect this harness can actually record.
+func captureDialectExpectation() bool {
+	return os.Getenv("ORACLE_TEST_OCI_CLIENT") == "container"
 }
 
 // sqlplusCaptureClient picks where sqlplus comes from, honouring the same
