@@ -36,7 +36,7 @@ import "encoding/binary"
 // Oracle DATE. What makes that safe is the same thing that makes the 4-byte
 // walk safe — everything after the anchor must decode and the whole block must
 // **land** on the message that follows it. A layout this file has wrong yields
-// *no id*, which is the behaviour an OCI session had before any of this
+// *no id*, which is the behavior an OCI session had before any of this
 // existed; it does not yield a different number.
 //
 // The cross-check is the same one, and it is what says the field is the right

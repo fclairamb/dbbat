@@ -457,7 +457,7 @@ func TestDumpReplay_OCI64DriveIsGatedAgainstItsCursorsStatement(t *testing.T) {
 
 	// The whole point of keying on the learned dialect: a session that never
 	// learned it speaks this one must not read the frame at all, which is the
-	// behaviour every 4-byte and thin session keeps.
+	// behavior every 4-byte and thin session keeps.
 	t.Run("a session that did not learn the dialect does not read it", func(t *testing.T) {
 		t.Parallel()
 
