@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -510,4 +511,60 @@ func TestDumpReplay_OCI64DriveOfAnUntrackedCursorFailsClosed(t *testing.T) {
 			"a grant with no statement-shaped control must not be broken by an unidentified execution")
 		assert.Nil(t, s.tracker.pendingQuery, "a forwarded but unidentified execution is not tracked")
 	})
+}
+
+// TestOCI64DecoyTailSignatureYieldsNoID is the bound the walk's central claim
+// rests on, and the reason it reads one descriptor rather than looping.
+//
+// The trailing block is found by scanning for a signature, so the question that
+// has to have an answer is: what happens when something *earlier* in the
+// payload looks like one? The walk takes the first match and nothing else — so
+// a decoy produces an id that then fails the landing check, and the whole
+// result is discarded. It must not return `[decoy, real]`, which is what a walk
+// that re-scanned after a non-landing descriptor would do, and which
+// rememberCursor would plant **both** halves of: one wrong id over a tracked
+// cursor is the failure this file exists to avoid, not one to bound.
+//
+// The decoy is written into a run of zeros inside the column records, so
+// nothing about the payload's length or its real trailing block moves.
+func TestOCI64DecoyTailSignatureYieldsNoID(t *testing.T) {
+	t.Parallel()
+
+	original := extractTTCPayload(recordedFrames(t, oci64RefCursorBindOutputs)[0])
+
+	require.Equal(t, []uint16{oci64RefCursorIDs[0]}, refCursorIDsInBindOutput(oci64OERShape(), original),
+		"the unmodified fixture must decode, or the mutation below proves nothing")
+
+	realTail := bytes.Index(original, wide64TailSignature)
+	require.Positive(t, realTail, "the fixture must carry the trailing block this walk anchors on")
+
+	// Far enough inside the column records to be ahead of the real block, and in
+	// a stretch the recording leaves zeroed.
+	const decoyAt = 70
+
+	require.Less(t, decoyAt+wide64TailLen, realTail, "the decoy has to come first to be a decoy")
+
+	payload := append([]byte(nil), original...)
+	require.Equal(t, make([]byte, wide64TailLen), payload[decoyAt:decoyAt+wide64TailLen],
+		"the decoy must land in a run of zeros, or it is overwriting real fields")
+
+	copy(payload[decoyAt:], wide64TailSignature)
+	// A date-shaped run, so the anchor's second half accepts it too.
+	copy(payload[decoyAt+wide64TailDateAt:], []byte{0x78, 0x7e, 0x09, 0x14, 0x16, 0x29, 0x02})
+	// And a perfectly plausible cursor id behind it, which is the whole danger:
+	// without the single-descriptor rule this is the number that would be
+	// planted alongside the real one.
+	copy(payload[decoyAt+wide64TailCursorIDAt:], []byte{0x09, 0x00, 0x00, 0x00})
+
+	start, ok := bindOutputBodyStartWide64(payload)
+	require.True(t, ok, "the mutated payload must still open with a walkable IO vector")
+
+	decoyID, next, ok := wide64RefCursorDescriptor(payload, start)
+	require.True(t, ok, "the decoy must actually be taken as the anchor, or this tests nothing")
+	require.Equal(t, uint16(9), decoyID, "and it must produce the plausible id it was built to produce")
+	require.False(t, landedAfterBindOutput(payload, next) || landedAfterBindOutput(payload, next+2),
+		"a decoy that landed would be a different test")
+
+	assert.Empty(t, refCursorIDsInBindOutput(oci64OERShape(), payload),
+		"a decoy anchor must yield nothing at all — not the decoy, and not the real id behind it")
 }
