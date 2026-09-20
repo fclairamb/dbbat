@@ -494,7 +494,10 @@ have turned every sqlplus `VARIABLE rc REFCURSOR` / `PRINT rc` into the
 `TestIntegration_RepeatedStatementFromSQLPlusUnderReadOnly` hold both halves at
 once, live: the drives are gated, nothing is refused as untracked, a repeated
 read still returns its rows, and a repeated write is refused on the repeat
-exactly as on the first execution.
+exactly as on the first execution — on the **4-byte** OCI dialect. The 64-bit
+one drives its cursors with a header this reading does not fit, and is still
+open: see "Learning a REF cursor's id" and
+`specs/todos/2026-09-20-03-oracle-wide64-oci-refcursor-and-drive.md`.
 
 The enforcement is pinned by **replaying** that recording through the real
 intercept pipeline, in both directions, so the cursor id is learned off the
@@ -795,6 +798,17 @@ the live test now requires both `PRINT rc` drives to reach the re-execution gate
 with nothing refused as untracked. The order mattered: gating the drive before
 the id was learnable would have turned every sqlplus REF cursor into the
 `ORA-01031` this feature exists to prevent.
+
+> Both halves are the **4-byte OCI dialect** only. "The OCI encoding" is two
+> encodings (see "Two OCI encodings, not one"), and measured 2026-09-20 by
+> running the live test against each client in turn, the 64-bit one — the
+> sqlplus bundled in `gvenzl/oracle-free:23-slim`, which is the client CI uses —
+> learns no REF cursor id and therefore gates no drive. Nothing is refused
+> there, so the visible behaviour is the pre-feature one; the exposure is the
+> same ungated re-execution, on a narrower set of clients. The live test reads
+> the dialect off the proxy's own AUTH log and pins each side, so closing the
+> gap fails it rather than passing unnoticed. See
+> `specs/todos/2026-09-20-03-oracle-wide64-oci-refcursor-and-drive.md`.
 
 #### Closing cursors
 
