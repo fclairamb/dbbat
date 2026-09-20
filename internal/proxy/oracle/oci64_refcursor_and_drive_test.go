@@ -526,7 +526,15 @@ func TestDumpReplay_OCI64DriveOfAnUntrackedCursorFailsClosed(t *testing.T) {
 // cursor is the failure this file exists to avoid, not one to bound.
 //
 // The decoy is written into a run of zeros inside the column records, so
-// nothing about the payload's length or its real trailing block moves.
+// nothing about the payload's length or its real trailing block moves. **Which**
+// run of zeros is load-bearing, and not every one of them works: at most
+// offsets the looping walk's re-sync lands on a field that fails its own bounds
+// and it returns nothing too, so a decoy placed there would leave this test
+// green against the very code it exists to exclude. Offset 72 is one of the
+// offsets where the looping walk genuinely returns `[9, 3]` — and rather than
+// take that on trust, the test replays that walk and requires it, so the day
+// the fixture changes under this offset the test says so instead of quietly
+// proving nothing.
 func TestOCI64DecoyTailSignatureYieldsNoID(t *testing.T) {
 	t.Parallel()
 
@@ -538,9 +546,10 @@ func TestOCI64DecoyTailSignatureYieldsNoID(t *testing.T) {
 	realTail := bytes.Index(original, wide64TailSignature)
 	require.Positive(t, realTail, "the fixture must carry the trailing block this walk anchors on")
 
-	// Far enough inside the column records to be ahead of the real block, and in
-	// a stretch the recording leaves zeroed.
-	const decoyAt = 70
+	// Inside the column records, in a stretch the recording leaves zeroed, and
+	// far enough ahead of the real block to be reached first. See the note above
+	// on why this number is not interchangeable with its neighbors.
+	const decoyAt = 72
 
 	require.Less(t, decoyAt+wide64TailLen, realTail, "the decoy has to come first to be a decoy")
 
@@ -565,6 +574,48 @@ func TestOCI64DecoyTailSignatureYieldsNoID(t *testing.T) {
 	require.False(t, landedAfterBindOutput(payload, next) || landedAfterBindOutput(payload, next+2),
 		"a decoy that landed would be a different test")
 
+	// The discrimination, checked rather than asserted in prose: these bytes are
+	// bytes the looping walk got wrong.
+	require.Equal(t, []uint16{9, oci64RefCursorIDs[0]}, wide64IDsUnderTheLoopingWalk(payload),
+		"this decoy must be one the looping walk resolved to [decoy, real], or the offset "+
+			"has stopped discriminating and the assertion below proves nothing")
+
 	assert.Empty(t, refCursorIDsInBindOutput(oci64OERShape(), payload),
 		"a decoy anchor must yield nothing at all — not the decoy, and not the real id behind it")
+}
+
+// wide64IDsUnderTheLoopingWalk is refCursorIDsInBindOutputWide64 as it was
+// before the single-descriptor rule: append an id per descriptor, and only ask
+// the *last* one to land.
+//
+// It is kept, and kept here rather than in the package, for one job — proving
+// that the decoy above is a decoy the old shape actually fell for. A negative
+// test whose input the buggy code also rejected is a test that passes either
+// way, and this walk is what stops this one from becoming that. It is written
+// out of the same primitives the real walk uses, so it cannot drift into
+// testing something else.
+func wide64IDsUnderTheLoopingWalk(ttc []byte) []uint16 {
+	start, ok := bindOutputBodyStartWide64(ttc)
+	if !ok {
+		return nil
+	}
+
+	var ids []uint16
+
+	for len(ids) < refCursorMaxOutBinds {
+		id, next, ok := wide64RefCursorDescriptor(ttc, start)
+		if !ok {
+			return nil
+		}
+
+		ids = append(ids, id)
+
+		if landedAfterBindOutput(ttc, next) || landedAfterBindOutput(ttc, next+2) {
+			return ids
+		}
+
+		start = next
+	}
+
+	return nil
 }
