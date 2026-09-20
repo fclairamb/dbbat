@@ -367,6 +367,29 @@ func TestCapture_JDBCThinRefCursor(t *testing.T) {
 // bind-output responses, so those are what it keeps.
 const ociRefCursorBindOutputFixture = "testdata/oci_refcursor_bind_output.hex"
 
+// ociRefCursorDrivesFixture is the other half of that evidence, and the half
+// that makes it falsifiable: the client frame that follows each of those
+// responses — the `PRINT rc` that drives the cursor the call just handed back.
+//
+// The id the walk reads is only *a* number until something independent says it
+// is the right one. For the three thin clients that something is the client's
+// own next frame (TestDumpReplay_RefCursorIDsMatchTheCursorsTheClientDrives);
+// this is the same check for the OCI encoding, and it is why the recording can
+// no longer be distilled down to its server side.
+//
+// The selection is positional rather than decoded — the next client Data frame
+// after each bind-output response — so nothing about which frames end up here
+// depends on the decoder under test.
+const ociRefCursorDrivesFixture = "testdata/oci_refcursor_drives.hex"
+
+// ociScalarOutBindFixture is the negative half: the same client, the same
+// `BEGIN … END;` shape, ordinary **scalar** OUT parameters. It is the shape the
+// session gate genuinely admits and that is not a REF cursor, so it is where a
+// fixed-width walk that accepts too much would show up — and the fixed-width
+// encoding spends four zero bytes where the compressed one spends one, which
+// makes a run of zeros that much easier to mistake for a descriptor.
+const ociScalarOutBindFixture = "testdata/oci_scalar_outbind_bind_output.hex"
+
 // TestCapture_SQLPlusRefCursor records sqlplus (OCI thick) driving the same
 // procedure and writes its call responses to ociRefCursorBindOutputFixture, so
 // the fixture set covers the fixed-width encoding too. Skipped when sqlplus is
@@ -411,13 +434,68 @@ EXIT
 	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
 	require.NoError(t, w.Close())
 
-	writeBindOutputHexFixture(t, outPath, ociRefCursorBindOutputFixture)
+	writeBindOutputHexFixture(t, outPath, ociRefCursorBindOutputFixture, ociRefCursorDrivesFixture)
+}
+
+// TestCapture_SQLPlusScalarOutBinds records sqlplus calling a procedure with
+// ordinary scalar OUT parameters, and keeps its call responses as the OCI
+// counterpart of testdata/go_ora_scalar_outbinds.pcapng. Nothing in it is a
+// cursor, so nothing may be learned from it —
+// TestOCIScalarOutBindsYieldNoRefCursorID.
+func TestCapture_SQLPlusScalarOutBinds(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := filepath.Join(t.TempDir(), "sqlplus_scalar_outbinds.pcapng")
+
+	requireOracleReachable(t, oracleAddr)
+
+	sqlplus, err := exec.LookPath("sqlplus")
+	if err != nil {
+		t.Skipf("sqlplus unavailable: %v", err)
+	}
+
+	w := newCaptureWriter(t, outPath, "capture-sqlplus-scalar-outbinds")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	body := scalarOutBindProcedure + `
+/
+VARIABLE n NUMBER
+VARIABLE s VARCHAR2(32)
+VARIABLE m NUMBER
+BEGIN dbbat_cap_scalarout(:n, :s, :m); END;
+/
+BEGIN dbbat_cap_scalarout(:n, :s, :m); END;
+/
+PRINT n
+DROP PROCEDURE dbbat_cap_scalarout;
+EXIT
+`
+
+	script := writeTempScript(t, body)
+
+	cmd := exec.CommandContext(t.Context(), sqlplus, "-S",
+		fmt.Sprintf("system/oracle@//%s/%s", relayAddr, oracleService), "@"+script)
+
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "sqlplus failed: %s", out)
+	t.Logf("sqlplus: %s", out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	writeBindOutputHexFixture(t, outPath, ociScalarOutBindFixture, "")
 }
 
 // writeBindOutputHexFixture distils a recording down to the server payloads that
 // answer a call with an IO vector — the bind-output responses — and writes them
 // as one hex line each, the form recordedFrames reads.
-func writeBindOutputHexFixture(t *testing.T, dumpPath, outPath string) {
+//
+// When drivesPath is non-empty it also writes, in the same order, the **client**
+// frame that immediately follows each of those responses. That pairing is the
+// cross-check the decoder is held to, and it is positional on purpose: which
+// frames land in the fixture must not depend on any decode, or the check would
+// be the decoder agreeing with itself.
+func writeBindOutputHexFixture(t *testing.T, dumpPath, outPath, drivesPath string) {
 	t.Helper()
 
 	r, err := dump.OpenReader(dumpPath)
@@ -425,22 +503,26 @@ func writeBindOutputHexFixture(t *testing.T, dumpPath, outPath string) {
 
 	defer func() { _ = r.Close() }()
 
-	body := "# sqlplus (OCI thick, Instant Client) calling\n" +
-		"#   PROCEDURE dbbat_cap_refcur(p OUT SYS_REFCURSOR)\n" +
+	body := "# sqlplus (OCI thick, Instant Client) calling a procedure with an OUT parameter\n" +
 		"# through dbbat against Oracle 23ai Free. One line per server response that\n" +
 		"# opens with the IO vector (TTC message 0x0b): the TNS Data payload, two\n" +
 		"# data-flag bytes first, exactly as extractTTCPayload receives it.\n" +
 		"#\n" +
-		"# These are the same REF cursor descriptors the thin recordings carry, marshaled\n" +
-		"# in the wide/fixed-width OCI encoding — four-byte little-endian integers where a\n" +
-		"# thin client sends compressed ones. refCursorIDsInBindOutput refuses them at the\n" +
-		"# first field rather than reading a number out of the wrong encoding, which is\n" +
-		"# what TestOCIRefCursorBindOutputYieldsNoID pins.\n" +
+		"# These carry the same field list the thin recordings do, marshaled in the\n" +
+		"# wide/fixed-width OCI encoding — little-endian integers of a per-call-site\n" +
+		"# width where a thin client sends compressed ones.\n" +
+		"#\n" +
+		"# Regenerate with:\n" +
+		"#   go test -tags capture -run TestCapture_SQLPlus ./internal/proxy/oracle/\n"
+
+	drives := "# The client frame that follows each response in the fixture next to this\n" +
+		"# one, in the same order: the `PRINT rc` that drives the REF cursor the call\n" +
+		"# just handed back. Selected by position, never by decoding them.\n" +
 		"#\n" +
 		"# Regenerate with:\n" +
 		"#   go test -tags capture -run TestCapture_SQLPlusRefCursor ./internal/proxy/oracle/\n"
 
-	frames := 0
+	frames, driveCount, wantDrive := 0, 0, false
 
 	for {
 		pkt, err := r.ReadPacket()
@@ -450,12 +532,18 @@ func writeBindOutputHexFixture(t *testing.T, dumpPath, outPath string) {
 
 		require.NoError(t, err)
 
-		if pkt.Direction != dump.DirServerToClient {
+		tns, err := parseTNSFromDumpPacket(pkt.Data)
+		if err != nil || tns.Type != TNSPacketTypeData {
 			continue
 		}
 
-		tns, err := parseTNSFromDumpPacket(pkt.Data)
-		if err != nil || tns.Type != TNSPacketTypeData {
+		if pkt.Direction == dump.DirClientToServer {
+			if wantDrive {
+				drives += hex.EncodeToString(tns.Payload) + "\n"
+				driveCount++
+				wantDrive = false
+			}
+
 			continue
 		}
 
@@ -465,10 +553,21 @@ func writeBindOutputHexFixture(t *testing.T, dumpPath, outPath string) {
 
 		body += hex.EncodeToString(tns.Payload) + "\n"
 		frames++
+		wantDrive = drivesPath != ""
 	}
 
 	require.Positive(t, frames, "the sqlplus session must have answered at least one call")
 	require.NoError(t, os.WriteFile(outPath, []byte(body), 0o600))
 
 	t.Logf("%d bind-output responses written to %s", frames, outPath)
+
+	if drivesPath == "" {
+		return
+	}
+
+	require.Equal(t, frames, driveCount,
+		"every recorded response must be followed by a client frame, or the pairing is not a pairing")
+	require.NoError(t, os.WriteFile(drivesPath, []byte(drives), 0o600))
+
+	t.Logf("%d drive frames written to %s", driveCount, drivesPath)
 }

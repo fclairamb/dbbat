@@ -120,7 +120,7 @@ func TestDecodeQueryResultV2_RealColumnNames(t *testing.T) {
 			td := loadTestDump(t, tc.file)
 			ttc := firstQueryResultFor(t, td, tc.marker)
 
-			result := decodeQueryResultV2(ttc, false)
+			result := decodeQueryResultV2(ttc)
 			require.NotNil(t, result)
 			assert.Equal(t, tc.want, result.Columns)
 		})

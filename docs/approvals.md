@@ -170,8 +170,8 @@ The boundaries, all deliberate:
   drives against the **call** — the statement this grant already gated once —
   so they resolve like any other re-execution. See `docs/oracle.md`, "Learning a
   REF cursor's id". A **thick/OCI** client (sqlplus, Instant Client) marshals
-  that bind output in the wide encoding, which is not decoded yet, so a REF
-  cursor driven from one is still refused here.
+  that bind output in the fixed-width encoding, and that is read too — the walk
+  asks the session which encoding it speaks rather than guessing from the bytes.
 
   Note what that measurement did **not** close: the stale-entry half is still
   open, and it is listed above as a live gap. The refusal here only covers the

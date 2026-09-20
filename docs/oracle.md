@@ -635,15 +635,20 @@ the same field list:
 ```
 [0x07]                      bind-output message
   len        byte
-  maxRowSize cint
-  colCount   cint
+  maxRowSize int(4)
+  colCount   int(4)
   [1 byte]   colCount x column-describe record
   dlc
-  cint cint          TTCVersion >= 3
-  cint cint          TTCVersion >= 4
+  int(4) int(4)      TTCVersion >= 3
+  int(4) int(4)      TTCVersion >= 4
   dlc                TTCVersion >= 5
-  cursorID   cint    <- the REF cursor
+  cursorID   int(4)  <- the REF cursor
 ```
+
+`int(n)` is a TTC compressed integer on a thin session and `n` fixed
+little-endian bytes on an OCI one — the width is go-ora's `GetInt(n, …)` at that
+call site, and it only ever matters in the second encoding. See the sqlplus
+paragraph below.
 
 On a call's **first** execution that message is preceded by the IO vector
 (`0x0b`), which names each bind's direction; on a re-execution it is the
@@ -708,15 +713,47 @@ the only shapes that can carry an out-bind — and never while that statement is
 itself a learned REF cursor, whose annotated text starts with the call's `BEGIN`
 but whose response is its own row stream.
 
-**sqlplus is the documented gap.** OCI marshals the identical field list in the
-wide/fixed-width encoding — four-byte little-endian integers where a thin client
-sends compressed ones — and the compressed walk refuses it at its first field
-rather than reading a number out of it. An OCI session therefore keeps exactly
-the behaviour it had before: the drive stays an untracked cursor, refused under a
-restrictive grant. The recording is kept as
-`testdata/oci_refcursor_bind_output.hex` and the refusal is pinned by
-`TestOCIRefCursorBindOutputYieldsNoID`; closing it is
-`specs/todos/2026-09-19-06-oracle-refcursor-id-in-the-oci-encoding.md`.
+**sqlplus sends the same field list in the fixed-width OCI encoding**, and the
+walk reads both. Where a thin client sends TTC compressed integers, an OCI one
+sends little-endian integers of a per-call-site width — the same split the
+summary object already has (`decodeOERFixedFieldsAt`). `dcursor` carries it:
+`intw(width)` reads `width` fixed bytes on an OCI session and a self-sizing
+compressed integer otherwise, and every call site above names the width go-ora
+reads that field with. Three things differ from the compressed record and all
+three are measured, not inferred: the scale is a single **signed byte** whatever
+the type (0x81 is the -127 float sentinel, seen on `1/3`), a DLC's length is four
+bytes (seen on a column whose 16-byte object type OID is the only non-null one in
+the corpus), and the three trailing integers 23ai appends for a thin client are
+simply absent.
+
+Which encoding to read is asked of the session's learned `oerShape.fixedWidth`
+and **never sniffed from the payload**, exactly as the OER decoder does it. That
+is what keeps a thin client's bytes from being offered a second layout to be
+mistaken for, and
+`TestRefCursorBindOutputIsReadInTheSessionsOwnEncodingOnly` holds it from both
+sides: each recording decodes under its own shape and yields nothing under the
+other.
+
+The OCI evidence is the same evidence, in the same shape. `TestDumpReplay_
+OCIRefCursorIDsMatchTheCursorsTheClientDrives` pairs
+`testdata/oci_refcursor_bind_output.hex` with
+`testdata/oci_refcursor_drives.hex` — the `PRINT rc` frame recorded after each
+response, picked by position rather than by decoding it — and requires each
+learned id (2, 5) to be the id that frame drives.
+`testdata/oci_scalar_outbind_bind_output.hex` is the false-positive half, and it
+matters more here than on the thin path: the fixed-width encoding spends four
+zero bytes where the compressed one spends a single `00`, so a call's bind output
+is a far longer run of zeros for a drifting walk to find a descriptor in. Not one
+id may come out of it. `TestIntegration_RefCursorFromSQLPlusUnderReadOnly` runs
+the whole path live.
+
+> One caveat the live test is explicit about: on an OCI session the drive itself
+> is **not gated today**. It is an exec op in the wide header declaring no
+> statement, and `execNoStatementCursorAt` refuses to read that header, so the
+> frame reaches neither `refuseUnknownCursor` nor the grant. Closing that is
+> filed in `specs/todos/`, deliberately after this — gating the drive before the
+> id was learnable would have turned every sqlplus REF cursor into the
+> `ORA-01031` this feature exists to prevent.
 
 #### Closing cursors
 

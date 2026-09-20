@@ -83,7 +83,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 
 		switch funcCode { //nolint:exhaustive // only row-bearing response codes matter here
 		case TTCFuncQueryResult:
-			result := decodeQueryResultV2(ttcPayload, false)
+			result := decodeQueryResultV2(ttcPayload)
 			if result == nil {
 				continue
 			}

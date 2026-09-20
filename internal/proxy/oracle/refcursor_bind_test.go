@@ -32,7 +32,24 @@ const (
 // call also carries an exec frame the exact statement locator cannot certify,
 // which is a finding of its own and not one to fold into `testdata/*.pcapng` —
 // a corpus several whole-corpus surveys enumerate and hold to 100%.
-const ociRefCursorBindOutputs = "testdata/oci_refcursor_bind_output.hex"
+//
+// ociRefCursorDrives is the client frame that follows each of them, recorded in
+// the same session and selected by position. See capture_refcursor_test.go.
+const (
+	ociRefCursorBindOutputs = "testdata/oci_refcursor_bind_output.hex"
+	ociRefCursorDrives      = "testdata/oci_refcursor_drives.hex"
+	ociScalarOutBinds       = "testdata/oci_scalar_outbind_bind_output.hex"
+)
+
+// ociOERShape is a session that has learned its upstream speaks the fixed-width
+// OCI encoding — what an sqlplus session learns off the AUTH exchange, long
+// before any statement runs (learnOERTail, readUpstreamAuthMessages).
+func ociOERShape() oerShape {
+	shape := thinOERShape()
+	shape.fixedWidth = true
+
+	return shape
+}
 
 // serverTTCPayloads returns the TTC payloads of every server→client Data packet
 // in a recording, in order.
@@ -150,22 +167,12 @@ func TestDumpReplay_RefCursorIDsMatchTheCursorsTheClientDrives(t *testing.T) {
 // capture build tag).
 const refCursorDrivesInFixtures = 3
 
-// TestOCIRefCursorBindOutputYieldsNoID pins the documented gap rather than
-// leaving it to be discovered.
-//
-// sqlplus marshals the identical field list in the wide/fixed-width OCI encoding
-// — four-byte little-endian integers where a thin client sends compressed ones —
-// and the compressed walk refuses it at its first field rather than reading a
-// number out of it. That refusal is the safe outcome: an OCI session keeps the
-// behavior it had before this existed (the drive stays an untracked cursor),
-// whereas a number read out of the wrong encoding would gate a fetch against the
-// wrong statement. See docs/oracle.md, "Learning a REF cursor's id".
-//
-// The fixture is checked for being what it claims first: these really are the
-// bind-output responses of a call, leading with the IO vector, or the refusal
-// below would prove nothing.
-func TestOCIRefCursorBindOutputYieldsNoID(t *testing.T) {
-	t.Parallel()
+// ociRefCursorBindOutputIDs runs the locator over the recorded sqlplus call
+// responses, as an OCI session sees them, and returns the ids it learned.
+func ociRefCursorBindOutputIDs(t *testing.T) []uint16 {
+	t.Helper()
+
+	ids := make([]uint16, 0, 2)
 
 	for i, payload := range recordedFrames(t, ociRefCursorBindOutputs) {
 		ttc := extractTTCPayload(payload)
@@ -173,8 +180,126 @@ func TestOCIRefCursorBindOutputYieldsNoID(t *testing.T) {
 		require.Equalf(t, byte(ttcMsgIOVector), ttc[0],
 			"frame %d must be a call's bind-output response", i)
 
-		assert.Emptyf(t, refCursorIDsInBindOutput(thinOERShape(), ttc),
-			"frame %d: the OCI/wide encoding must yield no id at all rather than a mis-decoded one", i)
+		ids = append(ids, refCursorIDsInBindOutput(ociOERShape(), ttc)...)
+	}
+
+	return ids
+}
+
+// ociDrivenCursorID reads the cursor id out of one recorded sqlplus drive: the
+// `03 5e` execute op the client staples behind its close-cursors list.
+//
+// The offsets are the ones execSQLLengthWideField already walks — `03 5e`, the
+// sequence byte, the `[0x01][seq+1]` pad, then eight bytes it calls "options" —
+// except that those eight are two fields, and the second is the cursor id. That
+// reading is what the corpus says: it is zero on every frame that carries a
+// statement (a parse allocates its cursor) and non-zero on exactly the frames
+// that carry none.
+//
+// It is deliberately written out here rather than taken from a decoder: this is
+// the independent witness the walk under test is checked against, so it must not
+// share code with it. (dbbat itself does not read this field yet — see
+// execNoStatementCursorAt, which refuses the wide header outright.)
+func ociDrivenCursorID(t *testing.T, ttc []byte) uint16 {
+	t.Helper()
+
+	body := ttc
+
+	if end, ok := closeCursorsEnd(ttc); ok && end < len(ttc) {
+		body = ttc[end:]
+	}
+
+	require.True(t, isPiggybackExecHeader(body), "the drive must staple an execute op behind its closes")
+	require.GreaterOrEqual(t, len(body), 13, "the wide exec header is 13 bytes before its statement fields")
+	require.Equalf(t, closeCursorsPointer, body[3], "the wide exec header's pad byte")
+	require.Equalf(t, body[2]+1, body[4], "the wide exec header's sequence pad")
+
+	return uint16(body[9]) | uint16(body[10])<<8
+}
+
+// TestDumpReplay_OCIRefCursorIDsMatchTheCursorsTheClientDrives is the OCI
+// counterpart of the thin measurement above, and it is here for the same reason:
+// a decoder reading one field too early or too late still produces *a* number,
+// and only agreeing with the client's own next frame says the field is the right
+// one.
+//
+// The fixture pair makes that check possible — the call responses and, recorded
+// beside them, the `PRINT rc` that follows each. sqlplus marshals the identical
+// field list as little-endian integers of a per-call-site width, and the ids it
+// then drives are read out of a part of the frame this walk never touches.
+//
+// The expected ids are spelled out rather than derived, so a regenerated capture
+// that shifts them fails loudly instead of agreeing with itself.
+func TestDumpReplay_OCIRefCursorIDsMatchTheCursorsTheClientDrives(t *testing.T) {
+	t.Parallel()
+
+	learned := ociRefCursorBindOutputIDs(t)
+
+	drives := recordedFrames(t, ociRefCursorDrives)
+	require.Len(t, learned, len(drives),
+		"one id per recorded call response, or the pairing below compares different things")
+
+	driven := make([]uint16, 0, len(drives))
+	for _, payload := range drives {
+		driven = append(driven, ociDrivenCursorID(t, extractTTCPayload(payload)))
+	}
+
+	assert.Equal(t, []uint16{2, 5}, learned, "the ids read out of the sqlplus bind-output")
+	assert.Equal(t, learned, driven,
+		"every learned id must be the one sqlplus then drives — that agreement is what says the "+
+			"fixed-width field was located correctly rather than merely decoded consistently")
+}
+
+// TestRefCursorBindOutputIsReadInTheSessionsOwnEncodingOnly is the gate, from
+// both sides.
+//
+// Which encoding to read is asked of the session's learned oerShape and never of
+// the payload, so each recording must decode under its own shape and yield
+// nothing under the other. That is not a nicety: a payload offered two layouts
+// is a payload with two chances to produce a plausible number, and a wrong id
+// planted here would let a fetch resolve against another statement's grant and
+// text (rememberCursor overwrites).
+func TestRefCursorBindOutputIsReadInTheSessionsOwnEncodingOnly(t *testing.T) {
+	t.Parallel()
+
+	oci := extractTTCPayload(recordedFrames(t, ociRefCursorBindOutputs)[0])
+	thin := recordedGoOraRefCursorDescriptor()
+
+	assert.NotEmpty(t, refCursorIDsInBindOutput(ociOERShape(), oci),
+		"the fixture must decode under the shape it was recorded from")
+	assert.Equal(t, []uint16{7}, refCursorIDsInBindOutput(thinOERShape(), thin),
+		"and so must the thin one")
+
+	assert.Empty(t, refCursorIDsInBindOutput(thinOERShape(), oci),
+		"a session that speaks the compressed encoding must not be offered the OCI reading")
+	assert.Empty(t, refCursorIDsInBindOutput(ociOERShape(), thin),
+		"nor the other way round")
+}
+
+// TestOCIScalarOutBindsYieldNoRefCursorID is the fixed-width half of the
+// false-positive bound, and it matters more here than on the thin path: the OCI
+// encoding spends four zero bytes where the compressed one spends a single
+// `00`, so a call's bind output is a far longer run of zeros for a drifting walk
+// to find a descriptor in.
+//
+// `BEGIN dbbat_cap_scalarout(:n, :s, :m); END;` through sqlplus puts a real
+// bind-output block on the wire — the check below insists on it, three binds and
+// all — carrying nothing but scalar values. Not one id may come out of it: an id
+// learned here would be planted against the call, and rememberCursor
+// **overwrites**, so a collision with a tracked cursor would replace that
+// statement's text with an anonymous PL/SQL block's, which passes `read_only`.
+func TestOCIScalarOutBindsYieldNoRefCursorID(t *testing.T) {
+	t.Parallel()
+
+	for i, payload := range recordedFrames(t, ociScalarOutBinds) {
+		ttc := extractTTCPayload(payload)
+		require.NotEmptyf(t, ttc, "frame %d must carry a TTC message", i)
+
+		_, ok := bindOutputBodyStart(ttc, true)
+		require.Truef(t, ok, "frame %d must be a walkable bind-output response, or this proves nothing", i)
+
+		assert.Emptyf(t, refCursorIDsInBindOutput(ociOERShape(), ttc),
+			"a call with only scalar OUT parameters must yield no REF cursor id: % x", ttc)
 	}
 }
 

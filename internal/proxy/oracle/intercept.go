@@ -956,19 +956,7 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 //
 // Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleQueryResultV2(ttcPayload []byte) {
-	// Compressed-only, deliberately, even though parseColumnDescribes can now
-	// read the fixed-width OCI records too (describeColumnLayoutWide).
-	//
-	// Handing this `s.oerShapeSnapshot().fixedWidth` is a one-word change and it
-	// was measured rather than reasoned about: an OCI session whose describes
-	// suddenly parse learns its columns, which puts it in a **row stream** over
-	// packets it used to walk past — and six of those packets in the corpus lead
-	// with a 0x04 that decodeOERAt accepts, which in production ends the call
-	// mid-fetch (TestDumpReplay_MidStreamOERFalsePositiveRate catches all six).
-	// Reading the records right is not the same thing as the row-stream
-	// bookkeeping being ready for it, so that is its own change, with its own
-	// measurement — see specs/todos.
-	result := decodeQueryResultV2(ttcPayload, false)
+	result := decodeQueryResultV2(ttcPayload)
 	if result == nil {
 		return
 	}
