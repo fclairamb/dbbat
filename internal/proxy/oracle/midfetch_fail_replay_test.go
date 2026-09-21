@@ -75,6 +75,15 @@ const (
 	// all. Kept loose so re-recording at a different fetch size is not a
 	// failure.
 	midFetchMinRowStreamPackets = 50
+
+	// ociInStreamEndOfDataOERs is how many of the corpus's mid-row-stream packets
+	// are an OCI fetch's own ORA-01403 terminator arriving at byte 0: five in
+	// sqlplus_cursor_reexec.pcapng (the login probe plus four re-executions), one
+	// login probe each in sqlplus_midfetch_fail.pcapng and
+	// sqlplus_refcursor.pcapng. They are inside a row stream because an OCI
+	// session reads its real describe records now; before that its columns came
+	// from the heuristic scanner and rowStreamActive() never fired on one.
+	ociInStreamEndOfDataOERs = 7
 )
 
 // midFetchDumps is the set of recordings whose mid-fetch failure dbbat can
@@ -110,17 +119,30 @@ type midStreamOER struct {
 	fields  *oerInfo
 	relaxed *oerInfo
 
-	// strict is what handleOERStatus's first branch makes of the packet: the
+	// strict is what handleOERStatus's first branch *decodes*: the
 	// end-of-call-bit reading of the compressed encoding, plus (since
-	// decodeFixedStatusOERAt) the fixed-width *status* object at byte 0. Both
-	// halves must refuse a mid-stream packet.
+	// decodeFixedStatusOERAt) the fixed-width *status* object at byte 0.
 	strict bool
+
+	// endsTheCall is what that branch then *does* with it —
+	// session.statusOERMayEndTheCall, asked on the very session state the packet
+	// arrived on. It is the figure that matters: a decode is only a false
+	// positive if it ends a live fetch.
+	endsTheCall bool
 
 	// embedded is what handleResponse's mid-row-stream branch makes of it —
 	// findOERInResponse, scanning every offset. It must find nothing here.
 	embedded *oerInfo
 
 	streamed uint16 // the cursor whose rows were on the wire at that moment
+}
+
+// isStatus reports whether the packet's fields read as a *status* — success or
+// end-of-data — rather than a failure. It is the split
+// session.statusOERMayEndTheCall turns on, and the one that separates the
+// ORA-01403 an OCI fetch ends on from the ORA-01722 that interrupts one.
+func (o midStreamOER) isStatus() bool {
+	return o.fields != nil && (o.fields.ErrorCode == 0 || o.fields.ErrorCode == oraNoDataFound)
 }
 
 // midStreamWalk is what one recording contributes to the corpus measurement:
@@ -169,12 +191,38 @@ func walkMidStreamOERs(t *testing.T, name string) (midStreamWalk, int) {
 
 		ttc := extractTTCPayload(tns.Payload)
 
+		shape := s.oerShapeSnapshot()
+
 		s.trackerMu.Lock()
 		active := s.rowStreamActive()
 
-		var streaming uint16
+		var (
+			streaming uint16
+			got       *midStreamOER
+		)
+
 		if active {
 			streaming = s.tracker.pendingQuery.cursor.cursorID
+
+			if len(ttc) >= 2 && TTCFunctionCode(ttc[0]) == TTCFuncOERR {
+				fields, _ := decodeOERFieldsForShape(shape, ttc, 0)
+				strict := decodeOERAt(shape, ttc, 0)
+
+				got = &midStreamOER{
+					dump:     name,
+					index:    i,
+					payload:  ttc,
+					fields:   fields,
+					relaxed:  decodeErrorOER(shape, ttc),
+					strict:   strict != nil,
+					embedded: findOERInResponse(shape, ttc),
+					streamed: streaming,
+				}
+
+				// Asked here, under the same lock and on the same session state
+				// handleOERStatus would ask it on.
+				got.endsTheCall = strict != nil && s.statusOERMayEndTheCall(strict)
+			}
 		}
 		s.trackerMu.Unlock()
 
@@ -182,20 +230,8 @@ func walkMidStreamOERs(t *testing.T, name string) (midStreamWalk, int) {
 			midStreamPackets++
 			found.leadingBytes[ttc[0]]++
 
-			if TTCFunctionCode(ttc[0]) == TTCFuncOERR {
-				shape := s.oerShapeSnapshot()
-				fields, _ := decodeOERFieldsForShape(shape, ttc, 0)
-
-				found.oers = append(found.oers, midStreamOER{
-					dump:     name,
-					index:    i,
-					payload:  ttc,
-					fields:   fields,
-					relaxed:  decodeErrorOER(shape, ttc),
-					strict:   decodeOERAt(shape, ttc, 0) != nil,
-					embedded: findOERInResponse(shape, ttc),
-					streamed: streaming,
-				})
+			if got != nil {
+				found.oers = append(found.oers, *got)
 			}
 		}
 
@@ -218,6 +254,13 @@ func walkMidStreamOERs(t *testing.T, name string) (midStreamWalk, int) {
 // on row 3 would still satisfy every other assertion here while measuring
 // nothing new, so the depth is asserted on two independent readings: the OER's
 // own CurRowNumber, and how many packets of row stream went past before it.
+//
+// "Exactly one" is now scoped to the 0x04 packets that report a *failure*. On an
+// OCI session the other kind exists too and always did — the ORA-01403 an
+// earlier SELECT ends on — it simply used to arrive while dbbat believed no row
+// stream was open, because an OCI session's columns came from the heuristic
+// scanner. Reading the describe records moved it inside the window; it is
+// counted here rather than ignored, so the split stays visible.
 func TestDumpReplay_MidFetchFailureIsABitLessStandaloneOER(t *testing.T) {
 	t.Parallel()
 
@@ -227,9 +270,24 @@ func TestDumpReplay_MidFetchFailureIsABitLessStandaloneOER(t *testing.T) {
 
 			midStream, total := walkMidStreamOERs(t, name)
 			require.Positive(t, total, "the recording must contain a row stream at all")
-			require.Len(t, midStream.oers, 1, "exactly one standalone 0x04 arrives mid-fetch")
 
-			got := midStream.oers[0]
+			var failures []midStreamOER
+
+			for _, oer := range midStream.oers {
+				if oer.isStatus() {
+					assert.Equal(t, oraNoDataFound, oer.fields.ErrorCode,
+						"packet #%d: the only non-failure 0x04 a fetch carries at byte 0 is its end-of-data",
+						oer.index)
+
+					continue
+				}
+
+				failures = append(failures, oer)
+			}
+
+			require.Len(t, failures, 1, "exactly one standalone 0x04 failure arrives mid-fetch")
+
+			got := failures[0]
 			require.NotNil(t, got.fields)
 
 			assert.Equal(t, oraMidFetchCode, got.fields.ErrorCode, "packet #%d", got.index)
@@ -297,10 +355,19 @@ func TestDumpReplay_OCIMidFetchFailureIsFixedWidthAndReadable(t *testing.T) {
 	midStream, total := walkMidStreamOERs(t, sqlplusMidFetchDump)
 	require.GreaterOrEqual(t, total, midFetchMinRowStreamPackets,
 		"the recording must carry a real run of row stream before the failure")
-	require.Len(t, midStream.oers, 1,
+
+	var failures []midStreamOER
+
+	for _, oer := range midStream.oers {
+		if !oer.isStatus() {
+			failures = append(failures, oer)
+		}
+	}
+
+	require.Len(t, failures, 1,
 		"the failure still arrives as a standalone 0x04 at byte 0 of a whole packet")
 
-	got := midStream.oers[0]
+	got := failures[0]
 	assert.Greater(t, got.index, midFetchMinRowStreamPackets,
 		"packet #%d: the failure must be late in the recording", got.index)
 
@@ -476,12 +543,17 @@ func midStreamCorpus(t *testing.T) []string {
 // *status* object, because that predicate has no diagnostic to prove itself with
 // and the same corpus is what bounds it:
 //
-//   - `statusAccepted`: what decodeOERAt now accepts at byte 0 of a mid-stream
-//     packet. It must be nothing, and it is: only four mid-stream packets in the
-//     corpus lead with 0x04 at all, and all four are the genuine ORA-01722
-//     failures, which a *status* predicate refuses by their error code alone.
+//   - `statusAccepted`: what decodeOERAt accepts at byte 0 of a mid-stream
+//     packet, and — the figure that matters — how many of those
+//     session.statusOERMayEndTheCall then lets end the call (`statusEnded`).
+//     Eleven mid-stream packets in the corpus lead with 0x04: four are the
+//     genuine ORA-01722 failures, which a *status* predicate refuses by their
+//     error code alone, and seven are the ORA-01403 an OCI fetch **ends** on,
+//     which must end it. What may never be accepted there is a bit-less
+//     *success* status: that is the shape of all 149 objects that genuinely
+//     travel inside the stream, and `statusEndedOnSuccess` counts it.
 //   - `respAccepted`: what findOERInResponse accepts on those same packets — the
-//     mid-row-stream branch of handleResponse. Also nothing.
+//     mid-row-stream branch of handleResponse. Nothing, on any of them.
 //   - `bitlessScan`: the counterfactual that decides both of the restrictions on
 //     decodeFixedStatusOERAt. It is the fixed-width status predicate run at every
 //     *non-zero* 0x04 offset inside those packets, and it is emphatically **not**
@@ -500,7 +572,10 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 
 	corpus := midStreamCorpus(t)
 
-	var midStreamPackets, accepted, stress, statusAccepted, respAccepted, bitlessScan int
+	var (
+		midStreamPackets, accepted, stress, respAccepted, bitlessScan int
+		statusAccepted, statusEnded, statusEndedOnSuccess             int
+	)
 
 	lead := map[byte]int{}
 
@@ -515,9 +590,23 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 		for _, got := range found.oers {
 			if got.strict {
 				statusAccepted++
+			}
 
-				assert.Failf(t, "mid-stream acceptance at byte 0",
-					"%s packet #%d: decodeOERAt accepted a mid-row-stream packet", name, got.index)
+			if got.endsTheCall {
+				statusEnded++
+
+				assert.Equalf(t, oraNoDataFound, got.fields.ErrorCode,
+					"%s packet #%d: only end-of-data may end a call from inside a row stream; "+
+						"a bit-less success is the object every continuation packet carries",
+					name, got.index)
+
+				assert.Equalf(t, int(got.streamed), got.fields.CursorID,
+					"%s packet #%d: an end-of-data that ends a fetch must name the cursor whose rows "+
+						"were on the wire", name, got.index)
+
+				if got.fields.ErrorCode == 0 {
+					statusEndedOnSuccess++
+				}
 			}
 
 			if got.embedded != nil {
@@ -552,10 +641,10 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 	// sql_extraction_survey_test.go).
 	t.Logf("corpus: %d recordings; mid-row-stream server packets: %d; leading with 0x04: %d; "+
 		"accepted as diagnostics: %d; stress acceptances at non-zero offsets: %d; "+
-		"accepted at byte 0 by decodeOERAt: %d; accepted by findOERInResponse: %d; "+
-		"a bit-less fixed-width status scan would accept: %d",
+		"accepted at byte 0 by decodeOERAt: %d (of which ending the call: %d, on a success: %d); "+
+		"accepted by findOERInResponse: %d; a bit-less fixed-width status scan would accept: %d",
 		len(corpus), midStreamPackets, lead[byte(TTCFuncOERR)], accepted, stress,
-		statusAccepted, respAccepted, bitlessScan)
+		statusAccepted, statusEnded, statusEndedOnSuccess, respAccepted, bitlessScan)
 
 	for _, b := range sortedLeadingBytes(lead) {
 		t.Logf("  mid-row-stream packets leading with %#02x: %d", b, lead[b])
@@ -565,7 +654,15 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 	assert.Equal(t, len(genuine), accepted, "only the genuine mid-fetch failures may be accepted")
 	assert.Zero(t, stress,
 		"real row bytes must never satisfy the diagnostic proof, at any offset")
-	assert.Zero(t, statusAccepted, "the fixed-width status reading must not fire mid-row-stream")
+	assert.Zero(t, statusEndedOnSuccess,
+		"a bit-less success status must never end a call from inside a row stream — that is the "+
+			"shape of every object the stream itself is full of")
+	assert.Equal(t, ociInStreamEndOfDataOERs, statusEnded,
+		"the calls ended from inside a row stream are exactly the OCI fetches' own ORA-01403 "+
+			"terminators — if this moves, either the corpus changed or the discriminator did")
+	assert.Equal(t, ociInStreamEndOfDataOERs, statusAccepted,
+		"and the status predicate accepts nothing else at byte 0 mid-stream: the four mid-fetch "+
+			"failures are refused by their error code")
 	assert.Zero(t, respAccepted, "nor may the Response locator, which is why it kept the bit")
 	assert.Positive(t, bitlessScan,
 		"this is the measurement decodeFixedStatusOERAt's two restrictions exist for — if it ever "+

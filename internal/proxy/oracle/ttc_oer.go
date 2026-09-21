@@ -37,8 +37,9 @@ type oerInfo struct {
 // *every* standalone summary object in the OCI recordings reports its status
 // with a bare CallStatus 0x1 — so a standalone func=0x04 reporting success or
 // ORA-01403 is read there under the layout anchors and the cursor bounds
-// instead, and only at byte 0 of a packet that no row stream is open on. See
-// decodeFixedStatusOERAt.
+// instead, and only at byte 0 of a packet — with a second bound inside a row
+// stream, where only the end-of-data half may end the call. See
+// decodeFixedStatusOERAt and session.statusOERMayEndTheCall.
 const oerEndOfCallBit = 0x010000
 
 // oraNoDataFound is ORA-01403, the normal end-of-data status — not an error.
@@ -111,23 +112,26 @@ func decodeCompressedEndOfCallOERAt(payload []byte, offset int) *oerInfo {
 // Two restrictions keep that from widening what row bytes can be mistaken for,
 // and both are measured rather than argued:
 //
-//   - **offset 0 only.** Across all 26 recordings in testdata/, 641 server
-//     packets arrive while a row stream is active; run at every 0x04 offset
-//     *inside* them, this predicate accepts 149 — and they are not junk. An OCI
-//     fetch response carries a real summary object of exactly this shape at a
-//     constant offset in *every* continuation packet, naming the streaming
-//     cursor and reporting the running row count (13001, 13101, … 14901 in
+//   - **offset 0 only.** Across the recordings in testdata/, 649 server packets
+//     arrive while a row stream is active; run at every 0x04 offset *inside*
+//     them, this predicate accepts 149 — and they are not junk. An OCI fetch
+//     response carries a real summary object of exactly this shape at a constant
+//     offset in *every* continuation packet, naming the streaming cursor and
+//     reporting the running row count (13001, 13101, … 14901 in
 //     sqlplus_midfetch_fail.pcapng), and two of them even carry the end-of-call
 //     bit. Accepting one ends the call in the middle of the fetch. So a 0x04
 //     that a scan *found* is never read this way; only one that was the packet's
 //     own leading byte, which is what the router already believed. That is what
 //     leaves findOERInResponse's mid-row-stream scan exactly as strict as it was.
-//   - **outside a row stream only**, which is the caller's half of the same
-//     bound: see session.statusOERMayEndTheCall. At offset 0 the corpus is clean
-//     — of those 641 mid-stream packets only 4 lead with 0x04, all four the
-//     genuine mid-fetch ORA-01722 failures, and a status predicate accepts none
-//     of them — but the object above demonstrably travels inside the stream, so
-//     a packet boundary is all that separates it from byte 0.
+//   - **inside a row stream, end-of-data only**, which is the caller's half of
+//     the same bound: see session.statusOERMayEndTheCall. At offset 0 the corpus
+//     is unambiguous — of those 649 mid-stream packets 11 lead with 0x04, 4 the
+//     genuine mid-fetch ORA-01722 failures (which this predicate refuses by
+//     their code alone) and 7 the ORA-01403 an OCI fetch *ends* on — while all
+//     149 objects that genuinely travel inside the stream report success with a
+//     running count. So a bit-less success is still refused there and a bit-less
+//     end-of-data naming the streaming cursor ends the call, which is what it
+//     means.
 //
 // A third restriction is about *ordering* rather than row bytes: the shape must be
 // **learned**, so the unlearned two-layout fallback decodeOERFixedFieldsAt offers
@@ -535,7 +539,7 @@ func findCursorIDInResponse(shape oerShape, payload []byte) (uint16, bool) {
 // omission: an OCI fetch response carries a genuine fixed-width summary object
 // at a constant offset inside every continuation packet, naming the streaming
 // cursor and reporting the fetch's running row count, and a bit-less scan of the
-// corpus's 641 mid-row-stream packets accepts 149 of them (2 even carry the bit).
+// corpus's 649 mid-row-stream packets accepts 149 of them (2 even carry the bit).
 // Mid-fetch, this scan runs on exactly those bytes, and the first acceptance
 // would end the call at row 13001 of 20000 — silently truncating capture,
 // stopping quota enforcement mid-stream and mis-charging the rest of the fetch,

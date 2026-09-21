@@ -3346,25 +3346,52 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 }
 
 // statusOERMayEndTheCall gates decodeOERAt's bit-less half — the fixed-width
-// status object an OCI client's calls end with — on the session not being in the
-// middle of a row stream.
+// status object an OCI client's calls end with — on what that status *reports*,
+// once the session is in the middle of a row stream.
 //
 // An OER that carries the end-of-call bit is unaffected: the bit is the protocol
-// saying the call is over, and that reading is what it always was.
+// saying the call is over, and that reading is what it always was. Outside a row
+// stream nothing is gated either: the payload cannot be row bytes there.
 //
-// The bit-less half needs the bound because an OCI fetch response demonstrably
-// carries a summary object of exactly this shape *inside* the row stream — one
-// per fetch round trip, at a constant offset, naming the streaming cursor and
-// reporting the running row count — so naming the cursor proves nothing here and
-// only a packet boundary separates such an object from byte 0. Refusing costs
-// nothing measurable: across testdata/, of the 641 server packets that arrive
-// mid-row-stream only 4 lead with 0x04, and all four are the genuine mid-fetch
-// ORA-01722 failures that decodeErrorOER completes below. See
-// decodeFixedStatusOERAt for both figures.
+// Inside one, the bound used to be a flat refusal, and it was drawn when no OCI
+// session ever *had* a row stream open: an OCI session's columns came from the
+// heuristic scanner, so rowStreamActive() never fired on one and the refusal
+// measured an empty set. Reading the describe records put those sessions in a
+// row stream, and the refusal then swallowed the very object it exists to read —
+// every OCI SELECT ends on a bare fixed-width status reporting ORA-01403, at
+// byte 0 of its own packet, *while rows are still considered to be streaming*.
+// Refusing it leaves the statement pending until the next one's
+// flushPendingQuery closes it, which is the whole symptom
+// TestDumpReplay_OCIStatusOERsCompleteTheirOwnStatement pins.
+//
+// What separates the terminator from the object the stream is full of is
+// measured on the corpus, not argued (TestDumpReplay_MidStreamOERFalsePositiveRate
+// prints both halves):
+//
+//   - An OCI fetch response carries a genuine summary object of this shape inside
+//     every continuation packet, naming the streaming cursor and reporting the
+//     fetch's running row count. All 149 of them in testdata/ report **success**
+//     (ErrorCode 0, counts 101, 201, … 14901). Not one reports end-of-data.
+//   - Of the 11 mid-row-stream packets that *lead* with 0x04, 4 are the genuine
+//     ORA-01722 mid-fetch failures decodeErrorOER completes below, and the other
+//     7 are the OCI end-of-fetch terminators — every one ORA-01403, CallStatus
+//     0x1, naming the cursor whose rows were on the wire.
+//
+// So the discriminator is the one the protocol already means: "no data found" is
+// a fetch saying it is over, and a fetch that is continuing cannot report it. A
+// bit-less **success** status stays refused mid-stream — that is exactly the
+// shape the 149 continuation objects have, and only a packet boundary separates
+// one of them from byte 0. The cursor anchor is the same one a mid-fetch
+// diagnostic clears (midFetchOERNamesTheStreamingCursor), and it fails the same
+// way: the call simply stays open.
 //
 // Callers hold trackerMu.
 func (s *session) statusOERMayEndTheCall(info *oerInfo) bool {
 	if info.CallStatus&oerEndOfCallBit != 0 || !s.rowStreamActive() {
+		return true
+	}
+
+	if info.ErrorCode == oraNoDataFound && s.midFetchOERNamesTheStreamingCursor(info) {
 		return true
 	}
 
@@ -3533,7 +3560,7 @@ func (s *session) handleResponse(ttcPayload []byte) {
 	// The bit stays the whole discriminator here, and that is measured, not
 	// inherited: an OCI fetch response carries a genuine fixed-width summary
 	// object inside every continuation packet, so a bit-less scan accepts 149 of
-	// the corpus's 641 mid-row-stream packets — each one ending the call
+	// the corpus's 649 mid-row-stream packets — each one ending the call
 	// mid-fetch. See findOERInResponse and decodeFixedStatusOERAt.
 	if s.rowStreamActive() {
 		if oer := findOERInResponse(shape, ttcPayload); oer != nil {

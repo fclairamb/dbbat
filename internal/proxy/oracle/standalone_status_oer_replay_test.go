@@ -41,9 +41,16 @@ func ociStatusDumps() map[string]int {
 }
 
 // standaloneStatusOER is one server packet that reached handleOERStatus at byte 0
-// while no row stream was open — the routing condition of the branch this
-// measures — together with what each of the two readings makes of it and whether
-// that very packet ended the pending statement's call.
+// — the routing condition of the branch this measures — together with what each
+// of the two readings makes of it and whether that very packet ended the pending
+// statement's call.
+//
+// `rowStream` is recorded rather than filtered on. It used to be the filter, and
+// the filter was written when an OCI session's columns came from the heuristic
+// scanner, so rowStreamActive() never fired on one and every terminator below
+// arrived "outside" a stream. Reading the describe records moved all of them
+// inside it, which is precisely the state session.statusOERMayEndTheCall has to
+// get right — so the walk must keep finding them, not stop seeing them.
 type standaloneStatusOER struct {
 	index      int
 	sql        string
@@ -51,6 +58,7 @@ type standaloneStatusOER struct {
 	compressed bool // could the end-of-call-bit reading of the compressed encoding see it?
 	accepted   bool // does decodeOERAt accept it now?
 	completed  bool // did this packet end the call, rather than the next statement?
+	rowStream  bool // was the session mid-fetch when it arrived?
 }
 
 // isStatus reports whether the OER carries a status rather than a diagnostic —
@@ -61,9 +69,9 @@ func (o standaloneStatusOER) isStatus() bool {
 }
 
 // walkStandaloneStatusOERs replays a recording through the real intercept
-// pipeline and returns every standalone `func 0x04` that arrived outside a row
-// stream, recording whether the statement pending at that moment was completed by
-// it.
+// pipeline and returns every standalone `func 0x04` — a packet whose own leading
+// byte routed it to handleOERStatus — recording whether the statement pending at
+// that moment was completed by it, and whether a row stream was open.
 //
 // `pause` is slept after each of those packets. It stands in for the client's
 // think time, which is the whole point of the duration half of the symptom: a
@@ -91,7 +99,8 @@ func walkStandaloneStatusOERs(t *testing.T, s *session, name string, pause time.
 		ttc := extractTTCPayload(tns.Payload)
 
 		s.trackerMu.Lock()
-		standalone := len(ttc) >= 2 && TTCFunctionCode(ttc[0]) == TTCFuncOERR && !s.rowStreamActive()
+		standalone := len(ttc) >= 2 && TTCFunctionCode(ttc[0]) == TTCFuncOERR
+		rowStream := s.rowStreamActive()
 
 		sql := ""
 		if standalone && s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
@@ -114,6 +123,7 @@ func walkStandaloneStatusOERs(t *testing.T, s *session, name string, pause time.
 			fields:     fields,
 			compressed: decodeCompressedEndOfCallOERAt(ttc, 0) != nil,
 			accepted:   decodeOERAt(shape, ttc, 0) != nil,
+			rowStream:  rowStream,
 		}
 
 		s.interceptUpstreamMessage(tns)
@@ -162,6 +172,14 @@ func TestDumpReplay_OCIStatusOERsCompleteTheirOwnStatement(t *testing.T) {
 
 			for _, got := range statuses {
 				require.NotNilf(t, got.fields, "packet #%d must decode at all", got.index)
+
+				assert.Equalf(t, oraNoDataFound, got.fields.ErrorCode,
+					"packet #%d: an OCI SELECT ends on end-of-data, which is what makes it "+
+						"distinguishable from the running-count object the stream is full of", got.index)
+				assert.Truef(t, got.rowStream,
+					"packet #%d: an OCI session reads its real describe records, so its fetch "+
+						"terminator arrives *inside* the row stream — that is the state "+
+						"statusOERMayEndTheCall has to get right", got.index)
 
 				assert.Zerof(t, got.fields.CallStatus&oerEndOfCallBit,
 					"packet #%d CallStatus=%#x: an OCI status OER carries no end-of-call bit, which is "+
@@ -439,26 +457,32 @@ func mutateFixedStatusOER(block []byte, offset int, value uint32) []byte {
 	return out
 }
 
-// TestHandleOERStatus_MidRowStreamRefusesABitLessStatusOER is the caller's half of
-// the bound, and the one the corpus measurement demands.
+// TestHandleOERStatus_MidRowStreamTakesOnlyEndOfData is the caller's half of the
+// bound, and the one the corpus measurement decides.
 //
-// An OCI fetch response carries a genuine summary object of exactly this shape
-// inside every continuation packet — naming the streaming cursor, reporting the
-// fetch's running row count — so naming the cursor proves nothing here and only a
-// packet boundary separates such an object from byte 0. Mid-stream, only a proven
-// diagnostic may end a call; a bare status may not, however well formed.
+// Two objects of the same fixed-width shape travel through an OCI fetch, and
+// only their reported code tells them apart. One is carried *inside* every
+// continuation packet, names the streaming cursor and reports the fetch's
+// running row count — measured across testdata/, all 149 of them report
+// **success**. The other is what the fetch **ends** on, at byte 0 of its own
+// packet — all 7 in the corpus report **ORA-01403**. So naming the cursor proves
+// nothing on its own; the code does, and a bare success mid-stream stays refused
+// because only a packet boundary separates one of those from byte 0.
 //
-// An OER that carries the end-of-call bit is unaffected: that is the protocol
-// saying the call is over, and it is the reading that always applied.
-func TestHandleOERStatus_MidRowStreamRefusesABitLessStatusOER(t *testing.T) {
+// An OER that carries the end-of-call bit is unaffected either way: that is the
+// protocol saying the call is over, and it is the reading that always applied.
+func TestHandleOERStatus_MidRowStreamTakesOnlyEndOfData(t *testing.T) {
 	t.Parallel()
 
 	const streamingCursor = 5
 
 	recorded, shape := recordedOCIStatusOER(t)
-	status := patchFixedStatusOER(t, recorded, oraNoDataFound, streamingCursor, 14999)
 
-	withBit := append([]byte(nil), status...)
+	endOfData := patchFixedStatusOER(t, recorded, oraNoDataFound, streamingCursor, 14999)
+	otherCursor := patchFixedStatusOER(t, recorded, oraNoDataFound, streamingCursor+1, 14999)
+	success := patchFixedStatusOER(t, recorded, 0, streamingCursor, 14901)
+
+	withBit := append([]byte(nil), success...)
 	binary.LittleEndian.PutUint32(withBit[oerFixed32Layout.callStatus:], oerEndOfCallBit|1)
 
 	tests := []struct {
@@ -466,8 +490,14 @@ func TestHandleOERStatus_MidRowStreamRefusesABitLessStatusOER(t *testing.T) {
 		oer      []byte
 		complete bool
 	}{
-		{name: "a bit-less status naming the streaming cursor", oer: status},
-		{name: "the same status with the end-of-call bit", oer: withBit, complete: true},
+		{
+			name:     "end-of-data naming the streaming cursor ends the fetch",
+			oer:      endOfData,
+			complete: true,
+		},
+		{name: "a bit-less success naming the streaming cursor", oer: success},
+		{name: "end-of-data naming another cursor", oer: otherCursor},
+		{name: "the same success with the end-of-call bit", oer: withBit, complete: true},
 	}
 
 	for _, tc := range tests {
@@ -484,14 +514,13 @@ func TestHandleOERStatus_MidRowStreamRefusesABitLessStatusOER(t *testing.T) {
 			s.handleOERStatus(tc.oer)
 
 			if tc.complete {
-				assert.Nil(t, s.tracker.pendingQuery,
-					"the end-of-call bit is the protocol saying the call is over")
+				assert.Nil(t, s.tracker.pendingQuery, "the call must be over")
 
 				return
 			}
 
 			assert.NotNil(t, s.tracker.pendingQuery,
-				"mid-fetch, a bare status is the object every continuation packet carries — "+
+				"mid-fetch, a bare success is the object every continuation packet carries — "+
 					"completing on it ends the call in the middle of the stream")
 		})
 	}

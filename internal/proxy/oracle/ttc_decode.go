@@ -1421,7 +1421,7 @@ type QueryResultV2 struct {
 //     in the first half of the payload (column definition area)
 //  2. Scan for row values: length-prefixed data after the column area
 //  3. Detect ORA-01403 as end-of-data (not an error)
-func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
+func decodeQueryResultV2(ttcPayload []byte, wide bool) *QueryResultV2 {
 	if len(ttcPayload) < 20 {
 		return nil
 	}
@@ -1439,18 +1439,19 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 	// scanning + padding when the records don't parse (e.g. an unexpected server
 	// layout) so behavior never regresses.
 	//
-	// Compressed-only, deliberately: parseColumnDescribes can read the
-	// fixed-width OCI records too (describeColumnLayoutWide), and asking it to
-	// here is a one-word change that was measured rather than reasoned about. An
-	// OCI session whose describes suddenly parse learns its columns, which puts
-	// it in a **row stream** over packets it used to walk past — and six of those
-	// packets in the corpus lead with a 0x04 that decodeOERAt accepts, which in
-	// production ends the call mid-fetch
-	// (TestDumpReplay_MidStreamOERFalsePositiveRate catches all six). Reading the
-	// records right is not the same thing as the row-stream bookkeeping being
-	// ready for it, so that is its own change with its own measurement — see
-	// specs/todos.
-	if descs := parseColumnDescribes(ttcPayload, false); descs != nil {
+	// `wide` is the session's learned encoding (oerShape.fixedWidth), so an OCI
+	// session reads its real records here instead of the scanner's guesses.
+	// Turning that on is not cosmetic and was measured rather than reasoned
+	// about: a session whose describes parse learns its columns, which puts it in
+	// a **row stream** over packets it used to walk straight past — and in the
+	// corpus seven of those packets lead with the 0x04 of the object that *ends
+	// an OCI fetch*, ORA-01403 at byte 0 of its own packet. The flat mid-stream
+	// refusal that used to guard against them was drawn when no OCI session ever
+	// had a row stream open, so it measured an empty set; what replaces it is the
+	// end-of-data discriminator in session.statusOERMayEndTheCall, which the
+	// corpus separates cleanly from the 149 running-count objects that really do
+	// travel inside the stream.
+	if descs := parseColumnDescribes(ttcPayload, wide); descs != nil {
 		result.Columns = describeColumnNames(descs)
 		result.ColumnTypes = describeColumnTypes(descs)
 	} else {
