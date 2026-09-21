@@ -469,6 +469,13 @@ func mutateFixedStatusOER(block []byte, offset int, value uint32) []byte {
 // nothing on its own; the code does, and a bare success mid-stream stays refused
 // because only a packet boundary separates one of those from byte 0.
 //
+// The cursor is not read at all, which the third case pins: a terminator that
+// names some other cursor still ends the fetch. That is not laxity, it is what
+// the live evidence forced — the id it would be compared against comes from
+// `learnCursorID`'s anchored scan, which mid-fetch runs over row bytes, and a
+// real 23ai session was measured holding **17744** for a fetch whose terminator
+// correctly said 2. See statusOERMayEndTheCall.
+//
 // An OER that carries the end-of-call bit is unaffected either way: that is the
 // protocol saying the call is over, and it is the reading that always applied.
 func TestHandleOERStatus_MidRowStreamTakesOnlyEndOfData(t *testing.T) {
@@ -496,7 +503,11 @@ func TestHandleOERStatus_MidRowStreamTakesOnlyEndOfData(t *testing.T) {
 			complete: true,
 		},
 		{name: "a bit-less success naming the streaming cursor", oer: success},
-		{name: "end-of-data naming another cursor", oer: otherCursor},
+		{
+			name:     "end-of-data naming another cursor still ends the fetch",
+			oer:      otherCursor,
+			complete: true,
+		},
 		{name: "the same success with the end-of-call bit", oer: withBit, complete: true},
 	}
 

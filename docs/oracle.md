@@ -1111,6 +1111,19 @@ from. So:
   to read — leaving each OCI SELECT pending until the next statement's
   `flushPendingQuery` closed it.
 
+  It is the code **and nothing else** — deliberately not also the cursor anchor a
+  mid-fetch *diagnostic* has to clear (`midFetchOERNamesTheStreamingCursor`).
+  That anchor was tried here and removed on live evidence: against a real 23ai
+  server a sqlplus fetch whose terminator correctly named cursor 2 was refused,
+  because the id dbbat held for that fetch was **17744** — a value
+  `learnCursorID`'s anchored scan had picked up out of row-stream bytes, which is
+  the caveat that function's own doc already spells out. The reference is not
+  independent evidence there, so requiring agreement with it adds no proof and
+  only adds a way for one mislearned id to leave a statement pending. The error
+  code is evidence carried by the packet itself, on top of the RetCode anchor and
+  the cursor bounds. `TestIntegration_OCIRowCaptureCarriesRealColumnNames` is
+  what keeps that honest live: it counts the refusals.
+
 A third restriction is about *ordering* rather than row bytes: the session's shape
 must already be **learned**, so the unlearned two-layout fallback
 `decodeOERFixedFieldsAt` offers is not available here. `handleOERStatus` runs the

@@ -79,6 +79,11 @@ type oracleFixtureOptions struct {
 	// per-user tag to every statement it can relocate exactly. Off by default,
 	// as it is in production.
 	statementTagging bool
+
+	// queryStorage turns result capture on. The zero value is what every test
+	// had before — `StoreResults` false, so no `query_rows` are written at all —
+	// and only a test that reads those rows back has any reason to set it.
+	queryStorage config.QueryStorageConfig
 }
 
 func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProxy {
@@ -173,7 +178,7 @@ func startOracleThroughProxyWith(t *testing.T, opts oracleFixtureOptions) *oracl
 		bindAddr = "0.0.0.0:0"
 	}
 
-	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.New(logs))
+	proxy := NewServer(dataStore, encryptionKey, nil, opts.queryStorage, config.DumpConfig{}, slog.New(logs))
 	proxy.SetStatementTagging(opts.statementTagging)
 
 	go func() { _ = proxy.Start(bindAddr) }()

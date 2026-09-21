@@ -44,6 +44,14 @@ const (
 	logMsgCursorsClosed          = "client closed cursors"
 	logMsgRecycledCursorID       = "cursor id recycled onto a different statement"
 
+	// logMsgMidStreamStatusRefused is what statusOERMayEndTheCall writes when a
+	// bit-less fixed-width status arrives mid-row-stream and is not the
+	// end-of-data that ends a fetch. On an OCI session it is the difference
+	// between a statement completed by its own OER and one left pending for the
+	// next statement's flushPendingQuery, so a live suite can count it: see
+	// TestIntegration_OCIRowCaptureCarriesRealColumnNames.
+	logMsgMidStreamStatusRefused = "bit-less status OER arrived mid-row-stream; leaving the call open"
+
 	// logMsgUnnamedCallForwarded is the fail-open record: a client message
 	// whose call dbbat could not name is forwarded with no reading taken off
 	// it. It is DEBUG rather than WARN because an OCI session emits one on

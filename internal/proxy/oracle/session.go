@@ -3375,15 +3375,27 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 //   - Of the 11 mid-row-stream packets that *lead* with 0x04, 4 are the genuine
 //     ORA-01722 mid-fetch failures decodeErrorOER completes below, and the other
 //     7 are the OCI end-of-fetch terminators — every one ORA-01403, CallStatus
-//     0x1, naming the cursor whose rows were on the wire.
+//     0x1.
 //
 // So the discriminator is the one the protocol already means: "no data found" is
 // a fetch saying it is over, and a fetch that is continuing cannot report it. A
 // bit-less **success** status stays refused mid-stream — that is exactly the
 // shape the 149 continuation objects have, and only a packet boundary separates
-// one of them from byte 0. The cursor anchor is the same one a mid-fetch
-// diagnostic clears (midFetchOERNamesTheStreamingCursor), and it fails the same
-// way: the call simply stays open.
+// one of them from byte 0.
+//
+// It is deliberately *only* the code, and not also the cursor anchor a mid-fetch
+// **diagnostic** has to clear (midFetchOERNamesTheStreamingCursor). That anchor
+// was tried here and removed on live evidence: against a real 23ai server a
+// sqlplus fetch whose terminator correctly named cursor 2 was refused, because
+// the id dbbat held for that fetch was **17744** — a value `learnCursorID`'s
+// anchored scan had picked up out of row-stream bytes, which is the caveat that
+// function's own doc already spells out. The reference is not independent
+// evidence there, so requiring agreement with it does not add proof; it only
+// adds a way for one mislearned id to leave a statement pending. The error code
+// is evidence carried by the packet itself, on top of decodeOERFixedFieldsAt's
+// RetCode anchor (the code repeated 66 bytes later) and the cursor *bounds* —
+// and across 649 mid-row-stream packets, at every 0x04 offset, no row bytes
+// anywhere in the corpus satisfy it.
 //
 // Callers hold trackerMu.
 func (s *session) statusOERMayEndTheCall(info *oerInfo) bool {
@@ -3391,11 +3403,11 @@ func (s *session) statusOERMayEndTheCall(info *oerInfo) bool {
 		return true
 	}
 
-	if info.ErrorCode == oraNoDataFound && s.midFetchOERNamesTheStreamingCursor(info) {
+	if info.ErrorCode == oraNoDataFound {
 		return true
 	}
 
-	s.logger.DebugContext(s.ctx, "bit-less status OER arrived mid-row-stream; leaving the call open",
+	s.logger.DebugContext(s.ctx, logMsgMidStreamStatusRefused,
 		slog.Int("oer_call_status", info.CallStatus),
 		slog.Int("oer_cursor_id", info.CursorID),
 		slog.Int("ora_code", info.ErrorCode))
