@@ -111,7 +111,7 @@ jobs:
       - uses: actions/setup-java@v6.0.1
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
 
       # The ojdbc thin driver, which is the `bare` on-wire shape — the one where
       # the TTC header's length field is the statement's ONLY declared length,
