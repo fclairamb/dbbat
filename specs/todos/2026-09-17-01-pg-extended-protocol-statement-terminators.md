@@ -211,3 +211,70 @@ message blames a statement that ran in milliseconds. With
 `DBB_STATEMENT_TIMEOUT=1h` on `dbbat.tools.stonal.io` that is any DataGrip
 session left idle for an hour. No configuration avoids it short of removing
 the limit.
+
+## Implementation Plan
+
+1. **`syncEpoch` on `pendingQuery` + client-side counter** (`session.go`): add
+   `syncEpoch uint64` to `pendingQuery` and `clientSyncEpoch uint64` to
+   `Session` (guarded by `bookMu`, which every writer already holds). Count in
+   `interceptClientMessage`'s switch: every forwarded `*pgproto3.Sync` and every
+   forwarded simple `*pgproto3.Query` bumps the counter. A refused simple Query
+   never reaches the switch's forward path (intercept returns an error before
+   forwarding), so it is not counted, which is what the spec requires; a refused
+   extended batch still forwards its Sync (discardUntilSync), so that one is.
+   Stamp the epoch in `handleQuery` (simple path, on `currentQuery`) and in
+   `handleExecute` (extended path, on the queued `pendingQuery`).
+2. **Rule 1 — pop on all four terminators** (`proxyUpstreamToClient`): add
+   `*pgproto3.EmptyQueryResponse` and `*pgproto3.PortalSuspended` cases beside
+   `CommandComplete`/`ErrorResponse`, sharing one `popPendingQuery(rowsAffected,
+   queryError)` helper that promotes `pendingQueries[0]` to `currentQuery` under
+   `bookMu`. `PortalSuspended` pops with no rowsAffected (there is no command
+   tag); `EmptyQueryResponse` pops with neither. Both then fall through to the
+   same `ReadyForQuery`-less completion the other two use — note that today the
+   pop only stages into `currentQuery` and `logQuery` runs at `ReadyForQuery`;
+   that staging is what "completes the row" means here and it is kept, so
+   durations stay wired to the `Sync` boundary.
+3. **Rule 2 — reconcile at every `ReadyForQuery`**: in the `ReadyForQuery` case,
+   after the existing `currentQuery` completion, walk `pendingQueries` and finish
+   every entry with `syncEpoch < clientSyncEpoch`: log it with the
+   `ReadyForQuery`'s time as its end and error text `no completion message from
+   upstream`, emit one `WARN` naming the statement and the epochs, and drop it.
+   Then `refreshStatementClock()` (already called after the switch). Seeding:
+   `runUpstreamSetup` consumes the startup `ReadyForQuery` inside
+   `connectUpstream`, before the relay loops start, so `proxyUpstreamToClient`
+   never sees a `ReadyForQuery` without a client-side counterpart — no seed
+   needed; assert this in the unit tests (the WARN must be absent from normal
+   flows).
+4. **Rule 3 — oldest-entry attribution**: add `oldestPendingQuery()` beside
+   `getCurrentPendingQuery()`; use it in `inFlightQueryUID` and in
+   `persistTerminatedQuery` (which completes the oldest with the limit text);
+   `persistAbortedQuery` keeps `getCurrentPendingQuery` (newest) for byte
+   attribution, but the terminated path must complete the *other* pending
+   entries as aborted too, so the teardown leaves no row that reads as still
+   running. Slack attribution follows automatically: `Termination.QueryUID` →
+   `buildTerminationEvent` → `ev.QueryHead`.
+5. **Tests**:
+   - Unit (`intercept_test.go` / new `session_bookkeeping_test.go`): drive
+     `proxyUpstreamToClient` over `net.Pipe` (the harness
+     `TestSession_ProxyUpstreamToClient_ByteLimitAbort` already builds) with
+     `EmptyQueryResponse` → `ReadyForQuery`, and `RowDescription` + 501
+     `DataRow` + `PortalSuspended` → `ReadyForQuery`; assert the entry pops, the
+     row logs with its own duration, `statementClock.Running()` is false. Then
+     the DataGrip capture sequence as one table-driven case: every logged
+     duration is the statement's own, clock clear at the end, and the reconcile
+     WARN absent.
+   - Unit backstop: `Execute` #1 answered by `ErrorResponse`, `Execute` #2
+     discarded by the server, `Sync`, `ReadyForQuery` → #2 finished at the
+     ReadyForQuery with the WARN; a pipelined case (batch 2 queued before
+     `ReadyForQuery` 1) must survive.
+   - Integration (`statement_timeout_integration_test.go`): 2s limit, raw
+     `pgproto3` frames through a real proxy fixture (empty statement, then
+     `Execute maxRows=N` over a table with more rows), sleep past
+     `limit + grace + poll`, assert the session is alive and no
+     `statement_timeout` termination was recorded.
+   - Termination attribution: a real watchdog timeout with two entries in
+     flight; the query row, the audit entry and the Slack event must name the
+     oldest.
+6. **Docs**: `docs/postgresql.md` Layer 2 paragraph (four terminators,
+   suspended-portal-is-idle, Sync-boundary reconcile); one sentence in
+   `CLAUDE.md`'s "Per-statement time limits" Layer 2 bullet.
