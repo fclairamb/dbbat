@@ -1064,13 +1064,15 @@ observables):
 
 | Figure | Value |
 |---|---|
-| recordings in `testdata/` | 26 |
-| server packets arriving mid-row-stream | 641 |
-| …of those, leading with `0x04` at byte 0 | 4 — all four the genuine mid-fetch ORA-01722 failures |
-| accepted at byte 0 by `decodeOERAt` mid-stream | **0** |
+| recordings in `testdata/` | 33 |
+| server packets arriving mid-row-stream | 649 |
+| …of those, leading with `0x04` at byte 0 | 11 — 4 the genuine mid-fetch ORA-01722 failures, 7 the ORA-01403 an OCI fetch *ends* on |
+| accepted at byte 0 by `decodeOERAt` mid-stream | **7** — the end-of-data terminators, and nothing else |
+| …of those, allowed to end the call | **7**, every one reporting end-of-data and naming the streaming cursor |
+| …of those, reporting **success** | **0** — a bit-less success mid-stream is refused |
 | accepted mid-stream by `findOERInResponse` | **0** |
 | accepted by `decodeErrorOER` at every non-zero `0x04` offset mid-stream | **0** (the pre-existing stress figure) |
-| **accepted by the fixed-width status predicate at every non-zero offset mid-stream** | **149** |
+| **accepted by the fixed-width status predicate at every non-zero offset mid-stream** | **149**, every one reporting success with a running count |
 | standalone OCI status OERs completed by a bit-demanding predicate | **0** |
 | standalone OCI status OERs completed by the adopted predicate | **6** (1 + 5 across the two recordings) |
 
@@ -1091,10 +1093,23 @@ from. So:
   omission**. Outside a row stream nothing is lost by it either, because the
   `findPlausibleOERInResponse` fall-through right behind it reads the fixed-width
   encoding under the cursor bounds.
-- and **only outside a row stream** (`statusOERMayEndTheCall`), because a packet
-  boundary is all that separates that object from byte 0. Refusing costs nothing
-  measurable: of the 641 mid-stream packets only 4 lead with `0x04` and all four
-  are failures a status predicate rejects by their error code alone.
+- and, inside a row stream, **end-of-data only** (`statusOERMayEndTheCall`),
+  because a packet boundary is all that separates the running-count object from
+  byte 0. What tells the two apart is the code they report, and the corpus is
+  unambiguous about it: all 149 objects that genuinely travel *inside* the stream
+  report **success**, and all 7 that arrive *at byte 0* of their own packet while
+  a stream is open report **ORA-01403** — which is a fetch saying it is over, and
+  a fetch that is continuing cannot report it. So a bit-less success stays
+  refused there, and a bit-less end-of-data naming the streaming cursor ends the
+  call, as it means to.
+
+  That bound used to be a flat refusal, and it was drawn while it measured an
+  empty set: an OCI session's column names came from the heuristic scanner, so
+  `rowStreamActive()` never fired on one and its terminators all arrived
+  "outside" a stream. Reading the describe records (below) moved every one of
+  them inside it, and the flat refusal then swallowed the very object it exists
+  to read — leaving each OCI SELECT pending until the next statement's
+  `flushPendingQuery` closed it.
 
 A third restriction is about *ordering* rather than row bytes: the session's shape
 must already be **learned**, so the unlearned two-layout fallback
@@ -1234,9 +1249,9 @@ measured rather than argued, over the whole `testdata/` corpus replayed through 
 real session so `rowStreamActive()` is the session's own
 (`TestDumpReplay_MidStreamOERFalsePositiveRate`):
 
-- across **26** recordings, **641** server packets arrive mid-row-stream;
-- **4** of them begin with `0x04` — the four genuine ORA-01722s; 623 of the rest
-  begin with `0x06`;
+- across **33** recordings, **649** server packets arrive mid-row-stream;
+- **11** of them begin with `0x04` — the four genuine ORA-01722s plus the seven
+  ORA-01403 terminators an OCI fetch ends on; most of the rest begin with `0x06`;
 - `decodeErrorOER` accepts exactly those **4** and nothing else:
   **false-positive rate 0**. It was 3 before the fixed-width decoder, the fourth
   being sqlplus's, refused for being unreadable rather than for being row data;
@@ -2509,7 +2524,7 @@ all five protocols.
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
 - **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the re-execution frames that are real (the SQL-less `OALL8`, the `03/0x4e|0x04` piggyback, and the `03 5e` declaring no statement in either the thin header — ojdbc6's — or either OCI one — sqlplus driving a cursor, in the 4-byte dialect's header or the 64-bit dialect's) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
-- **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
+- **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), in **both** encodings — the compressed one thin clients speak and the fixed-width OCI one (`describeColumnLayoutWide`), chosen by the session's own learned shape — so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions on sqlplus and SQL*Developer as well. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
 - **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. That now includes a failure raised **mid-fetch**, once column definitions are decoded — measured at 14 900 rows into a 20 000-row fetch on **four** clients, and accepted there only when the OER also names the cursor whose rows are streaming; see "A failure raised mid-fetch". "Every client" includes the OCI ones (sqlplus, Instant Client, SQL*Developer over OCI) only since `decodeOERFieldsAtLayout`: they marshal the summary object fixed-width, dbbat read TTC compressed integers only, and until then *every* failing statement on those clients — mid-fetch or not — was recorded as a success. A **successful** OCI call is a separate reading again, added later still (`decodeFixedStatusOERAt`): the standalone summary object that ends every OCI fetch reports ORA-01403 with a bare `CallStatus 0x1`, so until it was read, an OCI statement was completed by the *next* one's `flushPendingQuery` — no `rows_affected`, and a `duration_ms` measuring the client's think time. See "a successful call on an OCI client" for the predicate and its measured bounds. What is still not covered is a mid-fetch failure whose OER names a *different* cursor (none has been observed; it fails closed to the old no-error behaviour and logs a DEBUG line), any mid-fetch failure on a client not captured, and — the one to know about — **an OCI DML's `rows_affected`, which is still NULL**: its summary object is *embedded in a Response* with a populated logical-rowid DLC, a third fixed-width layout the RetCode anchor refuses (`sqlplus_midfetch_fail.pcapng` packet #31), so the statement is closed by the next one's flush. That is out of scope of the status reading above and tracked by the gated `TestIntegration_DMLRowCountLandsFromItsOwnOEROCI`; see "What is still NULL: an OCI DML's `rows_affected`". See `ttc_oer.go`.
 - **Bind values (parameterized queries)**: Bind values are captured from both the legacy `OALL8` execute path (`decodeBindValues`) and the v315+ **piggyback exec** path that modern clients use (`extractPiggybackBinds`, func `0x03` sub `0x5e`). The piggyback binds sit length-prefixed at the tail of the message; they're located as the suffix that parses as exactly as many values as there are distinct bind placeholders in the SQL, and each is decoded by content via `decodeOracleRawValue` (so a NUMBER bind like `42` renders as `42`, not hex). Verified against `testdata/go_ora_binds.pcapng` (`TestDumpReplay_Binds`). Captured binds are now persisted to `queries.parameters` (`formatOracleBinds` wired into `persistQueryRecord` and `completeQuery`), so the API (`GET /api/v1/queries/:uid`) and the UI Parameters card report them. Not yet handled: binds over ~253 bytes (extended length encoding) and full type-aware decoding from the bind-definition records.
 - **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results, verified end-to-end against `testdata/go_ora_temporal.pcapng` (`TestDumpReplay_Temporal`). The tz form renders the local wall clock plus its numeric offset, honouring byte 11's `0x40` "time in zone" flag (prefix stored as local vs UTC). Named-region time zones fall back to the stored wall clock without an offset suffix.
@@ -3333,16 +3348,30 @@ clients never regress) and retries the modern one only when the classic parse mi
 reference but is stale for 23ai — the three extra trailing ints were recovered empirically
 from a real SQLcl describe (`sqlcl_regression_test.go`).
 
-`parseColumnDescribes` takes a second axis now — the **encoding** — and reads the
+`parseColumnDescribes` takes a second axis — the **encoding** — and reads the
 fixed-width OCI records too (`describeColumnLayoutWide`, pinned by
-`TestOCIDescribeRecordsParse` against an eight-column sqlplus describe). It is a
-capability rather than a behaviour change so far: `decodeQueryResultV2` still asks for
-the compressed reading, so an OCI session's column names still come from the heuristic
-scanner. Turning it on is a one-word change with a measured consequence — an OCI session
-whose describes parse learns its columns and therefore enters a **row stream** over
-packets it used to walk past, six of which lead with a `0x04` that `decodeOERAt` accepts
-(`TestDumpReplay_MidStreamOERFalsePositiveRate`). That is its own change, filed in
-`specs/todos/`.
+`TestOCIDescribeRecordsParse` against an eight-column sqlplus describe).
+`decodeQueryResultV2` now asks for the session's own encoding
+(`s.oerShapeSnapshot().fixedWidth`), so an OCI session's column names come from its
+records rather than from the heuristic scanner. The difference is not cosmetic, and
+`TestOCIRowCaptureCarriesTheDescribesColumnNames` states it in the JSON that reaches
+`query_rows`: on sqlplus's login probe, whose single column is a 67-character
+expression, the scanner finds **no name at all** and every captured row was an empty
+object; on the eight-column describe it drops both one-character names (`D`, `R`) and
+invents two that are not columns — the schema `SYSTEM` and the object type
+`DBBAT_CAP_OBJ`, the other two DLCs of the record — filing six of eight values under the
+wrong column.
+
+Turning it on was a one-word change with a measured consequence, and it was reverted once
+before it was understood. An OCI session whose describes parse learns its columns and
+therefore enters a **row stream** over packets it used to walk straight past — seven of
+which lead with the `0x04` of the ORA-01403 that *ends an OCI fetch*. Those are genuine
+terminators, not row bytes: the flat mid-stream refusal in `statusOERMayEndTheCall` was
+drawn while no OCI session ever had a row stream open, so it measured an empty set, and
+turning the records on made it swallow the one object it exists to read. What replaces it
+is the end-of-data discriminator described under "a successful call on an OCI client",
+which the corpus separates cleanly from the 149 running-count objects that really do
+travel inside the stream (`TestDumpReplay_MidStreamOERFalsePositiveRate`).
 
 Once columns parse, rows are located independently by `scanRowValues`. A second, latent bug
 surfaced there: `parseRowStream` treated a leading `0x08` as the end-of-rows footer, but
