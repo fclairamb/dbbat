@@ -505,6 +505,91 @@ func TestIntegration_StatementTagFromOCIClient(t *testing.T) {
 		"Oracle's own view of the OCI client's statement must carry the tag:\n%s", out)
 }
 
+// sqlplusPLSQLTagProbeScript is the shape a thick-client user actually types:
+// an anonymous PL/SQL block with a **bind**, which sqlplus staples behind a
+// close-cursors piggyback, followed by the `PRINT` that drives the REF cursor
+// the call handed back.
+//
+// The two lookups split the marker with `||` so neither matches itself, and both
+// anchor on `BEGIN dbbat_tag_refcur` rather than on the procedure name alone —
+// the `CREATE OR REPLACE PROCEDURE` that made it, and the `DROP` that removes
+// it, both carry that name and neither is the statement under test.
+const sqlplusPLSQLTagProbeScript = `SET PAGESIZE 0
+SET FEEDBACK OFF
+VARIABLE rc REFCURSOR
+BEGIN dbbat_tag_refcur(:rc); END;
+/
+PRINT rc
+SELECT 'tagged=' || COUNT(*) FROM v$sql WHERE sql_text LIKE '%BEGIN dbbat' || '_tag_refcur%' AND sql_text LIKE '/*dbbat=''%';
+SELECT 'untagged=' || COUNT(*) FROM v$sql WHERE sql_text LIKE '%BEGIN dbbat' || '_tag_refcur%' AND sql_text NOT LIKE '/*dbbat=''%';
+EXIT
+`
+
+// TestIntegration_StatementTagFromOCIPLSQLCall is the shape this feature was
+// once believed not to reach.
+//
+// An sqlplus session running `VARIABLE rc REFCURSOR` / `BEGIN proc(:rc); END;`
+// puts an anonymous PL/SQL block carrying a bind on the wire, stapled behind a
+// close-cursors piggyback, and that frame looked for a while like one the exact
+// locator could not certify — which would have meant a thick client doing PL/SQL
+// with binds, most of what a DBA does from sqlplus, running untagged. It is not:
+// the refusals were the `PRINT rc` drives, which declare no statement at all
+// (execWideNoStatementCursor).
+//
+// So this is the live version of that correction, and it asserts both halves at
+// once. The block must come back **tagged** in Oracle's own view — with no
+// untagged twin, which is what a per-frame inconsistency would look like in
+// `V$SQL` — and the REF cursor the call handed back must still drive and return
+// its rows, which is what says the rewritten frame's bind survived the length
+// field moving.
+//
+// Measured 2026-09-21 against `gvenzl/oracle-free:23-slim` with Instant Client
+// 23.3 on PATH: `tagged=1`, `untagged=0`, `refcur-3`.
+//
+// Like TestIntegration_StatementTagFromOCIClient above, it asserts `tagged=1`,
+// so it is red against the **64-bit** OCI dialect
+// (`ORACLE_TEST_OCI_CLIENT=container`) — where the locator does not read the
+// header at all and the session runs untagged by design. That is one gap, not
+// two, and it is already filed:
+// specs/todos/2026-09-21-02-oracle-statement-tag-never-reaches-the-64-bit-oci-client.md.
+// Whatever fixes that test fixes this one.
+func TestIntegration_StatementTagFromOCIPLSQLCall(t *testing.T) {
+	env := startOracleThroughProxyWith(t, oracleFixtureOptions{
+		statementTagging:        true,
+		reachableFromContainers: plannedOCIClient() == ociClientContainer,
+	})
+
+	client := requireOCIClient(t, env)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	_, err := env.db.ExecContext(ctx, `CREATE OR REPLACE PROCEDURE dbbat_tag_refcur(p OUT SYS_REFCURSOR) AS
+BEGIN
+  OPEN p FOR SELECT 'refcur-' || LEVEL AS label FROM dual CONNECT BY LEVEL <= 3;
+END;`)
+	require.NoError(t, err, "the procedure must be creatable under the permissive grant the fixture starts with")
+
+	defer func() { _, _ = env.db.ExecContext(context.Background(), "DROP PROCEDURE dbbat_tag_refcur") }()
+
+	out, err := client.run(t, ctx, sqlplusPLSQLTagProbeScript)
+	require.NoErrorf(t, err, "sqlplus through a tagging proxy:\n%s", out)
+
+	t.Logf("%s output:\n%s", client.label, out)
+
+	assert.NotContains(t, out, "ORA-03146",
+		"a wrong TTC length field is what this whole design exists to avoid:\n%s", out)
+	assert.NotContains(t, out, "ORA-03120",
+		"a desynchronized message reads as a conversion overflow:\n%s", out)
+	assert.Contains(t, out, "refcur-3",
+		"the REF cursor the tagged call handed back must still drive and return its rows:\n%s", out)
+	assert.Contains(t, out, "tagged=1",
+		"Oracle's own view of the PL/SQL call must carry the tag:\n%s", out)
+	assert.Contains(t, out, "untagged=0",
+		"and there must be no untagged twin of it — that is what a frame tagged on some "+
+			"executions and not others would look like in V$SQL:\n%s", out)
+}
+
 // pythonTagProbeScript is the same probe through python-oracledb thin.
 const pythonTagProbeScript = `import sys
 import oracledb

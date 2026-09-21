@@ -86,7 +86,11 @@ exists for, on the thick-client family most likely to be running ad-hoc work.
 - `internal/proxy/oracle/statement_tagging.go` — `frameCarriesStatement`,
   `decideStatementTagging`
 - `internal/proxy/oracle/statement_tagging_integration_test.go` —
-  `TestIntegration_StatementTagFromOCIClient`
+  `TestIntegration_StatementTagFromOCIClient`, and since 2026-09-21
+  `TestIntegration_StatementTagFromOCIPLSQLCall` beside it, which asserts the
+  same `tagged=1` for the PL/SQL-with-a-bind shape and is red on the container
+  client for the same single reason. Both go green together; neither is a
+  second gap.
 - `internal/proxy/oracle/testdata/oci64_parse_execs.hex` — three recorded
   64-bit parses to round-trip against
 - `docs/oracle.md` — `DBB_QUERY_TAGGING_ORACLE`'s caveats
