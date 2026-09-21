@@ -33,13 +33,14 @@ type pendingQuery struct {
 	parameters *store.QueryParameters
 
 	// syncEpoch is the client-leg message count (forwarded Syncs and simple
-	// Queries) at the moment this query was queued. The upstream leg's
-	// ReadyForQuery reconcile (see reconcilePendingQueries) finishes every
-	// entry whose epoch is below the count of ReadyForQuery-replies the
-	// client has earned: such an entry's batch is over by definition, so a
-	// missing terminator (an upstream ErrorResponse discarding the rest of a
-	// batch, or any future gap of the same kind) can never park the statement
-	// clock on a finished statement again.
+	// Queries) at the moment this query was queued, so the RFQ answering this
+	// query's own batch is the syncEpoch+1-th one upstream sends. The upstream
+	// leg's ReadyForQuery reconcile (see reconcilePendingQueries) finishes
+	// every entry whose epoch is below its own ReadyForQuery count: such an
+	// entry's batch is over by definition, so a missing terminator (an
+	// upstream ErrorResponse discarding the rest of a batch, or any future gap
+	// of the same kind) can never park the statement clock on a finished
+	// statement again.
 	syncEpoch uint64
 
 	// Result capture state
@@ -182,10 +183,20 @@ type Session struct {
 
 	// clientSyncEpoch counts the client messages that each earn exactly one
 	// upstream ReadyForQuery: every forwarded Sync and every forwarded simple
-	// Query. The upstream leg's reconcile compares it against pendingQueries'
-	// epochs — see pendingQuery.syncEpoch. Guarded by bookMu, which every
-	// reader and writer of it already holds.
+	// Query. Each pendingQuery stamps it when queued, so the RFQ answering
+	// that query's batch is the syncEpoch+1-th one. The upstream leg keeps its
+	// own ReadyForQuery count (upstreamReadyEpoch) — it cannot read this one
+	// at RFQ time, because a pipelined client has already earned further RFQs
+	// by then — and the reconcile compares the two. Guarded by bookMu, which
+	// every writer already holds.
 	clientSyncEpoch uint64
+
+	// upstreamReadyEpoch counts the ReadyForQuery messages the upstream leg
+	// has relayed. Each answers exactly one client-side message, so a pending
+	// entry whose syncEpoch is below this count belongs to a batch that is
+	// already over — see reconcilePendingQueries. Bumped and read only under
+	// bookMu, inside the upstream leg's message switch.
+	upstreamReadyEpoch uint64
 
 	// upstreamKey is the cancellation key the *upstream server* issued for
 	// this session's backend. dbbat forwards it to the client verbatim, so it
@@ -578,11 +589,15 @@ func (s *Session) recordedTermination() store.Termination {
 // one is already persisted (an approval hold or a started result capture gave
 // it a uid). uuid.Nil otherwise — most statements are only inserted when they
 // finish, and a terminated one never does.
+//
+// The oldest in-flight entry, not the newest: this is what the watchdog
+// measures, so the termination record, the audit entry and the notification
+// must all name the statement whose duration was measured.
 func (s *Session) inFlightQueryUID() uuid.UUID {
 	s.bookMu.Lock()
 	defer s.bookMu.Unlock()
 
-	q := s.getCurrentPendingQuery()
+	q := s.oldestPendingQuery()
 	if q == nil {
 		return uuid.Nil
 	}
@@ -711,7 +726,28 @@ func (s *Session) proxyClientToUpstream() error {
 func (s *Session) interceptClientMessage(msg pgproto3.FrontendMessage) error {
 	switch m := msg.(type) {
 	case *pgproto3.Query:
-		return s.handleQuery(m)
+		if err := s.handleQuery(m); err != nil {
+			return err
+		}
+
+		// A forwarded simple Query earns exactly one upstream ReadyForQuery.
+		// A refused one never gets here (the refusal returns first), so it is
+		// not counted — dbbat answers it itself and upstream never hears of
+		// it, so upstream owes no ReadyForQuery either.
+		return s.book(func() error {
+			s.clientSyncEpoch++
+
+			return nil
+		})
+	case *pgproto3.Sync:
+		// A forwarded Sync earns exactly one upstream ReadyForQuery. A Sync
+		// from a refused batch is forwarded too (discardUntilSync), so it
+		// still counts — upstream does answer it.
+		return s.book(func() error {
+			s.clientSyncEpoch++
+
+			return nil
+		})
 	case *pgproto3.Parse:
 		return s.handleParse(m)
 	case *pgproto3.Bind:
@@ -888,6 +924,112 @@ func (s *Session) getCurrentPendingQuery() *pendingQuery {
 	}
 
 	return nil
+}
+
+// popPendingQuery promotes the oldest pending extended-protocol query to
+// currentQuery, where the next ReadyForQuery logs it. It is the one pop all
+// four terminators share: an Execute ends with exactly one of CommandComplete,
+// ErrorResponse, EmptyQueryResponse or PortalSuspended, and missing the last
+// two parked every paged grid and every empty statement on a stale queue entry
+// — from which on every pop took the wrong item and the last statements of the
+// session were never completed, leaving the watchdog armed on an idle backend.
+//
+// Callers hold bookMu (see proxyUpstreamToClient).
+func (s *Session) popPendingQuery() {
+	if s.extendedState == nil || len(s.extendedState.pendingQueries) == 0 {
+		return
+	}
+
+	s.currentQuery = s.extendedState.pendingQueries[0]
+	s.extendedState.pendingQueries = s.extendedState.pendingQueries[1:]
+}
+
+// reconcilePendingQueries finishes every pending extended-protocol query whose
+// batch the protocol has already closed, and drops it from the queue.
+//
+// Upstream sends one ReadyForQuery per client-side message that earns one
+// (a forwarded Sync or a forwarded simple Query), and the protocol guarantees
+// that when it arrives nothing from before that message is still running. So a
+// pending entry whose syncEpoch is below the ReadyForQuery count is over by
+// definition: its terminator went missing (an upstream ErrorResponse mid-batch
+// makes the server discard the rest of the batch until Sync, so a later
+// Execute the client had already sent gets none), and keeping it would park
+// the statement clock on a backend that is now idle — which is how an idle
+// DataGrip session was killed a full hour after its last statement. The entry
+// is logged with the ReadyForQuery's time as its end and dropped.
+//
+// It is a backstop, not the mechanism — rule 1 (all four terminators pop) is
+// what the normal flows are handled by — which is why the reconcile WARNs: the
+// unit tests assert the WARN is absent from normal flows, so a new gap shows
+// up as a failing assertion rather than as a killed session in production.
+//
+// A pipelined client's later batch survives: its entries carry the higher
+// epoch (their Sync has not been answered yet), so this counts rather than
+// drains.
+//
+// Callers hold bookMu (see proxyUpstreamToClient).
+func (s *Session) reconcilePendingQueries() {
+	if s.extendedState == nil || len(s.extendedState.pendingQueries) == 0 {
+		return
+	}
+
+	ready := s.upstreamReadyEpoch
+
+	kept := s.extendedState.pendingQueries[:0]
+
+	for _, q := range s.extendedState.pendingQueries {
+		if q.syncEpoch >= ready {
+			kept = append(kept, q)
+
+			continue
+		}
+
+		// The batch is over and this statement never got its terminator. The
+		// ReadyForQuery's time is its end — the exchange it belonged to
+		// closed, by protocol, at this Sync boundary.
+		errText := "no completion message from upstream"
+
+		s.logger.WarnContext(s.ctx, "finishing a pending query its terminator never completed",
+			slog.String("sql", q.sql),
+			slog.Uint64("sync_epoch", q.syncEpoch),
+			slog.Uint64("upstream_ready_for_query", ready))
+
+		s.currentQuery = q
+		s.logQuery(nil, &errText, 0)
+	}
+
+	s.extendedState.pendingQueries = kept
+	s.currentQuery = nil
+}
+
+// oldestPendingQuery returns the statement the statement clock is parked on:
+// the oldest entry among the staged current query and the extended-protocol
+// queue. The watchdog measures that entry, so the row completed with the
+// limit text, the audit entry and the notification must name it too — the
+// newest (getCurrentPendingQuery) is what the streamed bytes belong to, which
+// is a different statement whenever an earlier one never got popped.
+//
+// Callers hold bookMu.
+func (s *Session) oldestPendingQuery() *pendingQuery {
+	var oldest *pendingQuery
+
+	if s.currentQuery != nil {
+		oldest = s.currentQuery
+	}
+
+	if s.extendedState != nil {
+		for _, q := range s.extendedState.pendingQueries {
+			if q == nil {
+				continue
+			}
+
+			if oldest == nil || q.startTime.Before(oldest.startTime) {
+				oldest = q
+			}
+		}
+	}
+
+	return oldest
 }
 
 // captureRowDescription records the result column metadata of the current or
@@ -1073,20 +1215,35 @@ func (s *Session) proxyUpstreamToClient() error {
 			// Parse rows affected from CommandTag (e.g., "UPDATE 5")
 			rowsAffected = parseRowsAffected(string(m.CommandTag))
 			// Pop from pending queue if using Extended Query Protocol
-			if len(s.extendedState.pendingQueries) > 0 {
-				s.currentQuery = s.extendedState.pendingQueries[0]
-				s.extendedState.pendingQueries = s.extendedState.pendingQueries[1:]
-			}
+			s.popPendingQuery()
 
 		case *pgproto3.ErrorResponse:
 			// Capture error message
 			errMsg := m.Message
 			queryError = &errMsg
 			// Pop from pending queue if using Extended Query Protocol
-			if len(s.extendedState.pendingQueries) > 0 {
-				s.currentQuery = s.extendedState.pendingQueries[0]
-				s.extendedState.pendingQueries = s.extendedState.pendingQueries[1:]
-			}
+			s.popPendingQuery()
+
+		case *pgproto3.EmptyQueryResponse:
+			// The statement was the empty string: the fourth way an Execute
+			// ends (no command tag, no rows, no error). Not popping here is
+			// what parked every DataGrip session on a stale queue entry after
+			// it sent the empty statement it always sends, and got the idle
+			// session killed by the statement timeout an hour later.
+			rowsAffected = nil
+			queryError = nil
+			s.popPendingQuery()
+
+		case *pgproto3.PortalSuspended:
+			// The Execute carried a row limit and the portal has more rows.
+			// There is no command tag, and the backend is now idle — waiting
+			// for the client to ask for the next page — not executing. The
+			// next page's Execute was already queued by handleExecute as its
+			// own pendingQuery, with its own terminator, so a grid paged N
+			// times logs N rows, each with that page's real duration.
+			rowsAffected = nil
+			queryError = nil
+			s.popPendingQuery()
 
 		case *pgproto3.DataRow:
 			s.captureDataRow(m)
@@ -1130,6 +1287,12 @@ func (s *Session) proxyUpstreamToClient() error {
 			}
 
 		case *pgproto3.ReadyForQuery:
+			// One ReadyForQuery answers exactly one client-side message — a
+			// forwarded Sync or a forwarded simple Query. Counting it is what
+			// lets the reconcile below tell a finished batch from one still
+			// in flight.
+			s.upstreamReadyEpoch++
+
 			// Query complete - log it
 			if s.currentQuery != nil {
 				// Wire-level diff: cumulative client-side bytes since the
@@ -1147,6 +1310,14 @@ func (s *Session) proxyUpstreamToClient() error {
 				rowsAffected = nil
 				queryError = nil
 			}
+
+			// The protocol guarantees nothing from before this Sync is still
+			// running, so anything still queued from an earlier epoch is a
+			// statement that never got its terminator. Finish it here rather
+			// than letting it park the statement clock on an idle backend —
+			// the backstop that bounds any future gap of the kind that killed
+			// the idle DataGrip session.
+			s.reconcilePendingQueries()
 		}
 
 		// Whatever the message did to the bookkeeping, the set of statements
@@ -1295,6 +1466,13 @@ func (s *Session) persistAbortedQuery(errText string) {
 // termination as one that is still running, which is the one row an operator
 // looks for afterwards.
 //
+// The statement it completes is the *oldest* in-flight entry — the one the
+// statement clock measured, which is what "ran 1h0m2.1s" is about. Completing
+// the newest instead (as this used to) blamed a statement that had run in
+// milliseconds while the one the clock measured read as still running. Every
+// other pending entry is completed as aborted too, without the limit text, so
+// the teardown leaves no row that reads as still running.
+//
 // Runs on the watchdog goroutine, before the sockets are closed, so the relay
 // legs are still alive and the bookkeeping is still coherent.
 func (s *Session) persistTerminatedQuery(t store.Termination) {
@@ -1307,7 +1485,66 @@ func (s *Session) persistTerminatedQuery(t store.Termination) {
 	s.bookMu.Lock()
 	defer s.bookMu.Unlock()
 
-	s.persistAbortedQuery(message)
+	oldest := s.oldestPendingQuery()
+	if oldest == nil {
+		return
+	}
+
+	// Wire-level diff, computed once: the streamed-so-far bytes belong to the
+	// newest entry — that is what persistAbortedQuery attributes them to on
+	// the abort path, and the terminated path keeps the same rule.
+	total := s.bytesFromClient.Load() + s.bytesToClient.Load()
+
+	bytesTransferred := total - s.lastBytesSnapshot
+	if bytesTransferred > 0 {
+		s.lastBytesSnapshot = total
+	} else {
+		// Nothing new to attribute. The entries still get completed below —
+		// a row a result capture already inserted must not read as still
+		// running — they just carry no byte count.
+		bytesTransferred = 0
+	}
+
+	newest := s.getCurrentPendingQuery()
+
+	// Every pending entry except the oldest completes as aborted, without the
+	// limit text, so the teardown leaves no row that reads as still running.
+	// The oldest goes last, with the limit text.
+	aborted := "aborted: session terminated by dbbat"
+
+	if s.extendedState != nil {
+		for _, q := range s.extendedState.pendingQueries {
+			if q == nil || q == oldest {
+				continue
+			}
+
+			bytes := int64(0)
+			if q == newest {
+				bytes = bytesTransferred
+			}
+
+			s.currentQuery = q
+			s.logQuery(nil, &aborted, bytes)
+		}
+	}
+
+	oldestBytes := int64(0)
+	if oldest == newest {
+		oldestBytes = bytesTransferred
+	}
+
+	s.currentQuery = oldest
+	s.logQuery(nil, &message, oldestBytes)
+
+	// The teardown has now completed everything that was in flight; drop the
+	// bookkeeping rather than leaving rows that could read as still running.
+	s.currentQuery = nil
+	s.copyState = nil
+	if s.extendedState != nil {
+		s.extendedState.pendingQueries = nil
+	}
+
+	s.refreshStatementClock()
 }
 
 // cleanup closes connections and updates records.

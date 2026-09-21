@@ -147,6 +147,9 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 			sql:         sqlText,
 			startTime:   time.Now(),
 			approvalUID: approvalUID,
+			// The RFQ answering this Query is the syncEpoch+1-th one — the
+			// reconcile in the upstream leg keys on it.
+			syncEpoch: s.clientSyncEpoch,
 		}
 
 		s.refreshStatementClock()
@@ -350,6 +353,10 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 	}
 
 	return s.book(func() error {
+		// The RFQ answering this batch's Sync is the syncEpoch+1-th one — the
+		// reconcile in the upstream leg keys on it.
+		query.syncEpoch = s.clientSyncEpoch
+
 		s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
 
 		s.refreshStatementClock()
