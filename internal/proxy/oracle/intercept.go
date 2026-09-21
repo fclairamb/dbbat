@@ -180,6 +180,18 @@ type trackedCursor struct {
 	// is what stops the locator from being offered this execution's own row
 	// stream as if it were another call's out-binds.
 	fromRefCursorBind bool
+
+	// cursorIDSource ranks the evidence behind cursorID, so a better reading can
+	// replace a worse one and never the other way round. See cursorIDSource and
+	// learnCursorID.
+	//
+	// An id that did *not* come from a response leaves this at
+	// cursorIDUnlearned while cursorID is already set — the legacy OALL8 carries
+	// the id on the client's own request, and a REF cursor's comes out of a
+	// call's bind output. That pair means "authoritative, not learned", and
+	// learnCursorID refuses to touch it: neither value is something a scan over a
+	// response may second-guess.
+	cursorIDSource cursorIDSource
 }
 
 // oracleQueryTracker manages per-session cursor state and pending queries.
@@ -628,31 +640,76 @@ func (s *session) handlePiggybackReexec(ttcPayload []byte) error {
 // SQL.
 //
 // Only the legacy OALL8 carries the cursor id on the request; the piggyback and
-// JDBC exec paths leave dbbat to read it off the response. Learning is a
-// one-shot per statement — a cursor that already has an id is never re-read —
-// which is what keeps the anchored scan in findCursorIDInResponse from being
-// re-run against row-stream bytes for the rest of a fetch.
+// JDBC exec paths leave dbbat to read it off the response.
+//
+// Learning used to be a flat one-shot: the first value findCursorIDInResponse
+// returned won and the cursor was never re-read, which kept the anchored scan
+// from churning the id against row-stream bytes for the rest of a fetch. The
+// property was worth keeping; the rule was the wrong way to get it, because it
+// also meant the *first* value won even when it was the worst one available.
+// Measured live against a real 23ai server, a sqlplus fetch whose end-of-call
+// terminator correctly named cursor 2 ran on a session holding **17744** — a
+// value scanned out of row bytes, latched before the terminator arrived, and
+// never revisited. That is the id rememberCursor files the statement under, so
+// it is the id a later re-execution is gated against: the real id 2 is simply
+// never written, and an id the server recycles onto 17744 would resolve to the
+// wrong statement's SQL rather than being refused as unknown.
+//
+// So the id is ranked rather than latched (see cursorIDSource). A reading
+// replaces the stored one only when it is *stronger* evidence, which keeps the
+// original property intact — a scan hit never outranks a scan hit, so a fetch's
+// row bytes still cannot churn the id — while letting the server's own
+// end-of-call object correct a guess made before it arrived. Two things that are
+// not readings at all outrank every source: an id the client's request carried
+// (the legacy OALL8) and one read out of a call's bind output (a REF cursor).
+// Both are recognized by cursorID being set while the source is still
+// cursorIDUnlearned.
+//
+// When a correction changes the id, the entry the wrong one was filed under is
+// dropped. Leaving it is the whole gating hazard restated: a stale map entry
+// pointing at a statement it never named, waiting for the server to recycle that
+// id onto a real cursor.
 //
 // Runs on the upstream leg, so the caller holds trackerMu (see
 // interceptUpstreamMessage) — it writes into the in-flight query's cursor and
 // into the tracker's map, both of which the client leg also owns.
 func (s *session) learnCursorID(ttcPayload []byte) {
 	pending := s.tracker.pendingQuery
-	if pending == nil || pending.cursor == nil || pending.cursor.cursorID != 0 {
+	if pending == nil || pending.cursor == nil {
 		return
 	}
 
-	cursorID, ok := findCursorIDInResponse(s.oerShapeSnapshot(), ttcPayload)
-	if !ok {
+	cursor := pending.cursor
+
+	// Set, but by something other than a reading of a response: authoritative.
+	if cursor.cursorID != 0 && cursor.cursorIDSource == cursorIDUnlearned {
 		return
 	}
 
-	pending.cursor.cursorID = cursorID
-	s.rememberCursor(cursorID, pending.cursor)
+	cursorID, source := findCursorIDInResponse(s.oerShapeSnapshot(), ttcPayload, s.rowStreamActive())
+	if source <= cursor.cursorIDSource {
+		return
+	}
+
+	previous := cursor.cursorID
+
+	cursor.cursorID = cursorID
+	cursor.cursorIDSource = source
+
+	// The correction's other half: the id this statement was wrongly filed under
+	// must stop resolving to it. Only when the entry is still this very cursor —
+	// something else may have claimed the id since, and that claim is newer.
+	if previous != 0 && previous != cursorID && s.tracker.cursors[previous] == cursor {
+		s.forgetCursor(previous)
+	}
+
+	s.rememberCursor(cursorID, cursor)
 
 	s.logger.DebugContext(s.ctx, logMsgLearnedCursorID,
 		slog.Uint64("cursor_id", uint64(cursorID)),
-		slog.String("sql", truncateSQL(pending.cursor.sql, 200)),
+		slog.String("source", source.String()),
+		slog.Uint64("previous_cursor_id", uint64(previous)),
+		slog.String("sql", truncateSQL(cursor.sql, 200)),
 	)
 }
 

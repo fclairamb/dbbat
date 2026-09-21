@@ -37,6 +37,11 @@ type countingHandler struct {
 	// back: the synthetic-AUTH suite asserts on `wide_encoding` to prove an
 	// OCI client really did drive the wide path rather than the thin one.
 	bools map[string][]bool
+	// strs keys the same way, for the string attributes that are not `sql` —
+	// the cursor-id learning measurement reads `source` back off it, which is
+	// how the live suite says *where* each id came from rather than only that
+	// one was learned.
+	strs  map[string][]string
 	trace []string
 }
 
@@ -46,6 +51,7 @@ func newCountingHandler() *countingHandler {
 		sqls:   make(map[string][]string),
 		ints:   make(map[string][]int64),
 		bools:  make(map[string][]bool),
+		strs:   make(map[string][]string),
 	}
 }
 
@@ -97,6 +103,11 @@ func (h *countingHandler) Handle(_ context.Context, rec slog.Record) error {
 		if a.Value.Kind() == slog.KindBool {
 			key := rec.Message + "\x00" + a.Key
 			h.bools[key] = append(h.bools[key], a.Value.Bool())
+		}
+
+		if a.Key != "sql" && a.Value.Kind() == slog.KindString {
+			key := rec.Message + "\x00" + a.Key
+			h.strs[key] = append(h.strs[key], a.Value.String())
 		}
 
 		if a.Key == "sql" || a.Key == "cursor_id" {
@@ -156,6 +167,20 @@ func (h *countingHandler) boolsFor(msg, attr string) []bool {
 
 	values := h.bools[msg+"\x00"+attr]
 	out := make([]bool, len(values))
+	copy(out, values)
+
+	return out
+}
+
+// stringsFor returns every value the named string attribute carried on the
+// named message, in the order they were logged. `sql` is not among them — it
+// has sqlsFor, which every existing measurement already reads.
+func (h *countingHandler) stringsFor(msg, attr string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	values := h.strs[msg+"\x00"+attr]
+	out := make([]string, len(values))
 	copy(out, values)
 
 	return out
@@ -306,6 +331,34 @@ func TestCountingHandlerCapturesTheResolvedStatement(t *testing.T) {
 	assert.Equal(t, []string{"SELECT 1 AS n FROM dual"}, logs.sqlsFor(logMsgReexecGated),
 		"the measurement resolves mis-learned cursor ids by reading this back")
 	assert.Zero(t, logs.count(logMsgUntrackedCursorForwarded), "the cursor was tracked")
+}
+
+// TestCountingHandlerCapturesTheCursorIDSource guards the attribute the
+// cursor-id provenance measurement reads, and the reason it needs guarding is
+// the same one TestCountingHandlerWatchesTheMessagesTheGateEmits exists for: an
+// attribute nothing emits any more makes its measurement report a clean sheet
+// forever. `source` is what says an id came off the server's own end-of-call
+// object rather than out of row-stream bytes, and both live suites assert on it.
+func TestCountingHandlerCapturesTheCursorIDSource(t *testing.T) {
+	t.Parallel()
+
+	logs := newCountingHandler()
+
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+	s.logger = slog.New(logs)
+	s.clientConn = drainedPipe(t)
+
+	cursor := &trackedCursor{sql: "SELECT 1 AS n FROM dual"}
+	s.tracker.pendingQuery = &pendingOracleQuery{cursor: cursor}
+
+	// No row stream is open — the cursor has no column definitions — so this is
+	// the ordinary scan every thin client's id is learned by.
+	s.learnCursorID(decodeHexString(t, oerResponseSeqUnderAByte))
+
+	require.Equal(t, uint16(6), cursor.cursorID, "the fixture names cursor 6")
+	assert.Equal(t, []string{cursorIDFromScan.String()},
+		logs.stringsFor(logMsgLearnedCursorID, "source"),
+		"the provenance measurements read this attribute back")
 }
 
 // TestMultisetDiff pins the helper the measurement uses to name the parses that

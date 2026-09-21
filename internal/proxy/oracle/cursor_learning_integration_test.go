@@ -655,6 +655,8 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 	t.Logf("cursor-id learning measurement (image=%s):", oracleTestImage())
 	t.Logf("  parses seen (query intercepted):      %d", parses)
 	t.Logf("  cursor ids learned:                   %d", learned)
+
+	assertCursorIDProvenance(t, env)
 	t.Logf("  re-executions resolved to their SQL:  %d", resolved)
 	t.Logf("  re-executions naming an unknown id:   %d", untracked)
 	t.Logf("  REF cursor drives:                    %d (ids learned %d, resolved %d, unknown %d)",
@@ -772,6 +774,73 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 	}
 
 	assertTrackerStaysBounded(t, env, parses)
+}
+
+// assertCursorIDProvenance is the live half of step 1 of
+// specs/todos/2026-09-21-05-oracle-cursor-id-learning-latches-row-bytes.md: not
+// only how many ids were learned, but on what evidence each one was learned, and
+// how many of them had to be *corrected* afterwards.
+//
+// The corpus replay (TestDumpReplay_CursorIDLearningSource) answers the same
+// question offline and finds nothing to correct — every recording learns its ids
+// off a genuine OER the first time. The case that made this spec exist is live
+// and OCI-shaped: a sqlplus fetch that latched 17744 out of row-stream bytes
+// while its own terminator said 2. So the figure that matters here is the one no
+// replay can produce, and it is printed on every run of every client rather than
+// asserted into a single shape — a correction is the mechanism working, not a
+// failure.
+//
+// What *is* asserted is the invariant the whole ranking exists to hold: a
+// correction only ever moves an id *up* the evidence ladder, and the id a
+// session ends up holding is never the one a mid-stream scan guessed when
+// something better arrived later.
+func assertCursorIDProvenance(t *testing.T, env *oracleThroughProxy) {
+	t.Helper()
+
+	sources := env.logs.stringsFor(logMsgLearnedCursorID, "source")
+	previous := env.logs.intsFor(logMsgLearnedCursorID, "previous_cursor_id")
+	ids := env.logs.intsFor(logMsgLearnedCursorID, "cursor_id")
+
+	histogram := map[string]int{}
+	for _, s := range sources {
+		histogram[s]++
+	}
+
+	names := make([]string, 0, len(histogram))
+	for s := range histogram {
+		names = append(names, s)
+	}
+
+	sort.Strings(names)
+
+	for _, s := range names {
+		t.Logf("    learned on %-16s evidence:  %d", s, histogram[s])
+	}
+
+	require.Len(t, sources, len(ids),
+		"every learned-cursor record must carry its source; a measurement counting an attribute "+
+			"nothing emits reports a perfect score forever")
+
+	corrections := 0
+
+	for i, prev := range previous {
+		if prev == 0 || prev == ids[i] {
+			continue
+		}
+
+		corrections++
+
+		t.Logf("    cursor %d corrected to %d on %s evidence", prev, ids[i], sources[i])
+
+		// A correction is only ever an upgrade. The one that matters is exactly
+		// the 17744 shape: a mid-stream scan hit replaced by the server's own
+		// end-of-call object.
+		assert.NotEqualf(t, cursorIDFromMidStreamScan.String(), sources[i],
+			"an id may never be *corrected* to what a mid-stream scan guessed — that is the "+
+				"direction the ranking exists to forbid (cursor %d became %d)", prev, ids[i])
+	}
+
+	t.Logf("  ids corrected after a weaker guess:   %d", corrections)
 }
 
 // trackerPeakBound is the ceiling the cursor tracker must stay under across the

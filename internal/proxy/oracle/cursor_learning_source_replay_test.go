@@ -4,48 +4,49 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// cursorLearn is one acceptance of learnCursorID, replayed off a recording: the
-// id it latched, where in the packet the OER it read sat, and what the session
-// was doing at the time.
+// cursorLearn is one write learnCursorID made, replayed off a recording: the id
+// it stored, the evidence it stored it on, what it replaced, and what the
+// session was doing at the time.
 //
-// The two fields that matter are `duringRowStream` and `byte0ID`. The first is
-// the question the spec asks — an id learned while rows are on the wire is an id
-// that may have been scanned out of row bytes rather than read off the server's
-// own end-of-call OER. The second is the cheaper bound measured alongside it: the
-// fixed-width status object an OCI call ends on sits at byte 0 under the RetCode
-// anchor, and the scan behind findCursorIDInResponse starts at offset 1, so it
-// cannot see that object at all.
+// `source` is the shipped value — read straight off the tracked cursor — rather
+// than something the test re-derives, so this measures the rule that runs in
+// production and not a second copy of it. `byte0ID` is the one thing the test
+// adds: what byte 0 of the same packet would have said, which is how the
+// cheaper of the two bounds the spec proposes gets measured alongside the other.
 type cursorLearn struct {
 	dump            string
 	index           int
 	sql             string
 	id              uint16
-	offset          int // where the accepted OER sat; always ≥1, the scan starts there
+	previous        uint16
+	source          cursorIDSource
+	offset          int // where the scan's candidate sat, -1 when it found none
 	duringRowStream bool
 	byte0ID         int // the id byte 0 of the same packet reports, 0 when it reports none
 
-	// compressed is whether the acceptance came from the TTC compressed reading
-	// rather than the fixed-width one, and fixedWidthSession is what the session
-	// had *learned* the upstream speaks by then. The pair is the second question
-	// the measurement answers: a compressed acceptance on a session known to speak
-	// fixed-width cannot be a server OER, because the server has one encoding.
+	// compressed is whether the scan's candidate came from the TTC compressed
+	// reading rather than the fixed-width one, and fixedWidthSession is what the
+	// session had *learned* the upstream speaks by then. The pair answers a
+	// question worth asking once: a compressed acceptance on a session known to
+	// speak fixed-width cannot be a server OER, because a server speaks one
+	// encoding.
 	compressed        bool
 	fixedWidthSession bool
 }
 
 // walkCursorLearning replays one recording through the real intercept pipeline
-// and returns every cursor id learnCursorID latched, with the provenance of each.
+// and returns every write learnCursorID made to a tracked cursor's id.
 //
-// Learning is observed rather than reimplemented: the tracked cursor's id is read
-// before and after each upstream packet, so an entry here is an id the production
-// path really wrote. The *provenance* is then re-derived from the same payload
-// under the same session shape, which is the only part a test can add.
+// Learning is observed rather than reimplemented: the cursor's id and source are
+// read before and after each upstream packet, so an entry here is a write the
+// production path really made.
 func walkCursorLearning(t *testing.T, name string) []cursorLearn {
 	t.Helper()
 
@@ -72,11 +73,15 @@ func walkCursorLearning(t *testing.T, name string) []cursorLearn {
 
 		var (
 			watched *trackedCursor
+			before  uint16
+			source  cursorIDSource
 			active  bool
 		)
 
-		if pending := s.tracker.pendingQuery; pending != nil && pending.cursor != nil && pending.cursor.cursorID == 0 {
+		if pending := s.tracker.pendingQuery; pending != nil && pending.cursor != nil {
 			watched = pending.cursor
+			before = watched.cursorID
+			source = watched.cursorIDSource
 			active = s.rowStreamActive()
 		}
 
@@ -86,10 +91,10 @@ func walkCursorLearning(t *testing.T, name string) []cursorLearn {
 
 		s.trackerMu.Lock()
 
-		if watched != nil && watched.cursorID != 0 {
+		if watched != nil && watched.cursorIDSource != source {
 			// The shape learnOERTail left behind on this very packet is the one
-			// learnCursorID read it under, so re-deriving the offset with it
-			// reproduces the acceptance rather than guessing at another.
+			// learnCursorID read it under, so re-deriving the scan's candidate
+			// with it reproduces the acceptance rather than guessing at another.
 			shape := s.oerShapeSnapshot()
 			_, off := locatePlausibleOER(shape, ttc)
 
@@ -105,6 +110,8 @@ func walkCursorLearning(t *testing.T, name string) []cursorLearn {
 				index:             i,
 				sql:               truncateSQL(watched.sql, 60),
 				id:                watched.cursorID,
+				previous:          before,
+				source:            watched.cursorIDSource,
 				offset:            off,
 				duringRowStream:   active,
 				byte0ID:           byte0StatusCursorID(shape, ttc),
@@ -122,10 +129,10 @@ func walkCursorLearning(t *testing.T, name string) []cursorLearn {
 // byte0StatusCursorID reports the cursor id a status OER at byte 0 of this
 // payload names, or 0 when byte 0 carries no readable status.
 //
-// Both encodings are offered, each under plausibleStatusOER — the same bound the
-// scan applies — so the comparison below is "the same proof, at a better place"
-// rather than a looser reading. The fixed-width half is decodeOERFixedFieldsAt's,
-// which carries the RetCode anchor on top.
+// It is deliberately the *loose* reading — plausibleStatusOER over either
+// encoding, with no end-of-call bit and no offset-0 restriction demanded — so
+// the figure it feeds answers "was there anything at byte 0 at all", which is a
+// wider question than what cursorIDFromCallBoundary accepts.
 func byte0StatusCursorID(shape oerShape, payload []byte) int {
 	if len(payload) == 0 || payload[0] != 0x04 {
 		return 0
@@ -147,26 +154,37 @@ func byte0StatusCursorID(shape oerShape, payload []byte) int {
 // offline and corpus-wide: across every recording in testdata/, where does each
 // learned cursor id actually come from?
 //
-// The question the fix turns on is whether any statement shape learns its id
-// *only* while a row stream is open. A blanket refusal to learn mid-stream is
+// The question the fix had to turn on is whether any statement shape learns its
+// id *only* while a row stream is open. A blanket refusal to learn mid-stream is
 // the obvious bound — the server has already had its chance to name the cursor
 // in its own end-of-call OER by then — but if some client shape's id is only
 // ever available there, that refusal silently stops learning for it, and the
 // re-executions that follow become ORA-01031 under a restrictive grant.
 //
+// The answer is that one shape does: dbeaver's JDBC thin client, whose big
+// catalog SELECT is answered across seven packets, with the end-of-call OER in
+// the last of them — six packets after the QueryResult that opened the row
+// stream. The id it names is the one the client then fetches by, so it is
+// genuine and it is needed. Hence the ranking in cursorIDSource rather than a
+// refusal: that id is learned, and marked as the weakest evidence there is, so
+// anything better replaces it and it is never trusted where trust is optional
+// (midFetchOERNamesTheStreamingCursor).
+//
 // The figures are printed rather than pinned as a distribution: re-recording a
-// fixture must not be a test failure. What *is* asserted is the load-bearing
-// claim — see the assertions at the end.
+// fixture must not be a test failure. What is asserted is the shape of the
+// answer — see the assertions at the end.
 func TestDumpReplay_CursorIDLearningSource(t *testing.T) {
 	t.Parallel()
 
 	corpus := midStreamCorpus(t)
 
 	var (
-		total, midStream, agreeing, disagreeing, byte0Only int
-		compressedOnFixed, fixedSessions                   int
-		midStreamOnly                                      []string
+		total, corrections, byte0Disagreeing int
+		compressedOnFixed, fixedSessions     int
+		midStreamOnly                        []string
 	)
+
+	bySource := map[cursorIDSource]int{}
 
 	for _, name := range corpus {
 		learns := walkCursorLearning(t, name)
@@ -174,39 +192,43 @@ func TestDumpReplay_CursorIDLearningSource(t *testing.T) {
 			continue
 		}
 
-		// Per recording, which statements learned an id *only* mid-stream. A
-		// statement that learned one outside the stream too is unaffected by the
-		// bound; one that never did is what would stop being learned at all.
-		outside := map[string]bool{}
-		inside := map[string]bool{}
+		// Per recording, which statements hold an id whose *final* evidence is a
+		// mid-stream scan hit. Those are the ones a blanket refusal would have
+		// stopped learning altogether.
+		weakest := map[string]bool{}
+		stronger := map[string]bool{}
 
 		for _, l := range learns {
 			total++
+			bySource[l.source]++
 
-			if l.duringRowStream {
-				midStream++
+			if l.source == cursorIDFromMidStreamScan {
+				weakest[l.sql] = true
 
-				inside[l.sql] = true
-
-				t.Logf("  %s packet #%d: learned cursor %d mid-stream at offset %d (byte 0 says %d) — %q",
+				t.Logf("  %s packet #%d: cursor %d on the weakest evidence there is — "+
+					"scan hit at offset %d, mid-stream, byte 0 says %d — %q",
 					name, l.index, l.id, l.offset, l.byte0ID, l.sql)
 			} else {
-				outside[l.sql] = true
+				stronger[l.sql] = true
 			}
 
-			switch {
-			case l.byte0ID == 0:
-			case l.byte0ID == int(l.id):
-				agreeing++
-			default:
-				disagreeing++
-
-				t.Logf("  %s packet #%d: scan at offset %d says cursor %d, byte 0 says %d — %q",
-					name, l.index, l.offset, l.id, l.byte0ID, l.sql)
+			if l.source == cursorIDFromCallBoundary {
+				t.Logf("  %s packet #%d: cursor %d off the call boundary — %q",
+					name, l.index, l.id, l.sql)
 			}
 
-			if l.byte0ID != 0 && l.duringRowStream {
-				byte0Only++
+			if l.previous != 0 && l.previous != l.id {
+				corrections++
+
+				t.Logf("  %s packet #%d: cursor %d corrected to %d on %s evidence — %q",
+					name, l.index, l.previous, l.id, l.source, l.sql)
+			}
+
+			if l.byte0ID != 0 && l.byte0ID != int(l.id) {
+				byte0Disagreeing++
+
+				t.Logf("  %s packet #%d: the scan says cursor %d, byte 0 says %d — %q",
+					name, l.index, l.id, l.byte0ID, l.sql)
 			}
 
 			if l.fixedWidthSession {
@@ -214,15 +236,12 @@ func TestDumpReplay_CursorIDLearningSource(t *testing.T) {
 
 				if l.compressed {
 					compressedOnFixed++
-
-					t.Logf("  %s packet #%d: compressed acceptance at offset %d on a fixed-width "+
-						"session — cursor %d, %q", name, l.index, l.offset, l.id, l.sql)
 				}
 			}
 		}
 
-		for sql := range inside {
-			if !outside[sql] {
+		for sql := range weakest {
+			if !stronger[sql] {
 				midStreamOnly = append(midStreamOnly, name+": "+sql)
 			}
 		}
@@ -232,16 +251,32 @@ func TestDumpReplay_CursorIDLearningSource(t *testing.T) {
 
 	t.Logf("cursor-id learning provenance across %d recordings:", len(corpus))
 	t.Logf("  ids learned:                          %d", total)
-	t.Logf("  learned while a row stream was open:  %d", midStream)
-	t.Logf("  packets whose byte 0 also named one:  %d (agreeing %d, disagreeing %d)",
-		agreeing+disagreeing, agreeing, disagreeing)
-	t.Logf("  of those, mid-stream:                 %d", byte0Only)
+	t.Logf("  from the call boundary (byte 0):      %d", bySource[cursorIDFromCallBoundary])
+	t.Logf("  from a scan outside a row stream:     %d", bySource[cursorIDFromScan])
+	t.Logf("  from a scan inside one:               %d", bySource[cursorIDFromMidStreamScan])
+	t.Logf("  corrections of an id already held:    %d", corrections)
+	t.Logf("  packets where byte 0 disagreed:       %d", byte0Disagreeing)
 	t.Logf("  learned on a fixed-width session:     %d (of which read as compressed: %d)",
 		fixedSessions, compressedOnFixed)
 
 	for _, s := range midStreamOnly {
-		t.Logf("  learned ONLY mid-stream:              %s", s)
+		t.Logf("  holds a mid-stream-scan id only:      %s", s)
 	}
 
 	require.Positive(t, total, "the corpus must contain cursor-id learning to measure at all")
+
+	// The load-bearing claim, and the reason the fix is a ranking rather than a
+	// refusal: mid-stream scan hits are a rounding error in the corpus, but they
+	// are not zero, so refusing them outright would cost a real client its ids.
+	assert.Lessf(t, bySource[cursorIDFromMidStreamScan], total/10,
+		"mid-stream scan hits must stay the exception (%d of %d); if they become the rule, the "+
+			"ranking is no longer protecting anything",
+		bySource[cursorIDFromMidStreamScan], total)
+
+	// Nothing in the corpus needs correcting, which is the point: the recordings
+	// all learn their ids off a genuine OER the first time. The 17744 case is a
+	// *live* one — see TestIntegration_CursorIDLearningMissRate — so this figure
+	// is here to make a corpus that starts needing corrections visible rather
+	// than to assert the mechanism is unused.
+	t.Logf("  (corrections above are 0 on a corpus whose ids are all learned cleanly)")
 }

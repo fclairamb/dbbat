@@ -526,6 +526,79 @@ func plausibleStatusOER(info *oerInfo) bool {
 	return info.SeqNumber <= oerMaxSeqNumber && info.CursorID > 0 && info.CursorID <= cursorReexecMaxID
 }
 
+// cursorIDSource ranks the evidence behind a learned cursor id, weakest first.
+//
+// The ranking exists because learning used to be a flat one-shot: the first
+// value that passed plausibleStatusOER won and was never revisited. That is
+// fine when the first value comes off the server's own end-of-call OER and
+// catastrophic when it does not — measured live against a real 23ai server, a
+// sqlplus fetch whose terminator correctly named cursor **2** ran on a session
+// that had already latched **17744**, a value the anchored scan picked up out of
+// row-stream bytes. 17744 is inside cursorReexecMaxID and passes every bound the
+// scan applies; nothing distinguishes it after the fact. It is also what
+// rememberCursor files the statement under, so it is what a later re-execution
+// naming a recycled id would be gated against — the wrong statement's text,
+// silently, rather than the fail-closed refusal an *unknown* cursor gets.
+//
+// So the value is no longer latched, it is *ranked*: a stronger source replaces
+// a weaker one, and a weaker one can never displace a stronger. Which keeps the
+// property the one-shot rule was written for — row-stream bytes cannot churn the
+// id for the rest of a fetch, because a scan hit never outranks a scan hit.
+type cursorIDSource uint8
+
+const (
+	// cursorIDUnlearned is the zero value: no id has been read at all.
+	cursorIDUnlearned cursorIDSource = iota
+
+	// cursorIDFromMidStreamScan is a 0x04 the scan found *inside* a packet while
+	// rows were on the wire. It is the weakest reading dbbat accepts, and the one
+	// 17744 came from: mid-fetch, a payload is row data, so a run of bytes that
+	// happens to decode as seven bounded ints is exactly what the corpus is full
+	// of (see midStreamBitlessStatusAcceptances).
+	//
+	// It is still accepted, because refusing it outright is measurably wrong: of
+	// the 168 ids the testdata corpus learns, one is learned this way and it is
+	// genuine — a dbeaver/JDBC SELECT whose end-of-call OER arrives six packets
+	// into its own row stream, naming the cursor the client then fetches by. See
+	// TestDumpReplay_CursorIDLearningSource.
+	cursorIDFromMidStreamScan
+
+	// cursorIDFromScan is the same anchored scan run *outside* a row stream,
+	// where the payload cannot be row bytes — the reading that learns 167 of the
+	// corpus's 168 ids, and the one every thin client relies on.
+	cursorIDFromScan
+
+	// cursorIDFromCallBoundary is byte 0 of the packet under decodeOERAt's own
+	// anchors: the end-of-call bit on the compressed encoding, or the RetCode
+	// anchor plus plausibleStatusOER on the fixed-width status object an OCI call
+	// ends with. It is the server naming the cursor in the object whose whole
+	// purpose is to end the call, at the one offset the router already treats as
+	// a function code rather than as data.
+	//
+	// The scan cannot reach it — findPlausibleOERInResponse starts at offset 1 —
+	// which is why an OCI fetch's own terminator never got a say before this
+	// ranking existed, and a mid-stream scan hit did.
+	cursorIDFromCallBoundary
+)
+
+// String names the source for the debug record learnCursorID writes, which is
+// how the live suites read the provenance back
+// (TestIntegration_CursorIDLearningMissRate).
+func (c cursorIDSource) String() string {
+	switch c {
+	case cursorIDFromCallBoundary:
+		return "call_boundary"
+	case cursorIDFromScan:
+		return "scan"
+	case cursorIDFromMidStreamScan:
+		return "mid_stream_scan"
+	case cursorIDUnlearned:
+		return "unlearned"
+	default:
+		return "unknown"
+	}
+}
+
 // findCursorIDInResponse returns the cursor id the server assigned to the
 // statement just executed.
 //
@@ -534,13 +607,30 @@ func plausibleStatusOER(info *oerInfo) bool {
 // server picks one and reports it back, and the client then re-runs the
 // statement by that id alone. Without reading it here, a re-execution names a
 // cursor dbbat has no statement for.
-func findCursorIDInResponse(shape oerShape, payload []byte) (uint16, bool) {
-	info := findPlausibleOERInResponse(shape, payload)
-	if info == nil {
-		return 0, false
+//
+// `rowStream` is the session's own notion of whether rows are in flight
+// (session.rowStreamActive); it does not change what is accepted, only how
+// strongly the acceptance is rated. See cursorIDSource.
+func findCursorIDInResponse(shape oerShape, payload []byte, rowStream bool) (uint16, cursorIDSource) {
+	// Byte 0 first, and not merely as an optimisation: it is better evidence
+	// than anything the scan can return, so a packet that carries both must be
+	// read here. decodeOERAt is the router's own reading at that offset, and
+	// plausibleStatusOER on top of it is the bound the scan applies — an OER
+	// reporting a real failure assigns no cursor.
+	if info := decodeOERAt(shape, payload, 0); plausibleStatusOER(info) {
+		return uint16(info.CursorID), cursorIDFromCallBoundary
 	}
 
-	return uint16(info.CursorID), true
+	info, _ := locatePlausibleOER(shape, payload)
+	if info == nil {
+		return 0, cursorIDUnlearned
+	}
+
+	if rowStream {
+		return uint16(info.CursorID), cursorIDFromMidStreamScan
+	}
+
+	return uint16(info.CursorID), cursorIDFromScan
 }
 
 // findOERInResponse scans a Response (func=0x08) payload for the embedded OER

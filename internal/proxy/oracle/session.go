@@ -3442,24 +3442,36 @@ func (s *session) statusOERMayEndTheCall(info *oerInfo) bool {
 // fabricated one. The debug line is there because that is otherwise invisible —
 // if an unmeasured client ever reports a different cursor, this is what says so.
 //
-// One honest caveat about the reference value. `learnCursorID` runs on every
-// upstream packet and latches only once it has succeeded, so for a statement
-// whose id is never learned the anchored scan behind it keeps running over
-// row-stream bytes for the whole fetch — meaning the id this compares against
-// could itself have originated in row data. That is pre-existing (cursor-id
-// learning has always worked this way, and re-execution gating already trusts
-// it), but this anchor is what makes it load-bearing for query error text too.
+// The reference value used to carry an honest caveat, and the caveat has since
+// been measured: `learnCursorID` latched the first id its anchored scan found,
+// so for a statement whose id had not been learned before its fetch began, that
+// scan ran over row-stream bytes — and live against a real 23ai server it
+// latched **17744** on a fetch whose terminator said 2. Comparing against a
+// reference that came out of row data proves nothing; it only adds a way for one
+// mislearned id to drop a genuine ORA text.
+//
+// So the reference is used only when it is *not* itself a mid-stream scan hit —
+// cursorIDFromScan or better, which is where 167 of the corpus's 168 learned ids
+// sit, the four mid-fetch failure fixtures included. A weaker reference is
+// treated exactly like an unlearned one: the diagnostic is dropped, which is the
+// same fail-closed direction this anchor already had. Note statusOERMayEndTheCall
+// dropped the comparison outright for the same measurement; it is kept here
+// because a *diagnostic* — unlike a status — is something a result set's own rows
+// could spell out, and the cursor anchor is what that case has no answer for.
 //
 // Callers hold trackerMu.
 func (s *session) midFetchOERNamesTheStreamingCursor(info *oerInfo) bool {
-	streaming := s.tracker.pendingQuery.cursor.cursorID
-	if streaming != 0 && info.CursorID == int(streaming) {
+	cursor := s.tracker.pendingQuery.cursor
+
+	streaming := cursor.cursorID
+	if streaming != 0 && cursor.cursorIDSource != cursorIDFromMidStreamScan && info.CursorID == int(streaming) {
 		return true
 	}
 
 	s.logger.DebugContext(s.ctx, "mid-fetch OER does not name the streaming cursor; leaving the call open",
 		slog.Int("oer_cursor_id", info.CursorID),
 		slog.Int("streaming_cursor_id", int(streaming)),
+		slog.String("streaming_cursor_id_source", cursor.cursorIDSource.String()),
 		slog.Int("ora_code", info.ErrorCode))
 
 	return false

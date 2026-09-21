@@ -256,8 +256,8 @@ func TestFindCursorIDInResponse_SequenceNumberPastAByte(t *testing.T) {
 
 			payload := decodeHexString(t, tc.payload)
 
-			got, ok := findCursorIDInResponse(thinOERShape(), payload)
-			require.True(t, ok, "the server named a cursor in this response")
+			got, source := findCursorIDInResponse(thinOERShape(), payload, false)
+			require.NotEqual(t, cursorIDUnlearned, source, "the server named a cursor in this response")
 			assert.Equal(t, tc.want, got)
 		})
 	}
@@ -308,8 +308,8 @@ func TestFindCursorIDInResponse_RejectsAnErrorOER(t *testing.T) {
 	assert.Equal(t, 942, info.ErrorCode)
 	assert.Equal(t, 9, info.CursorID)
 
-	_, ok := findCursorIDInResponse(thinOERShape(), payload)
-	assert.False(t, ok, "an OER carrying a real ORA code must not teach a cursor id")
+	_, source := findCursorIDInResponse(thinOERShape(), payload, false)
+	assert.Equal(t, cursorIDUnlearned, source, "an OER carrying a real ORA code must not teach a cursor id")
 
 	// Same bytes, error code cleared: now it teaches.
 	succeeded := make([]byte, 0, len(payload))
@@ -317,7 +317,7 @@ func TestFindCursorIDInResponse_RejectsAnErrorOER(t *testing.T) {
 	succeeded = append(succeeded, 0x00)
 	succeeded = append(succeeded, payload[oerErrorCodeFieldStart+oerErrorCodeFieldLen:]...)
 
-	cursorID, ok := findCursorIDInResponse(thinOERShape(), succeeded)
-	require.True(t, ok, "with the error cleared the same OER must be read")
+	cursorID, source := findCursorIDInResponse(thinOERShape(), succeeded, false)
+	require.NotEqual(t, cursorIDUnlearned, source, "with the error cleared the same OER must be read")
 	assert.Equal(t, uint16(9), cursorID)
 }
