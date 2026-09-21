@@ -76,3 +76,105 @@ func TestOCIDescribeIsNotOfferedToAThinSession(t *testing.T) {
 	assert.Nil(t, parseColumnDescribes(oci, false),
 		"an OCI describe must not be read as a compressed one")
 }
+
+// ociExpressionColumnName is the login probe's one column: an *expression*, so
+// its name is the whole 67-character expression text and there is nothing in the
+// payload for a heuristic scanner to recognize as an identifier. The scanner
+// found no name at all for it, which is what made every row of that fetch land
+// in query_rows as an empty JSON object.
+const ociExpressionColumnName = `DECODE(USER,'XS$NULL',XS_SYS_CONTEXT('XS$SESSION','USERNAME'),USER)`
+
+// TestOCIRowCaptureCarriesTheDescribesColumnNames is the payoff of reading the
+// records, stated where it is actually visible: in the JSON dbbat writes to
+// query_rows.
+//
+// Both frames come off a recorded sqlplus session and both carry a row, so the
+// whole path runs — handleQueryResultV2 reads the describe under the session's
+// learned encoding, hangs the columns on the cursor, and captureRow keys the row
+// by their names.
+//
+// The scanner's own answer is asserted alongside, because "real names" only
+// means something next to what it produced. It is not a near miss on either
+// frame: on the login probe it yields nothing at all, and on the eight-column
+// describe it drops the two one-character names (`D`, `R`) and invents two that
+// are not columns — the schema `SYSTEM` and the object type `DBBAT_CAP_OBJ`,
+// both of which live in the record as the *other* two DLCs behind the name. A
+// row captured under those keys is not merely unlabeled; six of its eight values
+// are filed under the wrong column.
+func TestOCIRowCaptureCarriesTheDescribesColumnNames(t *testing.T) {
+	t.Parallel()
+
+	frames := recordedFrames(t, ociDescribes)
+	require.GreaterOrEqual(t, len(frames), 2, "the fixture must carry both describes")
+
+	tests := []struct {
+		name    string
+		frame   int
+		want    map[string]interface{}
+		scanned []string
+	}{
+		{
+			name:    "an expression column the scanner cannot see at all",
+			frame:   0,
+			want:    map[string]interface{}{ociExpressionColumnName: "SYSTEM"},
+			scanned: nil,
+		},
+		{
+			name:  "eight columns, two of them one character long",
+			frame: 1,
+			want: map[string]interface{}{
+				"N2":  "1",
+				"BIG": "x",
+				"FLT": "0.3333333333333333333333333333333333333333",
+				"D":   "2026-09-20 20:11:58",
+				"TS":  "2026-09-20 20:11:58.527544 +00:00",
+				"C5":  "ab   ",
+				"R":   "7a7a",
+				"OBJ": "00000024002202085bf0bee82b6b0146e06303d7a8c0ea1b000000000000000000000000",
+			},
+			scanned: []string{"N2", "BIG", "FLT", "TS", "C5", "OBJ", "SYSTEM", "DBBAT_CAP_OBJ"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ttc := extractTTCPayload(frames[tc.frame])
+
+			// What the heuristic scanner makes of the very same bytes.
+			assert.Equal(t, tc.scanned, scanAndPadColumnNames(ttc),
+				"the scanner's answer is the baseline this test exists to replace")
+
+			s, rowStore, _ := newCapturingSession(t, 10000)
+			s.oer = ociOERShape()
+			require.True(t, s.oerShapeSnapshot().fixedWidth,
+				"the session must speak the encoding the frame was recorded on")
+
+			s.trackerMu.Lock()
+			s.handleQueryResultV2(ttc)
+			s.trackerMu.Unlock()
+
+			require.NotNil(t, s.tracker.pendingQuery, "the fetch must still be open")
+			assert.Equal(t, describeColumnNames(parseColumnDescribes(ttc, true)),
+				columnNamesOf(s.tracker.pendingQuery.cursor.columns),
+				"the cursor must carry the describe's own names")
+
+			s.tracker.pendingQuery.rowSink.Flush(t.Context())
+
+			rows := rowStore.rowData(t)
+			require.Len(t, rows, 1, "the frame carries exactly one row")
+			assert.Equal(t, tc.want, rows[0])
+		})
+	}
+}
+
+// columnNamesOf is the name list of a cursor's learned columns.
+func columnNamesOf(cols []columnDef) []string {
+	out := make([]string, len(cols))
+	for i, c := range cols {
+		out[i] = c.Name
+	}
+
+	return out
+}

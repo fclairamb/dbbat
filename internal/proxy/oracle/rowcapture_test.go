@@ -206,3 +206,27 @@ func TestOracleCapture_RowDataIsPreserved(t *testing.T) {
 	assert.Equal(t, "1", decoded["ID"])
 	assert.Equal(t, "Alice", decoded["NAME"])
 }
+
+// rowData decodes every captured row's JSON, in insert order. It is what makes a
+// column-name claim checkable: the names are the object's keys, and nothing else
+// in the pipeline records them.
+func (c *captureRowStore) rowData(t *testing.T) []map[string]interface{} {
+	t.Helper()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make([]map[string]interface{}, 0)
+
+	for _, batch := range c.batches {
+		for _, row := range batch {
+			var decoded map[string]interface{}
+
+			require.NoError(t, json.Unmarshal(row.RowData, &decoded))
+
+			out = append(out, decoded)
+		}
+	}
+
+	return out
+}
