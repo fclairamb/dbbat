@@ -2675,11 +2675,27 @@ taken on the first statement rather than renegotiated later.
 
 `ttc_statement_rewrite_survey_test.go` runs the locator over every recording in
 `testdata/`, the way `sql_extraction_survey_test.go` runs the gate's decoder:
-**159 of 159 statement-carrying frames located**, each of them rewriting to
+**186 of 186 statement-carrying frames located**, each of them rewriting to
 itself byte for byte and reading back as the tagged statement, across all five
 recorded client shapes (go-ora and python-oracledb thin as
 `compressed`/`clr-short`, ojdbc thin and DBeaver as `compressed`/`bare`, sqlplus
 as `wide-ub4`/`clr-short`).
+
+**A shape that was thought to be outside that count, and is not.** While the
+REF-cursor fixtures were being recorded (2026-09-19) an sqlplus session running
+`VARIABLE rc REFCURSOR` / `BEGIN dbbat_cap_refcur(:rc); END;` looked as though
+it carried two frames the locator refused, which would have meant a whole client
+family — a thick client doing PL/SQL with binds, which is most of what a DBA
+does from sqlplus — running untagged. Re-recorded against 23ai Free and
+measured, it does not: the PL/SQL call locates as `wide-ub4`/`clr-short` like
+every other sqlplus statement, bind and close-cursors staple included. The two
+refusals were the `PRINT rc` drives, which declare **no statement at all** —
+`execWideNoStatementCursor` reads them as the cursor re-executions they are, so
+`frameCarriesStatement` no longer offers them to the locator and there is
+nothing there to refuse. That session is now `testdata/sqlplus_refcursor.pcapng`
+and is inside the 186, which is also what put the OCI wide dialect into the
+whole-corpus sweeps at all: until it landed they enumerated `testdata/*.pcapng`
+and no recording there carried a SQL-less OCI execute.
 
 `statement_tagging_integration_test.go` then puts it on a real 23ai: the tag read
 back out of `V$SQL`, 25 executions of one statement landing on one SQL_ID,

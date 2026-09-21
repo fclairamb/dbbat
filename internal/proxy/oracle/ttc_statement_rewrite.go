@@ -50,7 +50,11 @@ import (
 //     a little-endian ub4 holding `sqlLen * 3` behind the `fe x8` pointer
 //     sentinel, and the CLR body carries the trailing NUL the client counts.
 //     The NUL rides along at the end of the run and needs no special case: the
-//     rewriter prepends to the *value*, not to the text.
+//     rewriter prepends to the *value*, not to the text. It covers the
+//     anonymous PL/SQL block with a bind that sqlplus staples behind a
+//     close-cursors piggyback too — a shape once thought to be outside this
+//     list, and measured not to be (testdata/sqlplus_refcursor.pcapng, and
+//     "A shape that was thought to be outside that count" in docs/oracle.md).
 //   - **OALL8** (`0x0e`, legacy pre-v315): `decodeVarLen` (1 byte / `0xFE`+2BE /
 //     `0xFF`+4BE) with the text immediately behind it and the bind count
 //     immediately behind that. No recording carries one, so it is covered by
