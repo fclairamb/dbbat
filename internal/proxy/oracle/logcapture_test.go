@@ -363,11 +363,13 @@ func TestCountingHandlerCapturesTheCursorIDSource(t *testing.T) {
 	s.tracker.pendingQuery = &pendingOracleQuery{cursor: cursor}
 
 	// No row stream is open — the cursor has no column definitions — so this is
-	// the ordinary scan every thin client's id is learned by.
-	s.learnCursorID(decodeHexString(t, oerResponseSeqUnderAByte))
+	// the ordinary scan every thin client's id is learned by: the go-ora churn
+	// response is a QueryResult with the OER bundled behind it, which the
+	// ranking rates describe_scan rather than scan.
+	s.learnCursorID(TTCFuncQueryResult, decodeHexString(t, oerResponseSeqUnderAByte))
 
 	require.Equal(t, uint16(6), cursor.cursorID, "the fixture names cursor 6")
-	assert.Equal(t, []string{cursorIDFromScan.String()},
+	assert.Equal(t, []string{cursorIDFromDescribeScan.String()},
 		logs.stringsFor(logMsgLearnedCursorID, "source"),
 		"the provenance measurements read this attribute back")
 

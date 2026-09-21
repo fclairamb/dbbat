@@ -3087,7 +3087,7 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	// Before anything is completed: the response to an execute is where the
 	// server names the cursor it allotted, and that mapping is what lets a
 	// later re-execution be gated against the right statement.
-	s.learnCursorID(ttcPayload)
+	s.learnCursorID(funcCode, ttcPayload)
 
 	// And the one cursor id that never rides an OER: a `SYS_REFCURSOR` the
 	// server opened inside a procedure body and reported in the call's bind
@@ -3451,13 +3451,28 @@ func (s *session) statusOERMayEndTheCall(info *oerInfo) bool {
 // a genuine ORA text.
 //
 // So the reference is used only when it is *not* itself a mid-stream scan hit —
-// cursorIDFromScan or better, which is where 167 of the corpus's 168 learned ids
-// sit, the four mid-fetch failure fixtures included. A weaker reference is
-// treated exactly like an unlearned one: the diagnostic is dropped, which is the
-// same fail-closed direction this anchor already had. Note statusOERMayEndTheCall
-// dropped the comparison outright for the same measurement; it is kept here
-// because a *diagnostic* — unlike a status — is something a result set's own rows
-// could spell out, and the cursor anchor is what that case has no answer for.
+// cursorIDFromScan or better, which is where most of the corpus's learned ids
+// sit, the four mid-fetch failure fixtures included. A mid-stream hit is treated
+// exactly like an unlearned one: the diagnostic is dropped, which is the same
+// fail-closed direction this anchor already had.
+//
+// The describe-scan rank added in 2026-09-21-06 sits *below* cursorIDFromScan,
+// and the reference is still trusted at it — measured, not assumed: the
+// streaming cursor of every mid-fetch failure fixture is learned off the
+// QueryResult's own bundled summary (offsets 262/1230 across the four
+// recordings, per TestDumpReplay_CursorIDLearningSource), and refusing that
+// rank here drops the genuine ORA-01722 and records the failure as a success
+// (TestDumpReplay_OCIFailuresAreRecordedWithTheirORAText pins it). The rank is
+// about *learning corrections*, not about this anchor; the 17744 caveat it
+// carries — a describe scan can yield junk before the summary is reached — is
+// answered by the ranking itself, since the fetch's terminator outranks and
+// corrects it, and by statusOERMayEndTheCall, which dropped the reference
+// comparison outright for exactly this reason.
+//
+// Note statusOERMayEndTheCall dropped the comparison outright for the same
+// measurement; it is kept here because a *diagnostic* — unlike a status — is
+// something a result set's own rows could spell out, and the cursor anchor is
+// what that case has no answer for.
 //
 // Callers hold trackerMu.
 func (s *session) midFetchOERNamesTheStreamingCursor(info *oerInfo) bool {

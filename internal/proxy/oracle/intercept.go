@@ -674,7 +674,13 @@ func (s *session) handlePiggybackReexec(ttcPayload []byte) error {
 // Runs on the upstream leg, so the caller holds trackerMu (see
 // interceptUpstreamMessage) — it writes into the in-flight query's cursor and
 // into the tracker's map, both of which the client leg also owns.
-func (s *session) learnCursorID(ttcPayload []byte) {
+//
+// `funcCode` is the TTC function code of the packet the payload came in as,
+// which is what separates a scan hit on a packet that carries the call's OER
+// from one on a packet whose payload is data — the QueryResult's describe
+// records above all. It never changes what is learned, only the rank the
+// learning is filed under (see cursorIDSource).
+func (s *session) learnCursorID(funcCode TTCFunctionCode, ttcPayload []byte) {
 	pending := s.tracker.pendingQuery
 	if pending == nil || pending.cursor == nil {
 		return
@@ -687,7 +693,7 @@ func (s *session) learnCursorID(ttcPayload []byte) {
 		return
 	}
 
-	cursorID, source := findCursorIDInResponse(s.oerShapeSnapshot(), ttcPayload, s.rowStreamActive())
+	cursorID, source := findCursorIDInResponse(s.oerShapeSnapshot(), ttcPayload, s.rowStreamActive(), funcCode)
 	if source <= cursor.cursorIDSource {
 		return
 	}

@@ -256,7 +256,7 @@ func TestFindCursorIDInResponse_SequenceNumberPastAByte(t *testing.T) {
 
 			payload := decodeHexString(t, tc.payload)
 
-			got, source := findCursorIDInResponse(thinOERShape(), payload, false)
+			got, source := findCursorIDInResponse(thinOERShape(), payload, false, TTCFuncQueryResult)
 			require.NotEqual(t, cursorIDUnlearned, source, "the server named a cursor in this response")
 			assert.Equal(t, tc.want, got)
 		})
@@ -308,7 +308,7 @@ func TestFindCursorIDInResponse_RejectsAnErrorOER(t *testing.T) {
 	assert.Equal(t, 942, info.ErrorCode)
 	assert.Equal(t, 9, info.CursorID)
 
-	_, source := findCursorIDInResponse(thinOERShape(), payload, false)
+	_, source := findCursorIDInResponse(thinOERShape(), payload, false, TTCFuncResponse)
 	assert.Equal(t, cursorIDUnlearned, source, "an OER carrying a real ORA code must not teach a cursor id")
 
 	// Same bytes, error code cleared: now it teaches.
@@ -317,7 +317,7 @@ func TestFindCursorIDInResponse_RejectsAnErrorOER(t *testing.T) {
 	succeeded = append(succeeded, 0x00)
 	succeeded = append(succeeded, payload[oerErrorCodeFieldStart+oerErrorCodeFieldLen:]...)
 
-	cursorID, source := findCursorIDInResponse(thinOERShape(), succeeded, false)
+	cursorID, source := findCursorIDInResponse(thinOERShape(), succeeded, false, TTCFuncResponse)
 	require.NotEqual(t, cursorIDUnlearned, source, "with the error cleared the same OER must be read")
 	assert.Equal(t, uint16(9), cursorID)
 }

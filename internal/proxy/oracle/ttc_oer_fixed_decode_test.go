@@ -223,7 +223,7 @@ func TestFindPlausibleOERInResponse_LearnsACursorFromTheBundledOCISummary(t *tes
 		require.Truef(t, learnOERShape(&shape, extractTTCPayload(frame)), "summary %d taught nothing", i)
 		require.True(t, shape.fixedWidth64, "summary %d is the 64-bit OCI layout", i)
 
-		cursorID, source := findCursorIDInResponse(shape, frame, false)
+		cursorID, source := findCursorIDInResponse(shape, frame, false, TTCFuncOERR)
 		require.NotEqualf(t, cursorIDUnlearned, source, "summary %d must yield a cursor id", i)
 		assert.Equal(t, uint16(2), cursorID, "summary %d names cursor 2", i)
 

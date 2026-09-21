@@ -630,14 +630,15 @@ rather than trusting — seven compressed ints, error code success or ORA-01403,
 sequence number inside its 16-bit field, a 16-bit cursor id — because a run of
 row bytes can otherwise parse as an OER.
 
-It has two sources, and they are **ranked** rather than raced
+It has three sources, and they are **ranked** rather than raced
 (`cursorIDSource`):
 
 | Source | What it is |
 |---|---|
 | `call_boundary` | Byte 0 of the packet, under `decodeOERAt`'s own anchors — the end-of-call bit on the compressed encoding, the RetCode anchor plus the status bounds on the fixed-width one. The object whose purpose is to end the call, at the one offset the router already treats as a function code rather than as data. |
-| `scan` | `findPlausibleOERInResponse`'s anchored scan (which starts at offset 1), run outside a row stream, where the payload cannot be row bytes. |
-| `mid_stream_scan` | The same scan run while rows are on the wire. The weakest evidence dbbat accepts. |
+| `scan` | The anchored scan (`findPlausibleOERInResponse`, which starts at offset 1) on a packet that structurally carries the call's OER: the standalone OER message, the Response's embedded one behind the return-parameter block, or the OVERSION answer an execute-with-version piggyback is answered by — all three measured. |
+| `describe_scan` | The same scan on a packet that cannot carry the call's OER at all — above all the QueryResult whose payload is the server's describe records. Usually the genuine OER a thin client's response bundles behind them, occasionally junk (17744); never the object that ends the call. |
+| `mid_stream_scan` | The scan run while rows are on the wire. The weakest evidence dbbat accepts. |
 
 A reading replaces the stored id only when it is **stronger**. Two things that
 are not readings at all outrank every source and are never second-guessed: an id
@@ -659,29 +660,46 @@ call's bind output (a REF cursor).
 > **describe records**, on the packet that opens the fetch — and `learnCursorID`
 > runs before `handleQueryResultV2`, so `rowStreamActive()` is still false
 > there. A blanket "never learn mid-stream" would have left 17744 exactly where
-> it was. That is also why `scan` ranks below `call_boundary` rather than beside
-> it: "outside a row stream" means "not row data", not "trustworthy".
+> it was. That is also why the out-of-stream scan ranks below `call_boundary`
+> rather than beside it: "outside a row stream" means "not row data", not
+> "trustworthy".
 >
 > That id is what `rememberCursor` files the statement under, so it is what a
 > later re-execution naming a recycled id is gated against — the wrong
 > statement's SQL, silently, rather than the fail-closed refusal an *unknown*
 > cursor gets. The ranking keeps the original property (a scan hit never
-> outranks a scan hit, so row bytes still cannot churn the id) while letting the
-> server's own terminator correct a guess made before it arrived. A correction
-> also **drops the entry the wrong id was filed under**, so no stale mapping is
-> left waiting for the server to recycle that id.
+> outranks a scan hit at its own rank or above, so row bytes still cannot churn
+> the id) while letting the server's own terminator correct a guess made before
+> it arrived. A correction also **drops the entry the wrong id was filed
+> under**, so no stale mapping is left waiting for the server to recycle that
+> id.
 >
 > Byte 0 was not read at all before this: `findPlausibleOERInResponse` starts at
 > offset 1, so an OCI fetch's terminator — which sits at byte 0 of its own
 > packet — never had a say, and a mid-stream scan hit did. Reading it also
 > learns **8 ids the testdata corpus previously learned none for**, every one of
 > them on a sqlplus session.
+>
+> The `describe_scan` rank itself is 2026-09-21-06's addition, and it is
+> deliberately **not a refusal**, for two measured reasons. A client that
+> re-executes between the QueryResult and its terminator would otherwise meet
+> `refuseUnknownCursor`; and on the thin clients the same packet carries the
+> **genuine** OER bundled behind the describe records — which is how most
+> thin-client ids are learned, 107 of the corpus's 176. The rank only says the
+> reading is a guess about *where* the OER sits, so any later reading of any
+> other kind outranks it (a second `scan` hit on an OER-carrying packet can,
+> where two `scan` hits never could). What it does **not** tighten is the
+> mid-fetch diagnostic anchor (`midFetchOERNamesTheStreamingCursor`): the
+> streaming-cursor reference for every mid-fetch failure fixture is learned at
+> exactly this rank — the QueryResult's own bundled summary — and refusing it
+> there drops genuine ORA texts, which the corpus pins.
 
 The measurement behind all of that is reproducible from the tree:
 `TestDumpReplay_CursorIDLearningSource` replays all 33 recordings and reports
-where each of the 176 learned ids comes from (8 `call_boundary`, 167 `scan`, **1**
+where each of the 176 learned ids comes from (8 `call_boundary`, 60 `scan` — 51
+off a Response, 9 off an OVERSION piggyback —, 107 `describe_scan`, **1**
 `mid_stream_scan`), and `TestIntegration_OCIRowCaptureCarriesRealColumnNames`
-pins the live case — that session now logs `cursor_id=17744 source=scan`
+pins the live case — that session now logs `cursor_id=17744 source=describe_scan`
 followed by `cursor_id=2 source=call_boundary previous_cursor_id=17744`.
 
 The single `mid_stream_scan` is why the fix is a ranking and not a refusal: it is
@@ -691,9 +709,12 @@ blanket "never learn mid-stream" would have stopped learning for that shape
 entirely.
 
 The same scan reads the **fixed-width** OCI encoding of that OER, under the same
-bounds plus that encoding's own RetCode anchor; which encoding is offered comes
-from the session's learned `oerShape`, so a client known to speak compressed
-integers is never scanned for a fixed-width block. Until that landed, cursor-id
+bounds plus that encoding's own RetCode anchor; which encodings are offered come
+from the session's learned `oerShape`, and the check is **symmetric** — a client
+known to speak compressed integers is never scanned for a fixed-width block, and
+a client known to speak fixed-width is never offered the compressed reading
+(measured as free: none of the 22 ids the corpus learns on fixed-width sessions
+is ever read as compressed). Until the fixed-width reading landed, cursor-id
 learning was blind on every OCI session — see "The OCI client, on every shape"
 below.
 

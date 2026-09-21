@@ -491,14 +491,30 @@ func findPlausibleOERInResponse(shape oerShape, payload []byte) *oerInfo {
 // one of them is a *scan hit* — a 0x04 found somewhere inside a payload — and
 // never the packet's own leading function code. That is the distinction the
 // measurement in cursor_learning_source_replay_test.go reports.
+//
+// The encoding check is symmetric with decodeOERFixedFieldsAt's own: a session
+// that has learned the fixed-width encoding is never offered the compressed
+// reading here, because a server speaks one encoding — the converse of the rule
+// that keeps a compressed session's row bytes from being read as a fixed-width
+// block. A compressed acceptance on a learned fixed-width session cannot be a
+// server OER, and the corpus agrees: none of the 22 ids learned on fixed-width
+// sessions is ever read as compressed. The locator is shared with
+// handleResponse's out-of-stream fall-through, so the measurement covers
+// completion as well as learning
+// (TestDumpReplay_MidStreamOERFalsePositiveRate and the per-client completion
+// tests are the guard).
 func locatePlausibleOER(shape oerShape, payload []byte) (*oerInfo, int) {
+	tryCompressed := !shape.tailLearned || !shape.fixedWidth
+
 	for i := 1; i < len(payload); i++ {
 		if payload[i] != 0x04 {
 			continue
 		}
 
-		if info, _ := decodeOERFieldsAt(payload, i); plausibleStatusOER(info) {
-			return info, i
+		if tryCompressed {
+			if info, _ := decodeOERFieldsAt(payload, i); plausibleStatusOER(info) {
+				return info, i
+			}
 		}
 
 		if info, _ := decodeOERFixedFieldsAt(shape, payload, i); plausibleStatusOER(info) {
@@ -573,16 +589,33 @@ const (
 	// TestDumpReplay_CursorIDLearningSource.
 	cursorIDFromMidStreamScan
 
-	// cursorIDFromScan is the same anchored scan run *outside* a row stream —
-	// the reading that learns 167 of the corpus's 176 ids, and the one every
-	// thin client relies on.
+	// cursorIDFromDescribeScan is a scan hit on a packet that cannot carry the
+	// call's own OER at all — above all the QueryResult (func=0x10) whose
+	// payload is the server's describe records, which decode as seven bounded
+	// ints just as happily as row data does. That is literally where the live
+	// 17744 came from, and it is what learnCursorID sees first on a fetch, since
+	// it runs before handleQueryResultV2.
 	//
-	// "Outside a row stream" is weaker than it sounds, and the 17744 measurement
-	// is what proves it: the QueryResult that opens a fetch carries the server's
-	// describe records, which are just as capable of decoding as seven bounded
-	// ints as row data is, and learnCursorID sees that packet before its columns
-	// are decoded. So this rank is "not row data", not "trustworthy" — it is
-	// below the call boundary for exactly that reason.
+	// It is ranked below cursorIDFromScan rather than refused, for two measured
+	// reasons. A client that re-executes between this packet and its terminator
+	// would otherwise meet refuseUnknownCursor; and on the thin clients the same
+	// packet carries the genuine OER bundled behind the describe records (see
+	// oerResponseSeqUnderAByte), so the id it yields is usually the right one.
+	// The rank says only that it is a guess about *where* the OER sits, not a
+	// reading of the object that ends the call — so any later reading of any
+	// other kind outranks it, which a flat scan rank could not express (a second
+	// scan hit never outranks a scan hit).
+	cursorIDFromDescribeScan
+
+	// cursorIDFromScan is the same anchored scan run on a packet that *does*
+	// carry the call's OER: the standalone OER message, the Response's embedded
+	// one behind the return-parameter block, or the OVERSION answer an
+	// execute-with-version piggyback is answered by. The reading that learns
+	// most of the corpus's ids, and the one every thin client relies on.
+	//
+	// It is "not row data", not "trustworthy" — the 17744 measurement proved
+	// that much — but its packet is at least one whose structure puts an OER
+	// there, which is what the describe scan above cannot say.
 	cursorIDFromScan
 
 	// cursorIDFromCallBoundary is byte 0 of the packet under decodeOERAt's own
@@ -607,6 +640,8 @@ func (c cursorIDSource) String() string {
 		return "call_boundary"
 	case cursorIDFromScan:
 		return "scan"
+	case cursorIDFromDescribeScan:
+		return "describe_scan"
 	case cursorIDFromMidStreamScan:
 		return "mid_stream_scan"
 	case cursorIDUnlearned:
@@ -627,13 +662,23 @@ func (c cursorIDSource) String() string {
 //
 // `rowStream` is the session's own notion of whether rows are in flight
 // (session.rowStreamActive); it does not change what is accepted, only how
-// strongly the acceptance is rated. See cursorIDSource.
-func findCursorIDInResponse(shape oerShape, payload []byte, rowStream bool) (uint16, cursorIDSource) {
+// strongly the acceptance is rated. `funcCode` is the packet's TTC function
+// code — payload[0] for everything the production callers pass — and it only
+// feeds the rating too: a scan hit on a packet that structurally carries the
+// call's OER (OERR, Response, OVERSION — all three measured) outranks one on a
+// packet whose payload is data, the QueryResult's describe records above all.
+// See cursorIDSource.
+func findCursorIDInResponse(shape oerShape, payload []byte, rowStream bool, funcCode TTCFunctionCode) (uint16, cursorIDSource) {
 	// Byte 0 first, and not merely as an optimisation: it is better evidence
 	// than anything the scan can return, so a packet that carries both must be
 	// read here. decodeOERAt is the router's own reading at that offset, and
 	// plausibleStatusOER on top of it is the bound the scan applies — an OER
 	// reporting a real failure assigns no cursor.
+	//
+	// No explicit gate on funcCode is needed: both of decodeOERAt's halves
+	// demand a 0x04 at the offset, and payload[0] is the function code byte
+	// itself — so a byte-0 acceptance is by construction a standalone OER's own
+	// marker, never a describe record that happens to lead with one.
 	if info := decodeOERAt(shape, payload, 0); plausibleStatusOER(info) {
 		return uint16(info.CursorID), cursorIDFromCallBoundary
 	}
@@ -647,7 +692,12 @@ func findCursorIDInResponse(shape oerShape, payload []byte, rowStream bool) (uin
 		return uint16(info.CursorID), cursorIDFromMidStreamScan
 	}
 
-	return uint16(info.CursorID), cursorIDFromScan
+	switch funcCode {
+	case TTCFuncOERR, TTCFuncResponse, TTCFuncOVersion:
+		return uint16(info.CursorID), cursorIDFromScan
+	default:
+		return uint16(info.CursorID), cursorIDFromDescribeScan
+	}
 }
 
 // findOERInResponse scans a Response (func=0x08) payload for the embedded OER
