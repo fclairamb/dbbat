@@ -190,7 +190,7 @@ func byte0StatusCursorID(shape oerShape, payload []byte) int {
 // QueryResult describe records, the Response and OVERSION hits at structural
 // offsets — are what turned cursorIDFromScan into the carrier-packet rank and
 // added cursorIDFromDescribeScan beneath it, and the func-code measurement here
-// is what keeps those figures figures rather than inferences.
+// is what keeps those numbers measured rather than inferred.
 //
 // The figures are printed rather than pinned as a distribution: re-recording a
 // fixture must not be a test failure. What is asserted is the shape of the

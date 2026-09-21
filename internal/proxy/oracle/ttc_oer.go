@@ -692,6 +692,12 @@ func findCursorIDInResponse(shape oerShape, payload []byte, rowStream bool, func
 		return uint16(info.CursorID), cursorIDFromMidStreamScan
 	}
 
+	// The carrier set is deliberately an allowlist of the three packet kinds
+	// the corpus measured carrying the call's OER, so an *unknown* function
+	// code defaults to the weaker rank — the same fail-safe direction the
+	// mid-stream rank takes.
+	//
+	//nolint:exhaustive // only the packets measured to carry the call's OER rank as scan
 	switch funcCode {
 	case TTCFuncOERR, TTCFuncResponse, TTCFuncOVersion:
 		return uint16(info.CursorID), cursorIDFromScan
