@@ -477,21 +477,36 @@ const oerMaxSeqNumber = 0xFFFF
 // reading is offered only for the layouts `shape` admits, and adds the RetCode
 // anchor to the bounds below; see decodeOERFixedFieldsAt.
 func findPlausibleOERInResponse(shape oerShape, payload []byte) *oerInfo {
+	info, _ := locatePlausibleOER(shape, payload)
+
+	return info
+}
+
+// locatePlausibleOER is findPlausibleOERInResponse's scan, reporting *where* the
+// accepted candidate sat as well as what it decoded to. The offset is -1 when
+// nothing was accepted.
+//
+// The offset is not decoration. Every acceptance this scan makes is at a
+// non-zero offset by construction (the loop starts at 1), which is to say every
+// one of them is a *scan hit* — a 0x04 found somewhere inside a payload — and
+// never the packet's own leading function code. That is the distinction the
+// measurement in cursor_learning_source_replay_test.go reports.
+func locatePlausibleOER(shape oerShape, payload []byte) (*oerInfo, int) {
 	for i := 1; i < len(payload); i++ {
 		if payload[i] != 0x04 {
 			continue
 		}
 
 		if info, _ := decodeOERFieldsAt(payload, i); plausibleStatusOER(info) {
-			return info
+			return info, i
 		}
 
 		if info, _ := decodeOERFixedFieldsAt(shape, payload, i); plausibleStatusOER(info) {
-			return info
+			return info, i
 		}
 	}
 
-	return nil
+	return nil, -1
 }
 
 // plausibleStatusOER is the bound set findPlausibleOERInResponse applies to one
