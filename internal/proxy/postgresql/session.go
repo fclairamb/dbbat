@@ -32,6 +32,16 @@ type pendingQuery struct {
 	startTime  time.Time
 	parameters *store.QueryParameters
 
+	// syncEpoch is the client-leg message count (forwarded Syncs and simple
+	// Queries) at the moment this query was queued. The upstream leg's
+	// ReadyForQuery reconcile (see reconcilePendingQueries) finishes every
+	// entry whose epoch is below the count of ReadyForQuery-replies the
+	// client has earned: such an entry's batch is over by definition, so a
+	// missing terminator (an upstream ErrorResponse discarding the rest of a
+	// batch, or any future gap of the same kind) can never park the statement
+	// clock on a finished statement again.
+	syncEpoch uint64
+
 	// Result capture state
 	columnNames   []string // From RowDescription
 	columnOIDs    []uint32 // Type OIDs for decoding
@@ -169,6 +179,13 @@ type Session struct {
 	statementTimeouts *shared.StatementTimeoutResolver
 	statementLimit    time.Duration
 	statementClock    shared.StatementClock
+
+	// clientSyncEpoch counts the client messages that each earn exactly one
+	// upstream ReadyForQuery: every forwarded Sync and every forwarded simple
+	// Query. The upstream leg's reconcile compares it against pendingQueries'
+	// epochs — see pendingQuery.syncEpoch. Guarded by bookMu, which every
+	// reader and writer of it already holds.
+	clientSyncEpoch uint64
 
 	// upstreamKey is the cancellation key the *upstream server* issued for
 	// this session's backend. dbbat forwards it to the client verbatim, so it
