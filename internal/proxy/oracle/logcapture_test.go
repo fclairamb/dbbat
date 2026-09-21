@@ -100,6 +100,17 @@ func (h *countingHandler) Handle(_ context.Context, rec slog.Record) error {
 			h.ints[key] = append(h.ints[key], a.Value.Int64())
 		}
 
+		// Unsigned too, folded into the same map. Cursor ids are logged with
+		// slog.Uint64 throughout this package — they are uint16 on the wire — so
+		// a reader watching only KindInt64 saw none of them and reported an empty
+		// list rather than a wrong one. That is how the first draft of the 17744
+		// assertion managed to fail on a session that had logged exactly the
+		// records it was looking for.
+		if a.Value.Kind() == slog.KindUint64 {
+			key := rec.Message + "\x00" + a.Key
+			h.ints[key] = append(h.ints[key], int64(a.Value.Uint64()))
+		}
+
 		if a.Value.Kind() == slog.KindBool {
 			key := rec.Message + "\x00" + a.Key
 			h.bools[key] = append(h.bools[key], a.Value.Bool())
@@ -359,6 +370,15 @@ func TestCountingHandlerCapturesTheCursorIDSource(t *testing.T) {
 	assert.Equal(t, []string{cursorIDFromScan.String()},
 		logs.stringsFor(logMsgLearnedCursorID, "source"),
 		"the provenance measurements read this attribute back")
+
+	// And the id itself, which is logged unsigned. The live assertions pair the
+	// two — a correction is a `previous_cursor_id` that differs from
+	// `cursor_id` — so a reader that captured one and not the other would leave
+	// them measuring nothing.
+	assert.Equal(t, []int64{6}, logs.intsFor(logMsgLearnedCursorID, "cursor_id"),
+		"an unsigned attribute must be readable back, or the 17744 assertion has no ids to check")
+	assert.Equal(t, []int64{0}, logs.intsFor(logMsgLearnedCursorID, "previous_cursor_id"),
+		"nothing was replaced here: this id was the first one read")
 }
 
 // TestMultisetDiff pins the helper the measurement uses to name the parses that

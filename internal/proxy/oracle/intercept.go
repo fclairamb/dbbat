@@ -649,8 +649,9 @@ func (s *session) handlePiggybackReexec(ttcPayload []byte) error {
 // also meant the *first* value won even when it was the worst one available.
 // Measured live against a real 23ai server, a sqlplus fetch whose end-of-call
 // terminator correctly named cursor 2 ran on a session holding **17744** — a
-// value scanned out of row bytes, latched before the terminator arrived, and
-// never revisited. That is the id rememberCursor files the statement under, so
+// value the scan took off the QueryResult's describe records, latched before the
+// terminator arrived, and never revisited. That is the id rememberCursor files
+// the statement under, so
 // it is the id a later re-execution is gated against: the real id 2 is simply
 // never written, and an id the server recycles onto 17744 would resolve to the
 // wrong statement's SQL rather than being refused as unknown.

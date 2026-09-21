@@ -3443,12 +3443,12 @@ func (s *session) statusOERMayEndTheCall(info *oerInfo) bool {
 // if an unmeasured client ever reports a different cursor, this is what says so.
 //
 // The reference value used to carry an honest caveat, and the caveat has since
-// been measured: `learnCursorID` latched the first id its anchored scan found,
-// so for a statement whose id had not been learned before its fetch began, that
-// scan ran over row-stream bytes — and live against a real 23ai server it
-// latched **17744** on a fetch whose terminator said 2. Comparing against a
-// reference that came out of row data proves nothing; it only adds a way for one
-// mislearned id to drop a genuine ORA text.
+// been measured: `learnCursorID` latched the first id its anchored scan found
+// and never revisited it, and live against a real 23ai server that first id was
+// **17744**, taken off a fetch's own describe records, on a fetch whose
+// terminator said 2. Comparing against a reference that came out of a scan over
+// payload bytes proves nothing; it only adds a way for one mislearned id to drop
+// a genuine ORA text.
 //
 // So the reference is used only when it is *not* itself a mid-stream scan hit —
 // cursorIDFromScan or better, which is where 167 of the corpus's 168 learned ids

@@ -127,22 +127,29 @@ const ociPlausibleSessionCursorID = 100
 //
 // Driving this script against a real 23ai server, dbbat used to end up holding
 // **17744** for the fetch whose own end-of-data terminator correctly reported
-// cursor **2** — a value the anchored scan picked up out of row-stream bytes,
-// latched before the terminator arrived, and never revisited, because learning
-// was one-shot. That id is what rememberCursor files the statement under, so it
+// cursor **2** — a value the anchored scan took off that statement's own
+// describe records, latched before the terminator arrived, and never revisited,
+// because learning was one-shot. That id is what rememberCursor files it under, so it
 // is what a later re-execution naming a recycled id would have been gated
 // against: the wrong statement's SQL, silently, rather than the fail-closed
 // refusal an unknown cursor gets.
 //
-// Two things are checked, and they fail for different reasons:
+// Three things are checked, and they fail for different reasons:
 //
-//   - no id this session settles on may be one no sqlplus session would allot.
-//     That is the 17744 assertion itself, and it is a value check because the
-//     wrong id was structurally indistinguishable from a right one;
-//   - nothing may be left resting on a mid-stream scan hit. The fetch's
-//     terminator is a fixed-width status object at byte 0 of its own packet —
-//     cursorIDFromCallBoundary, the strongest source there is — so on this
-//     client the ranking must actually reach it rather than stop at a guess.
+//   - the **final** id of each statement may not be one no sqlplus session would
+//     allot. That is the 17744 assertion itself, and it has to be a value check
+//     because the wrong id was structurally indistinguishable from a right one;
+//   - the terminator must actually have been *reached*: at least one id on this
+//     session must rest on cursorIDFromCallBoundary evidence. That is the
+//     mechanism the first check depends on, and without it a run where learning
+//     silently stopped altogether would pass by holding no bad ids at all;
+//   - a correction, where one happened, only ever moves up the ladder.
+//
+// Note what this does *not* assert, because the measurement said otherwise: that
+// 17744 was never read. It still is — it is the first thing the scan finds on the
+// describe records, at which point rowStreamActive() is false and the packet is
+// the fetch's own QueryResult. What changed is that it no longer survives the
+// terminator.
 func assertNoCursorIDScannedOutOfRowBytes(t *testing.T, env *oracleThroughProxy) {
 	t.Helper()
 
@@ -154,18 +161,47 @@ func assertNoCursorIDScannedOutOfRowBytes(t *testing.T, env *oracleThroughProxy)
 			"empty list proves nothing, and this is the client the 17744 measurement came from")
 	require.Len(t, sources, len(ids), "every learned-cursor record must carry its source")
 
+	previous := env.logs.intsFor(logMsgLearnedCursorID, "previous_cursor_id")
+	require.Len(t, previous, len(ids), "and what it replaced")
+
+	// An id that a later record corrects is not a final id: it is the guess this
+	// whole mechanism exists to overrule.
+	corrected := map[int64]bool{}
+
+	for i := range ids {
+		if previous[i] != 0 && previous[i] != ids[i] {
+			corrected[previous[i]] = true
+
+			t.Logf("  cursor %d corrected to %d on %s evidence", previous[i], ids[i], sources[i])
+
+			assert.NotEqualf(t, cursorIDFromMidStreamScan.String(), sources[i],
+				"an id may never be corrected *to* a mid-stream scan hit (%d became %d)",
+				previous[i], ids[i])
+		}
+	}
+
+	reachedTheCallBoundary := false
+
 	for i, id := range ids {
 		t.Logf("  learned cursor %d on %s evidence", id, sources[i])
 
-		assert.Lessf(t, id, int64(ociPlausibleSessionCursorID),
-			"cursor %d is not an id a sqlplus session allots — it is the shape of a value scanned "+
-				"out of row-stream bytes, which is what 17744 was (source: %s)", id, sources[i])
+		if sources[i] == cursorIDFromCallBoundary.String() {
+			reachedTheCallBoundary = true
+		}
 
-		assert.NotEqualf(t, cursorIDFromMidStreamScan.String(), sources[i],
-			"cursor %d was left resting on a mid-stream scan hit: on this client the fetch's own "+
-				"terminator sits at byte 0 of its packet, so the call boundary must have been "+
-				"reached instead", id)
+		if corrected[id] {
+			continue
+		}
+
+		assert.Lessf(t, id, int64(ociPlausibleSessionCursorID),
+			"cursor %d is not an id a sqlplus session allots, and nothing later corrected it — "+
+				"that is the 17744 shape exactly (source: %s)", id, sources[i])
 	}
+
+	assert.True(t, reachedTheCallBoundary,
+		"on this client the fetch's own terminator is a fixed-width status object at byte 0 of "+
+			"its packet; if no id was learned there, the correction that overrules a describe-record "+
+			"guess never ran and the check above is passing on nothing")
 }
 
 // awaitCompletedQuery polls for the statement whose SQL contains fragment, once

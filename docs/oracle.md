@@ -624,12 +624,71 @@ exec (`0x03`/`0x5e`) and the JDBC exec (`0x11`/`0x69`) send the SQL with no id �
 the **server** allots one and reports it back — so without reading the response
 dbbat has a statement with no id and, later, an id with no statement.
 
-`learnCursorID` reads it off the first response to each execute
-(`findCursorIDInResponse`, a thin wrapper over `findPlausibleOERInResponse`):
-the OER's seventh field. The scan is anchored rather than trusting — seven
-compressed ints, error code success or ORA-01403, a sequence number inside its
-16-bit field, a 16-bit cursor id, first match wins — because a run of row bytes
-can otherwise parse as an OER. It runs at most once per statement.
+`learnCursorID` reads it off the responses to each execute
+(`findCursorIDInResponse`): the OER's seventh field. The reading is anchored
+rather than trusting — seven compressed ints, error code success or ORA-01403, a
+sequence number inside its 16-bit field, a 16-bit cursor id — because a run of
+row bytes can otherwise parse as an OER.
+
+It has two sources, and they are **ranked** rather than raced
+(`cursorIDSource`):
+
+| Source | What it is |
+|---|---|
+| `call_boundary` | Byte 0 of the packet, under `decodeOERAt`'s own anchors — the end-of-call bit on the compressed encoding, the RetCode anchor plus the status bounds on the fixed-width one. The object whose purpose is to end the call, at the one offset the router already treats as a function code rather than as data. |
+| `scan` | `findPlausibleOERInResponse`'s anchored scan (which starts at offset 1), run outside a row stream, where the payload cannot be row bytes. |
+| `mid_stream_scan` | The same scan run while rows are on the wire. The weakest evidence dbbat accepts. |
+
+A reading replaces the stored id only when it is **stronger**. Two things that
+are not readings at all outrank every source and are never second-guessed: an id
+the client's own request carried (the legacy `OALL8`) and one read out of a
+call's bind output (a REF cursor).
+
+> **This used to be a flat one-shot** — the first accepted value won and the
+> cursor was never re-read — which kept the scan from churning the id against
+> row-stream bytes for the rest of a fetch. That property was worth keeping; the
+> rule was the wrong way to get it, because the *first* value also won when it
+> was the worst one available. Measured live against Oracle Free 23ai, a sqlplus
+> fetch whose own end-of-data terminator correctly named cursor **2** ran on a
+> session holding **17744** — latched before the terminator arrived and never
+> revisited. 17744 is inside `cursorReexecMaxID` and passes every bound the scan
+> applies; nothing distinguishes it after the fact.
+>
+> Where it came from matters, because the obvious bound does not reach it. It
+> was **not** scanned out of row bytes: it came off the `QueryResult`'s
+> **describe records**, on the packet that opens the fetch — and `learnCursorID`
+> runs before `handleQueryResultV2`, so `rowStreamActive()` is still false
+> there. A blanket "never learn mid-stream" would have left 17744 exactly where
+> it was. That is also why `scan` ranks below `call_boundary` rather than beside
+> it: "outside a row stream" means "not row data", not "trustworthy".
+>
+> That id is what `rememberCursor` files the statement under, so it is what a
+> later re-execution naming a recycled id is gated against — the wrong
+> statement's SQL, silently, rather than the fail-closed refusal an *unknown*
+> cursor gets. The ranking keeps the original property (a scan hit never
+> outranks a scan hit, so row bytes still cannot churn the id) while letting the
+> server's own terminator correct a guess made before it arrived. A correction
+> also **drops the entry the wrong id was filed under**, so no stale mapping is
+> left waiting for the server to recycle that id.
+>
+> Byte 0 was not read at all before this: `findPlausibleOERInResponse` starts at
+> offset 1, so an OCI fetch's terminator — which sits at byte 0 of its own
+> packet — never had a say, and a mid-stream scan hit did. Reading it also
+> learns **8 ids the testdata corpus previously learned none for**, every one of
+> them on a sqlplus session.
+
+The measurement behind all of that is reproducible from the tree:
+`TestDumpReplay_CursorIDLearningSource` replays all 33 recordings and reports
+where each of the 176 learned ids comes from (8 `call_boundary`, 167 `scan`, **1**
+`mid_stream_scan`), and `TestIntegration_OCIRowCaptureCarriesRealColumnNames`
+pins the live case — that session now logs `cursor_id=17744 source=scan`
+followed by `cursor_id=2 source=call_boundary previous_cursor_id=17744`.
+
+The single `mid_stream_scan` is why the fix is a ranking and not a refusal: it is
+dbeaver's JDBC catalog SELECT, whose end-of-call OER arrives six packets into its
+own row stream, and the id it names is the one the client then fetches by. A
+blanket "never learn mid-stream" would have stopped learning for that shape
+entirely.
 
 The same scan reads the **fixed-width** OCI encoding of that OER, under the same
 bounds plus that encoding's own RetCode anchor; which encoding is offered comes
@@ -1025,7 +1084,7 @@ bytes:
 | `handleOERStatus` (standalone func `0x04`), **reporting success or ORA-01403**, compressed encoding | **yes** | routed on byte 0 alone, so any row-value length prefix of `0x04` arrives claiming to be an OER, and a status carries no text to prove itself with |
 | `handleOERStatus`, same, **fixed-width (OCI) encoding**, outside a row stream | no — there is no bit to demand | measured: *every* standalone OCI summary object carries `CallStatus 0x1`. `decodeFixedStatusOERAt` reads it under the RetCode anchor plus `findPlausibleOERInResponse`'s cursor bounds — see "a successful call on an OCI client" below |
 | `handleOERStatus`, same, **fixed-width**, mid-row-stream | **refused outright** | an OCI fetch response carries a real object of this very shape inside every continuation packet; naming the cursor proves nothing, so only a proven diagnostic may end a call there (`statusOERMayEndTheCall`) |
-| `handleOERStatus`, **reporting a failure**, mid-row-stream | no, but the OER must **name the streaming cursor** | still possibly row bytes, so the diagnostic proof gets a second anchor — see "a failure raised mid-fetch" below |
+| `handleOERStatus`, **reporting a failure**, mid-row-stream | no, but the OER must **name the streaming cursor**, and that id must not itself be a `mid_stream_scan` hit | still possibly row bytes, so the diagnostic proof gets a second anchor — see "a failure raised mid-fetch" below |
 | `handleOERStatus`, **reporting a failure**, outside a row stream | no | `decodeErrorOER` proves the tail is a diagnostic naming the code the fields reported — see the table above |
 | `handleResponse`, mid-row-stream | **yes**, both encodings | the payload *is* row bytes; a `0x04` run inside it is data. `findOERInResponse` keeps the bit *deliberately* — see the 149 below |
 | `handleResponse`, outside a row stream | no | the payload is a return-parameter block, and the anchors above are what stands in for the bit |
@@ -1116,8 +1175,11 @@ from. So:
   That anchor was tried here and removed on live evidence: against a real 23ai
   server a sqlplus fetch whose terminator correctly named cursor 2 was refused,
   because the id dbbat held for that fetch was **17744** — a value
-  `learnCursorID`'s anchored scan had picked up out of row-stream bytes, which is
-  the caveat that function's own doc already spells out. The reference is not
+  `learnCursorID`'s anchored scan had taken off that statement's own describe
+  records. (That latch is itself fixed now, by the ranking in "Learning the
+  cursor id": the same terminator is `call_boundary` evidence and corrects the id
+  to 2. The bound here stays, because it never depended on the reference being
+  wrong — only on it not being *independent*.) The reference is not
   independent evidence there, so requiring agreement with it adds no proof and
   only adds a way for one mislearned id to leave a statement pending. The error
   code is evidence carried by the packet itself, on top of the RetCode anchor and
@@ -1288,6 +1350,17 @@ the streaming cursor's own id. It fails closed — a mid-fetch diagnostic naming
 another cursor is dropped, and so is one arriving on a fetch whose cursor id was
 never learned — precisely the old behaviour, with a DEBUG line saying so, so an
 unmeasured client reporting a different cursor is visible rather than silent.
+
+The reference it compares against is **the id itself, and only when that id is
+worth comparing to**: since the 17744 measurement (see "Learning the cursor id"),
+an id whose evidence is a `mid_stream_scan` hit is treated exactly like an
+unlearned one here, because a reference that came out of row data proves nothing
+and only adds a way for one mislearned id to drop a genuine ORA text. That leaves
+167 of the corpus's 176 learned ids usable as references, the four mid-fetch
+failure fixtures included. `statusOERMayEndTheCall` went further on the same
+measurement and dropped the comparison outright; the anchor is kept **here**
+because a *diagnostic*, unlike a status, is something a result set's own rows
+could spell out, and the cursor check is what that case has no other answer for.
 
 `handleResponse`'s mid-stream strictness, `findOERInResponse` and cursor-id
 learning are untouched by this — and `findOERInResponse` stayed untouched by the

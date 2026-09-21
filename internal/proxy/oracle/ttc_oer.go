@@ -533,9 +533,19 @@ func plausibleStatusOER(info *oerInfo) bool {
 // fine when the first value comes off the server's own end-of-call OER and
 // catastrophic when it does not — measured live against a real 23ai server, a
 // sqlplus fetch whose terminator correctly named cursor **2** ran on a session
-// that had already latched **17744**, a value the anchored scan picked up out of
-// row-stream bytes. 17744 is inside cursorReexecMaxID and passes every bound the
-// scan applies; nothing distinguishes it after the fact. It is also what
+// that had already latched **17744**.
+//
+// Where that 17744 came from is worth being exact about, because the obvious
+// bound does not reach it. It was not scanned out of *row* bytes: it was scanned
+// out of the QueryResult's **describe records**, on the packet that opens the
+// fetch — and learnCursorID runs before handleQueryResultV2, so at that moment
+// rowStreamActive() is still false. A blanket "do not learn while a row stream
+// is open" would have left it exactly as it was. What reaches it is the other
+// end of the ranking: the fetch's own terminator, at byte 0 of a later packet,
+// is better evidence and is now allowed to say so.
+//
+// 17744 is inside cursorReexecMaxID and passes every bound the scan applies;
+// nothing distinguishes it after the fact. It is also what
 // rememberCursor files the statement under, so it is what a later re-execution
 // naming a recycled id would be gated against — the wrong statement's text,
 // silently, rather than the fail-closed refusal an *unknown* cursor gets.
@@ -557,15 +567,22 @@ const (
 	// of (see midStreamBitlessStatusAcceptances).
 	//
 	// It is still accepted, because refusing it outright is measurably wrong: of
-	// the 168 ids the testdata corpus learns, one is learned this way and it is
+	// the 176 ids the testdata corpus learns, one is learned this way and it is
 	// genuine — a dbeaver/JDBC SELECT whose end-of-call OER arrives six packets
 	// into its own row stream, naming the cursor the client then fetches by. See
 	// TestDumpReplay_CursorIDLearningSource.
 	cursorIDFromMidStreamScan
 
-	// cursorIDFromScan is the same anchored scan run *outside* a row stream,
-	// where the payload cannot be row bytes — the reading that learns 167 of the
-	// corpus's 168 ids, and the one every thin client relies on.
+	// cursorIDFromScan is the same anchored scan run *outside* a row stream —
+	// the reading that learns 167 of the corpus's 176 ids, and the one every
+	// thin client relies on.
+	//
+	// "Outside a row stream" is weaker than it sounds, and the 17744 measurement
+	// is what proves it: the QueryResult that opens a fetch carries the server's
+	// describe records, which are just as capable of decoding as seven bounded
+	// ints as row data is, and learnCursorID sees that packet before its columns
+	// are decoded. So this rank is "not row data", not "trustworthy" — it is
+	// below the call boundary for exactly that reason.
 	cursorIDFromScan
 
 	// cursorIDFromCallBoundary is byte 0 of the packet under decodeOERAt's own
