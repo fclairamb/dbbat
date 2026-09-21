@@ -286,11 +286,20 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// cursor 5, stapled behind its close-cursors piggyback, where go-ora and
 	// JDBC send a `03 04` piggyback re-execution instead (which is a different
 	// frame and counted nowhere here).
+	//
+	// sqlplus is the **OCI wide** entry, and the only one: its two are the
+	// `PRINT rc` that drives each REF cursor, read by execWideNoStatementCursor
+	// rather than by the thin walk. That reading had no recording in this corpus
+	// at all until sqlplus_refcursor.pcapng landed — it was pinned against the
+	// `oci_refcursor_drives.hex` fixture pair alone — so this is the line that
+	// makes a regression in it fail here. Two rather than three because sqlplus
+	// drives the cursor the script asks it to print, and the script prints twice.
 	assert.Equal(t, map[string]int{
 		"ojdbc6_legacy.pcapng":         1,
 		"go_ora_refcursor.pcapng":      3,
 		"jdbc_thin_refcursor.pcapng":   3,
 		"python_thin_refcursor.pcapng": 5,
+		"sqlplus_refcursor.pcapng":     2,
 	}, reexecs, "only these recordings carry an execute that declares no statement")
 }
 

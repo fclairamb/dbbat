@@ -370,14 +370,27 @@ func TestCapture_JDBCThinRefCursor(t *testing.T) {
 	t.Logf("capture written to %s (%d drives)", outPath, refCursorDrives)
 }
 
-// The OCI evidence is kept as hex fixtures rather than as recordings on
-// purpose. `testdata/*.pcapng` is a corpus several whole-corpus surveys
-// enumerate, and sqlplus's PL/SQL call carries an exec frame the exact
-// statement locator cannot certify — a finding of its own, filed separately,
-// and not something to fold in by lowering a survey's floor. The bytes these
-// tests actually need are the bind-output responses and the client frame that
-// follows each, so those are what is kept. The paths themselves, and why there
-// are two sets of them, are in oci_fixture_capture_test.go.
+// The OCI evidence is kept as hex fixtures **as well as** a recording, and the
+// two are different things rather than one of them being redundant.
+//
+// The fixtures are a distillation — one line per call response, the drive that
+// follows each picked by position — which is what lets the ids be spelled out
+// and pinned. The recording is the whole session, and what it buys is the
+// corpus sweeps: the exact statement locator's 100% floor, the SQL-less
+// execute census, the REF-cursor silence sweep. Those enumerate
+// `testdata/*.pcapng` and nothing else, so until a recording landed there the
+// OCI wide dialect was absent from every one of them.
+//
+// It used to be absent on purpose: the 4-byte session was believed to carry an
+// exec frame the exact statement locator could not certify, which would have
+// lowered that floor. It does not. The refused frames were the two `PRINT rc`
+// drives, which declare no statement at all and which
+// execWideNoStatementCursor now classifies as such; the PL/SQL call itself
+// locates as `wide-ub4/clr-short` like every other sqlplus statement. See
+// specs/todos/2026-09-19-07-oracle-statement-locator-misses-the-oci-plsql-call.md.
+//
+// The paths themselves, and why there are two sets of them, are in
+// oci_fixture_capture_test.go.
 
 // ociCaptureContainerEnv names the running Oracle container a `container`
 // capture execs into — the one the file header tells you to start.
@@ -596,10 +609,21 @@ func runSQLPlusCapture(t *testing.T, client *ociCaptureClient, sessionID, script
 	return outPath
 }
 
+// ociRefCursorCorpusDump is where the 4-byte OCI recording is kept as an
+// ordinary corpus fixture, next to its thin-client twins. It is written only
+// for that dialect: the whole-corpus sweeps read `testdata/*.pcapng` with the
+// 4-byte reading, so a 64-bit recording filed here would be walked as something
+// it is not.
+const ociRefCursorCorpusDump = "testdata/sqlplus_refcursor.pcapng"
+
 // TestCapture_SQLPlusRefCursor records sqlplus (OCI thick) driving the same
 // procedure and writes its call responses to the fixture pair of whichever OCI
 // dialect the recording turns out to hold, so the fixture set covers both
 // fixed-width encodings. Skipped when no sqlplus can be reached.
+//
+// The 4-byte run also keeps the recording itself, as
+// testdata/sqlplus_refcursor.pcapng — see the fixture note above for what the
+// recording buys that the distilled fixtures cannot.
 func TestCapture_SQLPlusRefCursor(t *testing.T) {
 	client := sqlplusCaptureClient(t)
 
@@ -623,9 +647,24 @@ EXIT
 	bindOutputs, drives := ociRefCursorBindOutputFixture, ociRefCursorDrivesFixture
 	if recordedDialectIsWide64(t, outPath) {
 		bindOutputs, drives = oci64RefCursorBindOutputFixture, oci64RefCursorDrivesFixture
+	} else {
+		// Copied only after requireRecordedDialect has passed, so a recording
+		// that turned out to hold the other dialect never reaches the corpus.
+		copyCaptureToCorpus(t, outPath, ociRefCursorCorpusDump)
 	}
 
 	writeBindOutputHexFixture(t, outPath, bindOutputs, drives)
+}
+
+// copyCaptureToCorpus files a scratch recording as a tracked corpus fixture.
+func copyCaptureToCorpus(t *testing.T, from, to string) {
+	t.Helper()
+
+	data, err := os.ReadFile(from) //nolint:gosec // a path this test just wrote
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(to, data, 0o600))
+
+	t.Logf("recording filed as %s (%d bytes)", to, len(data))
 }
 
 // TestCapture_SQLPlusScalarOutBinds records sqlplus calling a procedure with

@@ -25,13 +25,14 @@ const (
 	goOraRefCursorDump      = "go_ora_refcursor.pcapng"
 	pythonThinRefCursorDump = "python_thin_refcursor.pcapng"
 	jdbcThinRefCursorDump   = "jdbc_thin_refcursor.pcapng"
+	ociRefCursorDump        = "sqlplus_refcursor.pcapng"
 )
 
 // ociRefCursorBindOutputs is the OCI half of the same session, kept as a hex
-// fixture of the two call responses rather than as a recording: sqlplus's PL/SQL
-// call also carries an exec frame the exact statement locator cannot certify,
-// which is a finding of its own and not one to fold into `testdata/*.pcapng` —
-// a corpus several whole-corpus surveys enumerate and hold to 100%.
+// fixture of the two call responses so the pairing below can be pinned by
+// position — the recording it was distilled from is ociRefCursorDump, and the
+// two are separate sessions with separate cursor ids on purpose: one is audited
+// evidence, the other is regenerated whole.
 //
 // ociRefCursorDrives is the client frame that follows each of them, recorded in
 // the same session and selected by position. See capture_refcursor_test.go.
@@ -257,6 +258,80 @@ func TestDumpReplay_OCIRefCursorIDsMatchTheCursorsTheClientDrives(t *testing.T) 
 			"fixed-width field was located correctly rather than merely decoded consistently")
 }
 
+// TestDumpReplay_OCIRefCursorPairingHoldsOnTheWholeRecording is the check above
+// run on the **recording** rather than on the two frames distilled out of one.
+//
+// The distillation is what makes the fixture pair pinnable — one line per call
+// response, the drive that follows each picked by position — but it is also a
+// hand-selection, and a hand-selection cannot say that nothing *else* in the
+// session produced an id or a drive. Here the whole session is walked in wire
+// order, both halves, and the two sequences must be the same sequence.
+//
+// The ids are deliberately not spelled out: this recording is regenerated whole
+// (TestCapture_SQLPlusRefCursor writes it), and the server hands out whatever
+// cursor ids it likes. What must not change is that they agree.
+func TestDumpReplay_OCIRefCursorPairingHoldsOnTheWholeRecording(t *testing.T) {
+	t.Parallel()
+
+	learned := make([]uint16, 0, refCursorDrivesInOCIRecording)
+
+	for _, ttc := range serverTTCPayloads(t, ociRefCursorDump) {
+		learned = append(learned, refCursorIDsInBindOutput(ociOERShape(), ttc)...)
+	}
+
+	driven := make([]uint16, 0, refCursorDrivesInOCIRecording)
+
+	for _, ttc := range clientTTCPayloads(t, ociRefCursorDump) {
+		if body, ok := ociSQLLessWideExec(ttc); ok {
+			driven = append(driven, ociDrivenCursorID(t, body))
+		}
+	}
+
+	require.Len(t, learned, refCursorDrivesInOCIRecording,
+		"the script calls the procedure twice, so two cursors are handed back: got %v", learned)
+	assert.Equal(t, learned, driven,
+		"every id sqlplus is handed in a bind-output is the id it then drives, in that order")
+}
+
+// refCursorDrivesInOCIRecording is how many times the sqlplus script calls the
+// procedure — two `BEGIN dbbat_cap_refcur(:rc); END;` / `PRINT rc` pairs, see
+// TestCapture_SQLPlusRefCursor.
+const refCursorDrivesInOCIRecording = 2
+
+// ociSQLLessWideExec reports whether a client frame is an OCI wide execute
+// carrying **no statement** — the `PRINT rc` shape — and returns the exec op's
+// own body.
+//
+// It is hand-walked for the same reason ociDrivenCursorID is: this is the
+// witness execWideNoStatementCursor is checked against, so selecting the frames
+// with that function would make the comparison compare a function to itself.
+// The test here is the one the parse path uses in the other direction — a
+// statement-carrying wide exec writes the `fe x8` pointer sentinel, and a
+// SQL-less one writes zeros there.
+func ociSQLLessWideExec(ttc []byte) ([]byte, bool) {
+	body := ttc
+
+	if end, ok := closeCursorsEnd(ttc); ok && end < len(ttc) {
+		body = ttc[end:]
+	}
+
+	if !isPiggybackExecHeader(body) || len(body) < execWideSQLLenAt {
+		return nil, false
+	}
+
+	if body[3] != closeCursorsPointer || body[4] != body[2]+1 {
+		return nil, false
+	}
+
+	for i := range closeCursorsWideSentinel {
+		if body[execWideSentinelAt+i] != 0 {
+			return nil, false
+		}
+	}
+
+	return body, true
+}
+
 // TestRefCursorBindOutputIsReadInTheSessionsOwnEncodingOnly is the gate, from
 // both sides.
 //
@@ -285,7 +360,7 @@ func TestRefCursorBindOutputIsReadInTheSessionsOwnEncodingOnly(t *testing.T) {
 	// And not just on the one hand-kept descriptor: the three thin REF-cursor
 	// recordings are the densest source of bind-output blocks in the corpus, and
 	// the fixed-width reading must find nothing in any of them either.
-	for name := range refCursorDumps {
+	for name := range thinRefCursorDumps {
 		for _, ttc := range serverTTCPayloads(t, name) {
 			assert.Emptyf(t, refCursorIDsInBindOutput(ociOERShape(), ttc),
 				"%s: a thin client's REF cursor must not decode under the fixed-width reading", name)
@@ -320,13 +395,28 @@ func TestOCIScalarOutBindsYieldNoRefCursorID(t *testing.T) {
 	}
 }
 
+// thinRefCursorDumps are the REF-cursor recordings whose cursor rides the
+// **compressed** encoding. They are the ones the cross-encoding check sweeps:
+// none of them may decode under the fixed-width reading.
+var thinRefCursorDumps = map[string]bool{
+	goOraRefCursorDump:      true,
+	pythonThinRefCursorDump: true,
+	jdbcThinRefCursorDump:   true,
+}
+
 // refCursorDumps are the only recordings in the corpus that hold a REF cursor.
 // Everything else must be silent, which is what the sweep below turns into an
 // assertion rather than a list.
+//
+// The OCI one is the odd member and is kept apart from thinRefCursorDumps for
+// exactly that reason: its cursor really does decode under the fixed-width
+// reading, so it is excused from the silence sweep but must not be fed to the
+// cross-encoding one, which asserts the opposite.
 var refCursorDumps = map[string]bool{
 	goOraRefCursorDump:      true,
 	pythonThinRefCursorDump: true,
 	jdbcThinRefCursorDump:   true,
+	ociRefCursorDump:        true,
 }
 
 // TestDumpReplay_RefCursorLocatorIsSilentOnOrdinaryTraffic is the false-positive
