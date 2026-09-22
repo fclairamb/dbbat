@@ -196,6 +196,12 @@ jobs:
       - name: Vet integration-tagged build
         run: go vet -tags integration ./...
 
+      # The capture harness needs a live Oracle container and is only ever run
+      # by hand, so the same rot applies — and it is the file group holding the
+      # guard that decides which dialect's fixtures a run may overwrite.
+      - name: Vet capture-tagged build
+        run: go vet -tags capture ./...
+
       - name: Upload coverage
         uses: codecov/codecov-action@v7.1.1
         with:
