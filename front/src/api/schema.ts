@@ -1964,6 +1964,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/servers/{uid}/references": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What an edit to this server row would move (admin only)
+         * @description Returns the blast radius of editing this server's target: the live
+         *     grants that would reach the *new* host / port / database name on the
+         *     next connect, and the server groups whose scope carries the row along.
+         *
+         *     Editing a server re-points existing access rather than re-issuing it —
+         *     nothing is approved again, the same way adding a server to a server
+         *     group widens every grant bound to that group. This endpoint is what
+         *     lets a client warn before the `PUT`, not after.
+         *
+         *     `active_grants` counts grants anchored on this server **or** bound to a
+         *     server group that currently holds it, under the same liveness predicate
+         *     the proxy's auth path uses. Sessions already open are unaffected: they
+         *     stay on the upstream they dialed.
+         */
+        get: operations["getServerReferences"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ssh-servers": {
         parameters: {
             query?: never;
@@ -2120,7 +2152,7 @@ export interface paths {
         get?: never;
         /**
          * Update instance-wide statement tagging
-         * @description Writes the `tagging.*` parameter group. Admin-only. `enabled` is a boolean, so the store always ends up holding an explicit choice — "false" overrides a `DBB_QUERY_TAGGING` default of true. An empty `oracle` clears the parameter, falling back to DBB_QUERY_TAGGING_ORACLE. An unrecognised `oracle` is a 400 here, never a stored value: through the environment variable the same mistake is a startup failure, and a settings write that would crash every replica on restart is a worse trade. Sessions already running keep the decision they authenticated under; the change reaches new sessions.
+         * @description Writes the `tagging.*` parameter group. Admin-only. `enabled` is a boolean, so the store always ends up holding an explicit choice — "false" overrides a `DBB_QUERY_TAGGING` default of true. An empty `oracle` clears the parameter, falling back to DBB_QUERY_TAGGING_ORACLE. An unrecognized `oracle` is a 400 here, never a stored value: through the environment variable the same mistake is a startup failure, and a settings write that would crash every replica on restart is a worse trade. Sessions already running keep the decision they authenticated under; the change reaches new sessions.
          */
         put: operations["updateInstanceTagging"];
         post?: never;
@@ -2770,7 +2802,7 @@ export interface components {
             /** @description SSL mode */
             ssl_mode?: string;
             /**
-             * @description Server protocol
+             * @description Server protocol. Changing it is refused with **409** once any grant or connection references the row: every other field is a correction, but a row that was PostgreSQL and is now Oracle is a different server, and the grants, sessions and query chains already hanging off its uid would silently re-label themselves as having been against that other thing. A pristine row (never granted, never connected to) may still change protocol, so a create-dialog typo stays a one-click fix. The admin UI's edit form omits the field entirely.
              * @enum {string}
              */
             protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh" | "kubernetes";
@@ -4294,7 +4326,7 @@ export interface components {
              */
             oracle: "off" | "user";
             /**
-             * @description Where the effective mode came from: `parameter` when the store parameter is set (including one the resolver folded to `off` because it was not recognised), `env` when DBB_QUERY_TAGGING_ORACLE supplies it, empty when neither is configured.
+             * @description Where the effective mode came from: `parameter` when the store parameter is set (including one the resolver folded to `off` because it was not recognized), `env` when DBB_QUERY_TAGGING_ORACLE supplies it, empty when neither is configured.
              * @enum {string}
              */
             oracle_source: "" | "parameter" | "env";
@@ -7358,6 +7390,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConnectionTestResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getServerReferences: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reference counts for the server */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /**
+                         * Format: int64
+                         * @description Live grants that would reach the new target on next connect.
+                         */
+                        active_grants?: number;
+                        /**
+                         * Format: int64
+                         * @description Server groups this row belongs to.
+                         */
+                        server_groups?: number;
+                    };
                 };
             };
             400: components["responses"]["BadRequest"];

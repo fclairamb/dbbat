@@ -566,3 +566,160 @@ test.describe("Servers Management", () => {
     await expect(sshSection.getByText(after)).toBeVisible({ timeout: 10000 });
   });
 });
+
+// A database row's connection details — host, port, the upstream database
+// name, credentials, SSL mode, tunnel — used to be editable nowhere in this
+// UI, so correcting a typo meant deleting and re-creating the row, which
+// drops its grants, its session ledger and its query chains.
+test.describe("Database row editing", () => {
+  const API_BASE = "http://localhost:8080/api/v1";
+
+  test("editing the host warns about the blast radius and saves", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const name = `e2e_edit_host_${Date.now()}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("localhost");
+    await authenticatedPage.locator("#databaseName").fill("postgres");
+    await authenticatedPage.locator("#username").fill("postgres");
+    await authenticatedPage.locator("#password").fill("postgres");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = authenticatedPage.locator("tr", { hasText: name }).first();
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    await row.locator('[data-testid^="database-edit-"]').click();
+
+    const dialog = authenticatedPage.getByTestId("database-edit-dialog");
+    await expect(dialog).toBeVisible();
+
+    // The protocol is deliberately not a field here: it is the one edit that
+    // makes the row a different server, and the API refuses it with a 409
+    // once anything references the row.
+    await expect(dialog.locator("#edit-db-protocol")).toHaveCount(0);
+
+    // Seeded from the row, and nothing has moved yet.
+    await expect(
+      authenticatedPage.getByTestId("database-edit-host-input")
+    ).toHaveValue("localhost");
+    await expect(
+      authenticatedPage.getByTestId("database-edit-target-warning")
+    ).toHaveCount(0);
+
+    await authenticatedPage
+      .getByTestId("database-edit-host-input")
+      .fill("127.0.0.2");
+
+    // Moving the target says what follows it, and counts what follows it.
+    const warning = authenticatedPage.getByTestId(
+      "database-edit-target-warning"
+    );
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText(/moves where the row points/i);
+    await expect(
+      authenticatedPage.getByTestId("database-edit-target-counts")
+    ).toContainText(/reference this row/i, { timeout: 10000 });
+
+    await authenticatedPage.getByTestId("database-edit-submit").click();
+    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+
+    // Re-read the row: the edit landed, and the name is untouched.
+    await authenticatedPage.reload();
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const saved = authenticatedPage.locator("tr", { hasText: name }).first();
+    await expect(saved).toBeVisible({ timeout: 10000 });
+    await expect(saved).toContainText("127.0.0.2");
+
+    await saved.locator('[data-testid^="database-edit-"]').click();
+    await expect(
+      authenticatedPage.getByTestId("database-edit-host-input")
+    ).toHaveValue("127.0.0.2");
+  });
+
+  test("a rename-free edit leaves name out of the audit details", async ({
+    authenticatedPage,
+    request,
+  }) => {
+    const login = await request.post(`${API_BASE}/auth/login`, {
+      data: { username: "admin", password: "admintest" },
+    });
+    expect(login.status()).toBe(200);
+    const { token } = await login.json();
+    const auth = { Authorization: `Bearer ${token}` };
+
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const name = `e2e_edit_audit_${Date.now()}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("localhost");
+    await authenticatedPage.locator("#databaseName").fill("postgres");
+    await authenticatedPage.locator("#username").fill("postgres");
+    await authenticatedPage.locator("#password").fill("postgres");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = authenticatedPage.locator("tr", { hasText: name }).first();
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    await row.locator('[data-testid^="database-edit-"]').click();
+    await expect(
+      authenticatedPage.getByTestId("database-edit-dialog")
+    ).toBeVisible();
+
+    // One field, and a password rotation: the form sends exactly those two.
+    await authenticatedPage
+      .getByTestId("database-edit-description-input")
+      .fill("edited by e2e");
+    await authenticatedPage
+      .getByTestId("database-edit-password-input")
+      .fill("rotated-secret");
+    await authenticatedPage.getByTestId("database-edit-submit").click();
+    await expect(
+      authenticatedPage.getByTestId("database-edit-dialog")
+    ).not.toBeVisible({ timeout: 10000 });
+
+    const servers = await request.get(`${API_BASE}/servers`, {
+      headers: auth,
+    });
+    expect(servers.status()).toBe(200);
+    const uid = (await servers.json()).databases.find(
+      (db: { name: string; uid: string }) => db.name === name
+    ).uid;
+
+    const audit = await request.get(
+      `${API_BASE}/audit?event_type=database.updated&limit=50`,
+      { headers: auth }
+    );
+    expect(audit.status()).toBe(200);
+    const entries: { details: Record<string, unknown> }[] = (
+      await audit.json()
+    ).audit_events;
+
+    const mine = entries.find(
+      (entry) =>
+        (entry.details as { database_uid?: string }).database_uid === uid
+    );
+    expect(mine).toBeTruthy();
+
+    const fields = (mine!.details as { updated_fields: Record<string, unknown> })
+      .updated_fields;
+
+    expect(fields.description).toBe("edited by e2e");
+    expect(fields.password_changed).toBe(true);
+    // The whole point of diffing before the PUT: a rename-free edit says
+    // nothing about the name, and an untouched host says nothing about the
+    // host.
+    expect(fields).not.toHaveProperty("name");
+    expect(fields).not.toHaveProperty("host");
+    // And the secret is never the value.
+    expect(JSON.stringify(mine!.details)).not.toContain("rotated-secret");
+  });
+});

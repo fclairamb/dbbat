@@ -8,10 +8,13 @@ import {
   useDeleteDatabase,
   useTunnelServers,
   useTestServerConnection,
+  useServerReferences,
   type ConnectionTestResult,
   type Database,
   type DatabaseLimited,
   type OracleServiceNameConflict,
+  type ServerReferences,
+  type UpdateDatabaseRequest,
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -54,10 +57,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Plus,
   Trash2,
   Pencil,
+  Tag,
   ShieldCheck,
   AlertCircle,
   AlertTriangle,
@@ -277,6 +282,7 @@ function ServersPage() {
   const [editSshServer, setEditSshServer] = useState<Database | null>(null);
   const [approversDb, setApproversDb] = useState<Database | null>(null);
   const [renameDb, setRenameDb] = useState<DatabaseItem | null>(null);
+  const [editDb, setEditDb] = useState<Database | null>(null);
 
   const canCreate = canCreateDatabase(user?.roles);
   const canDelete = canDeleteDatabase(user?.roles);
@@ -520,9 +526,27 @@ function ServersPage() {
               disabledReason={getDisabledReason("update-database", user?.roles)}
             />
           )}
-          {/* Renaming is the one edit a database row has always been missing:
-              the name is the connection target, and correcting a bad one used
-              to mean an UPDATE against the storage database. */}
+          {/* Correcting where the row points — host, port, credentials, SSL
+              mode, tunnel — without the delete-and-recreate that would drop
+              its grants, its session ledger and its query chains. */}
+          {canUpdate && isFullDatabase(db) && (
+            <PermissionButton
+              data-testid={`database-edit-${db.uid}`}
+              variant="ghost"
+              size="icon"
+              disabled={!canUpdate}
+              disabledReason={getDisabledReason("update-database", user?.roles)}
+              enabledTooltip="Edit this server's connection details"
+              onClick={(e) => {
+                e.stopPropagation();
+                setEditDb(db);
+              }}
+            >
+              <Pencil className="h-4 w-4" />
+            </PermissionButton>
+          )}
+          {/* The rename keeps a button of its own: the name is what every
+              client types, so the edit carries a warning the others do not. */}
           <PermissionButton
             data-testid={`database-rename-${db.uid}`}
             variant="ghost"
@@ -535,7 +559,7 @@ function ServersPage() {
               setRenameDb(db);
             }}
           >
-            <Pencil className="h-4 w-4" />
+            <Tag className="h-4 w-4" />
           </PermissionButton>
           {canUpdate && isFullDatabase(db) && (
             <Button
@@ -566,7 +590,7 @@ function ServersPage() {
           </PermissionButton>
         </div>
       ),
-      className: "w-20",
+      className: "w-28",
     },
   ];
 
@@ -644,6 +668,7 @@ function ServersPage() {
         onClose={() => setApproversDb(null)}
       />
       <RenameServerDialog server={renameDb} onClose={() => setRenameDb(null)} />
+      <EditDatabaseDialog server={editDb} onClose={() => setEditDb(null)} />
     </div>
   );
 }
@@ -1525,11 +1550,10 @@ function DeleteDatabaseDialog({
 /**
  * Renaming one database row.
  *
- * A dialog of its own rather than a field in a general edit form, because
- * database rows have no general edit form in this UI — and because a rename is
- * not an edit like the others: it changes what clients type, so it deserves the
- * warning to itself. Tunnel rows get the same field inside their existing edit
- * form (EditSSHServerForm) instead.
+ * A dialog of its own rather than a field in the general edit form next to it,
+ * because a rename is not an edit like the others: it changes what clients
+ * type, so it deserves the warning to itself. Tunnel rows get the same field
+ * inside their existing edit form (EditSSHServerForm) instead.
  */
 function RenameServerDialog({
   server,
@@ -1603,6 +1627,399 @@ function RenameServerForm({
             disabled={renameServer.isPending || name === server.name}
           >
             Rename
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  );
+}
+
+/**
+ * Editing one database row's connection details.
+ *
+ * The counterpart of EditSSHServerForm, which tunnel rows have had all along.
+ * Every field here is a *correction* — a host that moved, a port that changed,
+ * a password that rotated — and correcting one used to mean either an UPDATE
+ * against the storage database or the far worse workaround, delete and
+ * re-create, which drops the grants, the session ledger and the query chains
+ * hanging off the row.
+ *
+ * Two fields are deliberately absent:
+ *
+ *   - `name`, which lives in RenameServerDialog: it changes what every client
+ *     types, so it carries a warning of its own rather than sharing this one.
+ *   - `protocol`, which is the single edit that genuinely makes the row a
+ *     *different server*. The API refuses it with a 409 once any grant or
+ *     connection references the row, so this is not the UI hiding something
+ *     the API allows — it is the same invariant, stated twice.
+ */
+function EditDatabaseDialog({
+  server,
+  onClose,
+}: {
+  server: Database | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={!!server} onOpenChange={() => onClose()}>
+      {/* Keyed on the UID so every field re-seeds from the row that was
+          opened, the same trick EditSSHServerDialog uses. */}
+      {server && (
+        <EditDatabaseForm key={server.uid} server={server} onClose={onClose} />
+      )}
+    </Dialog>
+  );
+}
+
+/**
+ * TargetMoveWarning is the blast radius of re-pointing a row.
+ *
+ * Editing host, port or the database/service name does not re-issue anything:
+ * every grant already covering the row keeps covering it and simply reaches
+ * whatever was typed, on the next connect, with no approval in between. That
+ * is the same trade the project already took for live server-group membership,
+ * and the answer is the same — say so at the point of edit rather than making
+ * the row immutable.
+ */
+function TargetMoveWarning({
+  references,
+  isLoading,
+}: {
+  references?: ServerReferences;
+  isLoading: boolean;
+}) {
+  return (
+    <Alert data-testid="database-edit-target-warning">
+      <AlertTriangle className="h-4 w-4" />
+      <AlertDescription className="text-xs space-y-1">
+        <p>
+          <strong>This moves where the row points.</strong> Nothing is
+          re-issued: every grant already covering this server reaches the new
+          target on the next connect. Sessions already open stay on the
+          upstream they dialed.
+        </p>
+        {isLoading ? (
+          <p className="text-muted-foreground">Counting what follows…</p>
+        ) : (
+          references && (
+            <p data-testid="database-edit-target-counts">
+              {references.active_grants} active{" "}
+              {references.active_grants === 1 ? "grant" : "grants"} and{" "}
+              {references.server_groups}{" "}
+              {references.server_groups === 1
+                ? "server group"
+                : "server groups"}{" "}
+              reference this row.
+            </p>
+          )
+        )}
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function EditDatabaseForm({
+  server,
+  onClose,
+}: {
+  server: Database;
+  onClose: () => void;
+}) {
+  const isOracle = server.protocol === "oracle";
+  const isMongo = server.protocol === "mongodb";
+
+  // The one name that identifies the upstream schema for this protocol. Oracle
+  // keeps it in oracle_service_name; every other protocol in database_name.
+  const originalTargetName =
+    (isOracle ? server.oracle_service_name : server.database_name) || "";
+
+  const [description, setDescription] = useState(server.description || "");
+  const [host, setHost] = useState(server.host || "");
+  const [port, setPort] = useState(String(server.port ?? ""));
+  const [targetName, setTargetName] = useState(originalTargetName);
+  const [mongoAuthSource, setMongoAuthSource] = useState(
+    server.mongo_auth_source || "",
+  );
+  const [username, setUsername] = useState(server.username || "");
+  const [password, setPassword] = useState("");
+  const [sslMode, setSslMode] = useState(server.ssl_mode || "prefer");
+  const [listable, setListable] = useState(server.listable ?? true);
+  const [viaUid, setViaUid] = useState(server.via_uid || "");
+  const [testAfterSave, setTestAfterSave] = useState(false);
+
+  const { data: tunnelServers } = useTunnelServers();
+
+  // Only host/port/target-name move the *target*; a description or a listable
+  // toggle moves nothing, so they raise no warning.
+  const targetMoved =
+    host !== (server.host || "") ||
+    port !== String(server.port ?? "") ||
+    targetName !== originalTargetName;
+
+  // Fetched only once the form says something moved: an admin opening the
+  // dialog to fix a typo in the description should not cost a query.
+  const { data: references, isLoading: referencesLoading } =
+    useServerReferences(server.uid, targetMoved);
+
+  const updateServer = useUpdateDatabase(server.uid, {
+    onSuccess: (test) => {
+      toast.success(`"${server.name}" updated`);
+
+      if (test) {
+        reportTestWarnings(test);
+
+        if (test.ok) {
+          toast.success(test.message ?? "Connection OK");
+        } else {
+          toast.error(describeTestResult(test));
+        }
+      }
+
+      onClose();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+
+    // Only what actually changed goes on the wire, so the `database.updated`
+    // audit entry reads as the edit that was made rather than a dump of every
+    // field the form happens to render.
+    const update: UpdateDatabaseRequest = { test_connection: testAfterSave };
+
+    if (description !== (server.description || "")) {
+      update.description = description;
+    }
+    if (host !== (server.host || "")) {
+      update.host = host;
+    }
+    if (port !== String(server.port ?? "")) {
+      update.port = parseInt(port, 10);
+    }
+    if (targetName !== originalTargetName) {
+      // Oracle carries the same value in both columns — the create dialog
+      // writes them together, so an edit keeps them in step.
+      update.database_name = targetName;
+      if (isOracle) {
+        update.oracle_service_name = targetName;
+      }
+    }
+    if (isMongo && mongoAuthSource !== (server.mongo_auth_source || "")) {
+      update.mongo_auth_source = mongoAuthSource;
+    }
+    if (username !== (server.username || "")) {
+      update.username = username;
+    }
+    // Blank means "keep the stored password", exactly like the SSH secrets.
+    if (password) {
+      update.password = password;
+    }
+    if (!isOracle && sslMode !== (server.ssl_mode || "prefer")) {
+      update.ssl_mode = sslMode;
+    }
+    if (listable !== (server.listable ?? true)) {
+      update.listable = listable;
+    }
+    if (viaUid !== (server.via_uid || "")) {
+      if (viaUid) {
+        update.via_uid = viaUid;
+      } else {
+        // Distinct from an omitted via_uid, which would leave the tunnel alone.
+        update.clear_via_uid = true;
+      }
+    }
+
+    updateServer.mutate(update);
+  };
+
+  return (
+    <DialogContent data-testid="database-edit-dialog" className="max-w-md">
+      <form onSubmit={handleSubmit}>
+        <DialogHeader>
+          <DialogTitle>Edit server</DialogTitle>
+          <DialogDescription>
+            Correct "{server.name}"'s connection details. Its grants, history
+            and query chains stay with it. The name is changed from the rename
+            dialog, and the protocol cannot change once the row has been used.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
+          <div className="space-y-2">
+            <Label htmlFor="edit-db-description">Description</Label>
+            <Input
+              id="edit-db-description"
+              data-testid="database-edit-description-input"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <div className="col-span-2 space-y-2">
+              <Label htmlFor="edit-db-host">Host</Label>
+              <Input
+                id="edit-db-host"
+                data-testid="database-edit-host-input"
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-db-port">Port</Label>
+              <Input
+                id="edit-db-port"
+                data-testid="database-edit-port-input"
+                type="number"
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+                required
+              />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="edit-db-target">
+              {isOracle ? "Service Name" : "Database Name"}
+            </Label>
+            <Input
+              id="edit-db-target"
+              data-testid="database-edit-target-input"
+              value={targetName}
+              onChange={(e) => setTargetName(e.target.value)}
+              required
+            />
+            <p className="text-xs text-muted-foreground">
+              The name on the <em>upstream</em> server. What clients type is
+              this row&apos;s name ("{server.name}"), which the rename dialog
+              owns.
+            </p>
+          </div>
+          {targetMoved && (
+            <TargetMoveWarning
+              references={references}
+              isLoading={referencesLoading}
+            />
+          )}
+          {isMongo && (
+            <div className="space-y-2">
+              <Label htmlFor="edit-db-mongo-auth-source">Auth Source</Label>
+              <Input
+                id="edit-db-mongo-auth-source"
+                data-testid="database-edit-mongo-auth-source-input"
+                value={mongoAuthSource}
+                onChange={(e) => setMongoAuthSource(e.target.value)}
+                placeholder="admin"
+              />
+              <p className="text-xs text-muted-foreground">
+                Upstream MongoDB database where the proxy user&apos;s
+                credentials live. Blank defaults to{" "}
+                <code className="font-mono">admin</code>.
+              </p>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label htmlFor="edit-db-username">Username</Label>
+            <Input
+              id="edit-db-username"
+              data-testid="database-edit-username-input"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="edit-db-password">
+              Password (leave blank to keep unchanged)
+            </Label>
+            <Input
+              id="edit-db-password"
+              data-testid="database-edit-password-input"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          {!isOracle && (
+            <div className="space-y-2">
+              <Label htmlFor="edit-db-ssl-mode">SSL Mode</Label>
+              <Select value={sslMode} onValueChange={setSslMode}>
+                <SelectTrigger data-testid="database-edit-ssl-mode-select">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="disable">Disable</SelectItem>
+                  <SelectItem value="prefer">Prefer</SelectItem>
+                  <SelectItem value="require">Require</SelectItem>
+                  <SelectItem value="verify-ca">Verify CA</SelectItem>
+                  <SelectItem value="verify-full">Verify Full</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label htmlFor="edit-db-via">Via tunnel server</Label>
+            <Select
+              value={viaUid || "none"}
+              onValueChange={(v) => setViaUid(v === "none" ? "" : v)}
+            >
+              <SelectTrigger data-testid="database-edit-via-select">
+                <SelectValue placeholder="Direct (no tunnel)" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">Direct (no tunnel)</SelectItem>
+                {(tunnelServers ?? []).map((srv) => (
+                  <SelectItem key={srv.uid} value={srv.uid}>
+                    {srv.name} (
+                    {PROTOCOL_LABEL[srv.protocol as Protocol] ?? srv.protocol})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center justify-between rounded-lg border p-3">
+            <div className="space-y-0.5">
+              <Label htmlFor="edit-db-listable">Listable</Label>
+              <p className="text-sm text-muted-foreground">
+                Show in the access-request dropdown for non-admin users
+              </p>
+            </div>
+            <Switch
+              id="edit-db-listable"
+              data-testid="database-edit-listable-switch"
+              checked={listable}
+              onCheckedChange={setListable}
+            />
+          </div>
+          {/* The check runs against the row *as saved*, which is the only
+              version worth checking — hence a flag on the PUT rather than a
+              second call the admin has to remember to make. */}
+          <div className="flex items-center gap-2 rounded-lg border p-3">
+            <Checkbox
+              id="edit-db-test-after-save"
+              data-testid="database-edit-test-after-save"
+              checked={testAfterSave}
+              onCheckedChange={(checked) => setTestAfterSave(checked === true)}
+            />
+            <Label
+              htmlFor="edit-db-test-after-save"
+              className="text-sm font-normal"
+            >
+              Test the connection after saving
+            </Label>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            data-testid="database-edit-submit"
+            disabled={updateServer.isPending}
+          >
+            Save
           </Button>
         </DialogFooter>
       </form>

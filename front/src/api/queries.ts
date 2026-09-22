@@ -61,6 +61,15 @@ export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
 export type ConnectionTestResult =
   components["schemas"]["ConnectionTestResult"];
 /**
+ * The blast radius of editing one server row's target, as
+ * `GET /servers/{uid}/references` reports it. Both numbers describe what
+ * follows the edit with no re-issue and no approval.
+ */
+export type ServerReferences = {
+  active_grants: number;
+  server_groups: number;
+};
+/**
  * The warning an Oracle row carries when its upstream `oracle_service_name` is
  * also claimed by rows pointing at a different `host:port`. Each such row works
  * on its own; a client connecting with the shared service name is refused
@@ -321,14 +330,23 @@ export function useCreateDatabase(options?: {
 export function useUpdateDatabase(
   uid: string,
   options?: {
-    onSuccess?: () => void;
+    /**
+     * `test` is the inline connectivity check the PUT ran, present only when
+     * the request set `test_connection`. The API returns it alongside the
+     * message rather than making the caller follow up with POST
+     * /servers/{uid}/test, so "save and check it still works" is one round
+     * trip against the row as saved.
+     */
+    onSuccess?: (test?: ConnectionTestResult) => void;
     onError?: (error: Error) => void;
   }
 ) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (data: UpdateDatabaseRequest): Promise<void> => {
+    mutationFn: async (
+      data: UpdateDatabaseRequest
+    ): Promise<ConnectionTestResult | undefined> => {
       const response = await apiClient.PUT("/servers/{uid}", {
         params: { path: { uid } },
         body: data,
@@ -336,15 +354,51 @@ export function useUpdateDatabase(
       if (response.error) {
         throw new Error(response.error.message || "Failed to update database");
       }
+      return (
+        response.data as { connection_test?: ConnectionTestResult } | undefined
+      )?.connection_test;
     },
-    onSuccess: () => {
+    onSuccess: (test) => {
       queryClient.invalidateQueries({ queryKey: ["databases"] });
       queryClient.invalidateQueries({ queryKey: ["databases", uid] });
       queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
       queryClient.invalidateQueries({ queryKey: ["tunnel-servers"] });
-      options?.onSuccess?.();
+      queryClient.invalidateQueries({ queryKey: ["server-references", uid] });
+      options?.onSuccess?.(test);
     },
     onError: options?.onError,
+  });
+}
+
+/**
+ * What an edit to this server row would move: the live grants that will reach
+ * the new host/port/database name on the next connect, and the server groups
+ * carrying the row along.
+ *
+ * Read *before* the save, which is the whole point — editing a server
+ * re-points existing access rather than re-issuing it, exactly the way adding
+ * a server to a server group widens every grant bound to that group. Admin-only
+ * on the API, so `enabled` gates it off for everyone else rather than letting
+ * the UI collect 403s.
+ */
+export function useServerReferences(uid: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["server-references", uid],
+    enabled: enabled && !!uid,
+    queryFn: async (): Promise<ServerReferences> => {
+      const response = await apiClient.GET("/servers/{uid}/references", {
+        params: { path: { uid: uid as string } },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to load the server's references"
+        );
+      }
+      return {
+        active_grants: response.data?.active_grants ?? 0,
+        server_groups: response.data?.server_groups ?? 0,
+      };
+    },
   });
 }
 
