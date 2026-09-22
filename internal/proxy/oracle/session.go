@@ -324,8 +324,10 @@ type session struct {
 	oerSeq        int
 	oerCallNumber byte
 
-	// statementTaggingEnabled is DBB_QUERY_TAGGING_ORACLE=user, resolved at
-	// startup and stamped on the session by the server.
+	// statementTaggingEnabled is DBB_QUERY_TAGGING_ORACLE=user — resolved at
+	// startup and stamped on the session by the server, or, when a
+	// queryTaggingResolver is installed, the tagging.* store parameter over
+	// that default, decided per session at auth.
 	statementTaggingEnabled bool
 
 	// tagging carries the per-user statement tag and the once-per-session

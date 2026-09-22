@@ -123,6 +123,16 @@ func (s *Session) authenticate() error {
 	// so they can never disagree about what the session is allowed.
 	s.statementLimit = s.statementTimeouts.For(s.ctx, grant)
 
+	// The tagging decision, taken once, next to the statement limit: the
+	// tagging.* store parameter over the DBB_QUERY_TAGGING default when a
+	// resolver is installed, otherwise the server's environment default.
+	// Either way the session keeps what it authenticated under — a statement
+	// tagged on some executions and not others would get two digests in
+	// pg_stat_statements, which is the opposite of what the tag is for.
+	if s.queryTaggingResolver != nil {
+		s.queryTagging = s.queryTaggingResolver.Enabled(s.ctx)
+	}
+
 	// The statement tag, built once, here, because every component of it is
 	// known exactly now and none of them changes for the rest of the session —
 	// which is precisely what makes repeated executions of one statement stay

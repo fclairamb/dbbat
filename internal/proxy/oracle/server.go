@@ -57,15 +57,31 @@ type Server struct {
 
 	// statementTagging is DBB_QUERY_TAGGING_ORACLE=user, already resolved.
 	// false — the default — forwards every client packet byte for byte, which
-	// is what this proxy did before the tag existed.
+	// is what this proxy did before the tag existed. It carries the
+	// *environment* default; when a queryTaggingResolver is installed it
+	// decides instead, per session.
 	statementTagging bool
+
+	// queryTaggingResolver resolves the tagging.* store parameter over the
+	// DBB_QUERY_TAGGING_ORACLE default at every session's auth. nil — the
+	// default — leaves the decision to the boolean above.
+	queryTaggingResolver *shared.QueryTaggingResolver
 }
 
 // SetStatementTagging turns the per-user statement tag on for new sessions.
 // Resolved from DBB_QUERY_TAGGING_ORACLE by the caller, so an invalid value
-// fails the process at startup rather than reaching a session.
+// fails the process at startup rather than reaching a session. It sets the
+// environment default the queryTaggingResolver falls back to, and remains the
+// decision of record for a server built without a resolver (tests, fixtures).
 func (s *Server) SetStatementTagging(on bool) {
 	s.statementTagging = on
+}
+
+// SetQueryTaggingResolver installs the per-session tagging resolver over the
+// tagging.* store parameters. Called by the wiring in main; a server without
+// one keeps deciding from the DBB_QUERY_TAGGING_ORACLE default set above.
+func (s *Server) SetQueryTaggingResolver(r *shared.QueryTaggingResolver) {
+	s.queryTaggingResolver = r
 }
 
 // NewServer creates a new Oracle proxy server.
@@ -223,6 +239,14 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
 	session.statementTaggingEnabled = s.statementTagging
+	if s.queryTaggingResolver != nil {
+		// The tagging.* store parameter over the DBB_QUERY_TAGGING_ORACLE
+		// default, decided per session. An unrecognised stored value resolved
+		// to off inside the resolver — with a WARN — rather than failing the
+		// session the way the environment variable fails startup.
+		session.statementTaggingEnabled =
+			s.queryTaggingResolver.OracleMode(s.ctx) == config.QueryTaggingOracleUser
+	}
 	if err := session.run(); err != nil {
 		// Two expected outcomes, told apart by the sentinel rather than by
 		// matching on the error text as this used to. The string match demoted

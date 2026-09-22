@@ -133,8 +133,16 @@ func (s *Session) establishSession(responseTo int32, grant *store.Grant) error {
 
 	// The identity tag, built once, here, because every component of it is
 	// known exactly now and none of them changes for the rest of the session.
-	// Left at its inert zero value when DBB_QUERY_TAGGING is off.
-	if s.server.queryTagging.Load() {
+	// Left at its inert zero value when tagging is off. The decision is the
+	// tagging.* store parameter over the DBB_QUERY_TAGGING default when a
+	// resolver is installed, otherwise the server's environment default — and
+	// the session keeps whichever it authenticated under.
+	taggingEnabled := s.server.queryTagging.Load()
+	if s.server.queryTaggingResolver != nil {
+		taggingEnabled = s.server.queryTaggingResolver.Enabled(s.ctx)
+	}
+
+	if taggingEnabled {
 		s.queryTag = shared.NewQueryTagger(
 			version.Version, s.user.Username, s.connUID, grant.DefinitionSlug())
 	}

@@ -240,8 +240,16 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 	// known exactly now and none of them changes for the rest of the session —
 	// which is what keeps repeated executions of one statement byte-identical
 	// and the MySQL digest aggregating them. Left at its inert zero value when
-	// DBB_QUERY_TAGGING is off.
-	if s.server.queryTagging.Load() {
+	// tagging is off. The decision is the tagging.* store parameter over the
+	// DBB_QUERY_TAGGING default when a resolver is installed, otherwise the
+	// server's environment default — and the session keeps whichever it
+	// authenticated under.
+	taggingEnabled := s.server.queryTagging.Load()
+	if s.server.queryTaggingResolver != nil {
+		taggingEnabled = s.server.queryTaggingResolver.Enabled(s.ctx)
+	}
+
+	if taggingEnabled {
 		s.queryTag = shared.NewQueryTagger(
 			version.Version, s.user.Username, s.connUID, grant.DefinitionSlug())
 	}

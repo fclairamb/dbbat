@@ -62,8 +62,14 @@ type Server struct {
 	// Atomic, unlike its neighbors above: those are installed before Start,
 	// but this one is also flipped on an already-listening server (the
 	// integration suite does exactly that), and the accept loop reads it on
-	// every connection.
+	// every connection. It carries the *environment* default; when a
+	// queryTaggingResolver is installed it decides instead, per session.
 	queryTagging atomic.Bool
+
+	// queryTaggingResolver resolves the tagging.* store parameter over the
+	// DBB_QUERY_TAGGING default at every session's auth. nil — the default —
+	// leaves the decision to the atomic above.
+	queryTaggingResolver *shared.QueryTaggingResolver
 
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
@@ -129,9 +135,18 @@ func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
 
 // SetQueryTagging turns the sqlcommenter-style statement tag on. Called by the
 // wiring in main from DBB_QUERY_TAGGING; a server without it forwards every
-// statement byte-for-byte as it always did.
+// statement byte-for-byte as it always did. It sets the environment default
+// the queryTaggingResolver falls back to, and remains the decision of record
+// for a server built without a resolver (tests, fixtures).
 func (s *Server) SetQueryTagging(enabled bool) {
 	s.queryTagging.Store(enabled)
+}
+
+// SetQueryTaggingResolver installs the per-session tagging resolver over the
+// tagging.* store parameters. Called by the wiring in main; a server without
+// one keeps deciding from the DBB_QUERY_TAGGING default set above.
+func (s *Server) SetQueryTaggingResolver(r *shared.QueryTaggingResolver) {
+	s.queryTaggingResolver = r
 }
 
 // SetRowWriter installs the process-wide result-row writer, replacing (and
@@ -284,6 +299,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
 	session.queryTagging = s.queryTagging.Load()
+	session.queryTaggingResolver = s.queryTaggingResolver
 
 	if err := session.Run(); err != nil {
 		// A CancelRequest is a normal, expected one-shot connection, not a

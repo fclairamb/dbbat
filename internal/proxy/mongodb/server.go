@@ -77,8 +77,15 @@ type Server struct {
 	// queryTagging puts the dbbat identity in the `comment` field of every
 	// taggable command forwarded upstream (querytag.go). Off — the default —
 	// forwards each command byte-for-byte as it always did. Atomic because the
-	// wiring in main sets it while the listener may already be accepting.
+	// wiring in main sets it while the listener may already be accepting. It
+	// carries the *environment* default; when a queryTaggingResolver is
+	// installed it decides instead, per session.
 	queryTagging atomic.Bool
+
+	// queryTaggingResolver resolves the tagging.* store parameter over the
+	// DBB_QUERY_TAGGING default at every session's auth. nil — the default —
+	// leaves the decision to the atomic above.
+	queryTaggingResolver *shared.QueryTaggingResolver
 }
 
 // NewServer creates a new MongoDB proxy server.
@@ -307,9 +314,19 @@ func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
 
 // SetQueryTagging turns the dbbat identity tag on. Called by the wiring in
 // main from DBB_QUERY_TAGGING — the same flag the SQL proxies read; a server
-// without it forwards every command byte-for-byte as it always did.
+// without it forwards every command byte-for-byte as it always did. It sets
+// the environment default the queryTaggingResolver falls back to, and remains
+// the decision of record for a server built without a resolver (tests,
+// fixtures).
 func (s *Server) SetQueryTagging(enabled bool) {
 	s.queryTagging.Store(enabled)
+}
+
+// SetQueryTaggingResolver installs the per-session tagging resolver over the
+// tagging.* store parameters. Called by the wiring in main; a server without
+// one keeps deciding from the DBB_QUERY_TAGGING default set above.
+func (s *Server) SetQueryTaggingResolver(r *shared.QueryTaggingResolver) {
+	s.queryTaggingResolver = r
 }
 
 // SetRowWriter installs the process-wide result-row writer, replacing (and

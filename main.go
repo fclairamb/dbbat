@@ -411,23 +411,29 @@ func startProxies(
 		mssql:    startMSSQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
 	}
 
-	// One resolver for the whole process: the store memoizes the parameter, so
-	// five resolvers would share one cache anyway, but building them here keeps
-	// the "who imposes the limit" wiring in one place.
+	// One resolver for the whole process: the store memoizes the parameters,
+	// so five resolvers would share one cache anyway, but building them here
+	// keeps the "who imposes the limit / who decides the tag" wiring in one
+	// place.
 	statementTimeouts := shared.NewStatementTimeoutResolver(dataStore, cfg)
+	queryTagging := shared.NewQueryTaggingResolver(dataStore, cfg)
 
 	set.postgres.SetStatementTimeouts(statementTimeouts)
+	set.postgres.SetQueryTaggingResolver(queryTagging)
 
 	if set.oracle != nil {
 		set.oracle.SetStatementTimeouts(statementTimeouts)
+		set.oracle.SetQueryTaggingResolver(queryTagging)
 	}
 
 	if set.mysql != nil {
 		set.mysql.SetStatementTimeouts(statementTimeouts)
+		set.mysql.SetQueryTaggingResolver(queryTagging)
 	}
 
 	if set.mongo != nil {
 		set.mongo.SetStatementTimeouts(statementTimeouts)
+		set.mongo.SetQueryTaggingResolver(queryTagging)
 	}
 
 	if set.mssql != nil {
@@ -439,6 +445,11 @@ func startProxies(
 	// `comment` command field on MongoDB. Oracle is deliberately absent —
 	// V$SQL deduplicates on statement text, so a per-connection tag would
 	// defeat its shared-cursor cache — and so is SQL Server.
+	//
+	// These SetQueryTagging calls now only carry the DBB_QUERY_TAGGING
+	// *default* each proxy falls back to when the store is unreadable; the
+	// resolvers installed above decide per session, from the tagging.*
+	// parameters the Settings page edits.
 	if cfg.QueryTagging.Enabled {
 		set.postgres.SetQueryTagging(true)
 

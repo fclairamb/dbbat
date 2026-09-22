@@ -167,11 +167,15 @@ type Session struct {
 	revocation            *cache.RevocationHandle // Signaled when this session's grant is revoked mid-flight
 	liveSession           *cache.SessionHandle    // Signaled when an admin ends *this* session (POST /connections/{uid}/terminate)
 
-	// queryTagging mirrors the server's DBB_QUERY_TAGGING setting; queryTag is
-	// the tagger built from it at auth. The tagger's zero value is inert, so
-	// every call site is unconditional and the disabled path changes nothing.
-	queryTagging bool
-	queryTag     shared.QueryTagger
+	// queryTagging is this session's tagging decision, taken once at auth:
+	// the queryTaggingResolver's store-over-env answer when a resolver is
+	// installed, otherwise the server's DBB_QUERY_TAGGING default. queryTag
+	// is the tagger built from it at auth. The tagger's zero value is inert,
+	// so every call site is unconditional and the disabled path changes
+	// nothing.
+	queryTagging          bool
+	queryTaggingResolver  *shared.QueryTaggingResolver
+	queryTag              shared.QueryTagger
 
 	// statementTimeouts resolves the instance-wide per-statement limit;
 	// statementLimit is this session's resolved value (0 = no limit), stamped
