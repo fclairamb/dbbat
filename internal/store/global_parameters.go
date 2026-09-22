@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/config"
@@ -339,6 +340,22 @@ const (
 	// KeyLimitsStatementTimeout is a Go duration string ("30s", "5m") bounding
 	// how long any single statement may run. Empty or "0" = no limit.
 	KeyLimitsStatementTimeout = "statement_timeout"
+
+	// GroupTagging holds the instance-wide statement-tagging settings an
+	// operator edits from the Settings page, with the same precedence rule:
+	// a set parameter wins over the deployment's environment variable.
+	GroupTagging = "tagging"
+
+	// KeyTaggingEnabled carries "true" or "false" — the sqlcommenter-style
+	// statement tag on PostgreSQL, MySQL/MariaDB and MongoDB. It does not
+	// reach Oracle (KeyTaggingOracle is its own switch) or SQL Server.
+	KeyTaggingEnabled = "enabled"
+
+	// KeyTaggingOracle carries "off" or "user" — Oracle's own per-user
+	// statement tag. Deliberately a separate key: V$SQL keys on statement
+	// text, so this one spends shared-pool cursors and an operator must be
+	// able to see that they opted into it specifically.
+	KeyTaggingOracle = "oracle"
 )
 
 // Limits holds the operator-configured instance-wide limits.
@@ -412,6 +429,124 @@ func StatementTimeoutMisconfigured(raw string) bool {
 	return raw != "" && raw != "0" && ParseStatementTimeout(raw) <= 0
 }
 
+// Tagging holds the operator-configured statement-tagging settings. Raw
+// parameter values: empty means the operator never set one, and the
+// environment variable decides. That distinction is the whole point of the
+// env-var fallback — "explicitly off" and "never chose" must not collapse.
+type Tagging struct {
+	// Enabled carries "true" / "false" / "". Covers the PostgreSQL,
+	// MySQL/MariaDB and MongoDB statement tag (DBB_QUERY_TAGGING).
+	Enabled string
+
+	// Oracle carries "off" / "user" / "" — Oracle's own per-user tag
+	// (DBB_QUERY_TAGGING_ORACLE), deliberately a separate decision.
+	Oracle string
+}
+
+// GetTagging reads every tagging.* parameter and returns the typed struct.
+func (s *Store) GetTagging(ctx context.Context) (Tagging, error) {
+	params, err := s.GetParameters(ctx, GroupTagging)
+	if err != nil {
+		return Tagging{}, err
+	}
+
+	var t Tagging
+
+	for _, p := range params {
+		switch p.Key {
+		case KeyTaggingEnabled:
+			t.Enabled = p.Value
+		case KeyTaggingOracle:
+			t.Oracle = p.Value
+		}
+	}
+
+	return t, nil
+}
+
+// SetTagging writes the tagging.* parameters. An empty value deletes the
+// parameter rather than storing a blank one, so "unset" really does fall back
+// to the environment variable instead of pinning a choice in the store — the
+// same rule SetLimits applies to the limits.* group.
+func (s *Store) SetTagging(ctx context.Context, t Tagging) error {
+	for _, p := range []struct {
+		key, value string
+	}{
+		{KeyTaggingEnabled, t.Enabled},
+		{KeyTaggingOracle, t.Oracle},
+	} {
+		if p.value == "" {
+			if err := s.DeleteParameter(ctx, GroupTagging, p.key); err != nil &&
+				!errors.Is(err, ErrParameterNotFound) {
+				return err
+			}
+
+			continue
+		}
+
+		if err := s.SetParameter(ctx, GroupTagging, p.key, p.value); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// TaggingOracleMisconfigured reports that raw is neither empty nor a recognised
+// Oracle tagging mode. Through the API a bad value is a 400 at write time, so
+// reaching this needs a raw-parameters write or a hand-edited store; the
+// resolver folds it into "off" with a WARN rather than failing the session.
+func TaggingOracleMisconfigured(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", config.QueryTaggingOracleOff, config.QueryTaggingOracleUser:
+		return false
+	default:
+		return true
+	}
+}
+
+// ResolveQueryTagging applies the fallback chain for the PostgreSQL / MySQL /
+// MongoDB statement tag: the operator-set tagging.enabled parameter wins when
+// set (either polarity), otherwise the deployment's DBB_QUERY_TAGGING.
+func ResolveQueryTagging(t Tagging, cfg *config.Config) bool {
+	if t.Enabled != "" {
+		return t.Enabled == "true"
+	}
+
+	if cfg != nil {
+		return cfg.QueryTagging.Enabled
+	}
+
+	return false
+}
+
+// ResolveOracleTaggingMode applies the fallback chain for Oracle's per-user
+// statement tag: the operator-set tagging.oracle parameter wins when set,
+// otherwise the deployment's DBB_QUERY_TAGGING_ORACLE. A stored value the
+// configuration would reject resolves to off — callers that want to warn
+// about it compare against TaggingOracleMisconfigured.
+func ResolveOracleTaggingMode(t Tagging, cfg *config.Config) string {
+	if t.Oracle != "" {
+		if misconfigured := TaggingOracleMisconfigured(t.Oracle); misconfigured {
+			return config.QueryTaggingOracleOff
+		}
+
+		if on, err := (config.QueryTaggingConfig{Oracle: t.Oracle}).ResolveOracle(); err == nil && on {
+			return config.QueryTaggingOracleUser
+		}
+
+		return config.QueryTaggingOracleOff
+	}
+
+	if cfg != nil {
+		if on, err := cfg.QueryTagging.ResolveOracle(); err == nil && on {
+			return config.QueryTaggingOracleUser
+		}
+	}
+
+	return config.QueryTaggingOracleOff
+}
+
 // limitsCacheTTL is how long ResolveStatementTimeoutCached reuses the
 // parameter group it last read. Short enough that an operator editing the value
 // from the Settings page sees it take effect while they are still looking at
@@ -427,15 +562,39 @@ const limitsCacheTTL = 10 * time.Second
 // configured one for. The fallback is cached too — a store that is down stays
 // down for more than one connection.
 func (s *Store) ResolveStatementTimeoutCached(ctx context.Context, cfg *config.Config) time.Duration {
+	limits, _ := s.resolveParamsCached(ctx, cfg)
+	return ResolveStatementTimeout(limits, cfg)
+}
+
+// ResolveTaggingCached is ResolveQueryTagging / ResolveOracleTaggingMode over
+// the same short-lived memo the statement timeout uses, for the callers that
+// ask once per connection. Same error contract: a store error falls back to
+// the environment defaults, cached.
+func (s *Store) ResolveTaggingCached(ctx context.Context, cfg *config.Config) Tagging {
 	if s == nil {
-		return ResolveStatementTimeout(Limits{}, cfg)
+		return Tagging{}
+	}
+
+	_, tagging := s.resolveParamsCached(ctx, cfg)
+
+	return tagging
+}
+
+// resolveParamsCached reads both parameter groups the per-connection resolvers
+// need, over one memo. The groups are read together because they are written
+// together (the Settings page saves an operator's whole intent) and because
+// half the readers want both. On a nil store, or when the store read fails,
+// the zero value falls back to the environment defaults at resolution time.
+func (s *Store) resolveParamsCached(ctx context.Context, cfg *config.Config) (Limits, Tagging) {
+	if s == nil {
+		return Limits{}, Tagging{}
 	}
 
 	s.limitsCache.mu.Lock()
 	defer s.limitsCache.mu.Unlock()
 
 	if !s.limitsCache.readAt.IsZero() && time.Since(s.limitsCache.readAt) < limitsCacheTTL {
-		return ResolveStatementTimeout(s.limitsCache.value, cfg)
+		return s.limitsCache.value, s.limitsCache.tagging
 	}
 
 	limits, err := s.GetLimits(ctx)
@@ -443,15 +602,21 @@ func (s *Store) ResolveStatementTimeoutCached(ctx context.Context, cfg *config.C
 		limits = Limits{}
 	}
 
+	tagging, err := s.GetTagging(ctx)
+	if err != nil {
+		tagging = Tagging{}
+	}
+
 	s.limitsCache.value = limits
+	s.limitsCache.tagging = tagging
 	s.limitsCache.readAt = time.Now()
 
-	return ResolveStatementTimeout(limits, cfg)
+	return limits, tagging
 }
 
 // InvalidateLimits drops the memo so the next resolution re-reads the store.
-// Called after this process writes a limits.* parameter; other replicas pick
-// the change up within limitsCacheTTL.
+// Called after this process writes a limits.* or tagging.* parameter; other
+// replicas pick the change up within limitsCacheTTL.
 func (s *Store) InvalidateLimits() {
 	if s == nil {
 		return
@@ -461,6 +626,12 @@ func (s *Store) InvalidateLimits() {
 	defer s.limitsCache.mu.Unlock()
 
 	s.limitsCache.readAt = time.Time{}
+}
+
+// InvalidateTagging is InvalidateLimits under the name the tagging callers
+// read: the two parameter groups share one memo, so one drop serves both.
+func (s *Store) InvalidateTagging() {
+	s.InvalidateLimits()
 }
 
 // ResolveStatementTimeout applies the global fallback chain: the operator-set
