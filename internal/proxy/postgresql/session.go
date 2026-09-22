@@ -543,18 +543,20 @@ func (s *Session) onLimitViolation(err error) {
 
 	s.noteTermination(err)
 
-	// Complete the in-flight statement's row before the sockets go: once they
-	// are closed the relays unwind and nothing else knows which statement was
-	// running.
-	s.persistTerminatedQuery(s.recordedTermination())
-
 	// Cancel upstream *before* closing the sockets. Closing them is not
 	// enough on PostgreSQL: a backend in a long sequential scan does not
 	// notice a dead client until it next tries to send, and
 	// client_connection_check_interval defaults to 0, so it never checks — the
 	// scan runs to completion, which is precisely the load this exists to
-	// stop.
+	// stop. It also runs before the bookkeeping walk below: the cancel gates
+	// on the statement clock, which that walk clears once it has completed
+	// every in-flight row.
 	s.cancelUpstreamStatement()
+
+	// Complete the in-flight statement's row before the sockets go: once they
+	// are closed the relays unwind and nothing else knows which statement was
+	// running.
+	s.persistTerminatedQuery(s.recordedTermination())
 
 	s.closeConns()
 }
