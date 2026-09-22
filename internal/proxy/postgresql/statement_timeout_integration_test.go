@@ -227,8 +227,11 @@ func requireNoUpstreamSleep(ctx context.Context, t *testing.T, f *fixture) {
 	defer func() { _ = admin.Close(context.Background()) }()
 
 	require.Eventually(t, func() bool {
+		// pid <> pg_backend_pid() keeps the poll's own query out: its text
+		// contains "pg_sleep", and without the exclusion the count is never 0.
 		result := admin.ExecParams(ctx,
-			"SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' AND state = 'active'",
+			"SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%pg_sleep%' "+
+				"AND state = 'active' AND pid <> pg_backend_pid()",
 			nil, nil, nil, nil).Read()
 		if result.Err != nil {
 			return false
