@@ -68,3 +68,57 @@ point of edit rather than immutability. Same treatment here.
   already covers the secrets.
 - E2E: edit host on a seeded row, see the warning, save, re-read the row; and
   a rename-free edit must leave `name` untouched in the audit details.
+
+## Implementation Plan
+
+1. **Store — `GetServerReferences`** (`internal/store/servers.go`). One struct,
+   two counts: the *live* grants that would reach the new target (anchor
+   `database_id` **or** a `server_group_uid` whose group holds this server,
+   under the auth path's own `applyGrantLiveness`) and the server groups the
+   row belongs to. One query each, mirroring `GetServerGroupBlastRadius`.
+   Unit test in `internal/store`.
+
+2. **API — `GET /servers/{uid}/references`** (admin), returning
+   `{active_grants, server_groups}`. Registered next to `/servers/{uid}/test`,
+   documented in `openapi.yml` (the parity test fails otherwise), handler test
+   in `internal/api`.
+
+3. **API — refuse a protocol change on a row with history.** `PUT
+   /servers/{uid}` accepts `protocol` today with no guard at all. Add one in
+   `handleUpdateDatabase`: a request whose `protocol` differs from the stored
+   one on a row carrying any grant (revoked included) or any connection is a
+   **409**. Same counts, reused from step 1's store helper plus a connection
+   count. Handler tests for both the refusal and the still-allowed change on a
+   pristine row.
+
+4. **Audit — target on `connection.opened`.** `connectionAuditDetails` gains
+   `host`, `port` and `database` (the Oracle service name on Oracle,
+   `database_name` elsewhere), read from the `servers` row inside
+   `recordConnectionOpened` so no proxy call site has to be touched and the
+   property holds unconditionally. Never fatal: a lookup failure leaves the
+   fields empty rather than dropping the entry. Store test.
+
+5. **Frontend API layer.** Regenerate `front/src/api/schema.ts`, add
+   `useServerReferences(uid, enabled)`, and let `useUpdateDatabase` hand the
+   PUT's inline `connection_test` back to its `onSuccess`.
+
+6. **Frontend — `EditDatabaseDialog` / `EditDatabaseForm`** in
+   `front/src/routes/_authenticated/servers/index.tsx`, keyed on the row uid,
+   opened from a new pencil-adjacent action on the database actions column.
+   Fields: description, host, port, `database_name` /
+   `oracle_service_name` (+ `mongo_auth_source` on MongoDB), username, password
+   (blank = keep), `ssl_mode` (not on Oracle), `listable`, tunnel (`via_uid` /
+   `clear_via_uid`). No `protocol`. Blast-radius `Alert` whenever host, port or
+   the database/service name differs from the stored value, fed by
+   `useServerReferences`. A "test connection after saving" checkbox setting
+   `test_connection`. Submit diffs against the seeded row and sends only what
+   changed.
+
+7. **E2E** — extend `front/e2e/servers.spec.ts`: open the edit dialog on a
+   seeded database row, change the host, assert the blast-radius warning, save,
+   reopen and confirm the new host; then assert the `database.updated` audit
+   entry's `updated_fields` carries `host` and **no** `name`.
+
+8. **QA** — `make lint`, `go test ./internal/api/... ./internal/store/...`,
+   `make test`, `bun run lint` + `make build-front`, and the new Playwright
+   spec.
