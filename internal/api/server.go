@@ -395,6 +395,10 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Provisioning-time connectivity validation (admin): dial the row for
 			// real rather than trusting that it was typed correctly.
 			databases.POST("/:uid/test", s.requireAdmin(), s.handleTestServerConnection)
+			// What an edit to this row moves (admin): the live grants that
+			// would reach the new target, and the server groups carrying it.
+			// Read before a save, not after — see handleGetServerReferences.
+			databases.GET("/:uid/references", s.requireAdmin(), s.handleGetServerReferences)
 
 			// SSH bastion management (admin). Kept on a separate path because a
 			// static /servers/ssh segment would conflict with /servers/:uid.

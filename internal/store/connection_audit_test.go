@@ -101,6 +101,88 @@ func TestSessionAuditOutlivesAWholeSessionDelete(t *testing.T) {
 	assert.True(t, result.OK(), "the audit chain must still verify: %v", result.Break)
 }
 
+// TestSessionAuditOpenRecordsTheTargetItReached is the property that lets the
+// server row be editable at all: the ledger has to say *where* a session went,
+// not merely which row it named, because the row's host, port and database
+// name can be corrected afterwards.
+func TestSessionAuditOpenRecordsTheTargetItReached(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "open_target")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.9.9.9")
+	require.NoError(t, err)
+
+	opened := sessionAuditEntries(t, ctx, store, AuditEventConnectionOpened, conn.UID)
+	require.Len(t, opened, 1)
+	assert.Equal(t, "localhost", opened[0].TargetHost)
+	assert.Equal(t, 5432, opened[0].TargetPort)
+	assert.Equal(t, "db", opened[0].TargetDatabase)
+
+	// Now move the row somewhere else entirely. The past session's evidence
+	// must not move with it — that is the whole point.
+	newHost := "replica.internal"
+	newPort := 6432
+	newName := "elsewhere"
+	require.NoError(t, store.UpdateServer(ctx, database.UID, ServerUpdate{
+		Host: &newHost, Port: &newPort, DatabaseName: &newName,
+	}, testEncryptionKey()))
+
+	again := sessionAuditEntries(t, ctx, store, AuditEventConnectionOpened, conn.UID)
+	require.Len(t, again, 1)
+	assert.Equal(t, "localhost", again[0].TargetHost, "a later edit changes nothing about the evidence")
+	assert.Equal(t, 5432, again[0].TargetPort)
+	assert.Equal(t, "db", again[0].TargetDatabase)
+
+	// And a session opened *after* the edit records the new target.
+	next, err := store.CreateConnection(ctx, user.UID, database.UID, "10.9.9.10")
+	require.NoError(t, err)
+
+	later := sessionAuditEntries(t, ctx, store, AuditEventConnectionOpened, next.UID)
+	require.Len(t, later, 1)
+	assert.Equal(t, newHost, later[0].TargetHost)
+	assert.Equal(t, newPort, later[0].TargetPort)
+	assert.Equal(t, newName, later[0].TargetDatabase)
+}
+
+// TestSessionAuditOpenPrefersTheOracleServiceName pins the one protocol where
+// the identifying name is not database_name.
+func TestSessionAuditOpenPrefersTheOracleServiceName(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, err := store.CreateUser(ctx, "oracle_target_user", "hash", []string{RoleConnector})
+	require.NoError(t, err)
+
+	service := "ORCLPDB1"
+	database, err := store.CreateServer(ctx, &Server{
+		Name:              "oracle_target_row",
+		Host:              "ora.internal",
+		Port:              1521,
+		DatabaseName:      "ignored",
+		Protocol:          ProtocolOracle,
+		OracleServiceName: &service,
+		Username:          "system",
+		Password:          "pass",
+	}, testEncryptionKey())
+	require.NoError(t, err)
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.8.8.8")
+	require.NoError(t, err)
+
+	opened := sessionAuditEntries(t, ctx, store, AuditEventConnectionOpened, conn.UID)
+	require.Len(t, opened, 1)
+	assert.Equal(t, "ora.internal", opened[0].TargetHost)
+	assert.Equal(t, 1521, opened[0].TargetPort)
+	assert.Equal(t, service, opened[0].TargetDatabase,
+		"on Oracle the SERVICE_NAME is what identifies the upstream")
+}
+
 // TestSessionAuditCleanCloseWritesOneEntry pins the clean-teardown writer: one
 // open entry, one close entry, and a second CloseConnection — which closes
 // nothing — writes no second one.

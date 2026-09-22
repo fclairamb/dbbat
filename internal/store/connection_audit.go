@@ -163,6 +163,24 @@ type connectionAuditDetails struct {
 	RunID         string `json:"run_id,omitempty"`
 	GrantUID      string `json:"grant_uid,omitempty"`
 
+	// Open-only: *where the session actually went*.
+	//
+	// database_id above names a row, and the row is editable — host, port and
+	// the database/service name can all be corrected after the fact, which is
+	// the whole point of the server edit form. A ledger that recorded only the
+	// uid would therefore stop saying where a past session connected the
+	// moment someone fixed a typo. These three are immutable for the
+	// *session*, so recording them here is what makes a later edit change
+	// nothing about the evidence.
+	//
+	// Read from the `servers` row at open time. Best effort, like the entry
+	// itself: a lookup that fails leaves them empty rather than dropping the
+	// record, since a session-open entry without the target still beats no
+	// entry at all.
+	TargetHost     string `json:"target_host,omitempty"`
+	TargetPort     int    `json:"target_port,omitempty"`
+	TargetDatabase string `json:"target_database,omitempty"`
+
 	// Close-only. ClosedBy is one of the constants above; the three chain
 	// fields are the stamp the close (or the reconcile) sealed onto the row, so
 	// the audit entry points at the query chain this session owned even after
@@ -202,8 +220,11 @@ const connectionAuditColumns = "uid, user_id, database_id, host(source_ip) AS so
 // UserID is the person who connected. PerformedBy stays nil: nobody *performed*
 // this the way an admin performs a grant revocation, and filling it with the
 // same user would make the audit page read as if they had acted on themselves.
-func connectionOpenedEvent(conn *Connection) (*AuditEvent, error) {
-	return connectionAuditEvent(AuditEventConnectionOpened, conn, connectionAuditDetails{
+// The target — host, port, database/service name — is the server row's as it
+// stood when the session opened; see connectionAuditDetails. A nil target is
+// the "we could not read the row" case and simply leaves those fields out.
+func connectionOpenedEvent(conn *Connection, target *connectionTarget) (*AuditEvent, error) {
+	details := connectionAuditDetails{
 		ConnectionUID: conn.UID.String(),
 		UserID:        conn.UserID.String(),
 		DatabaseID:    conn.DatabaseID.String(),
@@ -212,7 +233,61 @@ func connectionOpenedEvent(conn *Connection) (*AuditEvent, error) {
 		InstanceID:    conn.InstanceID,
 		RunID:         derefString(conn.RunID),
 		GrantUID:      optionalUUIDString(conn.GrantUID),
-	})
+	}
+
+	if target != nil {
+		details.TargetHost = target.Host
+		details.TargetPort = target.Port
+		details.TargetDatabase = target.database()
+	}
+
+	return connectionAuditEvent(AuditEventConnectionOpened, conn, details)
+}
+
+// connectionTarget is the upstream a session was pointed at, projected out of
+// the `servers` row: the three columns an admin can edit afterwards.
+type connectionTarget struct {
+	Host              string  `bun:"host"`
+	Port              int     `bun:"port"`
+	DatabaseName      string  `bun:"database_name"`
+	Protocol          string  `bun:"protocol"`
+	OracleServiceName *string `bun:"oracle_service_name"`
+}
+
+// database renders the one name that identifies the upstream schema for this
+// protocol: the SERVICE_NAME on Oracle (where database_name is a fallback at
+// best), the database name everywhere else. Same rule the servers table in the
+// UI uses, so the audit entry and the row read alike.
+func (t *connectionTarget) database() string {
+	if t.Protocol == ProtocolOracle && t.OracleServiceName != nil && *t.OracleServiceName != "" {
+		return *t.OracleServiceName
+	}
+
+	return t.DatabaseName
+}
+
+// connectionTargetOf reads the upstream a connection was opened against.
+//
+// One small SELECT next to a chained INSERT that already takes the store-wide
+// advisory lock, so the cost is noise — and doing it here rather than through a
+// CreateConnection option is what makes the property unconditional: no proxy,
+// no seeding path and no future call site can forget to pass it.
+func (s *Store) connectionTargetOf(ctx context.Context, databaseID uuid.UUID) *connectionTarget {
+	target := new(connectionTarget)
+
+	err := s.db.NewSelect().
+		Model((*Server)(nil)).
+		Column("host", "port", "database_name", "protocol", "oracle_service_name").
+		Where("d.uid = ?", databaseID).
+		Scan(ctx, target)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to read the session's target for the audit entry",
+			slog.String("database", databaseID.String()), slog.Any("error", err))
+
+		return nil
+	}
+
+	return target
 }
 
 // connectionClosedEvent builds the entry written when a session ends, from the
@@ -268,7 +343,7 @@ func connectionAuditEvent(eventType string, conn *Connection, details connection
 // recordConnectionOpened writes the session-open entry. Best effort by design —
 // see writeConnectionAudit.
 func (s *Store) recordConnectionOpened(ctx context.Context, conn *Connection) {
-	event, err := connectionOpenedEvent(conn)
+	event, err := connectionOpenedEvent(conn, s.connectionTargetOf(ctx, conn.DatabaseID))
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to build the session audit entry",
 			slog.String("connection", conn.UID.String()), slog.Any("error", err))

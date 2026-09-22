@@ -3672,6 +3672,63 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /servers/{uid}/references:
+    get:
+      tags:
+        - Databases
+      summary: What an edit to this server row would move (admin only)
+      description: |
+        Returns the blast radius of editing this server's target: the live
+        grants that would reach the *new* host / port / database name on the
+        next connect, and the server groups whose scope carries the row along.
+
+        Editing a server re-points existing access rather than re-issuing it —
+        nothing is approved again, the same way adding a server to a server
+        group widens every grant bound to that group. This endpoint is what
+        lets a client warn before the `PUT`, not after.
+
+        `active_grants` counts grants anchored on this server **or** bound to a
+        server group that currently holds it, under the same liveness predicate
+        the proxy's auth path uses. Sessions already open are unaffected: they
+        stay on the upstream they dialed.
+      operationId: getServerReferences
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reference counts for the server
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  active_grants:
+                    type: integer
+                    format: int64
+                    description: Live grants that would reach the new target on next connect.
+                  server_groups:
+                    type: integer
+                    format: int64
+                    description: Server groups this row belongs to.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /ssh-servers:
     get:
       tags:
@@ -5176,7 +5233,16 @@ components:
         protocol:
           type: string
           enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes]
-          description: Server protocol
+          description: >-
+            Server protocol. Changing it is refused with **409** once any grant
+            or connection references the row: every other field is a correction,
+            but a row that was PostgreSQL and is now Oracle is a different
+            server, and the grants, sessions and query chains already hanging
+            off its uid would silently re-label themselves as having been
+            against that other thing. A pristine row (never granted, never
+            connected to) may still change protocol, so a create-dialog typo
+            stays a one-click fix. The admin UI's edit form omits the field
+            entirely.
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME

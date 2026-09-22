@@ -507,6 +507,14 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		return
 	}
 
+	if blocked, err := s.protocolChangeRefused(c, current, &req); err != nil {
+		writeInternalError(c, s.logger, err, "failed to check the server's history")
+
+		return
+	} else if blocked {
+		return
+	}
+
 	if msg := s.validateApproverUserGroups(c.Request.Context(),
 		derefUUIDs(req.AccessApproverUserGroupUIDs), derefUUIDs(req.QueryApproverUserGroupUIDs)); msg != "" {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
@@ -832,6 +840,82 @@ func validateUpdateProtocolFields(current *store.Server, req *UpdateDatabaseRequ
 	}
 
 	return ""
+}
+
+// protocolChangeRefused enforces the one edit a server row does not get: its
+// protocol, once anything hangs off the row.
+//
+// Every other field on a server is a correction — a host that moved, a
+// password that rotated, a database renamed upstream. The protocol is not: a
+// row that was PostgreSQL and is now Oracle is a *different server*, and every
+// grant anchored on its uid, every connection in the ledger and every query
+// chain underneath it would silently re-label themselves as having been
+// against that other thing. The UI's edit form leaves the field out entirely;
+// this is the same invariant enforced where an API key can also reach it.
+//
+// A pristine row — no grant ever issued, no session ever opened — is still
+// free to change protocol: nothing has been said about it yet, so nothing is
+// re-labeled. That is what keeps "I picked the wrong protocol in the create
+// dialog" a one-click fix rather than a delete-and-recreate.
+//
+// Returns true when it has already written the response.
+func (s *Server) protocolChangeRefused(c *gin.Context, current *store.Server, req *UpdateDatabaseRequest) (bool, error) {
+	if req.Protocol == nil || *req.Protocol == current.Protocol {
+		return false, nil
+	}
+
+	used, err := s.store.ServerHasHistory(c.Request.Context(), current.UID)
+	if err != nil {
+		return false, err
+	}
+
+	if !used {
+		return false, nil
+	}
+
+	writeError(c, http.StatusConflict, ErrCodeConflict, fmt.Sprintf(
+		"cannot change the protocol of %q from %s to %s: grants or connections already reference this server, "+
+			"and changing its protocol would re-label that history as having been against a different target. "+
+			"Create a new server instead.",
+		current.Name, current.Protocol, *req.Protocol))
+
+	return true, nil
+}
+
+// handleGetServerReferences reports what an edit to this server row moves: the
+// live grants that would reach the new target on the next connect, and the
+// server groups whose scope carries the row along.
+//
+// It exists so the edit dialog can warn *before* the save rather than after —
+// editing host/port/database name re-points every grant already covering the
+// row, with no re-issue and no approval, exactly the way server-group
+// membership widens live grants. Admin-only: the numbers describe who holds
+// access, which is not a non-admin's business.
+func (s *Server) handleGetServerReferences(c *gin.Context) {
+	uid, err := parseUIDParam(c)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid database UID")
+
+		return
+	}
+
+	if _, err := s.store.GetServerByUID(c.Request.Context(), uid); err != nil {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
+
+		return
+	}
+
+	refs, err := s.store.GetServerReferences(c.Request.Context(), uid)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to compute the server's references")
+
+		return
+	}
+
+	successResponse(c, gin.H{
+		"active_grants": refs.ActiveGrants,
+		"server_groups": refs.ServerGroups,
+	})
 }
 
 // redactUpdateForAudit returns a copy of an update request safe to persist in
