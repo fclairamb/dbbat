@@ -3793,9 +3793,9 @@ yielded nothing on either.
 The values are not the problem and never were — a one-byte length then that many raw bytes,
 byte-for-byte the same shape in both dialects, which is what let the two fixtures be compared
 value for value. What differs is the **ROW_HEADER** object (`0x06`) standing in front of the
-`0x07` that opens the row data. `findRowDataStart` locates it by the two-byte pair `06 22`;
-on this dialect the header opens `06 01 22 xx`, so that pair occurs nowhere in the payload at
-all and the row area was never entered.
+`0x07` that opens the row data. The reading this replaced located it by the two-byte pair
+`06 22`; on this dialect the header opens `06 01 22 xx`, so that pair occurs nowhere in the
+payload at all and the row area was never entered.
 
 Read off `testdata/oci64_describe.hex` against its 4-byte counterpart, on the two frames that
 carry a header — the login probe and the eight-column query, which is what varies the one
@@ -3808,7 +3808,7 @@ field either reading takes from it:
 | +2 | ub4 column count | `0x22` flag |
 | +3 | | padding, stale (`0xaf` / `0x59`) |
 | +4 | | ub4 column count |
-| +6 / +8 | ub4 = `0x00010000` | ub8 = `0x10000` |
+| +6 / +8 | ub2 = 0, ub2 = array size | ub8 = `0x10000` |
 | +10 / +16 | 3 × ub4 = 0 | 4 × ub8, then a ub2 = 0 |
 | +22 / +50 | `0x07` ROW_DATA | `0x07` ROW_DATA |
 
@@ -3818,10 +3818,12 @@ non-zero **upper** half (`ffffa5a9…`, `ffffa382…` / `0001a382…`) over a ze
 the same two offsets in both frames. That is what a 64-bit struct looks like when the server
 writes a 32-bit value into it and leaves the top half stale, and it is also why nothing reads
 those slots: their low halves are zero in every sample, so the corpus says what the layout is
-and nothing about what the fields mean. The 4-byte dialect's ub4 at +6 is unread for the same
-reason — `0x00010000` on all four frames of both fixtures, varying with nothing.
+and nothing about what the fields mean. The 4-byte dialect's pair at +6 is unread for the same
+reason — the first half is zero everywhere, and the second is the fetch's array size (1 on
+both describe frames, 15 on `sqlplus_refcursor.pcapng`, which is what says it is a field
+rather than padding).
 
-`findRowDataStartWide64` therefore reads exactly one field, the column count, and **fails
+`wide64RowDataStartAt` therefore reads exactly one field, the column count, and **fails
 closed**: the count must be the describe's own and the `0x07` must land exactly where the
 header ends. Nothing is scanned for, so a payload offered the wrong reading yields no rows,
 which is the behaviour the dialect had before — not different ones.
@@ -3838,6 +3840,50 @@ being ~40 s apart).
 > defect with its own spec
 > (`2026-09-22-03-oracle-row-capture-drops-every-row-of-a-fetch-carrying-a-lob.md`): neither
 > frame carries a ROW_HEADER at all, so there is nothing here for this reading to find.
+
+##### Seven columns, and why the other two dialects stopped scanning too
+
+The 64-bit reading above was written as a measurement because a scan could not work there.
+The other two kept theirs, and it had a live bug in it that no fixture could show.
+
+`findRowDataStart` anchored on `06 22` and then scanned **forward from the very next byte**
+for the first `0x07`, calling what followed it the first row. Read the table again: the very
+next byte is the start of the header's own **column count**. Both of those dialects spell
+seven there as the single byte `0x07` — `07 00 00 00` as a little-endian ub4 on the 4-byte
+one, `01 07` as a TTC compressed int on the compressed one. So a query with exactly seven
+columns landed at `idx+3` instead of `idx+23`, and `parseRowStream` read lengths out of the
+middle of the header. It did not produce the row; it produced whatever the header's remaining
+zeros looked like.
+
+Nothing caught it because the corpus had no seven-column fetch: the recorded describes carry
+one, eight and six columns, so every fixture agreed with the wrong reading. Two recordings
+now close that — `testdata/oci_sevencols.hex` (sqlplus through dbbat, whose header opens
+`06 22 07 00 00 00`) and `testdata/go_ora_sevencols.pcapng` — and `sevencols_test.go` holds
+both, plus synthesized headers at counts six, seven and eight so the landing is stated as the
+layout rather than as one recording's bytes.
+
+Both readings are now measured the way the 64-bit one is:
+
+- **4-byte OCI** (`wideRowDataStartAt`): a fixed 22 bytes, the left column of the table above,
+  pinned by the two frames of `testdata/oci_describe.hex` that carry a header and the four in
+  `sqlplus_*.pcapng` (counts 1, 2 and 3).
+- **Compressed / thin** (`compressedRowDataStartAt`): no fixed length, its integers being
+  self-sizing, so the header is **walked** — `0x06`, the `0x22` flag, six TTC compressed
+  integers, then `0x07`. The field list is the 4-byte dialect's, counting the ub2 pair at +6
+  separately, which is what says six is the count rather than a number that happened to fit.
+  Pinned across `go_ora*`, `python_thin*`, `jdbc_thin*`, `dbeaver*` and `ojdbc6_legacy` at
+  column counts 1, 2, 3, 4, 6, 9, 15, 35 and 45. Only two of the six ever vary: the count, and
+  the third field, which is the client's prefetch size (10 for the JDBC thin driver, 25 and
+  1000 for go-ora, 2 and 100 for python-oracledb). The other four are a single `0x00` in every
+  sample, so whether they are integers or bare bytes is not something the corpus can say; they
+  are walked as integers because the 4-byte dialect spells the same tail as three ub4s, and a
+  compressed walk of a zero byte consumes one byte either way.
+
+All three now fail closed on the same two checks — the header's own column count must be the
+describe's, and the ROW_DATA byte must land exactly where the header ends — so a wrong landing
+yields no rows rather than a row of garbage. That also takes the readings off the `06 22`
+pairs that occur *inside* row data, which the midfetch recordings carry several of and the
+forward scan would have followed.
 
 #### A mid-fetch `0x08` is row data, not a Response
 

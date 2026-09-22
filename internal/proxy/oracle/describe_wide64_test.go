@@ -134,7 +134,7 @@ func TestOCI64DescribeIsNotOfferedToTheOtherTwoEncodings(t *testing.T) {
 // The names came right when parseColumnDescribes learned this dialect's records.
 // The values did not, and the gap was visible rather than theoretical: a 64-bit
 // OCI session wrote its rows to query_rows as empty JSON objects, because
-// findRowDataStart looks for a two-byte `06 22` ROW_HEADER marker that is
+// the reading it had looked for a two-byte `06 22` ROW_HEADER marker that is
 // `06 01 22 xx` here and therefore occurs nowhere in the payload at all.
 //
 // The expected values are the 4-byte fixture's own, column for column, and that
