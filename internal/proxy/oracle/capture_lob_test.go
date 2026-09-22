@@ -1,12 +1,14 @@
 //go:build capture
 
-// Capture tooling for the **thin** dialect's half of the LOB evidence.
+// Capture tooling for the **thin** dialect's half of the LOB evidence, and for
+// the LONG columns that turned out to be the same shape one type family over.
 //
 // Usage:
 //
 //	docker run -d --name dbbat-ora-cap -p 51521:1521 -e ORACLE_PASSWORD=oracle gvenzl/oracle-free:23-slim
 //	# wait for "DATABASE IS READY TO USE!" in docker logs
 //	go test -tags capture -timeout 300s -run TestCapture_GoOraLOB ./internal/proxy/oracle/
+//	go test -tags capture -timeout 300s -run 'TestCapture_(GoOra|PythonThin)Long' ./internal/proxy/oracle/
 //
 // The two OCI dialects are recorded by TestCapture_OCILOBFetchThroughDBBat
 // (`-tags integration`); this is the compressed encoding a thin client speaks,
@@ -104,6 +106,161 @@ func TestCapture_PythonThinLOB(t *testing.T) {
 	require.NoError(t, w.Close())
 
 	t.Logf("capture written to %s", outPath)
+}
+
+// TestCapture_GoOraLong records longQuery and longRawQuery — columns the
+// **describe** reports as LONG (8) and LONG RAW (24), rather than a LOB a
+// client re-declared as one — driven by go-ora with nothing configured.
+//
+// It needs the two tables longTableDDL builds, which is what makes it the one
+// capture in this file with setup in front of it: Oracle allows a single LONG
+// column per table and none at all in a `FROM dual` expression list.
+func TestCapture_GoOraLong(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_LONG", "testdata/"+goOraLongFixture)
+
+	requireOracleReachable(t, oracleAddr)
+
+	w := newCaptureWriter(t, outPath, "capture-go-ora-long")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	db, err := sql.Open("oracle",
+		fmt.Sprintf("oracle://system:oracle@%s/%s", relayAddr, oracleService))
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+	setupLongTables(t, db)
+
+	for _, query := range []string{longQuery, longRawQuery} {
+		logCapturedRows(t, db, query)
+	}
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
+// pythonLongScript runs both LONG queries on python-oracledb thin with nothing
+// configured, which is the same ask the go-ora recording makes: what a second,
+// independently written thin driver does with a column the describe reports as
+// a LONG.
+// The argument list is the DDL, then a lone "--", then the two queries — the
+// setup runs on the recorded session for the same reason the go-ora capture's
+// does (see longTableDDL), and a statement that fails before the separator is
+// one of the drops, whose failure is expected.
+const pythonLongScript = `
+import sys, oracledb
+dsn = sys.argv[1]
+setup = sys.argv[2:sys.argv.index("--")]
+queries = sys.argv[sys.argv.index("--") + 1:]
+with oracledb.connect(user="system", password="oracle", dsn=dsn, retry_count=0) as conn:
+    for sql in setup:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(sql)
+            except Exception as e:
+                print("setup:", sql, "->", e)
+    conn.commit()
+    for sql in queries:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            print("columns:", [(d[0], str(d[1])) for d in cur.description])
+            for row in cur:
+                print("  ", repr(row))
+print("ok")
+`
+
+// TestCapture_PythonThinLong is TestCapture_GoOraLong on the second thin
+// driver. The two disagree about how a LOB column is framed, so nothing said
+// they agree about a LONG one either, and one recording could not tell.
+func TestCapture_PythonThinLong(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_LONG_PY", "testdata/"+pythonThinLongFixture)
+	python := captureEnv("PYTHON_BIN", "python3")
+
+	requireOracleReachable(t, oracleAddr)
+
+	if out, err := exec.Command(python, "-c", "import oracledb").CombinedOutput(); err != nil {
+		t.Skipf("python-oracledb unavailable via %s: %v (%s)", python, err, out)
+	}
+
+	w := newCaptureWriter(t, outPath, "capture-python-thin-long")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	script := writeTempScript(t, pythonLongScript)
+
+	args := []string{script, fmt.Sprintf("%s/%s", relayAddr, oracleService)}
+	args = append(args, longTableDropDDL...)
+	args = append(args, longTableDDL...)
+	args = append(args, "--", longQuery, longRawQuery)
+
+	cmd := exec.CommandContext(t.Context(), python, args...)
+
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "python client failed: %s", out)
+	t.Logf("python client: %s", out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
+// setupLongTables runs longTableDDL on the session that is about to be
+// recorded. See longTableDDL for why it is not a connection of its own.
+func setupLongTables(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	for _, ddl := range longTableDropDDL {
+		if _, err := db.ExecContext(t.Context(), ddl); err != nil {
+			t.Logf("%s: %v (expected on a first run)", ddl, err)
+		}
+	}
+
+	for _, ddl := range longTableDDL {
+		_, err := db.ExecContext(t.Context(), ddl)
+		require.NoErrorf(t, err, "setting up the LONG tables: %s", ddl)
+	}
+}
+
+// logCapturedRows runs one query and logs what it scanned into. Nothing is
+// asserted about the values: what a driver turns a column into is its own
+// business, and the fixture is about the bytes on the wire.
+func logCapturedRows(t *testing.T, db *sql.DB, query string) {
+	t.Helper()
+
+	rows, err := db.QueryContext(t.Context(), query)
+	require.NoError(t, err)
+
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
+	require.NoError(t, err)
+	t.Logf("columns: %v", cols)
+
+	for rows.Next() {
+		values := make([]interface{}, len(cols))
+		into := make([]interface{}, len(cols))
+
+		for i := range values {
+			into[i] = &values[i]
+		}
+
+		require.NoError(t, rows.Scan(into...))
+
+		for i, v := range values {
+			t.Logf("  %s = %T %v", cols[i], v, v)
+		}
+	}
+
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
 }
 
 // captureGoOraLOB runs ociLOBQuery through a recording relay and writes the
