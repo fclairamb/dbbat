@@ -83,6 +83,9 @@ func sevenColumnRows() [][]string {
 func TestDumpReplay_SevenColumnRows(t *testing.T) {
 	t.Parallel()
 
+	require.Contains(t, sevenColumnQuery, sevenColumnSQLMarker,
+		"the marker has to be a substring of the statement on the wire, or it selects nothing")
+
 	td := loadTestDump(t, sevenColumnFixture)
 
 	rows := replayCapturedRows(t, td, sevenColumnSQLMarker)
@@ -217,8 +220,8 @@ func wideRowHeaderBytes(numCols int) []byte {
 	header := make([]byte, wideRowHeaderLen+1)
 	header[0] = ttcMsgRowHeader
 	header[wideRowHeaderFlagOffset] = wideRowHeaderFlag
-	binary.LittleEndian.PutUint32(header[wideRowHeaderCountOffset:], uint32(numCols)) //nolint:gosec // a column count
-	binary.LittleEndian.PutUint16(header[8:], 1)                                      // the array size, 1 on both describe frames
+	binary.LittleEndian.PutUint32(header[wideRowHeaderCountOffset:], uint32(numCols))
+	binary.LittleEndian.PutUint16(header[8:], 1) // the array size, 1 on both describe frames
 	header[wideRowHeaderLen] = ttcMsgBindOutput
 
 	return header
@@ -229,7 +232,8 @@ func wideRowHeaderBytes(numCols int) []byte {
 // integers the thin recordings carry — the count, its zero high part, the
 // client's prefetch size, and three zeros — then the `0x07`.
 func compressedRowHeaderBytes(numCols int) []byte {
-	header := []byte{ttcMsgRowHeader, wideRowHeaderFlag}
+	header := make([]byte, 0, 12)
+	header = append(header, ttcMsgRowHeader, wideRowHeaderFlag)
 	header = append(header, 0x01, byte(numCols)) // count
 	header = append(header, 0x00)                // its high part
 	header = append(header, 0x02, 0x03, 0xe8)    // prefetch 1000, as DBeaver and go-ora send
