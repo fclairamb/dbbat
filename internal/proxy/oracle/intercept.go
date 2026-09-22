@@ -1030,7 +1030,7 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 //
 // Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleQueryResultV2(ttcPayload []byte) {
-	result := decodeQueryResultV2(ttcPayload, s.oerShapeSnapshot().fixedWidth)
+	result := decodeQueryResultV2(ttcPayload, s.oerShapeSnapshot())
 	if result == nil {
 		return
 	}

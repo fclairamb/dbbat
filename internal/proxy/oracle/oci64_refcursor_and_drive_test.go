@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 	"time"
 
@@ -33,6 +34,7 @@ const (
 	oci64RefCursorDrives      = "testdata/oci64_refcursor_drives.hex"
 	oci64ScalarOutBinds       = "testdata/oci64_scalar_outbind_bind_output.hex"
 	oci64ParseExecs           = "testdata/oci64_parse_execs.hex"
+	oci64Describes            = "testdata/oci64_describe.hex"
 )
 
 // oci64RefCursorIDs are the ids the server handed back over that session, in
@@ -513,29 +515,28 @@ func TestDumpReplay_OCI64DriveOfAnUntrackedCursorFailsClosed(t *testing.T) {
 	})
 }
 
-// TestOCI64DecoyTailSignatureYieldsNoID is the bound the walk's central claim
-// rests on, and the reason it reads one descriptor rather than looping.
+// TestOCI64DecoyTailSignatureIsWalkedStraightPast is what used to be
+// TestOCI64DecoyTailSignatureYieldsNoID, and the change of name is the change
+// of mechanism.
 //
-// The trailing block is found by scanning for a signature, so the question that
-// has to have an answer is: what happens when something *earlier* in the
-// payload looks like one? The walk takes the first match and nothing else — so
-// a decoy produces an id that then fails the landing check, and the whole
-// result is discarded. It must not return `[decoy, real]`, which is what a walk
-// that re-scanned after a non-landing descriptor would do, and which
-// rememberCursor would plant **both** halves of: one wrong id over a tracked
-// cursor is the failure this file exists to avoid, not one to bound.
+// The walk used to find the descriptor's trailing block by scanning for its
+// signature — a DLC of exactly seven bytes carrying an Oracle DATE — because
+// the column records in between could not be parsed. The question that had to
+// have an answer was therefore: what happens when something *earlier* in the
+// payload looks like one? It now has a better answer than "the first match is
+// taken and then fails to land". There is no scan: the walk reads the column
+// records and arrives at the trailing block, so a decoy planted ahead of it is
+// never looked for.
 //
-// The decoy is written into a run of zeros inside the column records, so
-// nothing about the payload's length or its real trailing block moves. **Which**
-// run of zeros is load-bearing, and not every one of them works: at most
-// offsets the looping walk's re-sync lands on a field that fails its own bounds
-// and it returns nothing too, so a decoy placed there would leave this test
-// green against the very code it exists to exclude. Offset 72 is one of the
-// offsets where the looping walk genuinely returns `[9, 3]` — and rather than
-// take that on trust, the test replays that walk and requires it, so the day
-// the fixture changes under this offset the test says so instead of quietly
-// proving nothing.
-func TestOCI64DecoyTailSignatureYieldsNoID(t *testing.T) {
+// The decoy is the same one, written into a run of zeros inside the column
+// records, and it is still proven to be a decoy — `wide64IDUnderTheAnchoredWalk`
+// is the old reading, kept here so this test cannot quietly become one that
+// passes against anything. What is asserted is what the guarantee has always
+// been: the id the decoy was built to produce must not come back. It does not,
+// and the reason is visible in the same run: the decoy overwrites bytes the
+// field walk reads, so the record stops decoding rather than resynchronising on
+// a plausible number somewhere later.
+func TestOCI64DecoyTailSignatureIsWalkedStraightPast(t *testing.T) {
 	t.Parallel()
 
 	original := extractTTCPayload(recordedFrames(t, oci64RefCursorBindOutputs)[0])
@@ -544,11 +545,11 @@ func TestOCI64DecoyTailSignatureYieldsNoID(t *testing.T) {
 		"the unmodified fixture must decode, or the mutation below proves nothing")
 
 	realTail := bytes.Index(original, wide64TailSignature)
-	require.Positive(t, realTail, "the fixture must carry the trailing block this walk anchors on")
+	require.Positive(t, realTail, "the fixture must carry the trailing block the descriptor ends with")
 
 	// Inside the column records, in a stretch the recording leaves zeroed, and
-	// far enough ahead of the real block to be reached first. See the note above
-	// on why this number is not interchangeable with its neighbors.
+	// far enough ahead of the real block that a scanning walk would reach it
+	// first.
 	const decoyAt = 72
 
 	require.Less(t, decoyAt+wide64TailLen, realTail, "the decoy has to come first to be a decoy")
@@ -558,64 +559,47 @@ func TestOCI64DecoyTailSignatureYieldsNoID(t *testing.T) {
 		"the decoy must land in a run of zeros, or it is overwriting real fields")
 
 	copy(payload[decoyAt:], wide64TailSignature)
-	// A date-shaped run, so the anchor's second half accepts it too.
+	// A date-shaped run, so the old anchor's second half accepts it too.
 	copy(payload[decoyAt+wide64TailDateAt:], []byte{0x78, 0x7e, 0x09, 0x14, 0x16, 0x29, 0x02})
 	// And a perfectly plausible cursor id behind it, which is the whole danger:
-	// without the single-descriptor rule this is the number that would be
-	// planted alongside the real one.
+	// this is the number an anchored reading hands back.
 	copy(payload[decoyAt+wide64TailCursorIDAt:], []byte{0x09, 0x00, 0x00, 0x00})
 
-	start, ok := bindOutputBodyStartWide64(payload)
-	require.True(t, ok, "the mutated payload must still open with a walkable IO vector")
-
-	decoyID, next, ok := wide64RefCursorDescriptor(payload, start)
-	require.True(t, ok, "the decoy must actually be taken as the anchor, or this tests nothing")
-	require.Equal(t, uint16(9), decoyID, "and it must produce the plausible id it was built to produce")
-	require.False(t, landedAfterBindOutput(payload, next) || landedAfterBindOutput(payload, next+2),
-		"a decoy that landed would be a different test")
-
 	// The discrimination, checked rather than asserted in prose: these bytes are
-	// bytes the looping walk got wrong.
-	require.Equal(t, []uint16{9, oci64RefCursorIDs[0]}, wide64IDsUnderTheLoopingWalk(payload),
-		"this decoy must be one the looping walk resolved to [decoy, real], or the offset "+
+	// bytes the anchored walk got wrong.
+	require.Equal(t, uint16(9), wide64IDUnderTheAnchoredWalk(payload),
+		"this decoy must be one the anchored walk resolved to the decoy id, or the offset "+
 			"has stopped discriminating and the assertion below proves nothing")
 
+	assert.NotContains(t, refCursorIDsInBindOutput(oci64OERShape(), payload), uint16(9),
+		"the id a decoy trailing block was built to produce must never come back")
 	assert.Empty(t, refCursorIDsInBindOutput(oci64OERShape(), payload),
-		"a decoy anchor must yield nothing at all — not the decoy, and not the real id behind it")
+		"and in this fixture the decoy sits on fields the walk reads, so the descriptor "+
+			"stops decoding altogether — the pre-feature behavior, never a different number")
 }
 
-// wide64IDsUnderTheLoopingWalk is refCursorIDsInBindOutputWide64 as it was
-// before the single-descriptor rule: append an id per descriptor, and only ask
-// the *last* one to land.
+// wide64IDUnderTheAnchoredWalk is how refCursorIDsInBindOutputWide64 found the
+// cursor id before the column records could be walked: scan forward for the
+// trailing block's signature, take the **first** match, and read the id 32
+// bytes past it.
 //
 // It is kept, and kept here rather than in the package, for one job — proving
 // that the decoy above is a decoy the old shape actually fell for. A negative
-// test whose input the buggy code also rejected is a test that passes either
-// way, and this walk is what stops this one from becoming that. It is written
-// out of the same primitives the real walk uses, so it cannot drift into
-// testing something else.
-func wide64IDsUnderTheLoopingWalk(ttc []byte) []uint16 {
+// test whose input the previous code also rejected is a test that passes either
+// way, and this reading is what stops this one from becoming that.
+func wide64IDUnderTheAnchoredWalk(ttc []byte) uint16 {
 	start, ok := bindOutputBodyStartWide64(ttc)
 	if !ok {
-		return nil
+		return 0
 	}
 
-	var ids []uint16
-
-	for len(ids) < refCursorMaxOutBinds {
-		id, next, ok := wide64RefCursorDescriptor(ttc, start)
-		if !ok {
-			return nil
+	for at := start; at+wide64TailLen <= len(ttc); at++ {
+		if !bytes.Equal(ttc[at:at+len(wide64TailSignature)], wide64TailSignature) {
+			continue
 		}
 
-		ids = append(ids, id)
-
-		if landedAfterBindOutput(ttc, next) || landedAfterBindOutput(ttc, next+2) {
-			return ids
-		}
-
-		start = next
+		return binary.LittleEndian.Uint16(ttc[at+wide64TailCursorIDAt : at+wide64TailCursorIDAt+2])
 	}
 
-	return nil
+	return 0
 }

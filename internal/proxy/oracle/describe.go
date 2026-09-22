@@ -51,10 +51,21 @@ type columnDesc struct {
 // off the end, or a decoded type code is not a known TNSType (a strong signal of
 // a misaligned parse). A clean parse therefore yields trustworthy names+types.
 //
-// `wide` says the session speaks the fixed-width OCI encoding, and it comes from
-// the session's learned oerShape rather than from anything in the payload — see
-// describeWireLayout.
-func parseColumnDescribes(ttcPayload []byte, wide bool) []columnDesc {
+// The encoding comes from `shape` — the session's learned oerShape — and never
+// from anything in the payload. `fixedWidth` is the OCI encoding and
+// `fixedWidth64` its 64-bit variant, which is a third layout rather than the
+// second one at wider offsets; see parseColumnDescribeWide64.
+func parseColumnDescribes(ttcPayload []byte, shape oerShape) []columnDesc {
+	// The 64-bit dialect has one layout, not two. The classic/modern retry below
+	// exists to tell apart two spellings of the record's *version-gated* trailing
+	// fields, and this dialect ends its record in a single measured span instead
+	// (wide64ColumnRecordTailLen) — so there is nothing to retry it with, and
+	// offering the payload a second reading would only be a second chance at a
+	// plausible-looking column list.
+	if shape.fixedWidth64 {
+		return parseColumnDescribesMode(ttcPayload, false, shape)
+	}
+
 	// The per-column record has version-dependent trailing fields. Classic
 	// servers / lower-TTCVersion clients (go-ora, python-oracledb thin) end the
 	// record after two trailing ints; modern ones (Oracle 23ai negotiating a high
@@ -62,11 +73,11 @@ func parseColumnDescribes(ttcPayload []byte, wide bool) []columnDesc {
 	// annotations block, and three further ints. Try the classic layout first
 	// (so thin clients never regress); if it misaligns — a record runs off the
 	// end or yields an unknown TTC type — retry with the modern layout.
-	if cols := parseColumnDescribesMode(ttcPayload, false, wide); cols != nil {
+	if cols := parseColumnDescribesMode(ttcPayload, false, shape); cols != nil {
 		return cols
 	}
 
-	return parseColumnDescribesMode(ttcPayload, true, wide)
+	return parseColumnDescribesMode(ttcPayload, true, shape)
 }
 
 // parseColumnDescribesMode decodes the column records using either the classic
@@ -74,13 +85,13 @@ func parseColumnDescribes(ttcPayload []byte, wide bool) []columnDesc {
 // — so the caller falls back / retries — whenever the payload is not a describe,
 // the count is implausible, a record runs off the end, or a decoded type code is
 // not a known TNSType (a strong signal of a misaligned parse).
-func parseColumnDescribesMode(ttcPayload []byte, modern, wide bool) []columnDesc {
-	count, start, ok := describeWireLayout(ttcPayload, wide)
+func parseColumnDescribesMode(ttcPayload []byte, modern bool, shape oerShape) []columnDesc {
+	count, start, ok := describeWireLayout(ttcPayload, shape)
 	if !ok || count <= 0 || count > 1000 {
 		return nil
 	}
 
-	c := &dcursor{buf: ttcPayload, pos: start, wide: wide}
+	c := &dcursor{buf: ttcPayload, pos: start, wide: shape.fixedWidth, wide64: shape.fixedWidth64}
 	cols := make([]columnDesc, 0, count)
 
 	for range count {
@@ -97,12 +108,15 @@ func parseColumnDescribesMode(ttcPayload []byte, modern, wide bool) []columnDesc
 
 // describeWireLayout is describeColumnLayout for whichever encoding the session
 // speaks.
-func describeWireLayout(ttc []byte, wide bool) (int, int, bool) {
-	if wide {
+func describeWireLayout(ttc []byte, shape oerShape) (int, int, bool) {
+	switch {
+	case shape.fixedWidth64:
+		return describeColumnLayoutWide64(ttc)
+	case shape.fixedWidth:
 		return describeColumnLayoutWide(ttc)
+	default:
+		return describeColumnLayout(ttc)
 	}
-
-	return describeColumnLayout(ttc)
 }
 
 // describeColumnLayoutWide is describeColumnLayout for the fixed-width OCI
@@ -147,6 +161,29 @@ func describeColumnLayoutWide(ttc []byte) (int, int, bool) {
 	return count, c.pos, true
 }
 
+// describeColumnLayoutWide64 is describeColumnLayout for the **64-bit** OCI
+// encoding, and it is deliberately the 4-byte one unchanged:
+//
+//	[0x10] [size ub4] [size bytes] [maxRowSize ub4] [colCount ub4] [1 skip byte] [records...]
+//
+// The extra byte this dialect writes before the first column record is real —
+// it was the first thing measured about it — but it is **not** a header field.
+// It is the first record's own lead byte, and every record has one (see
+// parseColumnDescribeWide64). That is not a preference between two framings: it
+// is the only one under which every record in the recording is the same shape.
+// Read as a header byte plus a *trailing* flag per record, the eight records of
+// testdata/oci64_describe.hex come out with two different tail lengths — 25
+// bytes on the seven scalar columns, 23 on the object one — for no reason any
+// field could supply. Read as a lead byte, all eight tails are 24 and the whole
+// record differs only in its DLC payloads, which is what a wire format looks
+// like.
+//
+// So this function exists to say that, and to keep the three encodings' entry
+// points side by side; it delegates rather than duplicating the walk.
+func describeColumnLayoutWide64(ttc []byte) (int, int, bool) {
+	return describeColumnLayoutWide(ttc)
+}
+
 // describeColumnLayout walks the describe header and returns the column count
 // and the offset of the first column-definition record:
 //
@@ -186,12 +223,27 @@ func describeColumnLayout(ttc []byte) (int, int, bool) {
 	return count, pos, true
 }
 
+// tnsTypeOPAQUE is the type code 23ai reports for an opaque type — a
+// `SYS.XMLTYPE` column is one. It sits in a gap the ranges below leave open,
+// and it is named rather than folded into one of them because it is the only
+// value measured in there: it came out of the `X` column of
+// testdata/oci64_describe.hex, whose record also carries `SYS`, `XMLTYPE` and a
+// 16-byte type id, all read at the offsets the surrounding columns pin.
+//
+// Until that column was recorded, a describe naming it failed isKnownTNSType
+// and the *whole* describe was discarded — under every one of the three
+// encodings, not just this one — so a query with an XMLTYPE column anywhere in
+// its select list captured its rows under scanAndPadColumnNames' guesses.
+const tnsTypeOPAQUE = 58
+
 // isKnownTNSType reports whether t is a defined TTC type code. The ranges cover
 // the full TNSType enumeration; an out-of-range value means the record parse
 // drifted and the result must not be trusted.
 func isKnownTNSType(t int) bool {
 	switch {
 	case t >= 1 && t <= 24:
+		return true
+	case t == tnsTypeOPAQUE:
 		return true
 	case t >= 60 && t <= 127:
 		return true
@@ -214,11 +266,30 @@ func isKnownTNSType(t int) bool {
 // as little-endian integers of a per-call-site width instead of TTC compressed
 // ones. It is set from the session's learned oerShape and never from the bytes
 // being read — see refCursorIDsInBindOutput.
+// wide64 narrows that to the **64-bit** variant of the same encoding. It is a
+// third reading rather than the second one at wider offsets — see
+// parseColumnDescribeWide64 — and like wide it is set from the session's learned
+// oerShape (fixedWidth64) and never from the bytes.
 type dcursor struct {
-	buf  []byte
-	pos  int
-	err  bool
-	wide bool
+	buf    []byte
+	pos    int
+	err    bool
+	wide   bool
+	wide64 bool
+}
+
+// skip advances past n bytes that are read by no field, failing the cursor if
+// they are not there. It is how a measured span is consumed — a run whose field
+// boundaries no recording separates, but whose total is pinned by what sits on
+// either side of it.
+func (c *dcursor) skip(n int) {
+	if c.err || n < 0 || c.pos+n > len(c.buf) {
+		c.err = true
+
+		return
+	}
+
+	c.pos += n
 }
 
 func (c *dcursor) byte() int {
@@ -349,6 +420,10 @@ func (c *dcursor) dlc() []byte {
 // are consumed too — data-use-case domain schema/name, an annotations block, and
 // three further ints — which sets where the next record starts.
 func parseColumnDescribe(c *dcursor, modern bool) (string, int) {
+	if c.wide64 {
+		return parseColumnDescribeWide64(c)
+	}
+
 	dataType := c.byte()
 	c.byte() // flag
 	c.byte() // precision
@@ -402,6 +477,131 @@ func parseColumnDescribe(c *dcursor, modern bool) (string, int) {
 	}
 
 	return string(name), dataType
+}
+
+// The 64-bit OCI column record's three measured spans. Each is pinned by what
+// sits on either side of it — a field whose value is non-zero in some recorded
+// column — and none is decomposed further than the recordings decompose it.
+const (
+	// wide64ColumnRecordLeadLen is the one-byte flag every record opens with.
+	// See describeColumnLayoutWide64 for why it belongs to the record rather
+	// than to the header it first showed up in.
+	wide64ColumnRecordLeadLen = 1
+
+	// wide64ColumnArrayAndContFlagLen is maxNoOfArrayElements and contFlag
+	// together, the way the 4-byte dialect spends five bytes on the pair
+	// without saying which owns the fifth. Twelve here, and pinned: the type
+	// OID's four-byte length sits exactly twelve bytes past maxLen on the
+	// object column, whose maxLen (2000) and OID (16 bytes behind a 0x10 CLR
+	// marker) are both real values.
+	wide64ColumnArrayAndContFlagLen = 12
+
+	// wide64ColumnEmptyTypeOIDPad is what an **absent** type OID costs beyond
+	// its four-byte length: eleven bytes a present one does not spend. See
+	// wide64TypeOID.
+	wide64ColumnEmptyTypeOIDPad = 11
+
+	// wide64ColumnRecordTailLen is everything after the type name: the two
+	// version-gated trailing integers, the data-use-case domain schema and name,
+	// and the annotation count — 18 bytes in the 4-byte dialect, 24 here. It is
+	// a span rather than five fields because only its first is ever non-zero in
+	// the corpus (the object column's `07`), so the rest have no boundaries to
+	// measure. A column carrying a 23ai SQL domain or an annotation would extend
+	// it and misalign the walk, which costs the describe (the caller falls back
+	// to scanAndPadColumnNames) and never a wrong name.
+	wide64ColumnRecordTailLen = 24
+)
+
+// parseColumnDescribeWide64 is parseColumnDescribe for the **64-bit** OCI
+// dialect: the same field list as ParameterInfo.load, at this dialect's widths.
+//
+// It is a function of its own rather than a wider `intw` on the one above
+// because five things differ, and four of them differ in a direction no width
+// argument expresses:
+//
+//   - every record opens with a one-byte flag (describeColumnLayoutWide64);
+//   - maxNoOfArrayElements and contFlag spend twelve bytes where the 4-byte
+//     dialect spends five;
+//   - `version` is **one** byte where the 4-byte dialect spends two, and
+//     `charsetForm` is **two** where it spends one — measured on the object
+//     column, whose version is 1, and on the VARCHAR2(4000), whose charset id
+//     (873), maximum character length (4000) and collation id (16382) pin every
+//     boundary around them;
+//   - an absent type OID costs eleven bytes more than its length field
+//     (wide64TypeOID);
+//   - and the record ends in a 24-byte span rather than in the version-gated
+//     fields the classic/modern retry exists to tell apart.
+//
+// Every width above is read off a column whose value for that field is
+// **non-zero**. Runs of zeros decide nothing and were not asked to: they are
+// bounded by the non-zero fields on either side of them, which is why the two
+// spans that could not be split are spelled out as spans.
+func parseColumnDescribeWide64(c *dcursor) (string, int) {
+	c.skip(wide64ColumnRecordLeadLen)
+
+	dataType := c.byte()
+	c.byte() // flag
+	c.byte() // precision
+	c.byte() // scale — one signed byte, as in the 4-byte dialect
+
+	c.intw(4) // maxLen
+	c.skip(wide64ColumnArrayAndContFlagLen)
+
+	wide64TypeOID(c)
+
+	c.byte()  // version (one byte here; two in the 4-byte dialect)
+	c.intw(2) // charsetID
+	c.intw(2) // charsetForm (two bytes here; one in the 4-byte dialect)
+	c.intw(4) // maxCharLen
+	c.intw(4) // oaccollid
+	c.byte()  // allowNull
+	c.byte()  // v7 name length (unused; the DLC below carries the real length)
+
+	name := c.dlc() // column name
+	c.dlc()         // schema name
+	c.dlc()         // type name
+
+	c.skip(wide64ColumnRecordTailLen)
+
+	return string(name), dataType
+}
+
+// wide64TypeOID consumes the record's type OID: a four-byte length, then either
+// the CLR carrying the OID or — when the length is zero — eleven further bytes.
+//
+// That conditional is the one part of this record that is not a field list, and
+// it is measured rather than chosen. The distance from maxLen to `version` is 33
+// bytes on a column carrying a 16-byte OID and 27 on one carrying none, while
+// the OID's own CLR is 17 — so the absent case spends **six more** bytes than
+// removing the CLR would account for, and the length field cannot simply move,
+// because the object column pins it twelve bytes past maxLen. No fixed layout
+// fits both; this one fits both and nothing in the corpus contradicts it.
+//
+// What the corpus cannot say is *why*, and the walk does not pretend to: the
+// eleven bytes are zero wherever they appear, so "padding an absent DLC" and
+// "an inline area a present OID displaces" are the same bytes. It matters only
+// that the record advances correctly, and a record it advanced wrongly fails
+// the next one's isKnownTNSType check rather than producing a name.
+func wide64TypeOID(c *dcursor) {
+	length := c.intw(4)
+	if c.err {
+		return
+	}
+
+	if length <= 0 {
+		c.skip(wide64ColumnEmptyTypeOIDPad)
+
+		return
+	}
+
+	data, n := readCLR(c.buf[c.pos:])
+	if n == 0 || len(data) < length {
+		c.err = true
+
+		return
+	}
+
+	c.pos += n
 }
 
 // parseColumnDescribeModernTail consumes the extra per-column fields a modern

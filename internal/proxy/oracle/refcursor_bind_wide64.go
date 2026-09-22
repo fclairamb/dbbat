@@ -16,42 +16,38 @@ import "encoding/binary"
 //   - the IO vector's fixed header is **50 bytes** where the 4-byte dialect
 //     spends 22, and its bind count sits at a different offset;
 //   - the descriptor header is the same field list at the same widths, plus one
-//     byte between the marker and the first column record;
+//     byte between the marker and the first column record — which turned out to
+//     be the first record's own lead byte rather than a header field, see
+//     describeColumnLayoutWide64;
 //   - the descriptor's trailing block — the describe timestamp, four integers,
 //     an empty DLC, the cursor id — is **byte-for-byte identical** to the
 //     4-byte dialect's;
-//   - but the per-column record in between is 25 bytes longer, and *where*
-//     those 25 bytes sit cannot be decided from the recordings in hand. Seven
-//     of them are ahead of the type OID (the object column pins that), eleven
-//     appear only when that OID is absent, and the remaining seven only when
-//     the schema and type names are absent too — and the corpus holds exactly
-//     one column with any of those three non-empty, so the three effects cannot
-//     be separated. Widening the record walk would mean shipping offsets no
-//     recording can falsify, which is the one thing this whole area refuses to
-//     do.
+//   - and the per-column record in between is 25 bytes longer, in the four
+//     places parseColumnDescribeWide64 spells out.
 //
-// So the column records are not parsed here at all. The walk is header-driven
-// at both ends and anchors the middle on the trailing block's own signature:
-// the describe timestamp, which is a DLC of exactly seven bytes carrying an
-// Oracle DATE. What makes that safe is the same thing that makes the 4-byte
-// walk safe — everything after the anchor must decode and the whole block must
-// **land** on the message that follows it. A layout this file has wrong yields
-// *no id*, which is the behavior an OCI session had before any of this
-// existed; it does not yield a different number.
+// That last line used to say the 25 bytes could not be placed, and the walk
+// below used to route around the column records because of it: it anchored the
+// trailing block on a signature — a DLC of exactly seven bytes carrying an
+// Oracle DATE — and validated by landing. The recording that closed it added
+// three object columns at three type-name lengths, a CLOB, a SYS.XMLTYPE and an
+// ordinary NUMBER placed **last**, which is what separated "the object column"
+// from "the column with a type OID" from "the last column"
+// (specs/todos/2026-09-21-01-oracle-wide64-column-record-layout.md).
 //
-// That last sentence is a guarantee, so the walk is shaped to actually make it
-// one. It reads **one** descriptor and requires it to land; it does not
-// continue past a descriptor that did not. The difference matters because the
-// anchor is a scan where the 4-byte walk is a field walk: there, "did not land"
-// means another descriptor follows contiguously and the walk simply carries on,
-// while here it would mean re-scanning forward for another signature — so a
-// spurious early anchor followed by a re-sync on the real trailing block would
-// return `[wrong id, real id]`, and rememberCursor plants **both**. One wrong
-// id planted over a tracked cursor is the exact failure the whole REF-cursor
-// chain is bounded against, so the second-chance behavior is refused rather
-// than bounded. It costs nothing measurable: a `SYS_REFCURSOR` is one cursor
-// and no recording holds a call returning two. See
-// TestOCI64DecoyTailSignatureYieldsNoID.
+// So the middle is now walked rather than scanned, and the walk is the same
+// walk the describe path runs — one `parseColumnDescribe` per column, each
+// column's type checked against isKnownTNSType, which is the alignment proof
+// the anchored version could not use. What has not changed is what happens when
+// it is wrong: everything after the columns must still decode and the whole
+// block must still **land** on the message that follows it, so a layout this
+// file has wrong yields *no id*, never a different number.
+//
+// It still reads **one** descriptor and requires it to land. The reason is no
+// longer the one above — a field walk has no second signature to re-sync on, so
+// the `[wrong id, real id]` hazard the single-descriptor rule was written
+// against is gone with the scan — but the bound costs nothing measurable and is
+// kept: a `SYS_REFCURSOR` is one cursor and no recording holds a call returning
+// two. See TestOCI64DecoyTailSignatureIsWalkedStraightPast.
 //
 // The cross-check is the same one, and it is what says the field is the right
 // one rather than a consistently decoded one:
@@ -83,33 +79,18 @@ const (
 	bindDirectionInOut = 48
 )
 
-// wide64DescriptorHeaderLen is the bind-output descriptor's header: the length
-// byte, the four-byte max row size, the four-byte column count, the marker
-// byte, and the one further byte this dialect writes before the first column
-// record.
-const wide64DescriptorHeaderLen = 1 + 4 + 4 + 1 + 1
-
-// wide64DescriptorColCountAt is where that header declares the cursor's column
-// count, relative to the descriptor's first byte.
-const wide64DescriptorColCountAt = 5
-
-// wide64TailScanLimit bounds how far past a descriptor's header the trailing
-// block may be looked for. A REF cursor's whole descriptor is a few hundred
-// bytes; the bound is here so a payload that is not one stops the walk rather
-// than making it read to the end.
-const wide64TailScanLimit = 8192
-
 // wide64TailSignature opens the descriptor's trailing block: a DLC declaring
-// seven bytes (four-byte little-endian length) followed by its seven-byte CLR.
-// What it carries is the describe timestamp, an Oracle DATE — which is checked
-// for being one, so the anchor is seven constrained bytes rather than five.
+// seven bytes (four-byte little-endian length) followed by its seven-byte CLR,
+// carrying the describe timestamp as an Oracle DATE.
+//
+// Nothing scans for it any more — the column walk arrives at it — and it is
+// kept for the one test that plants a **decoy** copy of it inside the records
+// and requires the walk to go straight past.
 var wide64TailSignature = []byte{0x07, 0x00, 0x00, 0x00, 0x07}
 
-// wide64TailCursorIDAt is where the cursor id sits, relative to the signature's
-// first byte: past the seven-byte DATE, the four integers the descriptor ends
-// with, and the empty DLC before it. Identical to the 4-byte dialect's trailing
-// block, walked there by readRefCursorDescriptor and spelled out here because
-// this walk does not reach it through the column records.
+// wide64TailCursorIDAt is where the cursor id sits relative to that signature's
+// first byte, and wide64TailLen how long the whole block is. Same test, same
+// reason: it is how the decoy is given a plausible id to be mistaken for.
 //
 //	+0   07 00 00 00     DLC length: 7
 //	+4   07              CLR marker
@@ -204,98 +185,66 @@ func bindOutputBodyStartWide64(ttc []byte) (int, bool) {
 // wide64RefCursorDescriptor reads one `SYS_REFCURSOR` descriptor starting at
 // the cursor and returns its id plus the offset just past the descriptor.
 //
-// The header is read at pinned offsets and the trailing block is found by its
-// signature — the **first** match, never the first one that happens to work. A
-// walk that retried later matches until something decoded would be a search for
-// a plausible number, which is precisely the failure this file is bounded
-// against.
+// It is readRefCursorDescriptor's field list at this dialect's widths, and it
+// reaches the cursor id **through** the column records rather than around them:
+// the descriptor's own header, then one parseColumnDescribe per column, then
+// the trailing block the 4-byte dialect shares byte for byte.
+//
+//	len:byte maxRowSize:ub4 colCount:ub4 [1 marker byte]
+//	colCount x column-describe record     (parseColumnDescribeWide64)
+//	dlc                                   the describe timestamp
+//	four ub4                              the version-gated trailing integers
+//	dlc                                   empty on every recorded descriptor
+//	cursorID:ub4
+//
+// Note what that last empty DLC costs: four bytes and nothing else. The
+// eleven-byte pad an absent type OID carries inside a column record
+// (wide64TypeOID) is that field's, not every empty DLC's — which is measured
+// here, on this descriptor, and is why the pad lives in one function rather
+// than in dcursor.dlc.
 func wide64RefCursorDescriptor(ttc []byte, start int) (uint16, int, bool) {
-	if start < 0 || start+wide64DescriptorHeaderLen > len(ttc) {
+	if start < 0 || start > len(ttc) {
 		return 0, 0, false
 	}
 
-	colCount := int(binary.LittleEndian.Uint32(
-		ttc[start+wide64DescriptorColCountAt : start+wide64DescriptorColCountAt+4]))
+	c := &dcursor{buf: ttc, pos: start, wide: true, wide64: true}
+
+	c.byte()  // descriptor length, informational: the fields below are self-sizing
+	c.intw(4) // max row size
+
+	colCount := c.intw(4)
 
 	// The same bound the 4-byte walk puts on a descriptor, and doing the same
 	// work: a REF cursor is a query's result set and no recording holds one with
-	// zero columns, while a zero here would let a run of small integers stand in
-	// for a descriptor. See readRefCursorDescriptor.
-	if colCount <= 0 || colCount > refCursorMaxColumns {
+	// zero columns, while a zero here would skip the column records — and with
+	// them the only structural proof this walk has. See readRefCursorDescriptor.
+	if c.err || colCount <= 0 || colCount > refCursorMaxColumns {
 		return 0, 0, false
 	}
 
-	tail, ok := wide64DescriptorTailAt(ttc, start+wide64DescriptorHeaderLen)
-	if !ok {
-		return 0, 0, false
-	}
+	c.byte() // marker
 
-	cursorID := int(binary.LittleEndian.Uint32(
-		ttc[tail+wide64TailCursorIDAt : tail+wide64TailCursorIDAt+4]))
-	if cursorID <= 0 || cursorID > cursorReexecMaxID {
-		return 0, 0, false
-	}
-
-	return uint16(cursorID), tail + wide64TailLen, true
-}
-
-// wide64DescriptorTailAt finds the descriptor's trailing block: the first
-// offset at or after from where the signature sits and the DATE behind it is a
-// plausible one.
-func wide64DescriptorTailAt(ttc []byte, from int) (int, bool) {
-	if from < 0 {
-		return 0, false
-	}
-
-	limit := from + wide64TailScanLimit
-	if limit > len(ttc) {
-		limit = len(ttc)
-	}
-
-	for at := from; at+wide64TailLen <= limit; at++ {
-		if !matchesWide64TailSignature(ttc, at) {
-			continue
-		}
-
-		return at, true
-	}
-
-	return 0, false
-}
-
-// matchesWide64TailSignature reports whether the descriptor's trailing block
-// starts at offset at.
-func matchesWide64TailSignature(ttc []byte, at int) bool {
-	for i, b := range wide64TailSignature {
-		if ttc[at+i] != b {
-			return false
+	for range colCount {
+		_, typ := parseColumnDescribe(c, false)
+		if c.err || !isKnownTNSType(typ) {
+			return 0, 0, false
 		}
 	}
 
-	return isOracleDateRun(ttc[at+wide64TailDateAt : at+wide64TailDateAt+7])
-}
+	c.dlc() // the describe timestamp
 
-// isOracleDateRun reports whether seven bytes are an Oracle DATE as the server
-// writes one: century and year-within-century both excess-100, then month and
-// day as themselves, then hour, minute and second stored one greater than they
-// are. Measured on the recorded describe timestamp — `78 7e 09 14 16 29 02` is
-// 0x78-100 = 20 and 0x7e-100 = 26, i.e. 2026-09-20 21:40:01.
-//
-// It is the half of the anchor that does the work. Five signature bytes alone
-// are a run a payload could hold by accident; five plus seven bytes that have
-// to spell a real date is not.
-func isOracleDateRun(b []byte) bool {
-	if len(b) != 7 {
-		return false
+	// TTCVersion >= 3 and >= 4, exactly as in the 4-byte dialect.
+	c.intw(4)
+	c.intw(4)
+	c.intw(4)
+	c.intw(4)
+
+	c.dlc() // TTCVersion >= 5
+
+	cursorID := c.intw(4)
+	if c.err || cursorID <= 0 || cursorID > cursorReexecMaxID {
+		return 0, 0, false
 	}
 
-	century, year, month, day, hour, minute, second := b[0], b[1], b[2], b[3], b[4], b[5], b[6]
-
-	return century >= 100 && century <= 200 &&
-		year >= 100 && year <= 199 &&
-		month >= 1 && month <= 12 &&
-		day >= 1 && day <= 31 &&
-		hour >= 1 && hour <= 24 &&
-		minute >= 1 && minute <= 60 &&
-		second >= 1 && second <= 60
+	return uint16(cursorID), c.pos, true
 }

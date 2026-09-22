@@ -1421,7 +1421,7 @@ type QueryResultV2 struct {
 //     in the first half of the payload (column definition area)
 //  2. Scan for row values: length-prefixed data after the column area
 //  3. Detect ORA-01403 as end-of-data (not an error)
-func decodeQueryResultV2(ttcPayload []byte, wide bool) *QueryResultV2 {
+func decodeQueryResultV2(ttcPayload []byte, shape oerShape) *QueryResultV2 {
 	if len(ttcPayload) < 20 {
 		return nil
 	}
@@ -1439,8 +1439,9 @@ func decodeQueryResultV2(ttcPayload []byte, wide bool) *QueryResultV2 {
 	// scanning + padding when the records don't parse (e.g. an unexpected server
 	// layout) so behavior never regresses.
 	//
-	// `wide` is the session's learned encoding (oerShape.fixedWidth), so an OCI
-	// session reads its real records here instead of the scanner's guesses.
+	// `shape` is the session's learned encoding, so an OCI session reads its
+	// real records here instead of the scanner's guesses — whichever of the two
+	// OCI dialects it speaks.
 	// Turning that on is not cosmetic and was measured rather than reasoned
 	// about: a session whose describes parse learns its columns, which puts it in
 	// a **row stream** over packets it used to walk straight past — and in the
@@ -1451,7 +1452,7 @@ func decodeQueryResultV2(ttcPayload []byte, wide bool) *QueryResultV2 {
 	// end-of-data discriminator in session.statusOERMayEndTheCall, which the
 	// corpus separates cleanly from the 149 running-count objects that really do
 	// travel inside the stream.
-	if descs := parseColumnDescribes(ttcPayload, wide); descs != nil {
+	if descs := parseColumnDescribes(ttcPayload, shape); descs != nil {
 		result.Columns = describeColumnNames(descs)
 		result.ColumnTypes = describeColumnTypes(descs)
 	} else {

@@ -37,11 +37,11 @@ func TestOCIDescribeRecordsParse(t *testing.T) {
 		require.NotEmptyf(t, ttc, "frame %d must carry a TTC message", i)
 		require.Equalf(t, byte(TTCFuncQueryResult), ttc[0], "frame %d must be a describe", i)
 
-		assert.NotEmptyf(t, parseColumnDescribes(ttc, true),
+		assert.NotEmptyf(t, parseColumnDescribes(ttc, ociOERShape()),
 			"every describe an OCI session receives must parse under the fixed-width reading: frame %d", i)
 	}
 
-	cols := parseColumnDescribes(extractTTCPayload(frames[len(frames)-1]), true)
+	cols := parseColumnDescribes(extractTTCPayload(frames[len(frames)-1]), ociOERShape())
 
 	assert.Equal(t, []columnDesc{
 		{Name: "N2", Type: tnsTypeNUMBER},
@@ -71,9 +71,9 @@ func TestOCIDescribeIsNotOfferedToAThinSession(t *testing.T) {
 
 	oci := extractTTCPayload(recordedFrames(t, ociDescribes)[0])
 
-	assert.NotEmpty(t, parseColumnDescribes(oci, true),
+	assert.NotEmpty(t, parseColumnDescribes(oci, ociOERShape()),
 		"the fixture must parse under the shape it was recorded from")
-	assert.Nil(t, parseColumnDescribes(oci, false),
+	assert.Nil(t, parseColumnDescribes(oci, oerShape{}),
 		"an OCI describe must not be read as a compressed one")
 }
 
@@ -156,7 +156,7 @@ func TestOCIRowCaptureCarriesTheDescribesColumnNames(t *testing.T) {
 			s.trackerMu.Unlock()
 
 			require.NotNil(t, s.tracker.pendingQuery, "the fetch must still be open")
-			assert.Equal(t, describeColumnNames(parseColumnDescribes(ttc, true)),
+			assert.Equal(t, describeColumnNames(parseColumnDescribes(ttc, ociOERShape())),
 				columnNamesOf(s.tracker.pendingQuery.cursor.columns),
 				"the cursor must carry the describe's own names")
 
