@@ -1762,24 +1762,58 @@ the row. `readRowColumn` steps over the framing instead:
   |---|---|---|
   | 64-bit OCI | `maxSize` ub4 LE · `size` ub8 LE · `chunkSize` ub4 LE · locator CLR | `testdata/oci64_lob.hex` |
   | 4-byte OCI | `maxSize` ub4 LE · `size` **compressed** · `chunkSize` ub4 LE · locator CLR | `testdata/oci_lob.hex` |
-  | Thin / compressed | the LOB's **own bytes** as a CLR, then two compressed integers | `testdata/go_ora_lob.pcapng` |
+  | Thin, locators | `maxSize` · (`size` · `chunkSize`) · locator CLR, all compressed | `testdata/go_ora_lob_stream.pcapng`, `testdata/python_thin_lob.pcapng` |
+  | Thin, inlined | the LOB's **own bytes** as a CLR, then its indicator and return code | `testdata/go_ora_lob.pcapng` |
 
   So the 4-byte dialect's column is six bytes shorter than the skip it was being
   given, and every row of such a fetch was refused — the same silent "no rows"
-  the LOB reading exists to end, one dialect over. Both OCI dialects spell the
-  locator's length **twice**, as the ub4 `maxSize` ahead of the header and as
-  the CLR length byte behind it, and only a column where the two agree is read
-  as a locator. A zero `maxSize` is the NULL LOB and ends the column there.
+  the LOB reading exists to end, one dialect over. All three locator spellings
+  give the locator's length **twice**, once ahead of the header and once as the
+  CLR length byte behind it, and only a column where the two agree is read as a
+  locator. A zero leading size is the NULL LOB and ends the column there.
 
-  The thin dialect is not a locator at all: under the LOB policy a thin client
-  defaults to, the server inlines the contents, so dbbat captures the value
-  rather than a placeholder naming a handle that is not there. A thin client
-  that asks for locators instead (go-ora's `lob fetch=post`) frames the column a
-  third way again — two CLRs — and **nothing in the describe tells the two
-  apart**, because the difference was asked for in the execute's options. Those
-  rows are refused rather than guessed at; see
-  `TestThinStreamedLOBFetchIsRefusedRatherThanGuessed` and its fixture
-  `testdata/go_ora_lob_stream.pcapng`.
+  The thin dialect's two rows in that table are the same server sending the same
+  query two different ways, and **nothing in its own frames tells them apart** —
+  the column records of the recordings are byte-identical. The difference was
+  asked for on the client's side, so that is where dbbat reads it: see "A thin
+  client says which LOB reading it wants" below.
+
+##### A thin client says which LOB reading it wants
+
+A LOB's contents are not normally in the row at all. A thin client that wants
+them says so, in a **define block** — an execute that declares no statement and
+carries one entry per column of a cursor already described — where it
+re-declares each LOB column as a LONG type. Oracle then sends a LONG column:
+the value, then its indicator and return code. Absent that, it sends a locator.
+
+Three recordings of one query, and they do not agree, which is the point:
+
+| Client | What it sends | What comes back |
+|---|---|---|
+| go-ora, nothing configured | a define turning CLOB into LONG VARCHAR (94) and BLOB into LONG RAW (24) | the bodies |
+| python-oracledb thin, nothing configured | a define keeping each LOB column the LOB type it already was | locators |
+| go-ora, `lob fetch=post` | no define at all | locators |
+
+So inlining is go-ora's default rather than the thin dialect's, and the locator
+is what the protocol sends unless it was asked otherwise. `execDefineLOBShape`
+reads the ask off the client's own frame — once, before the rows exist, never
+out of the row bytes it would then be used to read — and `readRowColumn` branches
+on it. **A session that asked for nothing, or whose define dbbat could not walk,
+reads locators**, where a wrong walk costs the row rather than filling it with
+framing bytes.
+
+The walk is bounded the way the rest of this package's readings are: the entries
+have to be as many as the describe named, fill the frame to its last byte, and
+each declare the type the describe gave or a LONG substituted for a LOB — at
+exactly one offset, or nothing is learned. Swept across every `testdata/*.pcapng`
+recording, exactly the two frames that are defines answer
+(`TestDefineBlockIsNotFoundInFramesThatAreNotOne`), and each recording read under
+the *other* client's reading comes back with no rows at all
+(`TestThinLOBFetchIsNotOfferedTheOtherReading`).
+
+Until this was read, `lob fetch=post` and **every python-oracledb thin LOB
+query** captured nothing: the walk read the locator as an inlined value, came
+out on the wrong byte, and `rowEndsAtMarker` cost the row.
 - **Opaque / object** — the image header is *read*, not measured: the image
   length arrives twice, as a four-byte little-endian field and as a single byte,
   with a constant `0x01 0x00` between them. Two spellings of one number agreeing
@@ -1804,10 +1838,12 @@ captured as `<CLOB locator>`, `<BLOB locator>` or `<BFILE locator>`: a marker
 naming the type, distinguishable from real data and from a NULL, which still
 captures as `""`.
 
-The same rule read the other way is why a **thin** session captures the value
-instead: there the contents *are* in the packet, because the client asked the
-server to inline them. The deciding fact is where the data is, not which type
-the column has.
+The same rule read the other way is why a thin session that asked for the
+**bodies** captures the value instead: there the contents *are* in the packet,
+because the client asked the server to inline them. The deciding fact is where
+the data is, not which type the column has — and on the thin dialect that is
+decided per session, by the client, which is why it is read off the client's own
+define block rather than assumed.
 
 #### An object column captures its image, not the locator in front of it
 

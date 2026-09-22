@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/dump"
 )
 
 // The other two dialects' half of the LOB evidence.
@@ -18,10 +20,12 @@ import (
 //   - the **4-byte OCI** dialect sends its `size` field as a TTC compressed
 //     integer where the 64-bit one sends a fixed ub8, so its LOB column is six
 //     bytes shorter and every row of such a fetch used to be refused;
-//   - the **thin** dialect, under the LOB policy a thin client defaults to,
-//     sends no locator at all — the server inlines the LOB's own bytes.
+//   - the **thin** dialect has two shapes rather than one, and which arrives is
+//     decided by the client rather than by the negotiation: go-ora's default
+//     asks the server to inline the bodies, while go-ora's `lob fetch=post` and
+//     python-oracledb thin's own default both get locators.
 //
-// See readFixedLOBColumn and readCompressedLOBColumn.
+// See readFixedLOBColumn, readCompressedLOBColumn and execDefineLOBShape.
 
 // TestOCILOBFetchKeepsEveryOrdinaryColumn is
 // TestOCI64LOBFetchKeepsEveryOrdinaryColumn on the other OCI dialect, and it is
@@ -194,6 +198,136 @@ func TestThinStreamedLOBFetchCapturesItsLocators(t *testing.T) {
 	require.Len(t, rows, 1, "the query selects from dual and returns exactly one row")
 
 	assert.Equal(t, goOraLOBLocatorRow, rows[0])
+}
+
+// TestThinLOBFetchIsNotOfferedTheOtherReading is
+// TestOCILOBFetchIsNotOfferedToTheOtherTwoEncodings for the split this branch
+// introduced, and it is what makes the define block's reading load-bearing
+// rather than decorative.
+//
+// The two shapes are not each other's near-misses — one is a LONG column's
+// value with its indicator pair, the other a locator with its sizes in front —
+// but nothing about the row *says* which, so a walk offered both is a walk with
+// two chances at a plausible-looking row. Each thin recording is therefore
+// replayed under the reading its client did not ask for, and each must come
+// back with nothing: the walk comes out on the wrong byte and rowEndsAtMarker
+// costs it the row, which is the behavior every locator skip in this package
+// is bounded by.
+func TestThinLOBFetchIsNotOfferedTheOtherReading(t *testing.T) {
+	t.Parallel()
+
+	inline, locator := lobRowInline, lobRowLocator
+
+	for _, tc := range []struct {
+		fixture string
+		wrong   *lobRowShape
+	}{
+		{goOraLOBFixture, &locator},
+		{goOraLOBStreamFixture, &inline},
+		{pythonThinLOBFixture, &inline},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Empty(t,
+				replayCapturedRowsUnder(t, loadTestDump(t, tc.fixture), goOraLOBSQLMarker, tc.wrong),
+				"a fetch read under the shape its client did not ask for must cost the row")
+		})
+	}
+}
+
+// TestSessionLearnsTheLOBReadingOffTheClientsOwnFrame is the plumbing half:
+// the reading is not only decodable, it reaches the fetch that needs it.
+//
+// The define frame of each recording goes through interceptClientMessage — the
+// same entry point the live client leg uses, with the same lock discipline —
+// and what the row walk will be handed afterwards is pendingLOBRowShape. A
+// session that has seen no define keeps the locator reading it started with,
+// which is the last case here and the one go-ora's `lob fetch=post` produces.
+func TestSessionLearnsTheLOBReadingOffTheClientsOwnFrame(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		fixture string
+		want    lobRowShape
+	}{
+		{goOraLOBFixture, lobRowInline},
+		{pythonThinLOBFixture, lobRowLocator},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			t.Parallel()
+
+			s, _, _ := newCapturingSession(t, 10000)
+
+			s.trackerMu.Lock()
+			require.NotNil(t, s.tracker.pendingQuery)
+			s.tracker.pendingQuery.cursor.columns = lobColumnDefs(goOraLOBColumns)
+			s.trackerMu.Unlock()
+
+			s.interceptClientMessage(statementlessExecFrame(t, loadTestDump(t, tc.fixture)))
+
+			s.trackerMu.Lock()
+			defer s.trackerMu.Unlock()
+
+			assert.Equal(t, tc.want, s.pendingLOBRowShape())
+		})
+	}
+
+	t.Run("nothing seen", func(t *testing.T) {
+		t.Parallel()
+
+		s, _, _ := newCapturingSession(t, 10000)
+
+		s.trackerMu.Lock()
+		defer s.trackerMu.Unlock()
+
+		assert.Equal(t, lobRowLocator, s.pendingLOBRowShape(),
+			"a session that asked for nothing reads what the server sends unasked")
+	})
+}
+
+// lobColumnDefs turns a describe's records into the columnDef list a tracked
+// cursor holds.
+func lobColumnDefs(descs []columnDesc) []columnDef {
+	cols := make([]columnDef, len(descs))
+	for i, d := range descs {
+		cols[i] = columnDef{Name: d.Name, TypeCode: uint8(d.Type)}
+	}
+
+	return cols
+}
+
+// statementlessExecFrame returns the one client frame of a recording whose
+// execute declares no statement, which on the LOB fixtures is the define block.
+//
+// It is found by execNoStatementCursor rather than by the define reader under
+// test, and there is exactly one per recording — the corpus census in
+// TestOJDBC6ReexecDoesNotDisturbTheParsePath is what says so.
+func statementlessExecFrame(t *testing.T, td *testDump) *TNSPacket {
+	t.Helper()
+
+	var found *TNSPacket
+
+	for _, pkt := range td.Packets {
+		if pkt.Direction != dump.DirClientToServer {
+			continue
+		}
+
+		tns, err := parseTNSFromDumpPacket(pkt.Data)
+		if err != nil || tns.Type != TNSPacketTypeData || len(tns.Payload) < ttcDataFlagsSize+1 {
+			continue
+		}
+
+		if _, ok := execNoStatementCursor(extractTTCPayload(tns.Payload), false); ok {
+			require.Nil(t, found, "the recording must carry exactly one statement-less execute")
+
+			found = tns
+		}
+	}
+
+	require.NotNil(t, found, "the recording must carry a statement-less execute")
+
+	return found
 }
 
 // TestPythonThinLOBFetchCapturesItsLocators is the same query on a second,

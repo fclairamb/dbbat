@@ -18,15 +18,14 @@ const oci64LOBFrames = "testdata/oci64_lob.hex"
 // locator is a measurement rather than one server's habit.
 const ociLOBFrames = "testdata/oci_lob.hex"
 
-// goOraLOBFixture and goOraLOBStreamFixture are the thin dialect's two halves,
-// and the pair is the point.
+// goOraLOBFixture and goOraLOBStreamFixture are two of the thin dialect's three
+// halves, and the pair is the point.
 //
-// A thin client's default LOB policy is *inline*: go-ora asks for the bodies up
-// front, the server sends them as ordinary column values, and the row carries
-// no locator at all — which is why the compressed encoding never hit the defect
-// the LOB framing was written for. `lob fetch=post` is the same query with the
-// client asking for locators instead, and it is the recording that says whether
-// a thin session frames one the way the 64-bit OCI session does.
+// go-ora's default LOB policy is *inline*: it asks for the bodies up front, the
+// server sends them as ordinary column values, and the row carries no locator
+// at all — which is why the compressed encoding never hit the defect the LOB
+// framing was written for. `lob fetch=post` is the same query with the client
+// asking for nothing, which is what gets a locator.
 //
 // Regenerate both with:
 //
@@ -36,10 +35,12 @@ const (
 	goOraLOBStreamFixture = "go_ora_lob_stream.pcapng"
 )
 
-// pythonThinLOBFixture is the same query on a second, independently written
-// thin driver — python-oracledb, with nothing configured — and it is what says
-// whether go-ora's inline default is the thin dialect's norm or go-ora's own
-// habit. Regenerate with:
+// pythonThinLOBFixture is the third, and it is the one that says go-ora's inline
+// default is go-ora's habit rather than the thin dialect's: a second,
+// independently written driver with nothing configured fetches locators. Its
+// locator header is not go-ora's either — it carries the LOB's own size and
+// chunk size as well — which is what readCompressedLOBLocatorColumn steps over
+// rather than counts. Regenerate with:
 //
 //	go test -tags capture -timeout 300s -run TestCapture_PythonThinLOB ./internal/proxy/oracle/
 const pythonThinLOBFixture = "python_thin_lob.pcapng"

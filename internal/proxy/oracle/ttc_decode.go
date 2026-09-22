@@ -2356,7 +2356,8 @@ func rowValueShapeOf(colTypes []int, col int) rowValueShape {
 //
 //	64-bit OCI     maxSize ub4 LE · size ub8 LE · chunkSize ub4 LE · locator CLR
 //	4-byte OCI     maxSize ub4 LE · size compressed · chunkSize ub4 LE · locator CLR
-//	compressed     content CLR · two compressed integers
+//	compressed     maxSize · (size · chunkSize) · locator CLR, all compressed
+//	  or           content CLR · the column's indicator and return code
 //
 // So the 4-byte dialect's LOB column is six bytes shorter than the skip it was
 // being given, and every row of such a fetch was refused — the same silent
@@ -2370,15 +2371,13 @@ func rowValueShapeOf(colTypes []int, col int) rowValueShape {
 // NULL LOB and ends the column on the spot — the four bytes the old
 // lobNullTrailerLen counted with the length byte in front of it.
 //
-// The compressed dialect is not a locator at all under a thin client's default
-// policy: the server inlines the LOB's own bytes, so what the column carries is
-// the value, and dbbat captures it rather than a placeholder naming a handle
-// that is not there. A thin client that asks for locators instead
-// (`lob fetch=post`, testdata/go_ora_lob_stream.pcapng) frames them a third way
-// again, and nothing in the describe tells the two apart — so those rows are
-// refused, exactly as they were before any of this. Telling them apart needs
-// the client's own execute read for the policy it asked for, which is
-// specs/todos/2026-09-22-09-oracle-a-thin-client-that-asks-for-lob-locators-loses-its-rows.md.
+// The compressed dialect has **two** shapes rather than one, and the two are
+// not near-misses: a client that re-declared its LOB columns as LONG gets the
+// value in the row, a client that did not gets a locator. Nothing in the
+// describe says which — the column records of the two recordings are identical
+// — so the branch is decided off the client's own define block
+// (execDefineLOBShape), and a session that stated nothing reads locators,
+// because that is what the server sends when nothing was asked.
 //
 // None of it is load-bearing on its own: a wrong skip drifts the columns after
 // it, and parseRowStream then refuses the whole row (rowEndsAtMarker) rather
@@ -2395,7 +2394,8 @@ const (
 	lobFixedSize64Len = 8
 
 	// lobCompressedTrailingInts is how many compressed integers follow the
-	// inlined content on the thin dialect.
+	// inlined content on the thin dialect: the column's indicator and its
+	// return code.
 	lobCompressedTrailingInts = 2
 )
 

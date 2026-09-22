@@ -41,6 +41,20 @@ func largeResultPayload(n int) string {
 func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string {
 	t.Helper()
 
+	return replayCapturedRowsUnder(t, td, sqlMarker, nil)
+}
+
+// replayCapturedRowsUnder is replayCapturedRows with the LOB reading imposed
+// rather than read off the client's frames.
+//
+// It exists for one assertion and it is the gate every reading in this package
+// carries: a fetch offered both shapes is a fetch with two chances to produce a
+// plausible-looking row, so each thin recording is replayed under the *other*
+// client's reading and must come back with nothing. See
+// TestThinLOBFetchIsNotOfferedTheOtherReading.
+func replayCapturedRowsUnder(t *testing.T, td *testDump, sqlMarker string, forced *lobRowShape) [][]string {
+	t.Helper()
+
 	var (
 		started  bool
 		done     bool
@@ -50,6 +64,10 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 		rows     [][]string
 		lobShape lobRowShape
 	)
+
+	if forced != nil {
+		lobShape = *forced
+	}
 
 	for _, pkt := range td.Packets {
 		if done {
@@ -79,7 +97,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 			// is the only place the LOB reading of the rows about to arrive is
 			// stated, and a replay that skipped it would read the fixtures
 			// under a shape their client never asked for.
-			if started && len(colTypes) > 0 {
+			if forced == nil && started && len(colTypes) > 0 {
 				if shape, ok := execDefineLOBShape(ttcPayload, colTypes); ok {
 					lobShape = shape
 				}
