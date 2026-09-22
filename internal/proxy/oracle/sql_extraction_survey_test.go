@@ -487,3 +487,233 @@ func TestSurveyStapledOALL8(t *testing.T) {
 		"no recorded piggyback staples a decodable legacy OALL8; adding 0x0e to the anchor "+
 			"list would buy nothing and cost the false positives anchoring removed")
 }
+
+// --- the 64-bit OCI dialect ---------------------------------------------------
+//
+// The survey above is the pcapng corpus, none of which is a 64-bit OCI session.
+// That dialect's exec header had its own reading (execSQLLengthWide64Field) for
+// as long as the statement tag existed, but only the *rewriter* used it: the
+// gate's own decode took no dialect, refused the header, and fell through to the
+// offset window and the keyword scan — the mechanism this whole file exists to
+// measure the cost of. This half is the measurement that decided whether closing
+// that was worth a hot-path change, and the answer is in
+// TestSurveyWide64ScanReadsAPrefixPastTheShortCLRForm.
+
+// wide64ScanReading is decodePiggybackExecSQL's fallback, and only its fallback:
+// the 40-70 offset window followed by the keyword scan. It is what a 64-bit OCI
+// session's statements were read by before the decode learned the dialect, kept
+// here for the same reason legacyExecScan is — the report has to be able to say
+// what the old mechanism returned.
+func wide64ScanReading(ttcPayload []byte) (string, bool) {
+	var stmt execStatement
+
+	for offset := 40; stmt.Text == "" && offset < 70 && offset < len(ttcPayload)-1; offset++ {
+		if found, err := extractSQLAtOffsetText(ttcPayload, offset); err == nil && found.Text != "" {
+			stmt = found
+		}
+	}
+
+	if stmt.Text != "" {
+		// The window has no length to check its run against, so it never reports
+		// a prefix as one.
+		return stmt.Text, false
+	}
+
+	if found, cut := findSQLInPayload(ttcPayload); found != "" {
+		return found, cut
+	}
+
+	return "", false
+}
+
+// wide64SurveyStatements is the statement set the derived corpus carries. It is
+// chosen around the one boundary the scan cannot see — **253 bytes**, measured
+// by bisection: at or below it the scan reads the statement whole, from it on
+// the scan keeps exactly 252 bytes and says nothing — plus the three shapes
+// whose misreading on the 4-byte corpus is what made this decode exist at all
+// (TestSurveyAlterSessionMisreadAsSet).
+func wide64SurveyStatements() []string {
+	return []string{
+		"BEGIN dbbat_cap_refcur(:rc); END;",
+		"SELECT 1 FROM dual",
+		"ALTER SESSION SET CURRENT_SCHEMA=TESTADM",
+		"UPDATE emp SET name = 'x' WHERE id = 1",
+		"SELECT * FROM dba_role_privs WHERE GRANTED_ROLE='DBA'",
+		"SELECT COUNT(*) FROM user_tables",
+		// 252 bytes: the last size the scan reads whole.
+		"SELECT " + strings.Repeat("a", 235) + " FROM dual",
+		// 253: the first it does not.
+		"SELECT " + strings.Repeat("b", 236) + " FROM dual",
+		"UPDATE emp SET " + strings.Repeat("x", 400) + " = 1",
+		// Past one chunk, so the statement does not even sit contiguously.
+		"SELECT " + strings.Repeat("c", 40000) + " FROM dual",
+	}
+}
+
+// wide64DerivedFrames returns the recorded 64-bit parses with their statement
+// rewritten to sql.
+//
+// Deriving rather than recording is sound here for exactly one reason, and it is
+// measured rather than assumed: TestSurveyStatementRewriteWide64OCI shows this
+// rewriter reproduces each recorded frame's own bytes byte for byte when it
+// writes the statement back unchanged. A model that reproduces the client's
+// frame is a model that can stand in for the client on the same header with
+// different text. What it cannot vouch for is the CLR *long* form on this
+// dialect — no recording carries a 64-bit statement past 251 bytes — so the
+// finding below is about what the scan does with a length prefix it cannot read
+// as a single byte, whichever long form the client picks.
+func wide64DerivedFrames(t *testing.T, sql string) [][]byte {
+	t.Helper()
+
+	var out [][]byte
+
+	for i, base := range wide64StatementFrames(t) {
+		rw, ok := locateStatementRewrite(base, true, true)
+		require.Truef(t, ok, "frame %d must locate", i)
+
+		out = append(out, rw.apply(base, []byte(sql), true))
+	}
+
+	return out
+}
+
+// TestSurveyWide64RecordedFramesAreReadWhole is the first half of the
+// before/after, on the bytes a real 64-bit sqlplus session actually wrote.
+//
+// It is a **negative** result and it is reported as one: all three recorded
+// parses carry the same 33-byte `BEGIN dbbat_cap_refcur(:rc); END;`, and the
+// scan reads every one of them whole. On this corpus alone the answer would be
+// "no gap, do not ship a hot-path change" — which is why the corpus is widened
+// below rather than concluded from.
+func TestSurveyWide64RecordedFramesAreReadWhole(t *testing.T) {
+	t.Parallel()
+
+	const recorded = "BEGIN dbbat_cap_refcur(:rc); END;"
+
+	var scanWhole, headerWhole, headerBefore int
+
+	frames := wide64StatementFrames(t)
+
+	for i, ttc := range frames {
+		// What the decode did before it was told the dialect: nothing. The
+		// 4-byte and thin walks both refuse this header, which is the whole
+		// reason the scan was running.
+		if _, ok := decodeExecStatementText(ttc, false); ok {
+			headerBefore++
+		}
+
+		if stmt, ok := decodeExecStatementText(ttc, true); ok && stmt.Text == recorded {
+			headerWhole++
+		}
+
+		scanned, _ := wide64ScanReading(ttc)
+		if scanned == recorded {
+			scanWhole++
+		} else {
+			t.Logf("frame %d: the scan read %q", i, truncateSQL(scanned, 60))
+		}
+	}
+
+	t.Logf("=== testdata/%s: %d recorded parses, one distinct statement ===",
+		filepath.Base(oci64ParseExecs), len(frames))
+	t.Logf("  read whole by the window+keyword scan:      %d", scanWhole)
+	t.Logf("  read whole by the header-anchored decode:   %d", headerWhole)
+	t.Logf("  read at all by the decode before it knew the dialect: %d", headerBefore)
+
+	require.Equal(t, len(frames), scanWhole,
+		"the recorded 64-bit corpus is read whole by the scan; the gap this spec closes is not "+
+			"visible on it, and TestSurveyWide64ScanReadsAPrefixPastTheShortCLRForm is where it is")
+	require.Equal(t, len(frames), headerWhole, "and read whole by the decode that knows the dialect")
+	require.Zero(t, headerBefore,
+		"before the dialect was threaded down, the decode refused every one of these frames — "+
+			"which is what left the scan in charge of the gate on this client family")
+}
+
+// TestSurveyWide64ScanReadsAPrefixPastTheShortCLRForm is the measurement that
+// decided the change, and the gap it finds is silent rather than noisy.
+//
+// On this dialect the statement's length prefix sits at a fixed offset the 40-70
+// window happens to cover, so as long as that prefix reads as one byte — the CLR
+// short form — the scan lands on it and takes the run it names. That holds up to
+// 252 bytes. From **253** on it reads the long form's first bytes as a length
+// instead and hands the gate exactly 252 bytes, with `Truncated` unset, because
+// a window scan has no declared length to check its run against and so cannot
+// tell a prefix from a statement. The boundary is measured by bisection, not
+// derived. The header-anchored decode reads every one of them whole.
+//
+// A prefix is not a cosmetic misreading. It is what read_only, block_ddl, the
+// approval patterns and ValidateOracleQuery are evaluated against, and it is
+// what the `queries` row stores — so a `MERGE` whose write clause sits past byte
+// 252 was gated on its first 252 bytes and recorded as them.
+func TestSurveyWide64ScanReadsAPrefixPastTheShortCLRForm(t *testing.T) {
+	t.Parallel()
+
+	var (
+		frames                          int
+		scanWhole, scanPrefix, scanMiss int
+		headerWhole, headerMiss         int
+		silentPrefixes                  int
+	)
+
+	for _, sql := range wide64SurveyStatements() {
+		for i, frame := range wide64DerivedFrames(t, sql) {
+			frames++
+
+			stmt, ok := decodeExecStatementText(frame, true)
+			if ok && stmt.Text == sql {
+				headerWhole++
+			} else {
+				headerMiss++
+
+				t.Logf("HEADER MISS (%d bytes, frame %d): ok=%v got %q", len(sql), i, ok, truncateSQL(stmt.Text, 60))
+			}
+
+			scanned, flagged := wide64ScanReading(frame)
+
+			switch {
+			case scanned == sql:
+				scanWhole++
+			case scanned != "" && strings.HasPrefix(sql, scanned):
+				scanPrefix++
+
+				if !flagged {
+					silentPrefixes++
+				}
+
+				if i == 0 {
+					t.Logf("SCAN PREFIX (%d bytes): %d bytes kept, truncation flagged=%v",
+						len(sql), len(scanned), flagged)
+				}
+			default:
+				scanMiss++
+
+				if i == 0 {
+					t.Logf("SCAN OTHER (%d bytes): %q", len(sql), truncateSQL(scanned, 60))
+				}
+			}
+		}
+	}
+
+	t.Logf("=== 64-bit OCI exec frames, recorded headers with %d statements each ===",
+		len(wide64SurveyStatements()))
+	t.Logf("frames measured:                         %d", frames)
+	t.Logf("the window+keyword scan (before) read:")
+	t.Logf("  the whole statement:                   %d", scanWhole)
+	t.Logf("  a prefix of it:                        %d", scanPrefix)
+	t.Logf("    ... of which silently, Truncated unset: %d", silentPrefixes)
+	t.Logf("  something else / nothing:              %d", scanMiss)
+	t.Logf("the header-anchored decode (after) read:")
+	t.Logf("  the whole statement:                   %d", headerWhole)
+	t.Logf("  anything short of it:                  %d", headerMiss)
+
+	require.Zero(t, headerMiss,
+		"the header-anchored decode must read every one of these frames whole; that is the "+
+			"property the change buys")
+	require.Positive(t, scanPrefix,
+		"the gap this spec closes: the scan hands the gate a prefix once the statement outgrows "+
+			"the CLR short form. A zero here means the corpus stopped exercising the boundary, "+
+			"not that the scan became precise")
+	require.Equal(t, scanPrefix, silentPrefixes,
+		"and every one of those prefixes is silent — the scan reports no truncation, so nothing "+
+			"downstream can tell a gated prefix from a gated statement")
+}
