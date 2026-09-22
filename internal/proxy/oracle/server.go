@@ -241,7 +241,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.statementTaggingEnabled = s.statementTagging
 	if s.queryTaggingResolver != nil {
 		// The tagging.* store parameter over the DBB_QUERY_TAGGING_ORACLE
-		// default, decided per session. An unrecognised stored value resolved
+		// default, decided per session. An unrecognized stored value resolved
 		// to off inside the resolver — with a WARN — rather than failing the
 		// session the way the environment variable fails startup.
 		session.statementTaggingEnabled =
