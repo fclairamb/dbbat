@@ -17,16 +17,21 @@ const ociDescribes = "testdata/oci_describe.hex"
 // Until this existed, parseColumnDescribes read TTC compressed integers only, so
 // an OCI session's describes never parsed and its column names came from the
 // heuristic scanner — which guesses at what a describe record spells out. The
-// last describe in the fixture is a deliberately awkward one: a
-// `VARCHAR2(4000)` whose maximum length does not fit a byte, a `NUMBER(10,2)`
-// with a real precision and scale, `1/3` whose scale is the -127 float
-// sentinel, temporal types, a `CHAR(5)`, a `RAW`, and an object column whose
-// record carries a non-null 16-byte type OID.
+// session's second describe is a deliberately awkward one: a `VARCHAR2(4000)`
+// whose maximum length does not fit a byte, a `NUMBER(10,2)` with a real
+// precision and scale, `1/3` whose scale is the -127 float sentinel, temporal
+// types, a `CHAR(5)`, a `RAW`, and an object column whose record carries a
+// non-null 16-byte type OID.
 //
-// That last column is the one that settles a question no run of zeros could: the
-// type OID arrives as a four-byte little-endian length of 16 followed by a CLR,
-// which is what says the field is a DLC in this encoding too — and therefore
-// what fixes how many bytes the two integers before it may occupy.
+// That object column is the one that settles a question no run of zeros could:
+// the type OID arrives as a four-byte little-endian length of 16 followed by a
+// CLR, which is what says the field is a DLC in this encoding too — and
+// therefore what fixes how many bytes the two integers before it may occupy.
+//
+// The **third** describe is ociDescribeTypedQuery, recorded later and for the
+// 64-bit dialect's sake (see TestOCI64DescribeRecordsParse). It is asserted here
+// too, against the same expected list, because a column list that only one
+// dialect's walk produces is a column list one walk agrees with itself about.
 func TestOCIDescribeRecordsParse(t *testing.T) {
 	t.Parallel()
 
