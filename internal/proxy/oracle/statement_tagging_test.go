@@ -187,7 +187,7 @@ func TestStatementTaggingDecidesOncePerSession(t *testing.T) {
 	unrewritable := thinExecCLR("SELECT " + strings.Repeat("f", 235) + " FROM dual")
 	require.True(t, frameCarriesStatement(unrewritable, false))
 
-	_, ok := locateStatementRewrite(unrewritable, false)
+	_, ok := locateStatementRewrite(unrewritable, false, false)
 	require.False(t, ok, "the fixture must actually be refused")
 
 	// An ordinary one, which on its own would tag.
@@ -415,7 +415,7 @@ func TestStatementTaggingRefusesAStatementItCannotGrow(t *testing.T) {
 	oversize := thinExecBare(tooLong)
 	require.True(t, frameCarriesStatement(oversize, false))
 
-	_, ok := locateStatementRewrite(oversize, false)
+	_, ok := locateStatementRewrite(oversize, false, false)
 	require.True(t, ok,
 		"the frame is locatable — what follows is the length rule, not the locator refusing a shape")
 

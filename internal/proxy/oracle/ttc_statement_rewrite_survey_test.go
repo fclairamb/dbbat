@@ -1,10 +1,12 @@
 package oracle
 
 import (
+	"encoding/binary"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,7 +66,7 @@ func surveyStatementFrames(t *testing.T, name string) statementFrameVerdict {
 		// bigChunks is irrelevant to locating and to every value under the CLR
 		// short-form limit; it only decides the encoding of a value that has to
 		// *become* long. Both settings are exercised below.
-		rw, ok := locateStatementRewrite(ttc, true)
+		rw, ok := locateStatementRewrite(ttc, true, false)
 		if !ok {
 			v.refused = append(v.refused, ttcOpFunction(ttc))
 
@@ -175,7 +177,7 @@ func TestSurveyStatementRewritePerClientShape(t *testing.T) {
 				continue
 			}
 
-			rw, ok := locateStatementRewrite(ttc, true)
+			rw, ok := locateStatementRewrite(ttc, true, false)
 			if !ok {
 				continue
 			}
@@ -218,6 +220,7 @@ func stmtShapeName(rw stmtRewrite) string {
 		stmtLenCompressed: "compressed",
 		stmtLenWideUB4:    "wide-ub4",
 		stmtLenVarLen:     "varlen",
+		stmtLenWide64UB8:  "wide64-ub8",
 	}[rw.lenKind]
 
 	clr := map[stmtClrKind]string{
@@ -250,7 +253,7 @@ func TestSurveyStatementRewriteNulTerminatedOCI(t *testing.T) {
 				continue
 			}
 
-			rw, ok := locateStatementRewrite(ttc, true)
+			rw, ok := locateStatementRewrite(ttc, true, false)
 			if !ok {
 				continue
 			}
@@ -273,4 +276,153 @@ func TestSurveyStatementRewriteNulTerminatedOCI(t *testing.T) {
 
 	require.Positive(t, withNUL, "the sqlplus recordings carry at least one NUL-terminated statement")
 	require.Positive(t, withoutNUL, "and at least one that is not, which is why both are accepted")
+}
+
+// --- the 64-bit OCI dialect ---------------------------------------------------
+//
+// The corpus above is pcapng recordings, and none of them is a 64-bit OCI
+// session: that client's frames live as hex fixtures instead, recorded through
+// dbbat because a bare relay never decodes them (ociFixtureProvenance). So the
+// fourth length encoding gets the same two properties, measured the same way,
+// against testdata/oci64_parse_execs.hex.
+
+// wide64StatementFrames returns the recorded 64-bit OCI parses as TTC payloads.
+func wide64StatementFrames(t *testing.T) [][]byte {
+	t.Helper()
+
+	frames := recordedFrames(t, oci64ParseExecs)
+	out := make([][]byte, 0, len(frames))
+
+	for i, payload := range frames {
+		ttc := extractTTCPayload(payload)
+		require.NotEmptyf(t, ttc, "frame %d must carry a TTC message", i)
+
+		out = append(out, ttc)
+	}
+
+	require.Len(t, out, 3, "the fixture holds three recorded parses")
+
+	return out
+}
+
+// TestSurveyStatementRewriteWide64OCI is the survey's two properties on the
+// dialect CI runs: every recorded parse locates, rewriting it to itself
+// reproduces the client's own bytes, and rewriting it to a tagged statement
+// produces a frame the same reading walks back to the tagged text.
+//
+// The length field is checked by hand as well as by round trip, because its one
+// difference from the 4-byte header is invisible to a round trip that only ever
+// compares dbbat to itself: **the value is the plain byte count**, so a reading
+// that kept the `sqlLen * 3` convention would declare three times the statement
+// and re-encode it consistently while the server read a third of it.
+func TestSurveyStatementRewriteWide64OCI(t *testing.T) {
+	t.Parallel()
+
+	const statement = "BEGIN dbbat_cap_refcur(:rc); END;"
+
+	for i, ttc := range wide64StatementFrames(t) {
+		require.Truef(t, frameCarriesStatement(ttc, true), "frame %d must be seen as statement-carrying", i)
+
+		rw, ok := locateStatementRewrite(ttc, true, true)
+		require.Truef(t, ok, "frame %d must locate exactly on a 64-bit OCI session", i)
+
+		assert.Equal(t, stmtLenWide64UB8, rw.lenKind, "frame %d", i)
+		assert.Equal(t, stmtClrShort, rw.clrKind, "frame %d: the text carries a CLR short prefix", i)
+		assert.Equal(t, execWide64SQLLenWidth, rw.lenWidth, "frame %d", i)
+		assert.Equal(t, statement, rw.text(), "frame %d", i)
+
+		// The plain byte count, at the offset execWide64SQLLenAt names, in the
+		// frame's own bytes — not through any of the code under test.
+		base := rw.lenAt - execWide64SQLLenAt
+		assert.Equalf(t, uint64(len(statement)),
+			binary.LittleEndian.Uint64(ttc[rw.lenAt:rw.lenAt+execWide64SQLLenWidth]),
+			"frame %d declares the plain byte count, not %d×it", i, wideCharWidth)
+		assert.Equalf(t, byte(len(statement)), ttc[rw.valueAt],
+			"frame %d repeats it as the CLR short prefix", i)
+		assert.Equalf(t, closeCursorsWideSentinel,
+			ttc[base+execWide64SentinelAt:base+execWide64SentinelAt+len(closeCursorsWideSentinel)],
+			"frame %d must carry the pointer sentinel in front of the length", i)
+
+		// Identity: the model reproduces the frame.
+		assert.Equalf(t, ttc, rw.apply(ttc, rw.run, true),
+			"frame %d must rewrite to itself byte for byte", i)
+
+		// Round trip: the tagged frame reads back as the tagged statement, with
+		// the declared length agreeing.
+		tagged := append([]byte(surveyTagPrefix), rw.run...)
+		out := rw.apply(ttc, tagged, true)
+
+		back, ok := locateStatementRewrite(out, true, true)
+		require.Truef(t, ok, "frame %d: the tagged frame must locate again", i)
+		assert.Equalf(t, surveyTagPrefix+statement, back.text(), "frame %d", i)
+		assert.Equalf(t, len(tagged), len(back.run), "frame %d: the located run is the tagged one", i)
+		assert.Equalf(t, uint64(len(tagged)),
+			binary.LittleEndian.Uint64(out[back.lenAt:back.lenAt+execWide64SQLLenWidth]),
+			"frame %d: the rewritten header must declare the tagged byte count", i)
+
+		// The field is fixed-width, so nothing behind it moved by more than the
+		// statement itself grew.
+		assert.Equalf(t, len(ttc)+len(surveyTagPrefix), len(out), "frame %d", i)
+	}
+}
+
+// TestWide64StatementRewriteIsSelectedByTheSessionNotByTheBytes pins the rule
+// step 3 of the spec that added this is about: the dialect comes from what the
+// session learned about its client, and each reading answers only for its own.
+//
+// Both directions are asserted, because both are failure modes. A 64-bit session
+// whose frames were offered the 4-byte or thin walk is how a run of zeros becomes
+// a length; a 4-byte or thin session whose frames were offered the 64-bit walk
+// would have dbbat overwrite eight bytes of somebody else's header.
+func TestWide64StatementRewriteIsSelectedByTheSessionNotByTheBytes(t *testing.T) {
+	t.Parallel()
+
+	for i, ttc := range wide64StatementFrames(t) {
+		_, ok := locateStatementRewrite(ttc, true, false)
+		assert.Falsef(t, ok,
+			"frame %d: a 64-bit parse must not be locatable by the other dialects' readings", i)
+	}
+
+	refusedAsWide64 := 0
+
+	for _, name := range surveyCorpus(t) {
+		td := loadTestDump(t, name)
+
+		for _, ttc := range surveyClientTTC(t, td) {
+			if !frameCarriesStatement(ttc, false) {
+				continue
+			}
+
+			if _, ok := locateStatementRewrite(ttc, true, false); !ok {
+				continue
+			}
+
+			_, ok := locateStatementRewrite(ttc, true, true)
+			require.Falsef(t, ok,
+				"%s: a frame of another dialect must be refused outright when the session is flagged "+
+					"64-bit, never rewritten through the wrong header", name)
+
+			refusedAsWide64++
+		}
+	}
+
+	t.Logf("frames of the other dialects refused under the 64-bit reading: %d", refusedAsWide64)
+	require.Positive(t, refusedAsWide64, "the corpus must carry frames to check this against")
+}
+
+// TestWide64DrivesCarryNoStatementToTag is the negative half of the per-session
+// verdict on this dialect: a `PRINT rc` drive declares no statement, so it must
+// not take part in the decision at all. Reading one as a statement frame the
+// locator cannot certify is what would leave a whole sqlplus session untagged
+// because of a frame that never had a statement in it.
+func TestWide64DrivesCarryNoStatementToTag(t *testing.T) {
+	t.Parallel()
+
+	for i, payload := range recordedFrames(t, oci64RefCursorDrives) {
+		ttc := extractTTCPayload(payload)
+		require.NotEmptyf(t, ttc, "frame %d must carry a TTC message", i)
+
+		assert.Falsef(t, frameCarriesStatement(ttc, true),
+			"drive %d declares no statement, so it is not a frame to tag", i)
+	}
 }

@@ -112,7 +112,7 @@ func (s *session) rewriteStatementMessage(msg *statementFragments) ([][]byte, bo
 		return nil, false
 	}
 
-	rw, located := locateStatementRewrite(ttc, s.clientBigClrChunks)
+	rw, located := locateStatementRewrite(ttc, s.clientBigClrChunks, s.clientWide64Encoding)
 
 	if !s.tagging.decided {
 		s.decideStatementTagging(ttc, located)
