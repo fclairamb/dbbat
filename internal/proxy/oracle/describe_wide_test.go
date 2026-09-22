@@ -55,10 +55,10 @@ func TestOCIDescribeRecordsParse(t *testing.T) {
 }
 
 // ociObjectColumnType is the TTC type code 23ai reports for an object column in
-// a describe. go-ora names no constant for it — its enum stops at OCIRef (110)
-// and picks up again at JSON (119) — but isKnownTNSType's 60..127 range covers
-// it, which is the alignment proof the walk actually relies on.
-const ociObjectColumnType = 121
+// a describe, under the name the describe fixtures know it by. isKnownTNSType's
+// 60..127 range covers it, which is the alignment proof the walk actually relies
+// on; tnsTypeNamedObject is the same code where the row walk reads it.
+const ociObjectColumnType = tnsTypeNamedObject
 
 // TestOCIDescribeIsNotOfferedToAThinSession is the same gate the REF-cursor walk
 // carries, on the describe path: the encoding comes from the session, so an OCI

@@ -98,7 +98,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 				lastRow = row
 			}
 		case TTCFuncContinuation:
-			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow, colTypes)
+			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow, colTypes, oerShape{})
 			for _, row := range contRows {
 				strRow := make([]string, len(row))
 				for i, v := range row {

@@ -236,6 +236,31 @@ func describeColumnLayout(ttc []byte) (int, int, bool) {
 // its select list captured its rows under scanAndPadColumnNames' guesses.
 const tnsTypeOPAQUE = 58
 
+// The type codes whose row value is a *locator* rather than the datum itself.
+//
+// A LOB column never sends its contents inline: the fetch carries a fixed-size
+// handle naming the LOB inside the server, and a client that wants the bytes
+// asks for them in a round trip of its own. dbbat does not, and must not — a
+// proxy issuing reads on the session's behalf is a statement the user never
+// wrote. So these three are named here to be *recognised*, not decoded: see
+// rowValueShapeOf and lobLocatorPlaceholder.
+//
+// NCLOB has no code of its own; it is a CLOB with the national character set,
+// and it is measured here as one — its row value carries the same locator and
+// the same trailing block (see lobLocatorTrailerLen).
+const (
+	tnsTypeCLOB  = 112
+	tnsTypeBLOB  = 113
+	tnsTypeBFILE = 114
+)
+
+// tnsTypeNamedObject is the code 23ai reports for a column of a user-defined
+// object type. go-ora names no constant for it — its enum stops at OCIRef (110)
+// and picks up again at JSON (119) — but isKnownTNSType's 60..127 range covers
+// it. Like an opaque type (tnsTypeOPAQUE), its row value is a locator followed
+// by the object's own image rather than a length-prefixed scalar.
+const tnsTypeNamedObject = 121
+
 // isKnownTNSType reports whether t is a defined TTC type code. The ranges cover
 // the full TNSType enumeration; an out-of-range value means the record parse
 // drifted and the result must not be trusted.

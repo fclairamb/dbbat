@@ -58,7 +58,7 @@ var ociDescribeTypedColumns = []columnDesc{
 // isKnownTNSType's 60..127 range already covered. The XMLTYPE column's — 58 —
 // did not, and adding it is a finding this fixture produced rather than a
 // convenience: see tnsTypeOPAQUE.
-const ociCLOBColumnType = 112
+const ociCLOBColumnType = tnsTypeCLOB
 
 // TestOCI64DescribeRecordsParse is the 64-bit dialect's half of
 // TestOCIDescribeRecordsParse, and it is the test the whole fixture exists for.

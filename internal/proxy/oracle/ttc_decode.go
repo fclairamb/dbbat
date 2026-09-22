@@ -1671,6 +1671,43 @@ func rowDataStart(data []byte, numCols int, shape oerShape) int {
 	return findRowDataStart(data)
 }
 
+// fetchRowDataStart locates the row values of a fetch response that arrives in
+// a packet of its own — one whose TTC payload *opens* with the ROW_HEADER
+// rather than embedding it behind a describe.
+//
+// It is rowDataStart with one extra demand: the header must sit at offset 0.
+// The two readings behind it scan, which is right in a QueryResult (the header
+// follows the column records) and wrong here, where scanning would let a
+// mid-stream continuation packet supply a header-shaped run of bytes from
+// inside its own row data. A fetch response leads with the object or it is not
+// one.
+func fetchRowDataStart(data []byte, numCols int, shape oerShape) int {
+	if len(data) == 0 || data[0] != ttcMsgRowHeader {
+		return -1
+	}
+
+	start := rowDataStart(data, numCols, shape)
+	if start < 0 {
+		return -1
+	}
+
+	if shape.fixedWidth64 {
+		// The 64-bit header has a measured length, so a header at offset 0 puts
+		// the first value at exactly one byte past it.
+		if start != wide64RowHeaderLen+1 {
+			return -1
+		}
+
+		return start
+	}
+
+	if findBytes(data, []byte{ttcMsgRowHeader, 0x22}) != 0 {
+		return -1
+	}
+
+	return start
+}
+
 // findRowDataStartWide64 locates the row values of a **64-bit** OCI fetch.
 //
 // It exists because findRowDataStart below finds nothing at all on this dialect,
@@ -2087,9 +2124,24 @@ const continuationDescriptorMarker = 0x15
 //
 // prevRow is the last row of the previous packet so unchanged (compressed-away)
 // columns can be filled in.
-func parseContinuationRows(payload []byte, numCols int, prevRow []string, colTypes []int) [][]interface{} {
+func parseContinuationRows(
+	payload []byte, numCols int, prevRow []string, colTypes []int, shape oerShape,
+) [][]interface{} {
 	if numCols == 0 || len(payload) < 15 {
 		return nil
+	}
+
+	// A packet that *opens* with a ROW_HEADER is not a continuation of a stream
+	// already running: it is the fetch itself, arriving in a round trip of its
+	// own. Oracle sends one whenever the select list carries a LOB — prefetch is
+	// off for those — so the QueryResult that described the query carried no rows
+	// at all and every row of the fetch is here. The header is the same object
+	// rowDataStart reads at the head of a QueryResult, in whichever dialect the
+	// session speaks, and none of it fits in the 25-byte window the scan below
+	// searches (the 64-bit header alone is 50 bytes), which is why such a fetch
+	// used to be read as carrying nothing.
+	if start := fetchRowDataStart(payload, numCols, shape); start >= 0 {
+		return parseRowStream(payload, start, numCols, allColumns(numCols), nil, colTypes)
 	}
 
 	// Find the first 0x07 in the header area (marks start of row data).
@@ -2152,6 +2204,215 @@ func decodeRowValue(colTypes []int, col int, b []byte) string {
 	return decodeOracleRawValue(b)
 }
 
+// rowValueShape says how a column's value is laid out in the row stream. Only
+// the first is a length-prefixed datum; the other two are a locator followed by
+// bytes the scalar walk has no business reading as a value.
+type rowValueShape int
+
+const (
+	// rowValueScalar is a length-prefixed value, the shape every column had
+	// before LOBs and object types were looked at.
+	rowValueScalar rowValueShape = iota
+
+	// rowValueLOBLocator is a CLOB/NCLOB/BLOB/BFILE: a length-prefixed locator
+	// and then a fixed block of LOB framing.
+	rowValueLOBLocator
+
+	// rowValueObjectImage is an opaque type (XMLTYPE) or a named object type: a
+	// length-prefixed locator, then framing, then the object's own image.
+	rowValueObjectImage
+)
+
+// rowValueShapeOf reads a column's shape off the describe's type codes. With no
+// type codes — the heuristic path — every column is a scalar, which is the
+// behaviour this package had throughout.
+func rowValueShapeOf(colTypes []int, col int) rowValueShape {
+	if col < 0 || col >= len(colTypes) {
+		return rowValueScalar
+	}
+
+	switch colTypes[col] {
+	case tnsTypeCLOB, tnsTypeBLOB, tnsTypeBFILE:
+		return rowValueLOBLocator
+	case tnsTypeOPAQUE, tnsTypeNamedObject:
+		return rowValueObjectImage
+	}
+
+	return rowValueScalar
+}
+
+// The LOB framing that follows a locator in the row stream, measured off a
+// recorded 23ai fetch rather than reasoned about — see testdata/oci64_lob.hex
+// and TestOCI64LOBFetchKeepsEveryOrdinaryColumn.
+//
+// One recording carries a short CLOB, a 26-character CLOB, a BLOB, an NCLOB and
+// a NULL CLOB, each between two six-character scalars that say exactly where
+// the next value begins. The four non-NULL locators are followed by the *same*
+// sixteen bytes whatever the type and whatever the length of the LOB behind
+// them — the block is framing, not content — and the NULL one, which sends a
+// zero-length locator, by four.
+//
+// Nothing here is load-bearing on its own: a wrong skip drifts the columns
+// after it, and parseRowStream then refuses the whole row (rowEndsAtMarker)
+// rather than capturing one that decoded into the framing.
+const (
+	lobLocatorTrailerLen = 16
+	lobNullTrailerLen    = 4
+)
+
+// objectImageSearchWindow bounds how far past an object locator skipObjectImage
+// will look for the image header. The two dialects measured put it 12 and 14
+// bytes in; the window is wide enough for a third to differ and narrow enough
+// that it cannot wander into the next row.
+const objectImageSearchWindow = 32
+
+// skipObjectImage steps over the framing and the image that follow an object or
+// opaque locator, returning the offset of the next column's value.
+//
+// It reads the image header rather than hard-coding its distance, because that
+// distance is one of the things the OCI dialects spell differently (12 bytes of
+// framing on the 64-bit one, 14 on the 4-byte one) and because the header
+// validates itself: the image length arrives twice, once as a four-byte
+// little-endian field and once as a single byte, with a constant 0x01 0x00 in
+// between. Two encodings of one number agreeing is what makes a hit a
+// measurement instead of a pattern that happened to match.
+//
+// An image longer than 255 bytes cannot be spelled by the one-byte field, so it
+// is not matched and the row is refused. That is deliberate: no such image has
+// been recorded, and a guess at how the longer form is framed would be a guess
+// the capture then presents as a value.
+func skipObjectImage(payload []byte, offset int) (int, bool) {
+	const imageHeaderLen = 7
+
+	for i := offset; i+imageHeaderLen <= len(payload) && i-offset <= objectImageSearchWindow; i++ {
+		if payload[i+4] != 0x01 || payload[i+5] != 0x00 {
+			continue
+		}
+
+		size := binary.LittleEndian.Uint32(payload[i : i+4])
+		if size > 0xFF || byte(size) != payload[i+6] {
+			continue
+		}
+
+		end := i + imageHeaderLen + int(size)
+		if end > len(payload) {
+			return 0, false
+		}
+
+		return end, true
+	}
+
+	return 0, false
+}
+
+// lobLocatorPlaceholder is what dbbat captures for a LOB column, and the
+// decision is deliberate enough to state: **the locator's bytes are not the
+// value and dbbat will not go and fetch the one they name.**
+//
+// A locator is a handle into the server — it names a LOB, changes from fetch to
+// fetch, and says nothing a reader of the audit trail could use. The contents
+// arrive, when a client wants them, in LOB reads of that client's own; for
+// dbbat to issue those itself would be dbbat running statements on the
+// session's behalf, which is out of bounds however convenient the result would
+// read.
+//
+// So the column is captured as a marker naming its type. It is not the empty
+// string, which is what a NULL captures as, and not the locator hex, which
+// would read as data. A NULL LOB — a zero-length locator — captures as "" like
+// every other NULL.
+func lobLocatorPlaceholder(colTypes []int, col int) string {
+	if col >= 0 && col < len(colTypes) {
+		switch colTypes[col] {
+		case tnsTypeBLOB:
+			return "<BLOB locator>"
+		case tnsTypeBFILE:
+			return "<BFILE locator>"
+		}
+	}
+
+	return "<CLOB locator>"
+}
+
+// readRowColumn reads one column's value at payload[offset] and returns it with
+// the offset the next column starts at.
+//
+// Every column is a one-byte length and then that many bytes. What the three
+// shapes differ in is what follows those bytes: nothing for a scalar, a fixed
+// block for a LOB locator, and framing plus the object's image for an opaque or
+// object one. Reading a locator as a scalar and then carrying on is what used
+// to lose the whole rest of the row.
+func readRowColumn(payload []byte, offset int, colTypes []int, col int) (string, int, bool) {
+	if offset >= len(payload) {
+		return "", 0, false
+	}
+
+	valLen := int(payload[offset])
+	offset++
+
+	if valLen > 4000 || offset+valLen > len(payload) {
+		return "", 0, false
+	}
+
+	raw := payload[offset : offset+valLen]
+	offset += valLen
+
+	switch rowValueShapeOf(colTypes, col) {
+	case rowValueLOBLocator:
+		trailer := lobLocatorTrailerLen
+		value := lobLocatorPlaceholder(colTypes, col)
+
+		if valLen == 0 {
+			trailer, value = lobNullTrailerLen, ""
+		}
+
+		if offset+trailer > len(payload) {
+			return "", 0, false
+		}
+
+		return value, offset + trailer, true
+
+	case rowValueObjectImage:
+		next, ok := skipObjectImage(payload, offset)
+		if !ok {
+			return "", 0, false
+		}
+
+		return decodeRowValue(colTypes, col, raw), next, true
+
+	case rowValueScalar:
+		fallthrough
+	default:
+		if valLen == 0 {
+			return "", offset, true
+		}
+
+		return decodeRowValue(colTypes, col, raw), offset, true
+	}
+}
+
+// rowEndsAtMarker reports whether offset sits on something that can legitimately
+// follow a row: the 0x07 / 0x15 separators, the 0x08 footer, or the end of the
+// payload.
+//
+// It is the check that makes the locator skips above safe to get wrong. A row
+// with no locator in it is accepted wherever it ends, exactly as before — the
+// stream simply stops at the first byte readRowSeparator does not recognise. A
+// row that needed a skip is accepted only if the columns after that skip landed
+// on their own values, which is what a clean terminator says and what a drifted
+// walk almost never produces.
+func rowEndsAtMarker(payload []byte, offset int) bool {
+	if offset >= len(payload) {
+		return true
+	}
+
+	switch payload[offset] {
+	case 0x07, continuationDescriptorMarker, 0x08:
+		return true
+	default:
+		return false
+	}
+}
+
 // parseRowStream decodes a run of compressed rows starting at payload[offset].
 //
 // Both the QueryResult (func=0x10) row area and continuation (func=0x06) packets
@@ -2196,34 +2457,27 @@ func parseRowStream(payload []byte, offset, numCols int, activeCols []int, prev 
 		}
 
 		valid := true
+		skipped := false
 
 		for _, col := range activeCols {
-			if offset >= len(payload) {
+			decoded, next, ok := readRowColumn(payload, offset, colTypes, col)
+			if !ok {
 				valid = false
 
 				break
 			}
 
-			valLen := int(payload[offset])
-			offset++
-
-			if valLen == 0 {
-				row[col] = ""
-				cur[col] = ""
-
-				continue
-			}
-
-			if valLen > 4000 || offset+valLen > len(payload) {
-				valid = false
-
-				break
-			}
-
-			decoded := decodeRowValue(colTypes, col, payload[offset:offset+valLen])
+			skipped = skipped || rowValueShapeOf(colTypes, col) != rowValueScalar
 			row[col] = decoded
 			cur[col] = decoded
-			offset += valLen
+			offset = next
+		}
+
+		// A row that stepped over a locator's framing is only kept when it comes
+		// out on a row marker: the skip lengths are measured, so a wrong one has
+		// to cost the row rather than fill it with framing bytes.
+		if valid && skipped && !rowEndsAtMarker(payload, offset) {
+			valid = false
 		}
 
 		if !valid {
