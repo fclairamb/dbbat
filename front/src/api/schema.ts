@@ -2110,6 +2110,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/instance/tagging": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update instance-wide statement tagging
+         * @description Writes the `tagging.*` parameter group. Admin-only. `enabled` is a boolean, so the store always ends up holding an explicit choice — "false" overrides a `DBB_QUERY_TAGGING` default of true. An empty `oracle` clears the parameter, falling back to DBB_QUERY_TAGGING_ORACLE. An unrecognised `oracle` is a 400 here, never a stored value: through the environment variable the same mistake is a startup failure, and a settings write that would crash every replica on restart is a worse trade. Sessions already running keep the decision they authenticated under; the change reaches new sessions.
+         */
+        put: operations["updateInstanceTagging"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/mcp": {
         parameters: {
             query?: never;
@@ -4238,6 +4258,46 @@ export interface components {
             limits?: components["schemas"]["InstanceLimits"];
             resolved: components["schemas"]["ResolvedEndpoints"];
             resolved_limits: components["schemas"]["ResolvedInstanceLimits"];
+            resolved_tagging: components["schemas"]["ResolvedInstanceTagging"];
+            /** @description Only present for admin callers */
+            tagging?: components["schemas"]["InstanceTagging"];
+        };
+        /** @description Raw operator-configured statement-tagging settings (the `tagging.*` parameter group), before the environment-variable fallback is applied. Admin-only on GET /instance; the body of PUT /instance/tagging. */
+        InstanceTagging: {
+            /** @description "true" or "false" — the PostgreSQL / MySQL / MongoDB statement tag. Empty means the parameter is unset and DBB_QUERY_TAGGING applies. */
+            enabled: string;
+            /** @description "off" or "user" — Oracle's own per-user statement tag. Empty means the parameter is unset and DBB_QUERY_TAGGING_ORACLE applies. */
+            oracle: string;
+        };
+        /** @description Body of PUT /instance/tagging. `enabled` is a boolean, so the store always ends up holding an explicit choice: "false" overrides a DBB_QUERY_TAGGING default of true. */
+        UpdateInstanceTagging: {
+            /** @description Turns the PostgreSQL / MySQL / MongoDB statement tag on or off. */
+            enabled: boolean;
+            /**
+             * @description Oracle's own mode: "off" or "user". Empty clears the parameter, falling back to DBB_QUERY_TAGGING_ORACLE. Anything else is a 400.
+             * @enum {string}
+             */
+            oracle: "off" | "user" | "";
+        };
+        /** @description The statement-tagging settings that actually apply. */
+        ResolvedInstanceTagging: {
+            /** @description Effective PostgreSQL / MySQL / MongoDB tagging decision. */
+            enabled: boolean;
+            /**
+             * @description Where the effective value came from: `parameter` when the store parameter is set (either polarity), `env` when DBB_QUERY_TAGGING supplies it, empty when neither is configured.
+             * @enum {string}
+             */
+            enabled_source: "" | "parameter" | "env";
+            /**
+             * @description Effective Oracle per-user tagging mode.
+             * @enum {string}
+             */
+            oracle: "off" | "user";
+            /**
+             * @description Where the effective mode came from: `parameter` when the store parameter is set (including one the resolver folded to `off` because it was not recognised), `env` when DBB_QUERY_TAGGING_ORACLE supplies it, empty when neither is configured.
+             * @enum {string}
+             */
+            oracle_source: "" | "parameter" | "env";
         };
         /** @description Raw operator-configured instance-wide limits (the `limits.*` parameter group), before the environment-variable fallback is applied. */
         InstanceLimits: {
@@ -4487,6 +4547,9 @@ export type SetParameterRequest = components['schemas']['SetParameterRequest'];
 export type PublicEndpoints = components['schemas']['PublicEndpoints'];
 export type ResolvedEndpoints = components['schemas']['ResolvedEndpoints'];
 export type InstanceInfo = components['schemas']['InstanceInfo'];
+export type InstanceTagging = components['schemas']['InstanceTagging'];
+export type UpdateInstanceTagging = components['schemas']['UpdateInstanceTagging'];
+export type ResolvedInstanceTagging = components['schemas']['ResolvedInstanceTagging'];
 export type InstanceLimits = components['schemas']['InstanceLimits'];
 export type ResolvedInstanceLimits = components['schemas']['ResolvedInstanceLimits'];
 export type Error = components['schemas']['Error'];
@@ -7521,6 +7584,32 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["InstanceLimits"];
+            };
+        };
+        responses: {
+            /** @description Settings saved */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateInstanceTagging: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateInstanceTagging"];
             };
         };
         responses: {

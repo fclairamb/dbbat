@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   useInstance,
   useUpdateInstancePublic,
   useUpdateInstanceLimits,
+  useUpdateInstanceTagging,
   useParameters,
   useUpdateParameter,
   useDeleteParameter,
+  useVersion,
   type GlobalParameter,
   type InstanceInfo,
   type PublicEndpoints,
@@ -17,7 +19,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Card,
   CardContent,
@@ -94,6 +104,7 @@ function SettingsPage() {
       />
       <LocalListenersSection />
       <LimitsSection />
+      <TaggingSection />
       <PublicAdvertisementSection />
       <RawParametersSection />
     </div>
@@ -188,12 +199,172 @@ function LimitsForm({
   );
 }
 
+// The sample tag the settings page renders, so an operator can see what the
+// target database will receive before turning the feature on. The version
+// comes from /version; the shape (not the values) is the point.
+function sampleTag(version: string): string {
+  return `/*dbbat='${version}',user='alice',conn='a1b2c3d4e5f6',grant='readonly-prod'*/`;
+}
+
+// "from this setting" and "from DBB_QUERY_TAGGING" are different facts: the
+// first survives a redeploy, the second is the deployment's own default.
+function taggingSourceLabel(source: string): string {
+  return source === "parameter"
+    ? "from this setting"
+    : source === "env"
+      ? "from DBB_QUERY_TAGGING"
+      : "nothing is configured";
+}
+
+function TaggingSection() {
+  const { data: instance } = useInstance();
+  const { data: version } = useVersion();
+
+  // Keyed on load so the inputs pick up the fetched values once, without a
+  // controlled-vs-fetched tug of war on every re-render.
+  return (
+    <TaggingForm
+      key={
+        instance?.resolved_tagging ? "loaded" : "init"
+      }
+      enabled={instance?.resolved_tagging?.enabled ?? false}
+      enabledSource={instance?.resolved_tagging?.enabled_source ?? ""}
+      oracle={instance?.resolved_tagging?.oracle ?? "off"}
+      oracleSource={instance?.resolved_tagging?.oracle_source ?? ""}
+      buildVersion={version?.build_version ?? "0.0.0"}
+    />
+  );
+}
+
+function TaggingForm({
+  enabled,
+  enabledSource,
+  oracle,
+  oracleSource,
+  buildVersion,
+}: {
+  enabled: boolean;
+  enabledSource: string;
+  oracle: string;
+  oracleSource: string;
+  buildVersion: string;
+}) {
+  const updateTagging = useUpdateInstanceTagging({
+    onSuccess: () => toast.success("Tagging settings saved"),
+    onError: (e) => toast.error(e.message),
+  });
+
+  const [enabledValue, setEnabledValue] = useState(enabled);
+  const [oracleValue, setOracleValue] = useState(oracle);
+
+  const oracleSourceLabel =
+    oracleSource === "parameter"
+      ? "from this setting"
+      : oracleSource === "env"
+        ? "from DBB_QUERY_TAGGING_ORACLE"
+        : "nothing is configured";
+
+  return (
+    <Card data-testid="tagging-section">
+      <CardHeader>
+        <CardTitle>Statement tagging</CardTitle>
+        <CardDescription>
+          Prepends a sqlcommenter-style comment carrying the dbbat identity to
+          every statement forwarded to the target, so the target&rsquo;s own
+          tooling (RDS Performance Insights,{" "}
+          <code className="text-xs">pg_stat_statements</code>, the slow log) can
+          attribute the load to a dbbat user instead of to the one shared role
+          every session logs in as. It changes the bytes the target receives,
+          which is why it ships off.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="tagging-enabled"
+              data-testid="tagging-enabled-checkbox"
+              checked={enabledValue}
+              onCheckedChange={(v) => setEnabledValue(v === true)}
+            />
+            <Label htmlFor="tagging-enabled">
+              Tag statements on PostgreSQL, MySQL/MariaDB and MongoDB
+            </Label>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Currently: <strong>{enabledValue ? "on" : "off"}</strong> (
+            {taggingSourceLabel(enabledSource)}).
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="tagging-oracle">Oracle tagging</Label>
+          <Select value={oracleValue} onValueChange={setOracleValue}>
+            <SelectTrigger id="tagging-oracle" data-testid="tagging-oracle-select">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="off">off</SelectItem>
+              <SelectItem value="user">user</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-sm text-muted-foreground">
+            Oracle&rsquo;s own switch, separate on purpose:{" "}
+            <code className="text-xs">V$SQL</code> keys on statement text, so
+            each distinct tag holds its own shared-pool cursor — roughly one
+            cursor and ~48KB per dbbat <em>user</em>, versus hundreds of MB for
+            a per-connection tag. Measured on Oracle 23ai; see{" "}
+            <code className="text-xs">docs/oracle.md</code>. Currently:{" "}
+            <strong>{oracleValue}</strong> ({oracleSourceLabel}).
+          </p>
+        </div>
+
+        <div className="space-y-1">
+          <Label>What the target will receive</Label>
+          <p
+            className="font-mono text-xs break-all rounded bg-muted p-2"
+            data-testid="tagging-sample"
+          >
+            {sampleTag(buildVersion)}
+          </p>
+        </div>
+
+        <p className="text-sm text-muted-foreground">
+          Applies to <strong>new sessions</strong> — a session already running
+          keeps the decision it authenticated under, so a statement is never
+          tagged on some executions and not others. See live sessions on the{" "}
+          <Link
+            to="/connections"
+            search={(prev) => ({ ...prev, size: prev.size ?? 20 })}
+            className="underline"
+            data-testid="tagging-connections-link"
+          >
+            connections page
+          </Link>{" "}
+          and terminate one to make it reconnect.
+        </p>
+
+        <Button
+          data-testid="tagging-save-button"
+          onClick={() =>
+            updateTagging.mutate({
+              enabled: enabledValue,
+              oracle: oracleValue === "user" ? "user" : "off",
+            })
+          }
+          disabled={updateTagging.isPending}
+        >
+          {updateTagging.isPending ? "Saving..." : "Save tagging"}
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 interface ListenerRow {
   protocol: string;
   address: string;
-}
-
-function ListenerTable({ rows }: { rows: ListenerRow[] }) {
+}function ListenerTable({ rows }: { rows: ListenerRow[] }) {
   return (
     <Table>
       <TableHeader>

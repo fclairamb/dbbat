@@ -1596,6 +1596,33 @@ export function useUpdateInstanceLimits(options?: {
   });
 }
 
+export type InstanceTagging = components["schemas"]["InstanceTagging"];
+export type UpdateInstanceTagging =
+  components["schemas"]["UpdateInstanceTagging"];
+
+export function useUpdateInstanceTagging(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: UpdateInstanceTagging) => {
+      const response = await apiClient.PUT("/instance/tagging", { body });
+      if (response.error) {
+        throw new Error(
+          (response.error as { message?: string }).message ||
+            "Failed to save tagging settings"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["instance"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
 export function useParameters(groupKey?: string) {
   return useQuery({
     queryKey: ["parameters", groupKey],
