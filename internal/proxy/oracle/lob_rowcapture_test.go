@@ -343,9 +343,19 @@ func TestObjectImageDecodesOrKeepsTheLocator(t *testing.T) {
 			image: []byte{0x84, 0x01, 0x08, 0x02, 0xc1, 0x02, 0x00, 0x78},
 			want:  "",
 		},
+		// The two CLR forms the attribute walk refuses. Both images declare
+		// their own length correctly — 0x06 for six bytes — on purpose: a
+		// length that disagreed would be refused by the self-length check
+		// before the walk ever ran, and the sub-test would pass while pinning
+		// nothing. That is how the first version of this case was wrong.
 		{
-			name:  "a NULL or chunked attribute, neither of which has been recorded",
-			image: []byte{0x84, 0x01, 0x05, 0xff, 0x01, 0x78},
+			name:  "a NULL attribute, which has never been recorded",
+			image: []byte{0x84, 0x01, 0x06, 0xff, 0x01, 0x78},
+			want:  "",
+		},
+		{
+			name:  "a chunked attribute, reached after one that reads cleanly",
+			image: []byte{0x84, 0x01, 0x06, 0x01, 0x78, 0xfe},
 			want:  "",
 		},
 		{
