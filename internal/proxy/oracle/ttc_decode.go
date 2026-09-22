@@ -1669,6 +1669,36 @@ const (
 	wideRowHeaderLen         = 22
 )
 
+// rowHeaderFlagFirstFetch (0x20) is the one bit of the ROW_HEADER flag byte that
+// moves between the round trips of a single fetch: set on the first packet of a
+// cursor, clear on every one after it. Everything else in the header is the
+// same, which is what makes this a bit rather than a second header shape.
+//
+// Measured on testdata/oci_long.hex, whose frames 2 and 3 are the two round
+// trips sqlplus fetches one four-column result set over: across the whole
+// 22-byte header the *only* byte that differs is the flag, 0x22 then 0x02.
+// testdata/oci64_long.hex records the same two round trips in the 64-bit
+// dialect and says the same thing — its header differs at the flag, at the
+// padding byte behind it, and at the stale **upper** halves of two ub8 slots
+// nothing reads (offsets 28-31 and 44-45, the ones wide64RowDataStartAt's table
+// already calls stale). Every field either reading looks at — the column count,
+// the fetch's array size, the ROW_DATA byte's position — is byte-identical.
+//
+// So the flag is read masked. Accepting the mask is accepting exactly the two
+// observed values, since 0x20 is the only bit that varies: a third value is
+// still refused, which is what keeps both readings fail-closed.
+const (
+	rowHeaderFlagFirstFetch = 0x20
+	rowHeaderFlagInvariant  = wideRowHeaderFlag &^ rowHeaderFlagFirstFetch
+)
+
+// isRowHeaderFlag reports whether b is a ROW_HEADER flag byte, on the first
+// packet of a fetch or on a later one. Both OCI readings key on it; see
+// rowHeaderFlagFirstFetch for what the two states were measured against.
+func isRowHeaderFlag(b byte) bool {
+	return b&^rowHeaderFlagFirstFetch == rowHeaderFlagInvariant
+}
+
 // compressedRowHeaderInts is how many TTC compressed integers stand between the
 // compressed dialect's 0x22 flag and its ROW_DATA byte — see
 // compressedRowDataStartAt. The header has no fixed length there, because those
@@ -1759,8 +1789,8 @@ func fetchRowDataStart(data []byte, numCols int, shape oerShape) int {
 //
 //	         | 4-byte dialect      | 64-bit dialect
 //	+0       | 0x06 ROW_HEADER     | 0x06 ROW_HEADER
-//	+1       | 0x22 flag           | 0x01
-//	+2       | ub4 column count    | 0x22 flag
+//	+1       | 0x22/0x02 flag      | 0x01
+//	+2       | ub4 column count    | 0x22/0x02 flag
 //	+3       |                     | padding, stale (0xaf / 0x59)
 //	+4       |                     | ub4 column count
 //	+6/+8    | ub2 = 0, ub2 = rows | ub8 = 0x10000
@@ -1775,6 +1805,14 @@ func fetchRowDataStart(data []byte, numCols int, shape oerShape) int {
 // stale — and it is also why nothing here reads those slots. Their low halves
 // are zero in every sample, so the corpus says nothing about what they mean.
 //
+// The flag is read through isRowHeaderFlag rather than compared to 0x22,
+// because its 0x20 bit is clear on every round trip after a fetch's first. That
+// bit is the whole of specs/todos/2026-09-23-01: demanding 0x22 here located
+// nothing in the second packet of a multi-packet fetch, and the fallback scan in
+// parseContinuationRows could not stand in for the reading either — this header
+// is 50 bytes and that window is 25 — so every 64-bit OCI fetch that took more
+// than one round trip lost every packet but the first, whatever its columns.
+//
 // The reading fails closed, which is the behavior the dialect had before it
 // existed: the count must be the describe's own, and the ROW_DATA byte must land
 // exactly where the header ends. Nothing is scanned for. Across every frame of
@@ -1786,7 +1824,7 @@ func wide64RowDataStartAt(data []byte, at, numCols int) int {
 		return -1
 	}
 
-	if data[at+wide64RowHeaderFlagOffset] != wide64RowHeaderFlag {
+	if !isRowHeaderFlag(data[at+wide64RowHeaderFlagOffset]) {
 		return -1
 	}
 
@@ -1819,12 +1857,18 @@ func wide64RowDataStartAt(data []byte, at, numCols int) int {
 // returned +3 instead of +23, handing parseRowStream the middle of the header.
 // The count check is what makes the measured reading fail closed instead, the
 // way the 64-bit one does.
+//
+// The flag goes through isRowHeaderFlag here too, and for once it changes no
+// result: a continuation packet's 0x02 was refused by this reading and then
+// rescued by that same forward scan, whose 25-byte window does reach a 22-byte
+// header's ROW_DATA byte. The packet was being stumbled upon rather than
+// located, which is exactly what this reading exists to stop.
 func wideRowDataStartAt(data []byte, at, numCols int) int {
 	if at+wideRowHeaderLen >= len(data) {
 		return -1
 	}
 
-	if data[at+wideRowHeaderFlagOffset] != wideRowHeaderFlag {
+	if !isRowHeaderFlag(data[at+wideRowHeaderFlagOffset]) {
 		return -1
 	}
 

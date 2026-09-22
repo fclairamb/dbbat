@@ -3986,8 +3986,8 @@ field either reading takes from it:
 |  | 4-byte dialect | 64-bit dialect |
 |---|---|---|
 | +0 | `0x06` ROW_HEADER | `0x06` ROW_HEADER |
-| +1 | `0x22` flag | `0x01` |
-| +2 | ub4 column count | `0x22` flag |
+| +1 | `0x22` / `0x02` flag | `0x01` |
+| +2 | ub4 column count | `0x22` / `0x02` flag |
 | +3 | | padding, stale (`0xaf` / `0x59`) |
 | +4 | | ub4 column count |
 | +6 / +8 | ub2 = 0, ub2 = array size | ub8 = `0x10000` |
@@ -4010,9 +4010,11 @@ closed**: the count must be the describe's own and the `0x07` must land exactly 
 header ends. Nothing is scanned for, so a payload offered the wrong reading yields no rows,
 which is the behaviour the dialect had before — not different ones.
 `TestOCI64RowHeaderPatternIsUniqueInTheCorpus` is what licenses the hard-coded length: run
-over every frame of every `.hex` fixture *without* the column-count check, the pattern matches
-exactly twice — the two 64-bit headers, at the counts their describes declare — and on no
-4-byte or compressed payload. `TestOCI64RowCaptureCarriesTheDescribesValues` holds the result
+over every frame of every `.hex` fixture *without* the column-count check, every match is a
+real 64-bit ROW_HEADER, at the count its own describe declares — and there is none on a
+4-byte or compressed payload. The test pins the whole list, so a reading that started
+matching one byte more loosely would have to say where.
+`TestOCI64RowCaptureCarriesTheDescribesValues` holds the result
 to the bar `TestOCIRowCaptureCarriesTheDescribesColumnNames` sets, against the 4-byte
 fixture's own values column for column (the two temporal columns excepted, the recordings
 being ~40 s apart).
@@ -4022,6 +4024,36 @@ being ~40 s apart).
 > defect with its own spec
 > (`2026-09-22-03-oracle-row-capture-drops-every-row-of-a-fetch-carrying-a-lob.md`): neither
 > frame carries a ROW_HEADER at all, so there is nothing here for this reading to find.
+
+##### A fetch's second packet flags its ROW_HEADER differently
+
+The flag byte in that table is `0x22` on the **first** packet of a fetch and `0x02` on every
+round trip after it. One bit, `0x20`, and nothing else moves.
+
+Measured on `testdata/oci_long.hex`, whose frames 2 and 3 are the two round trips sqlplus
+fetches one four-column result set over: across the whole 22-byte header the only byte that
+differs is the flag. `testdata/oci64_long.hex` records the same two round trips in the 64-bit
+dialect and agrees — there the flag, the padding byte behind it, and the stale **upper**
+halves of two ub8 slots nothing reads are what differ, while every field either reading looks
+at is byte-identical.
+
+Demanding `0x22` therefore cost a 64-bit OCI session **every packet of a fetch after the
+first**, whatever its columns: the header reading refused it, and the 25-byte fallback scan in
+`parseContinuationRows` cannot reach past a 50-byte header to rescue it. The 4-byte dialect
+hid the same defect, its header being short enough for that scan to find the `0x07` — the
+packet was stumbled upon rather than located, which is the distinction the header readings
+exist to make.
+
+Both readings now take the flag through `isRowHeaderFlag`, which masks `0x20` off and compares
+the rest. Since that is the only bit either recording varies, masking accepts exactly the two
+observed values and no third:
+`TestOCIRowHeaderFlagIsTwoStatesAndNothingElse` substitutes all 256 values into the real
+header, on both packets of both dialects, and exactly two of them may locate the row data.
+Everything else stays as it was — the column count must still be the describe's own, and the
+ROW_DATA byte must still land exactly where the header ends.
+
+It went unseen because no fixture had a multi-packet fetch until the LONG recordings: every
+other OCI recording in the corpus returns its rows in a single packet.
 
 ##### Seven columns, and why the other two dialects stopped scanning too
 

@@ -283,7 +283,7 @@ func TestOCI64RowHeaderPatternIsUniqueInTheCorpus(t *testing.T) {
 		for i, frame := range recordedFrames(t, fixture) {
 			for p := 0; p+wide64RowHeaderLen < len(frame); p++ {
 				if frame[p] != ttcMsgRowHeader ||
-					frame[p+wide64RowHeaderFlagOffset] != wide64RowHeaderFlag ||
+					!isRowHeaderFlag(frame[p+wide64RowHeaderFlagOffset]) ||
 					frame[p+wide64RowHeaderLen] != ttcMsgBindOutput {
 					continue
 				}
@@ -298,10 +298,14 @@ func TestOCI64RowHeaderPatternIsUniqueInTheCorpus(t *testing.T) {
 		}
 	}
 
-	// oci64_long.hex's three are the same thing again on the fixture recorded
-	// for the LONG columns: its login probe, and the two packets its two
+	// oci64_long.hex's four are the same thing again on the fixture recorded
+	// for the LONG columns: its login probe, and the packets its two
 	// four-column fetches arrive in — a LONG in the select list defers a fetch
-	// exactly as a LOB does.
+	// exactly as a LOB does. The first of those fetches takes two round trips,
+	// which is why it accounts for two of them: frame 3 is the packet whose
+	// flag carries 0x02 instead of 0x22, matched here because the reading is
+	// masked. Widening the flag adds exactly that one hit to the corpus and
+	// nothing else — no describe, no 4-byte payload, no compressed one.
 	assert.Equal(t, []hit{
 		{fixture: oci64Describes, frame: 0, count: 1},
 		{fixture: oci64Describes, frame: 1, count: 8},
@@ -309,6 +313,7 @@ func TestOCI64RowHeaderPatternIsUniqueInTheCorpus(t *testing.T) {
 		{fixture: oci64LOBFrames, frame: 2, count: 13},
 		{fixture: oci64LongFrames, frame: 0, count: 1},
 		{fixture: oci64LongFrames, frame: 2, count: 4},
+		{fixture: oci64LongFrames, frame: 3, count: 4},
 		{fixture: oci64LongFrames, frame: 5, count: 4},
 	}, hits)
 }

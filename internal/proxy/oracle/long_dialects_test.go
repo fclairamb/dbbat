@@ -179,7 +179,7 @@ func TestOCILongFetchKeepsEveryOrdinaryColumn(t *testing.T) {
 		want    [][]string
 	}{
 		{ociLongFrames, ociOERShape(), longRows},
-		{oci64LongFrames, oci64OERShape(), longRows[:1]},
+		{oci64LongFrames, oci64OERShape(), longRows},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
 			t.Parallel()
@@ -190,22 +190,75 @@ func TestOCILongFetchKeepsEveryOrdinaryColumn(t *testing.T) {
 
 			// The same expectations the thin recordings are pinned against,
 			// deliberately: what a column captures is not allowed to depend on
-			// which client asked for it.
-			//
-			// With one exception, and it is not about LONG columns at all.
+			// which client asked for it. No exception now on either dialect —
 			// sqlplus fetches this result set over two round trips, and the
 			// **second** packet's ROW_HEADER carries flag 0x02 where the first
-			// carries 0x22. On the 4-byte dialect the fallback scan still finds
-			// the ROW_DATA byte — its header is 22 bytes, inside the 25-byte
-			// window that scan searches — but the 64-bit header is 50, so that
-			// packet is located by nothing and its row is lost before any
-			// column is read. Pre-existing, unrelated to this reading, and
-			// filed as its own spec; the NULL row it costs is pinned on the
-			// other three recordings, the LONG RAW fetch below included.
+			// carries 0x22, which isRowHeaderFlag reads as the same object.
+			// Until it did, the 64-bit reading refused that packet and the
+			// 25-byte fallback scan could not reach past its 50-byte header, so
+			// the NULL row below was lost — on every multi-packet 64-bit OCI
+			// fetch, whatever its columns.
 			assert.Equal(t, tc.want,
 				ociLongFetchRows(t, tc.shape, longColumns, frames[1], frames[2], frames[3]))
 			assert.Equal(t, longRawRows,
 				ociLongFetchRows(t, tc.shape, longRawColumns, frames[4], frames[5]))
+		})
+	}
+}
+
+// TestOCIRowHeaderFlagIsTwoStatesAndNothingElse is the negative half of the
+// widening above, and the reason the flag is read through a mask rather than
+// simply dropped.
+//
+// Both round trips of the recorded fetch are taken in turn — the first packet's
+// 0x22 and the second's 0x02 — and every one of the 256 values that byte could
+// hold is substituted into the real header. Exactly two of them may locate the
+// ROW_DATA byte, on both dialects. A reading that had stopped checking the flag
+// would accept all 256 and would be a forward scan with extra steps.
+func TestOCIRowHeaderFlagIsTwoStatesAndNothingElse(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		fixture   string
+		shape     oerShape
+		flagAt    int
+		headerLen int
+	}{
+		{ociLongFrames, ociOERShape(), wideRowHeaderFlagOffset, wideRowHeaderLen},
+		{oci64LongFrames, oci64OERShape(), wide64RowHeaderFlagOffset, wide64RowHeaderLen},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			t.Parallel()
+
+			frames := recordedFrames(t, tc.fixture)
+			require.Len(t, frames, 6)
+
+			numCols := len(longColumns)
+
+			// frame 2 is the fetch's first packet, frame 3 the round trip after
+			// it — the pair this whole reading is measured against.
+			for frame, want := range map[int]byte{2: wideRowHeaderFlag, 3: 0x02} {
+				payload := extractTTCPayload(frames[frame])
+
+				require.Equal(t, want, payload[tc.flagAt],
+					"frame %d must carry the flag state it was recorded with", frame)
+				require.Equal(t, tc.headerLen+1, fetchRowDataStart(payload, numCols, tc.shape),
+					"and its header must locate its own ROW_DATA byte, both states alike")
+
+				var accepted []byte
+
+				for b := range 256 {
+					mutated := append([]byte(nil), payload...)
+					mutated[tc.flagAt] = byte(b)
+
+					if fetchRowDataStart(mutated, numCols, tc.shape) >= 0 {
+						accepted = append(accepted, byte(b))
+					}
+				}
+
+				assert.Equal(t, []byte{0x02, wideRowHeaderFlag}, accepted,
+					"only the two measured flag states may locate a ROW_HEADER (frame %d)", frame)
+			}
 		})
 	}
 }
