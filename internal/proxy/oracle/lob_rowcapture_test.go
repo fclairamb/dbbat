@@ -12,6 +12,51 @@ import (
 // describe, and the packet its rows arrive in.
 const oci64LOBFrames = "testdata/oci64_lob.hex"
 
+// ociLOBFrames is the same query recorded from the **4-byte** OCI dialect — an
+// Instant Client's sqlplus through dbbat, which is where testdata/oci_describe.hex
+// came from. It is the fixture that says the sixteen-byte block behind a
+// locator is a measurement rather than one server's habit.
+const ociLOBFrames = "testdata/oci_lob.hex"
+
+// goOraLOBFixture and goOraLOBStreamFixture are the thin dialect's two halves,
+// and the pair is the point.
+//
+// A thin client's default LOB policy is *inline*: go-ora asks for the bodies up
+// front, the server sends them as ordinary column values, and the row carries
+// no locator at all — which is why the compressed encoding never hit the defect
+// the LOB framing was written for. `lob fetch=post` is the same query with the
+// client asking for locators instead, and it is the recording that says whether
+// a thin session frames one the way the 64-bit OCI session does.
+//
+// Regenerate both with:
+//
+//	go test -tags capture -timeout 300s -run TestCapture_GoOraLOB ./internal/proxy/oracle/
+const (
+	goOraLOBFixture       = "go_ora_lob.pcapng"
+	goOraLOBStreamFixture = "go_ora_lob_stream.pcapng"
+)
+
+// goOraLOBSQLMarker picks the thin recordings' statement out of the dump. It
+// stops at the first column, so it is a substring of the text on the wire.
+const goOraLOBSQLMarker = "'aaaaaa' AS c1"
+
+// goOraLOBColumns is goOraLOBQuery's describe: ociLOBColumns without the
+// XMLTYPE, which go-ora has no coder for and refuses before a row is fetched.
+var goOraLOBColumns = []columnDesc{
+	{Name: "C1", Type: tnsTypeCHAR},
+	{Name: "D1", Type: tnsTypeCLOB},
+	{Name: "C2", Type: tnsTypeCHAR},
+	{Name: "D2", Type: tnsTypeCLOB},
+	{Name: "C3", Type: tnsTypeCHAR},
+	{Name: "D3", Type: tnsTypeBLOB},
+	{Name: "C4", Type: tnsTypeCHAR},
+	{Name: "D4", Type: tnsTypeCLOB},
+	{Name: "C5", Type: tnsTypeCHAR},
+	{Name: "C6", Type: tnsTypeCHAR},
+	{Name: "D5", Type: tnsTypeCLOB},
+	{Name: "C7", Type: tnsTypeCHAR},
+}
+
 // ociLOBColumns is ociLOBQuery's describe, name and TTC type code in wire
 // order. Four of the thirteen are the types this fixture exists for: CLOB
 // (112), BLOB (113) and the opaque XMLTYPE (58), each sitting between two
