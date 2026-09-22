@@ -565,9 +565,10 @@ func wide64SurveyStatements() []string {
 func wide64DerivedFrames(t *testing.T, sql string) [][]byte {
 	t.Helper()
 
-	var out [][]byte
+	bases := wide64StatementFrames(t)
+	out := make([][]byte, 0, len(bases))
 
-	for i, base := range wide64StatementFrames(t) {
+	for i, base := range bases {
 		rw, ok := locateStatementRewrite(base, true, true)
 		require.Truef(t, ok, "frame %d must locate", i)
 
