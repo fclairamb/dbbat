@@ -492,7 +492,7 @@ func (s *Store) SetTagging(ctx context.Context, t Tagging) error {
 	return nil
 }
 
-// TaggingOracleMisconfigured reports that raw is neither empty nor a recognised
+// TaggingOracleMisconfigured reports that raw is neither empty nor a recognized
 // Oracle tagging mode. Through the API a bad value is a 400 at write time, so
 // reaching this needs a raw-parameters write or a hand-edited store; the
 // resolver folds it into "off" with a WARN rather than failing the session.
@@ -562,20 +562,23 @@ const limitsCacheTTL = 10 * time.Second
 // configured one for. The fallback is cached too — a store that is down stays
 // down for more than one connection.
 func (s *Store) ResolveStatementTimeoutCached(ctx context.Context, cfg *config.Config) time.Duration {
-	limits, _ := s.resolveParamsCached(ctx, cfg)
+	limits, _ := s.resolveParamsCached(ctx)
 	return ResolveStatementTimeout(limits, cfg)
 }
 
-// ResolveTaggingCached is ResolveQueryTagging / ResolveOracleTaggingMode over
-// the same short-lived memo the statement timeout uses, for the callers that
-// ask once per connection. Same error contract: a store error falls back to
-// the environment defaults, cached.
-func (s *Store) ResolveTaggingCached(ctx context.Context, cfg *config.Config) Tagging {
+// ResolveTaggingCached reads the tagging.* group over the same short-lived
+// memo the statement timeout uses, for the callers that ask once per
+// connection. It returns the raw parameters — the environment fallback is
+// ResolveQueryTagging / ResolveOracleTaggingMode, which the caller already
+// holds its own *config.Config for. Same error contract as the timeout: a
+// store error yields the zero value, which falls back to the environment
+// defaults, and is cached like everything else.
+func (s *Store) ResolveTaggingCached(ctx context.Context) Tagging {
 	if s == nil {
 		return Tagging{}
 	}
 
-	_, tagging := s.resolveParamsCached(ctx, cfg)
+	_, tagging := s.resolveParamsCached(ctx)
 
 	return tagging
 }
@@ -585,7 +588,7 @@ func (s *Store) ResolveTaggingCached(ctx context.Context, cfg *config.Config) Ta
 // together (the Settings page saves an operator's whole intent) and because
 // half the readers want both. On a nil store, or when the store read fails,
 // the zero value falls back to the environment defaults at resolution time.
-func (s *Store) resolveParamsCached(ctx context.Context, cfg *config.Config) (Limits, Tagging) {
+func (s *Store) resolveParamsCached(ctx context.Context) (Limits, Tagging) {
 	if s == nil {
 		return Limits{}, Tagging{}
 	}

@@ -15,14 +15,15 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// setupInstanceRouter wires the /instance GET and /instance/public PUT
-// routes behind the real auth + admin-gating middleware, matching the
-// production mounting in server.go.
+// setupInstanceRouter wires the /instance GET, /instance/public PUT and
+// /instance/tagging PUT routes behind the real auth + admin-gating middleware,
+// matching the production mounting in server.go.
 func setupInstanceRouter(server *Server) *gin.Engine {
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.GET("/api/v1/instance", server.handleGetInstance)
 	router.PUT("/api/v1/instance/public", server.requireAdmin(), server.handleUpdateInstancePublic)
+	router.PUT("/api/v1/instance/tagging", server.requireAdmin(), server.handleUpdateInstanceTagging)
 
 	return router
 }

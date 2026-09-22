@@ -173,9 +173,9 @@ type Session struct {
 	// is the tagger built from it at auth. The tagger's zero value is inert,
 	// so every call site is unconditional and the disabled path changes
 	// nothing.
-	queryTagging          bool
-	queryTaggingResolver  *shared.QueryTaggingResolver
-	queryTag              shared.QueryTagger
+	queryTagging         bool
+	queryTaggingResolver *shared.QueryTaggingResolver
+	queryTag             shared.QueryTagger
 
 	// statementTimeouts resolves the instance-wide per-statement limit;
 	// statementLimit is this session's resolved value (0 = no limit), stamped

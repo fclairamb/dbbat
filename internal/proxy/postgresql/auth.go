@@ -123,23 +123,7 @@ func (s *Session) authenticate() error {
 	// so they can never disagree about what the session is allowed.
 	s.statementLimit = s.statementTimeouts.For(s.ctx, grant)
 
-	// The tagging decision, taken once, next to the statement limit: the
-	// tagging.* store parameter over the DBB_QUERY_TAGGING default when a
-	// resolver is installed, otherwise the server's environment default.
-	// Either way the session keeps what it authenticated under — a statement
-	// tagged on some executions and not others would get two digests in
-	// pg_stat_statements, which is the opposite of what the tag is for.
-	if s.queryTaggingResolver != nil {
-		s.queryTagging = s.queryTaggingResolver.Enabled(s.ctx)
-	}
-
-	// The statement tag, built once, here, because every component of it is
-	// known exactly now and none of them changes for the rest of the session —
-	// which is precisely what makes repeated executions of one statement stay
-	// byte-identical. Left at its inert zero value when the feature is off.
-	if s.queryTagging {
-		s.queryTag = shared.NewQueryTagger(version.Version, user.Username, s.connUID, grant.DefinitionSlug())
-	}
+	s.resolveQueryTagging(user.Username, grant.DefinitionSlug())
 
 	// Check quotas
 	if err := s.checkQuotas(); err != nil {
@@ -149,6 +133,29 @@ func (s *Session) authenticate() error {
 	}
 
 	return nil
+}
+
+// resolveQueryTagging takes this session's tagging decision and, when it is
+// yes, builds the tagger — once, at auth, next to the statement limit.
+//
+// The decision is the tagging.* store parameter over the DBB_QUERY_TAGGING
+// default when a resolver is installed, otherwise the server's environment
+// default alone. Either way the session keeps what it authenticated under: a
+// statement tagged on some executions and not others would get two digests in
+// pg_stat_statements, which is the opposite of what the tag is for.
+//
+// The tagger is built here because every component of it is known exactly now
+// and none of them changes for the rest of the session — which is precisely
+// what makes repeated executions of one statement stay byte-identical. It is
+// left at its inert zero value when the feature is off.
+func (s *Session) resolveQueryTagging(username, definitionSlug string) {
+	if s.queryTaggingResolver != nil {
+		s.queryTagging = s.queryTaggingResolver.Enabled(s.ctx)
+	}
+
+	if s.queryTagging {
+		s.queryTag = shared.NewQueryTagger(version.Version, username, s.connUID, definitionSlug)
+	}
 }
 
 // verifyPassword runs the cleartext-password exchange and proves the client is

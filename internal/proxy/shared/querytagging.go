@@ -51,7 +51,7 @@ func (r *QueryTaggingResolver) OracleMode(ctx context.Context) string {
 }
 
 // resolve reads the cached parameter group and interprets it, warning once per
-// unrecognised stored Oracle value. A session that authenticates while the
+// unrecognized stored Oracle value. A session that authenticates while the
 // store is unreadable gets the environment defaults, cached like everything
 // else.
 func (r *QueryTaggingResolver) resolve(ctx context.Context) (bool, string) {
@@ -61,14 +61,27 @@ func (r *QueryTaggingResolver) resolve(ctx context.Context) (bool, string) {
 
 	var tagging store.Tagging
 	if r.store != nil {
-		tagging = r.store.ResolveTaggingCached(ctx, r.cfg)
+		tagging = r.store.ResolveTaggingCached(ctx)
 	}
 
-	if store.TaggingOracleMisconfigured(tagging.Oracle) {
-		slog.WarnContext(ctx,
-			"tagging.oracle parameter not recognised; Oracle statements run untagged",
-			slog.String("value", tagging.Oracle))
+	return interpretTagging(tagging, r.cfg, func(msg string, args ...any) {
+		slog.WarnContext(ctx, msg, args...)
+	})
+}
+
+// interpretTagging turns one stored tagging.* read plus the environment
+// defaults into the (enabled, oracle mode) a session authenticating now gets.
+// warn receives the anomaly lines — an unrecognized tagging.oracle is folded
+// to off rather than failing the session, but never silently.
+func interpretTagging(
+	t store.Tagging,
+	cfg *config.Config,
+	warn func(msg string, args ...any),
+) (bool, string) {
+	if store.TaggingOracleMisconfigured(t.Oracle) {
+		warn("tagging.oracle parameter not recognized; Oracle statements run untagged",
+			slog.String("value", t.Oracle))
 	}
 
-	return store.ResolveQueryTagging(tagging, r.cfg), store.ResolveOracleTaggingMode(tagging, r.cfg)
+	return store.ResolveQueryTagging(t, cfg), store.ResolveOracleTaggingMode(t, cfg)
 }
