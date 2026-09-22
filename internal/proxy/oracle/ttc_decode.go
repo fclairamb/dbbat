@@ -1707,7 +1707,7 @@ func rowDataStart(data []byte, numCols int, shape oerShape) int {
 // 4-byte dialect's ub4 at +6 (0x00010000, identical on all four frames, both
 // dialects) is unread for the same reason.
 //
-// The reading fails closed, which is the behaviour the dialect had before it
+// The reading fails closed, which is the behavior the dialect had before it
 // existed: the count must be the describe's own, and the ROW_DATA byte must land
 // exactly where the header ends. Nothing is scanned for. Across every frame of
 // every .hex fixture in the corpus that pattern matches exactly twice — the two
