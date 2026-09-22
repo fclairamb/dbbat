@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -48,6 +49,42 @@ const pythonThinLOBFixture = "python_thin_lob.pcapng"
 // goOraLOBSQLMarker picks the thin recordings' statement out of the dump. It
 // stops at the first column, so it is a substring of the text on the wire.
 const goOraLOBSQLMarker = "'aaaaaa' AS c1"
+
+// goOraBigLOBFixture is the fourth thin recording, and it exists for one
+// number: 252, the largest value a CLR can carry behind a single length byte.
+//
+// Every LOB in goOraLOBQuery is shorter than that, so every inlined value in
+// the recordings above arrived in the CLR's short form — which is why the
+// reading was a single length byte for as long as it was. This is the same
+// client, the same default policy and one CLOB of 300 characters, and what it
+// says is that the long form is not the genuine LONG column's habit but the
+// encoding's rule. See readInlineLongColumn. Regenerate with:
+//
+//	go test -tags capture -timeout 300s -run TestCapture_GoOraLOBInlineBig ./internal/proxy/oracle/
+const goOraBigLOBFixture = "go_ora_lob_big.pcapng"
+
+// goOraBigLOBQuery puts that 300-character CLOB between two ordinary columns,
+// the same alternation goOraLOBQuery uses: `C2` is what says the walk came out
+// of the value where the value ended.
+const goOraBigLOBQuery = `SELECT 'aaaaaa' AS c1,
+       TO_CLOB(RPAD('x', 300, 'x')) AS d1,
+       'bbbbbb' AS c2
+  FROM dual`
+
+// goOraBigLOBSQLMarker picks it out of the dump, and names the one thing about
+// it that matters so a reader of the fixture knows which query this is.
+const goOraBigLOBSQLMarker = "RPAD('x', 300"
+
+// goOraBigLOBValue is what that CLOB holds: 300 times `x`, forty-eight past the
+// short form's limit.
+var goOraBigLOBValue = strings.Repeat("x", 300)
+
+// goOraBigLOBColumns is its describe.
+var goOraBigLOBColumns = []columnDesc{
+	{Name: "C1", Type: tnsTypeCHAR},
+	{Name: "D1", Type: tnsTypeCLOB},
+	{Name: "C2", Type: tnsTypeCHAR},
+}
 
 // goOraLOBQuery is ociLOBQuery with the XMLTYPE column removed and nothing else
 // changed — same names, same order, same values — so the two recordings line up

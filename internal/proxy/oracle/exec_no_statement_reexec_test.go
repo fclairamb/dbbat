@@ -305,6 +305,10 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// absent for the reason inverted: it asks for nothing, so there is no
 	// define, and the server prefetches the row into the describe.
 	//
+	// go_ora_lob_big.pcapng's one is the same define as go_ora_lob.pcapng's, on
+	// the recording made for a 300-character CLOB: the value's length changes
+	// nothing about the ask.
+	//
 	// go_ora_long.pcapng's two are the same frame again, one per query, and they
 	// say the prefetch-off rule is the column's rather than the LOB's: a
 	// **genuine** LONG column turns it off too. The define re-declares each
@@ -321,6 +325,7 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 		"go_ora_lob.pcapng":            1,
 		"python_thin_lob.pcapng":       1,
 		"go_ora_long.pcapng":           2,
+		"go_ora_lob_big.pcapng":        1,
 	}, reexecs, "only these recordings carry an execute that declares no statement")
 }
 

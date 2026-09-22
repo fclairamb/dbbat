@@ -318,12 +318,13 @@ type recordedFetch struct {
 	colTypes []int
 	rows     []byte
 	oer      oerShape
+	lob      lobRowShape
 }
 
 // rowsUnder parses the recorded rows with the column types imposed, and returns
 // them as strings.
 func (f recordedFetch) rowsUnder(colTypes []int) [][]string {
-	parsed := parseContinuationRows(f.rows, len(f.colTypes), nil, colTypes, f.oer, lobRowLocator)
+	parsed := parseContinuationRows(f.rows, len(f.colTypes), nil, colTypes, f.oer, f.lob)
 
 	out := make([][]string, 0, len(parsed))
 
@@ -381,6 +382,15 @@ func recordedLongFetch(t *testing.T, td *testDump, marker string) recordedFetch 
 				break // a new statement begins → this fetch is over
 			}
 
+			// The same half of the client leg replayCapturedRowsUnder reads: a
+			// LOB column's reading is stated in a define block and nowhere else.
+			// A fetch with no LOB column in it never reaches this.
+			if started && len(found.colTypes) > 0 {
+				if shape, ok := execDefineLOBShape(ttcPayload, found.colTypes); ok {
+					found.lob = shape
+				}
+			}
+
 			continue
 		}
 
@@ -390,7 +400,7 @@ func recordedLongFetch(t *testing.T, td *testDump, marker string) recordedFetch 
 
 		switch funcCode { //nolint:exhaustive // only row-bearing response codes matter here
 		case TTCFuncQueryResult:
-			result := decodeQueryResultV2(ttcPayload, found.oer, lobRowLocator)
+			result := decodeQueryResultV2(ttcPayload, found.oer, found.lob)
 			if result == nil {
 				continue
 			}

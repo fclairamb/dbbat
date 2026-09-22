@@ -2602,9 +2602,15 @@ const lobLocatorMaxLen = 0xFB
 // and never saw anything else; a genuine LONG arrives as the 0xFE long form
 // whatever its length — 20 bytes of text came back as `fe 01 14 … 00`. So the
 // value is read as a CLR proper, in the long form this session negotiated
-// (shape.bigClrChunks), which also fixes the case that was always there and
-// never recorded: an inlined LOB over the 252-byte short-form limit is chunked
-// too, and was costing its row.
+// (shape.bigClrChunks).
+//
+// That also fixes a case that was always there and had no recording: an inlined
+// LOB **over the 252-byte short-form limit** is chunked too, because the long
+// form is the CLR's rule rather than a LONG column's habit. It is a measurement
+// now, not an inference — testdata/go_ora_lob_big.pcapng is the same client and
+// the same default policy on a 300-character CLOB, its value opens with 0xFE,
+// and 0xFE is not a length (see TestThinInlineLOBOver252BytesIsChunked). Read
+// as one it meant 254 bytes of a 300-byte value, and the row was lost.
 func readInlineLongColumn(
 	payload []byte, offset int, shape oerShape, colTypes []int, col int,
 ) (string, int, bool) {
@@ -3070,14 +3076,21 @@ func rowEndsAtMarker(shape oerShape, payload []byte, offset int) bool {
 //     1403 the compressed reading is far too weak to accept here.
 //   - **fixed-width** (OCI): the layout validates itself — the error number is
 //     repeated as the RetCode 66 bytes further on and the call status is
-//     non-zero (decodeOERFieldsAtLayout) — so it needs no status of its own,
-//     which is just as well: the object measured behind sqlplus's last row
-//     reports plain success, `callStatus 1, errNum 0, rowCount 2`.
+//     non-zero (decodeOERFieldsAtLayout) — and on top of that it must pass
+//     plausibleStatusOER, the bound findPlausibleOERInResponse already applies
+//     to this same object: success or end-of-data, a sequence number inside its
+//     16-bit field, and a real cursor id. Both halves are needed. The layout
+//     invariant alone is satisfied by a summary object reporting *any* error, so
+//     it would accept an ORA-01722 as "the row ended here"; and end-of-data
+//     alone is not available, because what sqlplus sends behind its last row
+//     reports plain success (`callStatus 1, errNum 0, cursorID 2, rowCount 2`).
 //
-// Both are tried under their own proof rather than first-wins, for the reason
-// decodeOERFieldsForShape spells out: a fixed-width block decodes as a run of
-// zero-valued compressed fields, so a compressed reading that came back
-// "successful" would stop the fixed one from ever being asked.
+// Both encodings are tried under their own proof rather than first-wins, for
+// the reason decodeOERFieldsForShape spells out: a fixed-width block decodes as
+// a run of zero-valued compressed fields, so a compressed reading that came
+// back "successful" would stop the fixed one from ever being asked. That same
+// run is why the compressed branch demands 1403 rather than reusing
+// plausibleStatusOER, which would accept the zero-valued decode as a success.
 func rowEndsAtSummaryObject(shape oerShape, payload []byte, offset int) bool {
 	if info, _ := decodeOERFieldsAt(payload, offset); info != nil && info.ErrorCode == oraNoDataFound {
 		return true
@@ -3085,7 +3098,7 @@ func rowEndsAtSummaryObject(shape oerShape, payload []byte, offset int) bool {
 
 	info, _ := decodeOERFixedFieldsAt(shape, payload, offset)
 
-	return info != nil
+	return plausibleStatusOER(info)
 }
 
 // parseRowStream decodes a run of compressed rows starting at payload[offset].

@@ -34,6 +34,40 @@ func TestCapture_GoOraLOBInline(t *testing.T) {
 	captureGoOraLOB(t, "capture-go-ora-lob", "testdata/"+goOraLOBFixture, "")
 }
 
+// TestCapture_GoOraLOBInlineBig records the same client and the same default
+// policy on a CLOB of 300 characters — forty-eight past the 252 a CLR can carry
+// behind a single length byte.
+//
+// Every LOB in goOraLOBQuery is under that limit, so the inlined value always
+// arrived in the short form and the reading was a single length byte for as
+// long as it was. This is the recording that says what happens on the other
+// side of it. See readInlineLongColumn.
+func TestCapture_GoOraLOBInlineBig(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_LOB_BIG", "testdata/"+goOraBigLOBFixture)
+
+	requireOracleReachable(t, oracleAddr)
+
+	w := newCaptureWriter(t, outPath, "capture-go-ora-lob-big")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	db, err := sql.Open("oracle",
+		fmt.Sprintf("oracle://system:oracle@%s/%s", relayAddr, oracleService))
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+	logCapturedRows(t, db, goOraBigLOBQuery)
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
 // TestCapture_GoOraLOBStream records the same query with `lob fetch=post`,
 // which is the thin client asking for locators instead — the shape the row walk
 // has framing to skip in, and therefore the one that says whether a thin

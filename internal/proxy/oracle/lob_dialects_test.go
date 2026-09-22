@@ -153,6 +153,56 @@ func TestThinLOBFetchCarriesTheContentInsteadOfALocator(t *testing.T) {
 	}, rows[0])
 }
 
+// TestThinInlineLOBOver252BytesIsChunked is the same client and the same
+// default policy on a CLOB of 300 characters, and it is here because the
+// reading was a single length byte until 2026-09-22 and nothing in the corpus
+// could say what that cost.
+//
+// A CLR carries at most 252 bytes behind one length byte; past that the value
+// arrives in the 0xFE long form. Every LOB in goOraLOBQuery is shorter than
+// that, so the short form was the only shape ever recorded, and "an inlined LOB
+// over the limit is chunked too" was arithmetic rather than a measurement.
+// This recording is the measurement, and it is made twice over:
+//
+//   - the bytes: the column after `C1` opens with 0xFE, which is not a length
+//     and never can be. The reading that took it for one read 254 bytes of a
+//     300-byte value, started `C2` inside it and lost the row — every fetch of
+//     an inlined LOB past the limit, on every thin client;
+//   - the reading: the same fetch under `bigClrChunks` cleared — what a session
+//     that never saw the capability gets — comes back with nothing, so the
+//     chunk lengths really are the compressed integers the LONG recordings
+//     showed, not single bytes.
+//
+// The value is a **LOB**, so it also says the long form is the CLR's rule
+// rather than a genuine LONG column's habit — the two share one reader
+// (readInlineLongColumn) precisely because they are the same thing on the wire.
+func TestThinInlineLOBOver252BytesIsChunked(t *testing.T) {
+	t.Parallel()
+
+	require.Len(t, goOraBigLOBValue, 300, "the value has to be past the 252-byte short form to say anything")
+	require.Contains(t, goOraBigLOBQuery, goOraBigLOBSQLMarker,
+		"the marker has to be a substring of the statement on the wire, or it selects nothing")
+
+	td := loadTestDump(t, goOraBigLOBFixture)
+
+	assert.Equal(t, [][]string{{"aaaaaa", goOraBigLOBValue, "bbbbbb"}},
+		replayCapturedRows(t, td, goOraBigLOBSQLMarker))
+
+	fetch := recordedLongFetch(t, td, goOraBigLOBSQLMarker)
+	require.Equal(t, describeColumnTypes(goOraBigLOBColumns), fetch.colTypes)
+	require.NotEmpty(t, fetch.rowsUnder(fetch.colTypes),
+		"the fetch must yield its row under the reading its session negotiated")
+
+	// `C1` as a short-form CLR, then the LOB column's first byte: 0xFE, the
+	// long-form marker, where every recorded inlined LOB until now had a length.
+	assert.Contains(t, string(fetch.rows), "\x06aaaaaa\xfe",
+		"the recorded value must be in the long form, or the fixture says nothing")
+
+	fetch.oer.bigClrChunks = false
+	assert.Empty(t, fetch.rowsUnder(fetch.colTypes),
+		"and its chunk lengths must be compressed integers, not single bytes")
+}
+
 // goOraLOBLocatorRow is what the two locator recordings capture: the ordinary
 // columns verbatim, each LOB a placeholder naming its type, and the NULL CLOB
 // the empty string every other NULL captures as.

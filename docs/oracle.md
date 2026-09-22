@@ -1850,6 +1850,14 @@ out on the wrong byte, and `rowEndsAtMarker` cost the row.
   the session's negotiated `UseBigClrChunks` (`oerShape.bigClrChunks`, stamped
   from the pre-auth relay) rather than assuming one.
 
+  The long form is the **CLR's** rule rather than a LONG column's habit, which
+  is why the same reader serves both and why it fixes a case that predates it:
+  an inlined LOB past the 252 bytes a single length byte can carry is chunked
+  too, and every such fetch was losing its row. `testdata/go_ora_lob_big.pcapng`
+  is that measurement — the same client and the same default LOB policy on a
+  300-character CLOB, whose value opens with `0xFE`. Read as a length that meant
+  254 bytes of a 300-byte value, so the next column started inside it.
+
 Because those skips are measured, a row that used one is kept **only** when the
 columns after it come out on something that can legitimately follow a row: the
 `0x07` / `0x15` separators, the `0x08` footer, or the **summary object that ends
@@ -1863,10 +1871,29 @@ thin runs its last row straight into it on every fetch, and sqlplus does so on
 the round trip that returns the result set's final row — so on those clients the
 **last row of every fetch with a framed column in it** was being refused, LOB
 and object columns included. Each encoding is accepted under its own proof,
-never on the `0x04` marker byte alone: the compressed one must decode *and*
-report ORA-01403, the fixed-width one validates itself (its error number is
-repeated as the RetCode 66 bytes on, `decodeOERFieldsAtLayout`), which it has to,
-because the object sqlplus sends there reports plain success.
+never on the `0x04` marker byte alone:
+
+- the **compressed** one must decode *and* report ORA-01403. Its seven fields
+  are weak enough on their own that a run of zeroes decodes as a plausible
+  success, so end-of-data is the whole of its proof.
+- the **fixed-width** one must satisfy both its layout invariant — the error
+  number repeated as the RetCode 66 bytes on, a non-zero call status
+  (`decodeOERFieldsAtLayout`) — *and* `plausibleStatusOER`, the bound
+  `findPlausibleOERInResponse` already applies to the same object: success or
+  end-of-data, a sequence number inside its 16-bit field, a real cursor id.
+  Both halves are load-bearing. The layout invariant alone is satisfied by a
+  summary object reporting *any* failure, and accepting one of those as "the row
+  ended here" would be worse than the bug this replaced — a refused row is lost
+  loudly, a drifted row that lands on an accepted terminator is presented as a
+  measurement. End-of-data alone is not available either: what sqlplus sends
+  behind its last row reports plain success (`callStatus 1, errNum 0,
+  cursorID 2`).
+
+Both directions are pinned away from the corpus, in
+`TestRowEndsAtMarker_AcceptsTheFourThingsThatCanFollowARow` and
+`TestRowEndsAtMarker_RefusesWhatIsNotAnEnding` — the negative half has to be
+synthesized, because a real server does not put a summary object behind a row it
+is still sending.
 
 **What a LOB column captures, and why it is not the data.** A locator is a
 handle into the server: it names a LOB, changes from fetch to fetch, and the
