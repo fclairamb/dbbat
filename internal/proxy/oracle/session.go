@@ -2318,6 +2318,11 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 	// oerSummary.CallNumber.
 	named := s.observeClientCallNumber(ttcPayload)
 
+	// The client's own define block is the only place the LOB reading of the
+	// rows about to arrive is stated, so it is read here, before the frame is
+	// forwarded and long before those rows come back. See learnLOBRowShape.
+	s.learnLOBRowShape(ttcPayload)
+
 	// A limit crossed while dbbat was relaying a reply is answered here rather
 	// than written into that reply: this message is the proof the client has
 	// finished consuming it and is parked on a fresh call that can be ended.
@@ -3129,6 +3134,50 @@ func (s *session) observeClientAuthEncoding(phase1Payload []byte) {
 	}
 }
 
+// learnLOBRowShape reads the LOB reading this fetch's rows will arrive under
+// off the client's own frame, and records it on the query already in flight.
+//
+// It is the one thing about a row's layout that the server's frames do not say:
+// a thin client that wants a LOB's bytes rather than a handle re-declares the
+// column as a LONG in a define block, and what comes back is then a LONG
+// column. The column records are identical either way, so the ask is read
+// rather than the answer — see execDefineLOBShape and readCompressedLOBColumn.
+//
+// It runs on every client frame and costs a walk that fails on its first byte
+// for all but the define. Nothing learned leaves the fetch on the locator
+// reading it started with, which is what the server sends unless it was asked
+// otherwise.
+func (s *session) learnLOBRowShape(ttcPayload []byte) {
+	_ = s.book(func() error {
+		pending := s.tracker.pendingQuery
+		if pending == nil || pending.cursor == nil || len(pending.cursor.columns) == 0 {
+			return nil
+		}
+
+		shape, ok := execDefineLOBShape(ttcPayload, columnTypeCodes(pending.cursor.columns))
+		if !ok {
+			return nil
+		}
+
+		pending.lobShape = shape
+
+		return nil
+	})
+}
+
+// pendingLOBRowShape is what learnLOBRowShape recorded for the fetch now in
+// flight, or the locator reading when there is nothing in flight or nothing was
+// learned.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
+func (s *session) pendingLOBRowShape() lobRowShape {
+	if s.tracker.pendingQuery == nil {
+		return lobRowLocator
+	}
+
+	return s.tracker.pendingQuery.lobShape
+}
+
 // learnOERTail keeps the session's picture of the TTC summary object honest
 // against the one the upstream actually sends, and tracks the end-to-end
 // sequence number so a synthesized error continues the session's count instead
@@ -3536,7 +3585,8 @@ func (s *session) handleContinuation(ttcPayload []byte) {
 
 	if numCols > 0 {
 		rows := parseContinuationRows(
-			ttcPayload, numCols, s.tracker.pendingQuery.lastRow, columnTypeCodes(columns), s.oerShapeSnapshot())
+			ttcPayload, numCols, s.tracker.pendingQuery.lastRow, columnTypeCodes(columns),
+			s.oerShapeSnapshot(), s.pendingLOBRowShape())
 
 		for _, row := range rows {
 			s.captureRow(columns, row)

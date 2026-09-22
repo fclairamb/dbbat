@@ -294,13 +294,16 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// `oci_refcursor_drives.hex` fixture pair alone — so this is the line that
 	// makes a regression in it fail here. Two rather than three because sqlplus
 	// drives the cursor the script asks it to print, and the script prints twice.
-	// go_ora_lob.pcapng is the one entry that is not a REF cursor, and it is
-	// the LOB round trip's own shape: with a LOB in the select list Oracle
-	// turns row prefetch off, the describe comes back with no rows, and go-ora
-	// goes and fetches them — a statement-less execute naming the cursor it was
-	// just given. Its streamed sibling (go_ora_lob_stream.pcapng) is absent for
-	// the same reason inverted: asked for locators rather than bodies, the
-	// server prefetches the row into the describe and there is nothing to fetch.
+	// The two LOB entries are not REF cursors, and they are the same frame as
+	// each other: the **define block** a thin client sends when it has a cursor
+	// described and something to say about how its columns come back. With a
+	// LOB in the select list Oracle turns row prefetch off, so the describe
+	// arrives empty and the client re-executes the cursor it was just given —
+	// go-ora re-declaring its LOB columns as LONG to get the bodies inlined,
+	// python-oracledb thin re-declaring them as the LOB types they already are.
+	// That frame is what execDefineLOBShape reads. go_ora_lob_stream.pcapng is
+	// absent for the reason inverted: it asks for nothing, so there is no
+	// define, and the server prefetches the row into the describe.
 	assert.Equal(t, map[string]int{
 		"ojdbc6_legacy.pcapng":         1,
 		"go_ora_refcursor.pcapng":      3,
@@ -308,6 +311,7 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 		"python_thin_refcursor.pcapng": 5,
 		"sqlplus_refcursor.pcapng":     2,
 		"go_ora_lob.pcapng":            1,
+		"python_thin_lob.pcapng":       1,
 	}, reexecs, "only these recordings carry an execute that declares no statement")
 }
 

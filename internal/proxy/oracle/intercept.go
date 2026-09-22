@@ -219,6 +219,12 @@ type pendingOracleQuery struct {
 	// Created by persistQueryRecord, i.e. only once the parent queries row
 	// exists — query_rows.query_id is a foreign key.
 	rowSink *shared.QuerySink
+
+	// lobShape is the reading this fetch's LOB columns come back under, learned
+	// off the client's own define block (learnLOBRowShape). The zero value is
+	// the locator, which is what the server sends when the client asked for
+	// nothing — see execDefineLOBShape.
+	lobShape lobRowShape
 }
 
 // newOracleQueryTracker creates a new query tracker.
@@ -1030,7 +1036,7 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 //
 // Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleQueryResultV2(ttcPayload []byte) {
-	result := decodeQueryResultV2(ttcPayload, s.oerShapeSnapshot())
+	result := decodeQueryResultV2(ttcPayload, s.oerShapeSnapshot(), s.pendingLOBRowShape())
 	if result == nil {
 		return
 	}

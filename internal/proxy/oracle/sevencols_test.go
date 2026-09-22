@@ -122,7 +122,7 @@ func TestOCISevenColumnFetchCarriesItsRow(t *testing.T) {
 		"the recording is only the regression it is meant to be if its column count "+
 			"is the very byte a forward scan would stop on")
 
-	result := decodeQueryResultV2(ttc, ociOERShape())
+	result := decodeQueryResultV2(ttc, ociOERShape(), lobRowLocator)
 	require.NotNil(t, result)
 
 	assert.Equal(t, []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7"}, result.Columns)
@@ -204,7 +204,7 @@ func TestSevenColumnFetchIsDecodedEndToEnd(t *testing.T) {
 
 			payload := append(tc.header(numCols), oneByteRowValues(numCols)...)
 
-			rows := scanRowValues(payload, numCols, nil, tc.shape)
+			rows := scanRowValues(payload, numCols, nil, tc.shape, lobRowLocator)
 			require.Len(t, rows, 1, "the payload carries exactly one row")
 			assert.Equal(t, []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7"}, rows[0])
 		})

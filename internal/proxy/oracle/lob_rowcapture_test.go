@@ -146,7 +146,7 @@ func TestOCI64LOBDescribeCarriesNoRowValuesAtAll(t *testing.T) {
 	describe := extractTTCPayload(frames[1])
 	require.Equal(t, byte(TTCFuncQueryResult), describe[0], "frame 1 must be the describe")
 
-	result := decodeQueryResultV2(describe, oci64OERShape())
+	result := decodeQueryResultV2(describe, oci64OERShape(), lobRowLocator)
 	require.NotNil(t, result)
 
 	assert.Equal(t, ociLOBColumns, parseColumnDescribes(describe, oci64OERShape()),
@@ -232,11 +232,11 @@ func TestOCI64LOBFetchIsNotOfferedToTheOtherTwoEncodings(t *testing.T) {
 	fetch := extractTTCPayload(frames[2])
 	types := describeColumnTypes(ociLOBColumns)
 
-	require.Len(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, oci64OERShape()), 1,
+	require.Len(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, oci64OERShape(), lobRowLocator), 1,
 		"the fixture must yield its row under the shape it was recorded from")
-	assert.Empty(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, ociOERShape()),
+	assert.Empty(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, ociOERShape(), lobRowLocator),
 		"a 64-bit OCI fetch must not be read as a 4-byte OCI one")
-	assert.Empty(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, oerShape{}),
+	assert.Empty(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, oerShape{}, lobRowLocator),
 		"nor as a compressed one")
 }
 
@@ -267,7 +267,7 @@ func TestLOBRowIsRefusedWhenTheFramingSkipLandsWrong(t *testing.T) {
 	types = append(types, describeColumnTypes(ociLOBColumns)...)
 	types = append(types, tnsTypeCHAR)
 
-	assert.Empty(t, parseRowStream(fetch, start, drifted, allColumns(drifted), nil, types, oci64OERShape()),
+	assert.Empty(t, parseRowStream(fetch, start, drifted, allColumns(drifted), nil, types, oci64OERShape(), lobRowLocator),
 		"a walk that comes out of the framing on the wrong byte must cost the row, not fill it")
 }
 
@@ -413,7 +413,7 @@ func TestUnreadableObjectImageKeepsTheLocatorHex(t *testing.T) {
 		0x07,
 	}
 
-	value, next, ok := readRowColumn(payload, 0, oci64OERShape(), []int{tnsTypeNamedObject}, 0)
+	value, next, ok := readRowColumn(payload, 0, oci64OERShape(), []int{tnsTypeNamedObject}, 0, lobRowLocator)
 	require.True(t, ok, "the column must still be stepped over — the row is not lost")
 	assert.Equal(t, len(payload)-1, next)
 	assert.Equal(t, "abcd", value, "and the capture falls back to the locator hex")

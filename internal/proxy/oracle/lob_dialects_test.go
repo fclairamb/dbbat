@@ -93,11 +93,11 @@ func TestOCILOBFetchIsNotOfferedToTheOtherTwoEncodings(t *testing.T) {
 	fetch := extractTTCPayload(frames[2])
 	types := describeColumnTypes(ociLOBColumns)
 
-	require.Len(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, ociOERShape()), 1,
+	require.Len(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, ociOERShape(), lobRowLocator), 1,
 		"the fixture must yield its row under the shape it was recorded from")
-	assert.Empty(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, oci64OERShape()),
+	assert.Empty(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, oci64OERShape(), lobRowLocator),
 		"a 4-byte OCI fetch must not be read as a 64-bit one")
-	assert.Empty(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, oerShape{}),
+	assert.Empty(t, parseContinuationRows(fetch, len(ociLOBColumns), nil, types, oerShape{}, lobRowLocator),
 		"nor as a compressed one")
 }
 
@@ -105,11 +105,16 @@ func TestOCILOBFetchIsNotOfferedToTheOtherTwoEncodings(t *testing.T) {
 // recording, and the finding it exists for is in its expectation rather than in
 // any assertion about bytes: `D1` is `body`, not `<CLOB locator>`.
 //
-// A thin client asks for the LOB bodies up front by default, so the server
-// inlines them and the row carries no handle to step over at all. That is why
-// the compressed encoding never showed the defect the LOB framing was written
+// go-ora asks for the LOB bodies up front by default, so the server inlines
+// them and the row carries no handle to step over at all. That is why the
+// compressed encoding never showed the defect the LOB framing was written
 // for — and why it had one of its own: the walk was skipping sixteen bytes past
 // a value that ended where it said it did, and losing every such row.
+//
+// The ask is a define block re-declaring each LOB column as a LONG, which is
+// what execDefineLOBShape reads here — off the client's own frame, before the
+// rows arrive. Nothing in the server's frames says it: this fixture's column
+// records are byte-identical to the streamed one's below.
 //
 // `D4` is an NCLOB, so what arrives is the UCS-2 the server sent — `00 6e 00
 // 6e` — and decodeOracleRawValue renders a byte run with NULs in it as hex
@@ -144,25 +149,74 @@ func TestThinLOBFetchCarriesTheContentInsteadOfALocator(t *testing.T) {
 	}, rows[0])
 }
 
-// TestThinStreamedLOBFetchIsRefusedRatherThanGuessed is the honest half, and it
-// pins a limit rather than a capability.
+// goOraLOBLocatorRow is what the two locator recordings capture: the ordinary
+// columns verbatim, each LOB a placeholder naming its type, and the NULL CLOB
+// the empty string every other NULL captures as.
 //
-// The same thin client asked for locators instead of bodies (`lob fetch=post`)
-// frames the column a third way again — two CLRs, where the inline shape is a
-// CLR and two compressed integers — and **nothing in the describe tells the two
-// apart**: the column records of the two recordings are identical, because the
-// difference was asked for in the execute's options. So the row is read under
-// the shape a thin client defaults to, it comes out on the wrong byte under the
-// other one, and rowEndsAtMarker costs it the row.
+// It is deliberately the same expectation for both, because the point of having
+// two is that the *column* reads the same however the client spelled the header
+// in front of the locator.
+var goOraLOBLocatorRow = []string{
+	"aaaaaa",
+	"<CLOB locator>",
+	"bbbbbb",
+	"<CLOB locator>",
+	"cccccc",
+	"<BLOB locator>",
+	"dddddd",
+	"<CLOB locator>",
+	"eeeeee",
+	"ffffff",
+	"",
+	"gggggg",
+}
+
+// TestThinStreamedLOBFetchCapturesItsLocators is the same client asking for
+// locators instead of bodies (`lob fetch=post`), and it is the half that used
+// to cost the whole fetch.
 //
-// That is the behavior this fixture is here to hold still. Capturing it would
-// need the client's own execute read for its LOB policy, which is a piece of
-// work of its own and not one to fake with a second guess at the row —
-// specs/todos/2026-09-22-09-oracle-a-thin-client-that-asks-for-lob-locators-loses-its-rows.md.
-func TestThinStreamedLOBFetchIsRefusedRatherThanGuessed(t *testing.T) {
+// The column is framed a third way again — the locator's size and then the
+// locator, where the inline shape is a value and its indicator pair — and
+// **nothing in the describe tells the two apart**: the column records of the two
+// recordings are identical, because the difference was asked for on the client's
+// side of the wire. So it is asked for there that dbbat reads it. This session
+// sends no define at all, which is the ask for nothing, and a locator is what
+// the server sends when nothing was asked.
+//
+// The captured values are placeholders rather than data, and that is the rule
+// the inline half reads the other way round: a locator names a LOB inside the
+// server and its contents are not in this packet, so there is nothing to
+// render. See lobLocatorPlaceholder.
+func TestThinStreamedLOBFetchCapturesItsLocators(t *testing.T) {
 	t.Parallel()
 
 	rows := replayCapturedRows(t, loadTestDump(t, goOraLOBStreamFixture), goOraLOBSQLMarker)
-	assert.Empty(t, rows,
-		"a walk that comes out of the framing on the wrong byte must cost the row, not fill it")
+	require.Len(t, rows, 1, "the query selects from dual and returns exactly one row")
+
+	assert.Equal(t, goOraLOBLocatorRow, rows[0])
+}
+
+// TestPythonThinLOBFetchCapturesItsLocators is the same query on a second,
+// independently written thin driver with **nothing configured**, and it is what
+// makes the reading above a dialect's rather than one driver's switch.
+//
+// python-oracledb thin fetches LOB handles by default, so its rows carry
+// locators — and it does send a define, keeping each LOB column the LOB type it
+// already was. Two of the three thin recordings therefore ask for locators, and
+// go-ora's inline default is go-ora's habit rather than the thin norm, which is
+// why the unlearned reading is the locator.
+//
+// Its locator header is not go-ora's: python asks for the LOB's own size and
+// chunk size as well, which is the OCI dialects' four-field header spelled in
+// compressed integers. The walk does not count those fields, it steps over them
+// until the size it read agrees with the locator's own length byte — see
+// readCompressedLOBLocatorColumn — so the column reads the same either way, and
+// that is exactly what this asserts.
+func TestPythonThinLOBFetchCapturesItsLocators(t *testing.T) {
+	t.Parallel()
+
+	rows := replayCapturedRows(t, loadTestDump(t, pythonThinLOBFixture), goOraLOBSQLMarker)
+	require.Len(t, rows, 1, "the query selects from dual and returns exactly one row")
+
+	assert.Equal(t, goOraLOBLocatorRow, rows[0])
 }

@@ -1421,7 +1421,7 @@ type QueryResultV2 struct {
 //     in the first half of the payload (column definition area)
 //  2. Scan for row values: length-prefixed data after the column area
 //  3. Detect ORA-01403 as end-of-data (not an error)
-func decodeQueryResultV2(ttcPayload []byte, shape oerShape) *QueryResultV2 {
+func decodeQueryResultV2(ttcPayload []byte, shape oerShape, lob lobRowShape) *QueryResultV2 {
 	if len(ttcPayload) < 20 {
 		return nil
 	}
@@ -1467,7 +1467,7 @@ func decodeQueryResultV2(ttcPayload []byte, shape oerShape) *QueryResultV2 {
 	// Row values appear after the column definitions. We look for a marker
 	// pattern that separates column defs from row data.
 	// The row data area starts roughly after the column definitions.
-	result.Rows = scanRowValues(ttcPayload, len(result.Columns), result.ColumnTypes, shape)
+	result.Rows = scanRowValues(ttcPayload, len(result.Columns), result.ColumnTypes, shape, lob)
 
 	return result
 }
@@ -1622,13 +1622,13 @@ func skipColumnMetadata(data []byte) int {
 // introduces them is not, so `shape` (the session's learned encoding, never
 // anything sniffed from the payload) decides how the stream is found. See
 // rowDataStart.
-func scanRowValues(data []byte, numCols int, colTypes []int, shape oerShape) [][]string {
+func scanRowValues(data []byte, numCols int, colTypes []int, shape oerShape, lob lobRowShape) [][]string {
 	rowStart := rowDataStart(data, numCols, shape)
 	if rowStart < 0 || numCols == 0 {
 		return nil
 	}
 
-	rows := parseRowStream(data, rowStart, numCols, allColumns(numCols), nil, colTypes, shape)
+	rows := parseRowStream(data, rowStart, numCols, allColumns(numCols), nil, colTypes, shape, lob)
 
 	out := make([][]string, len(rows))
 	for i, row := range rows {
@@ -2229,7 +2229,7 @@ const continuationDescriptorMarker = 0x15
 // prevRow is the last row of the previous packet so unchanged (compressed-away)
 // columns can be filled in.
 func parseContinuationRows(
-	payload []byte, numCols int, prevRow []string, colTypes []int, shape oerShape,
+	payload []byte, numCols int, prevRow []string, colTypes []int, shape oerShape, lob lobRowShape,
 ) [][]interface{} {
 	if numCols == 0 || len(payload) < 15 {
 		return nil
@@ -2245,7 +2245,7 @@ func parseContinuationRows(
 	// searches (the 64-bit header alone is 50 bytes), which is why such a fetch
 	// used to be read as carrying nothing.
 	if start := fetchRowDataStart(payload, numCols, shape); start >= 0 {
-		return parseRowStream(payload, start, numCols, allColumns(numCols), nil, colTypes, shape)
+		return parseRowStream(payload, start, numCols, allColumns(numCols), nil, colTypes, shape, lob)
 	}
 
 	// Find the first 0x07 in the header area (marks start of row data).
@@ -2277,7 +2277,7 @@ func parseContinuationRows(
 		copy(prev, prevRow)
 	}
 
-	return parseRowStream(payload, headerEnd+1, numCols, activeCols, prev, colTypes, shape)
+	return parseRowStream(payload, headerEnd+1, numCols, activeCols, prev, colTypes, shape, lob)
 }
 
 // decodeRowValue decodes a single captured column value by its TTC type. NUMBER
@@ -2468,12 +2468,111 @@ func readFixedLOBColumn(
 	return lobLocatorPlaceholder(colTypes, col), offset + locatorLen, true
 }
 
-// readCompressedLOBColumn reads a LOB column on the thin dialect, where the
-// server has inlined the LOB's own bytes: a CLR carrying the value, then two
+// readCompressedLOBColumn reads a LOB column on the thin dialect, under the
+// reading this session's client asked for.
+//
+// The two shapes are not each other's near-misses, they are unrelated: one is a
+// LONG column's value, the other a locator with its sizes in front of it. And
+// the bytes do not say which — the column records of the two are identical,
+// because the ask was made on the client's side of the wire. So the branch is
+// decided by execDefineLOBShape, off the client's own define block, and never
+// by trying one reading and falling back to the other.
+//
+// lobRowLocator is the branch a session that asked for nothing gets, because a
+// locator is what Oracle sends unless a client re-declared the column as a
+// LONG. A define dbbat could not walk therefore lands here too, where a wrong
+// walk costs the row rather than filling it with framing bytes.
+func readCompressedLOBColumn(
+	payload []byte, offset int, colTypes []int, col int, lob lobRowShape,
+) (string, int, bool) {
+	if lob == lobRowInline {
+		return readCompressedInlineLOBColumn(payload, offset, colTypes, col)
+	}
+
+	return readCompressedLOBLocatorColumn(payload, offset, colTypes, col)
+}
+
+// lobCompressedLocatorMaxSkips is how many compressed integers may sit between
+// a thin locator column's leading size and the locator itself.
+//
+// Two recordings, two answers: go-ora's `lob fetch=post` sends the size and
+// then the locator with nothing in between (testdata/go_ora_lob_stream.pcapng),
+// while python-oracledb thin sends the LOB's own size and its chunk size as
+// well (testdata/python_thin_lob.pcapng) — which is the OCI dialects' four-field
+// header spelled in compressed integers. The walk steps over them rather than
+// counting them, and it is the size agreeing with the locator's own length that
+// says where it stopped, so a third client adding or dropping one of the two
+// costs nothing. Two is the measured maximum and the bound that keeps a walk
+// which has drifted from wandering into the next column.
+const lobCompressedLocatorMaxSkips = 2
+
+// readCompressedLOBLocatorColumn reads a LOB column on the thin dialect when
+// the row carries a locator: a leading size as a compressed integer, then the
+// LOB's own size and chunk size on the clients that send them, then the locator
+// as a CLR.
+//
+// The reading validates itself the way readFixedLOBColumn's does — the locator
+// length is spelled **twice**, once as the leading size and once as the CLR's
+// own length byte, and only a column where the two agree is read as a locator.
+// That is also what locates the CLR: the walk steps forward over compressed
+// integers until the byte it is looking at is that size and that many bytes are
+// there to be had.
+//
+// A zero leading size is the NULL LOB and ends the column there, exactly as it
+// does on both OCI dialects. The captured value is the placeholder — the
+// contents are not in this packet and dbbat will not go and ask for them (see
+// lobLocatorPlaceholder).
+func readCompressedLOBLocatorColumn(
+	payload []byte, offset int, colTypes []int, col int,
+) (string, int, bool) {
+	maxSize, n := readCompressedInt(payload[offset:])
+	if n == 0 {
+		return "", 0, false
+	}
+
+	offset += n
+
+	if maxSize == 0 {
+		return "", offset, true // a NULL LOB: the column is its zero size and nothing else
+	}
+
+	// A locator's length is a single CLR byte, so a size that cannot be spelled
+	// by one is a walk that landed on the wrong bytes rather than a LOB.
+	if maxSize > lobLocatorMaxLen {
+		return "", 0, false
+	}
+
+	for range lobCompressedLocatorMaxSkips + 1 {
+		if offset < len(payload) && int(payload[offset]) == maxSize && offset+1+maxSize <= len(payload) {
+			return lobLocatorPlaceholder(colTypes, col), offset + 1 + maxSize, true
+		}
+
+		next, ok := skipCompressedInt(payload, offset)
+		if !ok {
+			return "", 0, false
+		}
+
+		offset = next
+	}
+
+	return "", 0, false
+}
+
+// lobLocatorMaxLen bounds a locator's declared length. A CLR spells its length
+// in one byte, so anything past 0xFB — the first of the four values that mean
+// something other than a length — is not one.
+const lobLocatorMaxLen = 0xFB
+
+// readCompressedInlineLOBColumn reads a LOB column on the thin dialect when the
+// client re-declared it as a LONG and the server put the bytes in the row: a
+// CLR carrying the value, then the column's indicator and return code as two
 // compressed integers. A NULL LOB is the empty CLR with the same two behind it
-// (spelled -1 and 1405 rather than 0 and 0, which is why they are skipped as
-// integers instead of being counted as a fixed block).
-func readCompressedLOBColumn(payload []byte, offset int, colTypes []int, col int) (string, int, bool) {
+// (spelled -1 and 1405 — ORA-01403, "fetched column value is NULL" — rather
+// than 0 and 0, which is why they are skipped as integers instead of being
+// counted as a fixed block).
+func readCompressedInlineLOBColumn(
+	payload []byte, offset int, colTypes []int, col int,
+) (string, int, bool) {
 	if offset >= len(payload) {
 		return "", 0, false
 	}
@@ -2733,7 +2832,7 @@ const rowValueMaxLen = 4000
 // readCompressedLOBColumn). Reading either as a scalar and then carrying on is
 // what used to lose the whole rest of the row.
 func readRowColumn(
-	payload []byte, offset int, shape oerShape, colTypes []int, col int,
+	payload []byte, offset int, shape oerShape, colTypes []int, col int, lob lobRowShape,
 ) (string, int, bool) {
 	if offset >= len(payload) {
 		return "", 0, false
@@ -2744,7 +2843,7 @@ func readRowColumn(
 			return readFixedLOBColumn(payload, offset, shape, colTypes, col)
 		}
 
-		return readCompressedLOBColumn(payload, offset, colTypes, col)
+		return readCompressedLOBColumn(payload, offset, colTypes, col, lob)
 	}
 
 	valLen := int(payload[offset])
@@ -2828,6 +2927,7 @@ func rowEndsAtMarker(payload []byte, offset int) bool {
 // scan, and the caller (captureRow) enforces the configured result-size limits.
 func parseRowStream(
 	payload []byte, offset, numCols int, activeCols []int, prev []string, colTypes []int, shape oerShape,
+	lob lobRowShape,
 ) [][]interface{} {
 	if numCols == 0 {
 		return nil
@@ -2861,7 +2961,7 @@ func parseRowStream(
 		skipped := false
 
 		for _, col := range activeCols {
-			decoded, next, ok := readRowColumn(payload, offset, shape, colTypes, col)
+			decoded, next, ok := readRowColumn(payload, offset, shape, colTypes, col, lob)
 			if !ok {
 				valid = false
 

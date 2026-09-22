@@ -42,7 +42,7 @@ const modernSQLclDescribeFixture = "10173d20afa10f9cb3a32fc3f5f88e89224b787e0614
 func TestDecodeQueryResultV2_ModernDescribeNoPanic(t *testing.T) {
 	t.Parallel()
 
-	_ = decodeQueryResultV2(mustHex(t, modernSQLclDescribeFixture), oerShape{})
+	_ = decodeQueryResultV2(mustHex(t, modernSQLclDescribeFixture), oerShape{}, lobRowLocator)
 }
 
 // TestDecodeQueryResultV2_ModernDescribeColumns verifies the modern-layout
@@ -52,7 +52,7 @@ func TestDecodeQueryResultV2_ModernDescribeNoPanic(t *testing.T) {
 func TestDecodeQueryResultV2_ModernDescribeColumns(t *testing.T) {
 	t.Parallel()
 
-	res := decodeQueryResultV2(mustHex(t, modernSQLclDescribeFixture), oerShape{})
+	res := decodeQueryResultV2(mustHex(t, modernSQLclDescribeFixture), oerShape{}, lobRowLocator)
 	if res == nil {
 		t.Fatal("decodeQueryResultV2 returned nil")
 	}
@@ -93,7 +93,7 @@ const modernSQLclRowFixture = "10172a3e2cd14bedc60281caf2ab09f03cc0787e061417061
 func TestDecodeQueryResultV2_ModernDescribeRows(t *testing.T) {
 	t.Parallel()
 
-	res := decodeQueryResultV2(mustHex(t, modernSQLclRowFixture), oerShape{})
+	res := decodeQueryResultV2(mustHex(t, modernSQLclRowFixture), oerShape{}, lobRowLocator)
 	if res == nil {
 		t.Fatal("decodeQueryResultV2 returned nil")
 	}

@@ -48,6 +48,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 		colTypes []int
 		lastRow  []string
 		rows     [][]string
+		lobShape lobRowShape
 	)
 
 	for _, pkt := range td.Packets {
@@ -74,6 +75,16 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 				done = true // a new statement begins → the result set is over
 			}
 
+			// session.learnLOBRowShape's half of the client leg: a define block
+			// is the only place the LOB reading of the rows about to arrive is
+			// stated, and a replay that skipped it would read the fixtures
+			// under a shape their client never asked for.
+			if started && len(colTypes) > 0 {
+				if shape, ok := execDefineLOBShape(ttcPayload, colTypes); ok {
+					lobShape = shape
+				}
+			}
+
 			continue
 		}
 
@@ -83,7 +94,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 
 		switch funcCode { //nolint:exhaustive // only row-bearing response codes matter here
 		case TTCFuncQueryResult:
-			result := decodeQueryResultV2(ttcPayload, oerShape{})
+			result := decodeQueryResultV2(ttcPayload, oerShape{}, lobShape)
 			if result == nil {
 				continue
 			}
@@ -98,7 +109,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 				lastRow = row
 			}
 		case TTCFuncContinuation:
-			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow, colTypes, oerShape{})
+			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow, colTypes, oerShape{}, lobShape)
 			for _, row := range contRows {
 				strRow := make([]string, len(row))
 				for i, v := range row {

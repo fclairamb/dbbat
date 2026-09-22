@@ -235,16 +235,16 @@ func TestOCI64RowValuesAreNotOfferedToTheOtherTwoEncodings(t *testing.T) {
 	oci64 := extractTTCPayload(recordedFrames(t, oci64Describes)[1])
 	oci := extractTTCPayload(recordedFrames(t, ociDescribes)[1])
 
-	require.Len(t, decodeQueryResultV2(oci64, oci64OERShape()).Rows, 1,
+	require.Len(t, decodeQueryResultV2(oci64, oci64OERShape(), lobRowLocator).Rows, 1,
 		"the fixture must yield its row under the shape it was recorded from")
-	assert.Empty(t, decodeQueryResultV2(oci64, ociOERShape()).Rows,
+	assert.Empty(t, decodeQueryResultV2(oci64, ociOERShape(), lobRowLocator).Rows,
 		"a 64-bit OCI fetch must not be read as a 4-byte OCI one")
-	assert.Empty(t, decodeQueryResultV2(oci64, oerShape{}).Rows,
+	assert.Empty(t, decodeQueryResultV2(oci64, oerShape{}, lobRowLocator).Rows,
 		"a 64-bit OCI fetch must not be read as a compressed one")
 
-	require.Len(t, decodeQueryResultV2(oci, ociOERShape()).Rows, 1,
+	require.Len(t, decodeQueryResultV2(oci, ociOERShape(), lobRowLocator).Rows, 1,
 		"and the 4-byte dialect's fetch must still yield its own row")
-	assert.Empty(t, decodeQueryResultV2(oci, oci64OERShape()).Rows,
+	assert.Empty(t, decodeQueryResultV2(oci, oci64OERShape(), lobRowLocator).Rows,
 		"a 4-byte OCI fetch must not be read as a 64-bit one")
 }
 
