@@ -140,36 +140,32 @@ func TestFile_PostgreSQL(t *testing.T) {
 	})
 }
 
-// TestFile_UnsupportedProtocol pins the deliberate refusal: a capture of a
-// protocol with no decoder must say so rather than print nothing or misread
-// the bytes as something it is not.
+// TestFile_UnsupportedProtocol pins the deliberate refusal: a capture whose
+// header names a protocol with no decoder must say so rather than print
+// nothing or misread the bytes as something it is not.
 func TestFile_UnsupportedProtocol(t *testing.T) {
 	t.Parallel()
 
-	for _, protocol := range []string{
-		dump.ProtocolOracle,
-	} {
-		t.Run(protocol, func(t *testing.T) {
-			t.Parallel()
+	const unknown = "cassandra"
 
-			path := writeCapture(t, protocol, []dump.Packet{
-				{Direction: dump.DirClientToServer, Data: []byte("whatever")},
-			})
+	path := writeCapture(t, unknown, []dump.Packet{
+		{Direction: dump.DirClientToServer, Data: []byte("whatever")},
+	})
 
-			var out bytes.Buffer
-			err := File(path, Options{}, &out)
+	var out bytes.Buffer
+	err := File(path, Options{}, &out)
 
-			require.ErrorIs(t, err, ErrUnsupportedProtocol)
-			assert.Contains(t, err.Error(), protocol)
-			assert.Empty(t, out.String())
-			assert.False(t, Supported(protocol))
-		})
-	}
+	require.ErrorIs(t, err, ErrUnsupportedProtocol)
+	assert.Contains(t, err.Error(), unknown)
+	assert.Empty(t, out.String())
+	assert.False(t, Supported(unknown))
 
+	// Every protocol dbbat proxies is decoded.
 	assert.True(t, Supported(dump.ProtocolPostgreSQL))
 	assert.True(t, Supported(dump.ProtocolMySQL))
 	assert.True(t, Supported(dump.ProtocolMongo))
 	assert.True(t, Supported(dump.ProtocolMSSQL))
+	assert.True(t, Supported(dump.ProtocolOracle))
 }
 
 // TestFile_MSSQL is the end-to-end pass over a real capture written by

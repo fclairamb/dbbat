@@ -11,10 +11,15 @@
 // build host and not in a terminal-driven investigation. This package is that
 // same view without a GUI.
 //
+// All five protocols dbbat proxies are decoded: PostgreSQL, MySQL/MariaDB,
+// MongoDB, SQL Server and Oracle. Each has its own splitter, doing its own
+// framing; the protocol comes from the capture header, never from sniffing the
+// bytes.
+//
 // Captures may hold customer data, so a decoded line is redacted by default:
-// result-row values and bind parameters collapse to their count. Options.ShowRows
-// opts into the values. Authentication payloads are never printed, with or
-// without that flag.
+// result-row values and bind parameters collapse to their count, and a MongoDB
+// document to the shape of its fields. Options.ShowRows opts into the values.
+// Authentication payloads are never printed, with or without that flag.
 package decode
 
 import (
@@ -29,8 +34,8 @@ import (
 )
 
 // ErrUnsupportedProtocol is returned for a capture whose protocol has no
-// decoder yet. PostgreSQL is the only one implemented; the other four have
-// frame parsers in their proxies and follow.
+// decoder. All five protocols dbbat proxies have one, so this is reached only
+// by a capture header naming something else.
 var ErrUnsupportedProtocol = errors.New("no message decoder for this capture's protocol")
 
 // ErrOutOfSync is returned when a stream cannot be cut at the protocol's
@@ -103,6 +108,8 @@ func newSplitter(protocol string, opts Options) (splitter, error) {
 		return newMongoSplitter(opts), nil
 	case dump.ProtocolMSSQL:
 		return newMSSQLSplitter(opts), nil
+	case dump.ProtocolOracle:
+		return newOracleSplitter(opts), nil
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedProtocol, protocol)
 	}
@@ -111,7 +118,8 @@ func newSplitter(protocol string, opts Options) (splitter, error) {
 // Supported reports whether a capture of the given protocol can be decoded.
 func Supported(protocol string) bool {
 	switch protocol {
-	case dump.ProtocolPostgreSQL, dump.ProtocolMySQL, dump.ProtocolMongo, dump.ProtocolMSSQL:
+	case dump.ProtocolPostgreSQL, dump.ProtocolMySQL, dump.ProtocolMongo,
+		dump.ProtocolMSSQL, dump.ProtocolOracle:
 		return true
 	default:
 		return false

@@ -395,19 +395,47 @@ message, both directions, with the offset from the start of the session:
 
 `C>` is client-to-server, `<S` is server-to-client, and a message split across
 packets is timed by the packet that completed it. The protocol comes from the
-capture header, never from sniffing the bytes; **PostgreSQL is the only one
-decoded so far** and a capture of any other protocol is refused by name rather
-than misread. `internal/dump/decode` does the framing itself — one type byte
-plus an int32 length, with the untyped `StartupMessage`/`SSLRequest` and the
-one-byte SSL answer handled first — and hands only complete messages to
-`pgproto3`.
+capture header, never from sniffing the bytes, and **all five protocols dbbat
+proxies are decoded**; a capture header naming anything else is refused by name
+rather than misread. `internal/dump/decode` does the framing itself, one
+splitter per protocol, and never guesses:
+
+| Protocol | Framing | What a line says |
+|---|---|---|
+| PostgreSQL | type byte + int32 length; the untyped `StartupMessage`/`SSLRequest` and the one-byte SSL answer first | the `pgproto3` message |
+| MySQL / MariaDB | 3-byte little-endian length + sequence id, payloads of exactly 0xFFFFFF continued | `COM_QUERY`, `ResultSet(n cols)`, `Row(n cols)`, `OK`, `ERR` |
+| MongoDB | the 16-byte header's own length, then `OP_MSG` sections | `find orders db=app (filter: 2 keys)`, `Reply ok=1 (cursor: 77, firstBatch: 2 docs)` |
+| SQL Server | 8-byte TDS header, packets reassembled on the `EOM` status bit | `SQLBatch`, `RPC sp_executesql`, `ColMetaData(n cols)`, `Row(n cols)`, `Done rows=n` |
+| Oracle | TNS header, 2-byte length below v315 and 4-byte from it, plus the Connect's appended descriptor | the TNS packet type, and for a Data packet the TTC message type and function code |
 
 **Output is redacted by default**, because the point of a decoded trace is that
-it can be pasted into a bug report: `DataRow` values and bind parameters
-collapse to their count, `COPY` payloads to a byte count, and the backend key to
-its pid. `--rows` opts into the values and the column names. Authentication
-messages are named but their payloads — passwords, salts, SCRAM nonces, server
-signatures — are never printed, with or without `--rows`.
+it can be pasted into a bug report. Result-row values and bind parameters
+collapse to their count, bulk payloads (`COPY`, `LOCAL INFILE`, TDS bulk load)
+to a byte count, and a MongoDB document to the shape of its fields rather than
+their content. `--rows` opts into the values and the column names.
+Authentication messages are named but their payloads — passwords, salts, SCRAM
+nonces, MySQL scrambles, the LOGIN7 credential block, Oracle's O5LOGON exchange
+— are never printed, with or without `--rows`. On MongoDB and Oracle the
+server's half of an authentication exchange has no name of its own, so it is
+redacted by the request it answers.
+
+Three limits are worth knowing before a line is trusted:
+
+- **MySQL binary-protocol rows and `COM_STMT_EXECUTE` parameters are counted
+  even under `--rows`.** Their types live in the prepare, which a capture
+  starting mid-session never saw.
+- **A TDS token the walk cannot frame stops it**, and the line says which one
+  and how many bytes were left. After an unmodelled length the bytes are not
+  tokens any more, so a guess would be worse than the gap.
+- **An Oracle TTC message longer than what the peer writes in one go is split
+  across Data packets**, and a continuation carries no marker — so it is named
+  by whatever its first byte happens to be. It shows up on the OCI clients
+  (sqlplus, ojdbc); the thin drivers do not fragment. Oracle statement text is
+  not extracted either: locating it inside a TTC frame is the byte-exact
+  problem `internal/proxy/oracle/ttc_statement_rewrite.go` solves with a
+  certifying locator, and a second looser copy here would be the drift that
+  makes one of them wrong. The text is in the `queries` table, under the same
+  connection uid the capture is named after.
 
 A capture truncated by `DBB_DUMP_MAX_SIZE` loses whole packets, so its stream
 stops framing at some point. Everything decoded up to that point is still

@@ -1667,7 +1667,7 @@ func dumpCommand() *cli.Command {
 			{
 				Name: "decode",
 				Usage: "Print a capture as one line per protocol message, both directions " +
-					"(PostgreSQL captures only, for now)",
+					"(PostgreSQL, MySQL, MongoDB, SQL Server and Oracle)",
 				ArgsUsage: "<input-file>",
 				Flags: []cli.Flag{
 					&cli.BoolFlag{
