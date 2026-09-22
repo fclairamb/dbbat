@@ -1633,6 +1633,79 @@ Verified against `testdata/go_ora_compressed.pcapng`
 (`TestDumpReplay_CompressedRows`): runs of a repeated column, NULLs, and the
 all-columns-change boundary.
 
+#### A LOB in the select list defers the whole fetch
+
+Oracle turns row prefetch **off** when the select list carries a LOB. The
+`func=0x10` QueryResult that answers the execute then has its column records and
+nothing behind them — no ROW_HEADER, no values — and every row of the fetch
+arrives in a **separate** server packet that *opens* with the ROW_HEADER object:
+
+```
+packet n     [func=0x10] [column records]                 ← no rows at all
+packet n+k   [ROW_HEADER 0x06 …] [0x07] [row values] …    ← the whole fetch
+```
+
+That second packet is a `func=0x06`, so it lands in `handleContinuation` — but it
+is not a continuation of a stream already running, and the 25-byte window that
+walk scans for its `0x07` cannot reach the start of the row data (the 64-bit
+ROW_HEADER alone is 50 bytes). `fetchRowDataStart` reads the header instead,
+under the session's own dialect and **only at offset 0**: a fetch response leads
+with the object or it is not one. Anywhere else the scan would be free to take a
+header-shaped run of bytes out of a real continuation packet's row data.
+
+Measured on `testdata/oci64_lob.hex`, which keeps both halves of that round trip
+(`ociLOBQuery`, `TestOCI64LOBDescribeCarriesNoRowValuesAtAll`). Until it was
+read, a query with a CLOB column anywhere in it captured **no rows at all** —
+not an unreadable value for that column, the whole row, every ordinary column
+beside it included, and nothing in the audit trail saying so.
+
+#### LOB, opaque and object columns are locators, not values
+
+Three type families do not send a length-prefixed datum:
+
+| Type | Codes | What the row carries |
+|---|---|---|
+| CLOB / NCLOB, BLOB, BFILE | 112, 113, 114 | a 40-byte locator, then **16 bytes** of framing — or, for a NULL LOB, a zero-length locator and **3** |
+| Opaque (`SYS.XMLTYPE`) | 58 | a 36-byte locator, then framing, then the object's own image |
+| Named object type | 121 | the same |
+
+Reading one of those as a scalar and carrying on is what used to lose the rest of
+the row. `readRowColumn` steps over the framing instead:
+
+- **LOB** — the trailer lengths are measured off `testdata/oci64_lob.hex`, whose
+  query alternates LOBs with six-character strings so the distance between them
+  can be counted. Four non-NULL locators (two CLOBs at different content
+  lengths, a BLOB, an NCLOB) are followed by the *same* sixteen bytes, which is
+  what says the block is framing rather than content.
+- **Opaque / object** — the image header is *read*, not measured: the image
+  length arrives twice, as a four-byte little-endian field and as a single byte,
+  with a constant `0x01 0x00` between them. Two spellings of one number agreeing
+  is what makes a hit a measurement, and it is also why the walk needs no
+  per-dialect constant (the framing ahead of the header is 12 bytes on the
+  64-bit dialect and 14 on the 4-byte one).
+
+Because those skips are measured, a row that used one is kept **only** when the
+columns after it come out on a row marker (`0x07`, `0x15` or the `0x08` footer).
+A skip that is wrong on some future server costs that row rather than filling it
+with framing bytes. Rows with no locator in them are unaffected and are accepted
+wherever they end, exactly as before.
+
+**What a LOB column captures, and why it is not the data.** A locator is a
+handle into the server: it names a LOB, changes from fetch to fetch, and the
+contents are not in the packet at all. A client that wants them asks for them in
+round trips of its own. dbbat does not and must not — a proxy issuing reads on
+the session's behalf is a statement the user never wrote — so the column is
+captured as `<CLOB locator>`, `<BLOB locator>` or `<BFILE locator>`: a marker
+naming the type, distinguishable from real data and from a NULL, which still
+captures as `""`.
+
+An **opaque or object** column keeps capturing its locator's bytes as hex, which
+is what it has always captured. The difference is not inconsistency but where the
+data is: that column's own image travels a few bytes further along the same row,
+so replacing the column wholesale with a marker would be discarding bytes dbbat
+is holding. Rendering that image instead of the locator would be a better value
+than either, and is filed as its own piece of work.
+
 #### DML status (OER, func=0x04)
 
 INSERT/UPDATE/DELETE don't return rows — their outcome is an OER status block.

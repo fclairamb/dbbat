@@ -384,11 +384,14 @@ const ociDescribeQuery = `SELECT CAST(1 AS NUMBER(10,2)) AS n2,
 // reason measured the moment they were: with a CLOB and an XMLTYPE in the
 // select list, the row capture of that describe's fetch comes back **empty**,
 // so folding them in would have cost
-// TestOCIRowCaptureCarriesTheDescribesColumnNames its row. That is a real gap
-// and it is filed as one
-// (specs/todos/2026-09-22-03-oracle-row-capture-drops-every-row-of-a-fetch-carrying-a-lob.md);
-// keeping the two queries apart is what stops it from being absorbed into a
-// spec about column records and never looked at again.
+// TestOCIRowCaptureCarriesTheDescribesColumnNames its row.
+//
+// Why it comes back empty was chased down afterwards and is not what it looked
+// like: the describe here carries no row values *at all*, because Oracle turns
+// row prefetch off when a LOB is in the select list and sends the whole fetch
+// in a packet of its own. So this fixture is the right place for the column
+// records and the wrong one for the rows — the rows are in testdata/oci64_lob.hex,
+// which holds both halves of that round trip (see ociLOBQuery).
 const ociDescribeTypedQuery = `SELECT dbbat_cap_obj(1, 'x') AS obj,
        dbbat_o(2) AS o,
        dbbat_cap_object_with_a_long_name(3) AS objlong,
