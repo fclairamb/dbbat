@@ -1695,8 +1695,8 @@ function TargetMoveWarning({
         <p>
           <strong>This moves where the row points.</strong> Nothing is
           re-issued: every grant already covering this server reaches the new
-          target on the next connect. Sessions already open stay on the
-          upstream they dialed.
+          target on the next connect. Sessions already open stay on the upstream
+          they dialed.
         </p>
         {isLoading ? (
           <p className="text-muted-foreground">Counting what follows…</p>
@@ -2066,6 +2066,7 @@ function EditSSHServerForm({
   const [k8sInsecure, setK8sInsecure] = useState(
     server.k8s_insecure_skip_tls_verify ?? false,
   );
+  const [viaUid, setViaUid] = useState(server.via_uid || "");
   // Read-only: the learned pin is the dialer's to write, never a form field.
   const learnedCaCert = server.k8s_learned_ca_cert || "";
   const [resetLearnedCa, setResetLearnedCa] = useState(false);
@@ -2074,6 +2075,14 @@ function EditSSHServerForm({
   // differ only in the extra material they carry.
   const isKubernetes = server.protocol === "kubernetes";
   const kindLabel = isKubernetes ? "Kubernetes cluster" : "SSH server";
+
+  const { data: tunnelServers } = useTunnelServers(isKubernetes);
+  // Same filter the create dialog applies: only an SSH bastion can sit in
+  // front of a cluster (a bastion reached through a port-forward is not wired
+  // up in the dialer), and a cluster is never dialed through itself.
+  const viaOptions = (tunnelServers ?? []).filter(
+    (srv) => srv.protocol === "ssh" && srv.uid !== server.uid,
+  );
 
   const updateServer = useUpdateDatabase(server.uid, {
     onSuccess: () => {
@@ -2092,6 +2101,17 @@ function EditSSHServerForm({
     // it keeps the audit entry free of a "renamed to itself" line.
     const renamed = name !== server.name ? name : undefined;
     if (isKubernetes) {
+      // Only sent when actually changed, so the `database.updated` audit entry
+      // stays a list of real edits. An omitted via_uid leaves the bastion
+      // alone; clearing it is its own flag.
+      const via: Pick<UpdateDatabaseRequest, "via_uid" | "clear_via_uid"> = {};
+      if (viaUid !== (server.via_uid || "")) {
+        if (viaUid) {
+          via.via_uid = viaUid;
+        } else {
+          via.clear_via_uid = true;
+        }
+      }
       updateServer.mutate({
         name: renamed,
         description: description || undefined,
@@ -2100,6 +2120,7 @@ function EditSSHServerForm({
         username,
         // Blank means "keep the stored token", exactly like the SSH secrets.
         password: password || undefined,
+        ...via,
         // Sent unconditionally, unlike the CA: the whole point is that the
         // flag can be turned back off from here.
         k8s_ca_cert: k8sCaCert,
@@ -2274,6 +2295,39 @@ function EditSSHServerForm({
                   checked={k8sInsecure}
                   onCheckedChange={setK8sInsecure}
                 />
+              </div>
+              {/* The bastion in front of the API server is not set-once: the
+                  create dialog offers it, so the edit dialog has to be able to
+                  change it. SSH rows get no such field — chaining a bastion
+                  behind another is configured on the row that dials. */}
+              <div className="space-y-2">
+                <Label htmlFor="edit-k8s-via">Via SSH bastion</Label>
+                <Select
+                  value={viaUid || "none"}
+                  onValueChange={(v) => setViaUid(v === "none" ? "" : v)}
+                >
+                  <SelectTrigger
+                    id="edit-k8s-via"
+                    data-testid="k8s-server-edit-via-select"
+                  >
+                    <SelectValue placeholder="Direct (no tunnel)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Direct (no tunnel)</SelectItem>
+                    {viaOptions.map((srv) => (
+                      <SelectItem key={srv.uid} value={srv.uid}>
+                        {srv.name} (
+                        {PROTOCOL_LABEL[srv.protocol as Protocol] ??
+                          srv.protocol}
+                        )
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Only needed when the API server itself is reachable only
+                  through a jump host.
+                </p>
               </div>
             </>
           )}
