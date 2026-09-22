@@ -928,7 +928,7 @@ func decodePiggybackExecSQL(ttcPayload []byte, wide64 bool) (*OALL8Result, error
 	// The header carries the statement's length, so read that first and take
 	// the run it names. Everything below is the pre-2026-08 heuristic, kept for
 	// a header shape no recording produces — see decodeExecStatement.
-	stmt, located := decodeExecStatementText(ttcPayload)
+	stmt, located := decodeExecStatementText(ttcPayload, wide64)
 
 	// A header that walks cleanly and declares **no** statement is not a frame
 	// this decode failed on: it is a re-execution of a cursor already parsed,
@@ -1107,12 +1107,12 @@ func decodeExecSQL(ttcPayload []byte, wide64 bool) (*OALL8Result, error) {
 	// the close list to that op and decode it properly. The old 50-75 window
 	// scanned *past* the list into the stapled SQL and routinely landed inside
 	// the statement text — see decodeExecStatement.
-	if sql, ok := decodeExecStatement(ttcPayload); ok {
+	if sql, ok := decodeExecStatement(ttcPayload, wide64); ok {
 		return &OALL8Result{SQL: sql}, nil
 	}
 
 	if end, ok := closeCursorsEnd(ttcPayload); ok {
-		if sql, ok := decodeExecStatement(ttcPayload[end:]); ok {
+		if sql, ok := decodeExecStatement(ttcPayload[end:], wide64); ok {
 			return &OALL8Result{SQL: sql}, nil
 		}
 	}

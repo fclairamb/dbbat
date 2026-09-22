@@ -95,7 +95,7 @@ func statementRoundTrips(t *testing.T, ttc []byte, rw stmtRewrite, prefix string
 	tagged := append([]byte(prefix), rw.run...)
 	out := rw.apply(ttc, tagged, true)
 
-	stmt, ok := decodeExecStatementText(out)
+	stmt, ok := decodeExecStatementText(out, false)
 	if !ok {
 		// The exec decoders do not read an OALL8; that op has its own.
 		if TTCFunctionCode(ttc[0]) != TTCFuncOALL8 {

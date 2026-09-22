@@ -139,7 +139,7 @@ func (s *session) collectStatementMessage(pkt *TNSPacket) (*statementFragments, 
 		return single, nil
 	}
 
-	need, ok := statementFragmentShortfall(ttc)
+	need, ok := statementFragmentShortfall(ttc, s.clientWide64Encoding)
 	if !ok {
 		return single, nil
 	}
@@ -319,8 +319,8 @@ func (c *prefixedConn) Read(b []byte) (int, error) {
 // The trigger is the declared length, never a guess: every statement-carrying op
 // dbbat gates says how long its statement is, and reassembly starts exactly when
 // that length runs past the bytes in hand.
-func statementFragmentShortfall(ttcPayload []byte) (int, bool) {
-	if need, ok := execFragmentShortfall(ttcPayload); ok {
+func statementFragmentShortfall(ttcPayload []byte, wide64 bool) (int, bool) {
+	if need, ok := execFragmentShortfall(ttcPayload, wide64); ok {
 		return need, true
 	}
 
@@ -330,7 +330,13 @@ func statementFragmentShortfall(ttcPayload []byte) (int, bool) {
 // execFragmentShortfall answers for the two exec shapes decodeExecStatementText
 // reads: the bare `03 5e` piggyback execute, and the `11 69` close-cursors
 // piggyback with that execute stapled behind it.
-func execFragmentShortfall(ttcPayload []byte) (int, bool) {
+//
+// wide64 is the session's dialect, threaded here for the same reason the decode
+// takes it: the length this reads is the length the decode will read, and a
+// 64-bit OCI session whose header the walk refuses is a session whose oversized
+// statement is never reassembled — so the gate would see the first fragment and
+// nothing else. See execSQLLengthFieldFor.
+func execFragmentShortfall(ttcPayload []byte, wide64 bool) (int, bool) {
 	bodies := [][]byte{ttcPayload}
 
 	if end, ok := closeCursorsEnd(ttcPayload); ok && end < len(ttcPayload) {
@@ -342,7 +348,7 @@ func execFragmentShortfall(ttcPayload []byte) (int, bool) {
 			continue
 		}
 
-		sqlLen, ok := execSQLLength(body)
+		sqlLen, ok := execSQLLength(body, wide64)
 		if !ok {
 			continue
 		}

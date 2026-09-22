@@ -82,7 +82,7 @@ func TestDecodeExecStatement_CommentLedStatement(t *testing.T) {
 	} {
 		payload := buildLongPiggybackExec(sql)
 
-		got, ok := decodeExecStatement(payload)
+		got, ok := decodeExecStatement(payload, false)
 		if !ok {
 			t.Fatalf("decodeExecStatement failed on a comment-led statement %.40q…", sql)
 		}
@@ -213,7 +213,7 @@ func TestDecodeExecStatement_ChunkedCLR(t *testing.T) {
 			sql := chunkedMergeStatement(t, tc.size)
 			payload := buildChunkedPiggybackExec(sql, tc.chunkSize, tc.bigChunks)
 
-			got, ok := decodeExecStatement(payload)
+			got, ok := decodeExecStatement(payload, false)
 			if !ok {
 				t.Fatal("decodeExecStatement failed on a chunked statement")
 			}
@@ -238,7 +238,7 @@ func TestDecodeExecStatement_ChunkedCLR_WrongTotalRefused(t *testing.T) {
 	// be covered.
 	payload = payload[:len(payload)-300]
 
-	if _, ok := decodeExecStatement(payload); ok {
+	if _, ok := decodeExecStatement(payload, false); ok {
 		t.Fatal("decodeExecStatement accepted a chunked statement whose chunks do not cover the declared length")
 	}
 }
@@ -252,7 +252,7 @@ func TestDecodeExecStatement_ChunkedSetsBindFloor(t *testing.T) {
 	sql := chunkedMergeStatement(t, 33000)
 	payload := buildChunkedPiggybackExec(sql, 32767, true)
 
-	stmt, ok := decodeExecStatementText(payload)
+	stmt, ok := decodeExecStatementText(payload, false)
 	if !ok {
 		t.Fatal("decodeExecStatementText failed")
 	}

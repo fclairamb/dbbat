@@ -143,7 +143,7 @@ func TestStatementFragmentShortfall(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			need, ok := statementFragmentShortfall(tc.ttc)
+			need, ok := statementFragmentShortfall(tc.ttc, false)
 			require.Equal(t, tc.want, ok)
 
 			if ok {
@@ -169,7 +169,7 @@ func TestFragmentedExecDecodesToTheWholeStatement(t *testing.T) {
 
 	// What the pre-fix gate saw: the first fragment alone.
 	fragment := frame[:oracleSDUFragment]
-	_, whole := decodeExecStatement(fragment)
+	_, whole := decodeExecStatement(fragment, false)
 	require.False(t, whole, "a fragment cannot yield the declared run — that is the bug")
 
 	prefix, err := decodeExecSQL(fragment, false)
@@ -178,7 +178,7 @@ func TestFragmentedExecDecodesToTheWholeStatement(t *testing.T) {
 	assert.NotEqual(t, sql, prefix.SQL)
 
 	// What the gate sees now.
-	got, ok := decodeExecStatement(frame)
+	got, ok := decodeExecStatement(frame, false)
 	require.True(t, ok)
 	assert.Equal(t, sql, got, "the reassembled body decodes to the statement, accents intact")
 }
@@ -390,7 +390,7 @@ func TestFragmentedRefusalAnswersAnOERWhenTheMessageEndsOnAFragmentBoundary(t *t
 			// covered at the end of fragment 1's successor and not a byte
 			// later, so the collector stops on a full-sized packet and only the
 			// peek can tell whether the message is over.
-			_, owed := statementFragmentShortfall(frame[:2*oracleSDUFragment])
+			_, owed := statementFragmentShortfall(frame[:2*oracleSDUFragment], false)
 			require.False(t, owed,
 				"the fixture must leave nothing owed at the end of a full-sized fragment")
 

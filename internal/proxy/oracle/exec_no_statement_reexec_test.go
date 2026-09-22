@@ -247,7 +247,7 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	for _, name := range surveyCorpus(t) {
 		for _, ttc := range surveyClientTTC(t, loadTestDump(t, name)) {
 			for _, body := range surveyExecOps(ttc) {
-				sql, located := decodeExecStatement(body)
+				sql, located := decodeExecStatement(body, false)
 				_, reexec := execNoStatementCursor(body, false)
 
 				require.Falsef(t, located && reexec,

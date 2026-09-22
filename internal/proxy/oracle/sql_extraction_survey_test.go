@@ -109,7 +109,7 @@ func TestSurveyStatementOpShapes(t *testing.T) {
 				kind := fmt.Sprintf("%02x/%02x", ttc[at], ttc[at+1])
 				kinds[kind]++
 
-				if sql, ok := decodeExecStatement(ttc[at:]); ok && sql != "" {
+				if sql, ok := decodeExecStatement(ttc[at:], false); ok && sql != "" {
 					withSQL[kind]++
 				}
 			}
@@ -159,7 +159,7 @@ func TestSurveyPreciseDecodeCoverage(t *testing.T) {
 
 				ops++
 
-				exact, ok := decodeExecStatement(body)
+				exact, ok := decodeExecStatement(body, false)
 				legacy := legacyExecScan(body)
 
 				switch {
@@ -244,7 +244,7 @@ func TestSurveyAlterSessionMisreadAsSet(t *testing.T) {
 
 		for _, ttc := range surveyClientTTC(t, td) {
 			for _, body := range surveyExecOps(ttc) {
-				exact, ok := decodeExecStatement(body)
+				exact, ok := decodeExecStatement(body, false)
 				if !ok || !strings.HasPrefix(strings.ToUpper(exact), "ALTER SESSION") {
 					continue
 				}

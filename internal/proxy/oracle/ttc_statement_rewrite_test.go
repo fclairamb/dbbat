@@ -110,19 +110,19 @@ func TestRewriteCompressedLengthKeepsItsWidth(t *testing.T) {
 	sql := "SELECT " + strings.Repeat("a", 90) + " FROM dual"
 	body := thinExecCLR(sql)
 
-	before, ok := execSQLLengthField(body)
+	before, ok := execSQLLengthFieldFor(body, false)
 	require.True(t, ok)
 	require.Equal(t, 2, before.width, "a length under 256 is a one-byte compressed int plus its count")
 
 	out := rewriteWith(t, body, tagOf(40), false)
 
-	after, ok := execSQLLengthField(out)
+	after, ok := execSQLLengthFieldFor(out, false)
 	require.True(t, ok)
 	assert.Equal(t, len(sql)+40, after.value)
 	assert.Equal(t, 2, after.width, "still under 256, so the field did not move")
 	assert.Len(t, out, len(body)+40, "only the tag was added")
 
-	stmt, ok := decodeExecStatementText(out)
+	stmt, ok := decodeExecStatementText(out, false)
 	require.True(t, ok)
 	assert.Equal(t, tagOf(40)+sql, stmt.Text)
 }
@@ -138,7 +138,7 @@ func TestRewriteCompressedLengthWidens(t *testing.T) {
 
 	body := thinExecBare(sql)
 
-	before, ok := execSQLLengthField(body)
+	before, ok := execSQLLengthFieldFor(body, false)
 	require.True(t, ok)
 	require.Equal(t, 2, before.width)
 
@@ -146,13 +146,13 @@ func TestRewriteCompressedLengthWidens(t *testing.T) {
 
 	out := rewriteWith(t, body, tagOf(tagLen), false)
 
-	after, ok := execSQLLengthField(out)
+	after, ok := execSQLLengthFieldFor(out, false)
 	require.True(t, ok)
 	require.Greater(t, after.value, 255)
 	assert.Equal(t, 3, after.width, "past 255 the compressed int needs a second value byte")
 	assert.Len(t, out, len(body)+tagLen+1, "the tag, plus the byte the length field grew by")
 
-	stmt, ok := decodeExecStatementText(out)
+	stmt, ok := decodeExecStatementText(out, false)
 	require.True(t, ok)
 	assert.Equal(t, tagOf(tagLen)+sql, stmt.Text)
 }
@@ -188,7 +188,7 @@ func TestRewriteWideUB4Length(t *testing.T) {
 			"the field carries three times the length, as the client writes it")
 		assert.Len(t, out, len(body)+40)
 
-		stmt, ok := decodeExecStatementText(out)
+		stmt, ok := decodeExecStatementText(out, false)
 		require.True(t, ok)
 		assert.Equal(t, tagOf(40)+sql, strings.TrimSuffix(stmt.Text, "\x00"))
 	}
@@ -295,7 +295,7 @@ func TestRewriteCLRCrossesTheChunkBoundary(t *testing.T) {
 			"the value is written in the variant the session negotiated")
 		assert.Equal(t, tagOf(46)+sql, rw.text())
 
-		stmt, ok := decodeExecStatementText(out)
+		stmt, ok := decodeExecStatementText(out, false)
 		require.True(t, ok, "bigChunks=%v", bigChunks)
 		assert.Equal(t, tagOf(46)+sql, stmt.Text)
 	}

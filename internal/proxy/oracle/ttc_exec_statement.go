@@ -68,8 +68,13 @@ func isPiggybackExecHeader(ttcPayload []byte) bool {
 // has always called "the JDBC exec": every `11 69` in the corpus that carries
 // SQL is a close list followed by `03 5e <exec>`, and the `11 98` sub-op in
 // dbbat's anchor list appears in no recording at all.
-func decodeExecStatement(ttcPayload []byte) (string, bool) {
-	stmt, ok := decodeExecStatementText(ttcPayload)
+//
+// wide64 says the session has learned its client writes the 64-bit OCI op
+// header, and it selects that dialect's header reading exclusively — the same
+// rule, and the same reason, as execNoStatementCursor's. See
+// execSQLLengthFieldFor.
+func decodeExecStatement(ttcPayload []byte, wide64 bool) (string, bool) {
+	stmt, ok := decodeExecStatementText(ttcPayload, wide64)
 
 	return stmt.Text, ok
 }
@@ -99,13 +104,13 @@ type execStatement struct {
 }
 
 // decodeExecStatementText is decodeExecStatement keeping the verbatim run.
-func decodeExecStatementText(ttcPayload []byte) (execStatement, bool) {
-	if stmt, ok := decodeExecStatementAt(ttcPayload); ok {
+func decodeExecStatementText(ttcPayload []byte, wide64 bool) (execStatement, bool) {
+	if stmt, ok := decodeExecStatementAt(ttcPayload, wide64); ok {
 		return stmt, true
 	}
 
 	if end, ok := closeCursorsEnd(ttcPayload); ok {
-		if stmt, ok := decodeExecStatementAt(ttcPayload[end:]); ok {
+		if stmt, ok := decodeExecStatementAt(ttcPayload[end:], wide64); ok {
 			if stmt.End > 0 {
 				stmt.End += end
 			}
@@ -119,12 +124,12 @@ func decodeExecStatementText(ttcPayload []byte) (execStatement, bool) {
 
 // decodeExecStatementAt is decodeExecStatementText for a payload that must
 // already begin at the exec op header.
-func decodeExecStatementAt(body []byte) (execStatement, bool) {
+func decodeExecStatementAt(body []byte, wide64 bool) (execStatement, bool) {
 	if !isPiggybackExecHeader(body) || len(body) < execHeaderMinLen {
 		return execStatement{}, false
 	}
 
-	sqlLen, ok := execSQLLength(body)
+	sqlLen, ok := execSQLLength(body, wide64)
 	if !ok {
 		return execStatement{}, false
 	}
@@ -160,8 +165,14 @@ func decodeExecStatementAt(body []byte) (execStatement, bool) {
 //	[5..12] options       8 bytes
 //	[13..20] fe x8        pointer sentinel
 //	[21..24] sqlLen*3     uint32 little-endian   <- this
-func execSQLLength(body []byte) (int, bool) {
-	field, ok := execSQLLengthField(body)
+//
+// OCI **64-bit** encoding (sqlplus 23.x, the dialect CI runs) — the same field
+// list at that client's widths, with the length as a plain little-endian ub8;
+// see execSQLLengthWide64Field for the offsets and for why the value is *not*
+// multiplied by three. It is reachable only when wide64 says the session
+// learned its client writes that header, never by trying it as a fallback.
+func execSQLLength(body []byte, wide64 bool) (int, bool) {
+	field, ok := execSQLLengthFieldFor(body, wide64)
 
 	return field.value, ok
 }
@@ -180,16 +191,11 @@ type execSQLLenField struct {
 	kind  stmtLenKind
 }
 
-// execSQLLengthField is execSQLLength keeping the field's position. The two
-// share one walk deliberately: a second implementation of "where does this
-// header declare its length" is exactly the drift that would let the gate read
-// one field and the rewriter overwrite another.
-func execSQLLengthField(body []byte) (execSQLLenField, bool) {
-	return execSQLLengthFieldFor(body, false)
-}
-
-// execSQLLengthFieldFor is execSQLLengthField told which OCI dialect the session
-// speaks.
+// execSQLLengthFieldFor is execSQLLength keeping the field's position, told
+// which OCI dialect the session speaks. The two share one walk deliberately: a
+// second implementation of "where does this header declare its length" is
+// exactly the drift that would let the gate read one field and the rewriter
+// overwrite another.
 //
 // The 64-bit header is reachable only this way, and deliberately: its reading is
 // selected by what the session **learned** about its client

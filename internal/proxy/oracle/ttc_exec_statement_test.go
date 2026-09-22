@@ -130,12 +130,12 @@ func TestShortExecHeaderDoesNotPanic(t *testing.T) {
 	payload := []byte{0x03, 0x5e, 0x01, 0x04, 0xaa, 0xbb, 0xcc, 0xdd, 0x03, 0xee, 0xff, 0x00}
 
 	require.NotPanics(t, func() {
-		_, _ = execSQLLength(payload)
-		_, _ = decodeExecStatement(payload)
+		_, _ = execSQLLength(payload, false)
+		_, _ = decodeExecStatement(payload, false)
 		_ = stapledStatements(payload, false)
 	})
 
-	sql, ok := decodeExecStatement(payload)
+	sql, ok := decodeExecStatement(payload, false)
 	assert.False(t, ok)
 	assert.Empty(t, sql)
 }
@@ -152,7 +152,7 @@ func TestExecStatementRejectsAShortLength(t *testing.T) {
 	sql := "DROP TABLE emp -- ALTER SYSTEM KILL SESSION"
 	frame := buildPiggybackExec(sql)
 
-	full, ok := decodeExecStatement(frame)
+	full, ok := decodeExecStatement(frame, false)
 	require.True(t, ok)
 	require.Equal(t, sql, full)
 
@@ -160,7 +160,7 @@ func TestExecStatementRejectsAShortLength(t *testing.T) {
 	short := buildPiggybackExec(sql)
 	short[9] = byte(len(sql) - 4)
 
-	got, ok := decodeExecStatement(short)
+	got, ok := decodeExecStatement(short, false)
 	assert.False(t, ok, "a short length must fall back, not answer with a prefix: %q", got)
 }
 
@@ -222,14 +222,14 @@ func TestNonASCIIStatementSurvivesIntact(t *testing.T) {
 		// quarter share shared.SanitizeStatementText allows.
 		run := "SELECT \xe9\xe8\xea\xeb\xec\xed\xee\xef\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7"
 
-		_, ok := decodeExecStatement(buildPiggybackExec(run))
+		_, ok := decodeExecStatement(buildPiggybackExec(run), false)
 		assert.False(t, ok)
 	})
 
 	t.Run("a control byte is still not a statement", func(t *testing.T) {
 		t.Parallel()
 
-		_, ok := decodeExecStatement(buildPiggybackExec("SELECT 1\x01\x01 FROM dual"))
+		_, ok := decodeExecStatement(buildPiggybackExec("SELECT 1\x01\x01 FROM dual"), false)
 		assert.False(t, ok)
 	})
 }

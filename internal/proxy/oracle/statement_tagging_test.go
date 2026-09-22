@@ -113,7 +113,7 @@ func TestStatementTaggingTagsEveryRecordedClient(t *testing.T) {
 	} {
 		ttc := firstCorpusStatementFrame(t, name)
 
-		before, ok := decodeExecStatement(ttc)
+		before, ok := decodeExecStatement(ttc, false)
 		require.True(t, ok, "%s", name)
 
 		s := taggedSession(t, 8192)
@@ -122,7 +122,7 @@ func TestStatementTaggingTagsEveryRecordedClient(t *testing.T) {
 		require.True(t, ok, "%s: the session must certify and tag", name)
 		require.True(t, s.tagging.certified, "%s", name)
 
-		after, ok := decodeExecStatement(upstreamTTC(t, frames))
+		after, ok := decodeExecStatement(upstreamTTC(t, frames), false)
 		require.True(t, ok, "%s: the rewritten frame must still decode", name)
 
 		assert.Equal(t, taggingTagPrefix+strings.TrimSuffix(before, "\x00"),
@@ -167,7 +167,7 @@ func TestStatementTaggingKeepsTheClientsBytesForTheRecord(t *testing.T) {
 	assert.Equal(t, rawBefore, string(msg.packets[0].Raw),
 		"nor the client's own packet, which is what the capture wrote")
 
-	wire, ok := decodeExecStatement(upstreamTTC(t, frames))
+	wire, ok := decodeExecStatement(upstreamTTC(t, frames), false)
 	require.True(t, ok)
 	assert.Equal(t, taggingTagPrefix+recorded, wire,
 		"the tag exists on the upstream wire and nowhere else")
@@ -317,7 +317,7 @@ func TestStatementTaggingTagsTheParseButNotTheReexecution(t *testing.T) {
 
 	parse := firstCorpusStatementFrame(t, "go_ora.pcapng")
 
-	client, ok := decodeExecStatement(parse)
+	client, ok := decodeExecStatement(parse, false)
 	require.True(t, ok)
 
 	s := taggedSession(t, 8192)
@@ -325,7 +325,7 @@ func TestStatementTaggingTagsTheParseButNotTheReexecution(t *testing.T) {
 	frames, ok := s.rewriteStatementMessage(messageOf(parse))
 	require.True(t, ok)
 
-	wire, ok := decodeExecStatement(upstreamTTC(t, frames))
+	wire, ok := decodeExecStatement(upstreamTTC(t, frames), false)
 	require.True(t, ok)
 	require.Equal(t, taggingTagPrefix+client, wire)
 
@@ -366,7 +366,7 @@ func TestStatementTaggingCertifiedSessionSkipsOneFrameAndKeepsGoing(t *testing.T
 	require.True(t, ok)
 	require.True(t, s.tagging.certified)
 
-	wire, ok := decodeExecStatement(upstreamTTC(t, first))
+	wire, ok := decodeExecStatement(upstreamTTC(t, first), false)
 	require.True(t, ok)
 	require.Contains(t, wire, "/*dbbat='")
 
@@ -383,7 +383,7 @@ func TestStatementTaggingCertifiedSessionSkipsOneFrameAndKeepsGoing(t *testing.T
 	third, ok := s.rewriteStatementMessage(messageOf(ordinary))
 	require.True(t, ok, "the session keeps tagging")
 
-	again, ok := decodeExecStatement(upstreamTTC(t, third))
+	again, ok := decodeExecStatement(upstreamTTC(t, third), false)
 	require.True(t, ok)
 	assert.Equal(t, wire, again,
 		"the same statement must go upstream as the same bytes every time, or it costs "+
@@ -428,7 +428,7 @@ func TestStatementTaggingRefusesAStatementItCannotGrow(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, s.tagging.certified)
 
-	wire, ok := decodeExecStatement(upstreamTTC(t, first))
+	wire, ok := decodeExecStatement(upstreamTTC(t, first), false)
 	require.True(t, ok)
 	require.Contains(t, wire, "/*dbbat='")
 
@@ -447,7 +447,7 @@ func TestStatementTaggingRefusesAStatementItCannotGrow(t *testing.T) {
 	third, ok := s.rewriteStatementMessage(messageOf(ordinary))
 	require.True(t, ok, "the session keeps tagging")
 
-	again, ok := decodeExecStatement(upstreamTTC(t, third))
+	again, ok := decodeExecStatement(upstreamTTC(t, third), false)
 	require.True(t, ok)
 	assert.Equal(t, wire, again)
 }
@@ -508,7 +508,7 @@ func TestStatementTaggingRecutsPastTheNegotiatedUnit(t *testing.T) {
 		assert.LessOrEqual(t, len(frame), 2048, "no packet may exceed the negotiated unit")
 	}
 
-	stmt, ok := decodeExecStatementText(upstreamTTC(t, frames))
+	stmt, ok := decodeExecStatementText(upstreamTTC(t, frames), false)
 	require.True(t, ok, "the fragments must reassemble to a readable message")
 	assert.Equal(t, taggingTagPrefix+sql, stmt.Text)
 }
