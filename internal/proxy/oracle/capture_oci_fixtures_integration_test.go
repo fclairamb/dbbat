@@ -92,10 +92,16 @@ PRINT n
 EXIT
 `)
 
-	_, err = env.db.ExecContext(ctx, ociDescribeObjectType)
-	require.NoError(t, err)
+	for _, ddl := range ociDescribeObjectTypes {
+		_, err = env.db.ExecContext(ctx, ddl)
+		require.NoErrorf(t, err, "creating the describe query's object types: %s", ddl)
+	}
 
-	defer func() { _, _ = env.db.ExecContext(ctx, "DROP TYPE dbbat_cap_obj") }()
+	defer func() {
+		for _, name := range ociDescribeObjectTypeNames {
+			_, _ = env.db.ExecContext(ctx, "DROP TYPE "+name)
+		}
+	}()
 
 	describeDump := recordOCIScriptThroughProxy(t, env, oci, "capture-oci-describe", `SET PAGESIZE 0
 SET FEEDBACK OFF

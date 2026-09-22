@@ -39,13 +39,10 @@ func TestCapture_SQLPlusDescribe(t *testing.T) {
 	w := newCaptureWriter(t, outPath, "capture-sqlplus-describe")
 	relayAddr := startCaptureRelay(t, oracleAddr, w)
 
-	body := `CREATE OR REPLACE TYPE dbbat_cap_obj AS OBJECT (a NUMBER, b VARCHAR2(10));
-/
-SET PAGESIZE 0
+	body := ociDescribeObjectTypeScript() + `SET PAGESIZE 0
 SET FEEDBACK OFF
 ` + ociDescribeQuery + `
-DROP TYPE dbbat_cap_obj;
-EXIT
+` + ociDescribeObjectDropScript() + `EXIT
 `
 
 	script := writeTempScript(t, body)

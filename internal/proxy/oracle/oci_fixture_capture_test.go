@@ -347,6 +347,27 @@ const ociDescribeFixture = "testdata/oci_describe.hex"
 // fixed CHAR, a RAW, and an object whose record carries a non-null 16-byte type
 // OID (the one column that proves the toID field is a DLC with a four-byte
 // length rather than a bare CLR).
+//
+// The first eight columns are the original set and are kept in their original
+// order, because the 4-byte dialect's fixture is pinned against them by name and
+// by type. The five after them were added for the 64-bit dialect, where one
+// object column was not enough to say where that record's extra bytes sit
+// (specs/todos/2026-09-21-01-oracle-wide64-column-record-layout.md), and each
+// one separates an effect the original eight conflate:
+//
+//   - `o` and `objlong` carry a type OID like `obj` does, with a one-character
+//     name and a 7- and 33-character type name against `obj`'s 3 and 13. Three
+//     samples of the same shape at three lengths is what turns "consistent with
+//     one record" into a measured field, and `o` is also the column with a
+//     non-empty toID and a one-character name the spec asks for.
+//   - `cl` and `x` are the two shapes that might carry a type name *without* an
+//     ordinary object OID — a CLOB and a SYS.XMLTYPE. Whether 23ai actually
+//     sends either that way is the measurement, not the assumption.
+//   - `tail` is an ordinary NUMBER and it is deliberately **last**, which is the
+//     whole reason it exists: in the first recording the object column was the
+//     last column, so every per-record byte that differed on it was equally
+//     "the object column's" and "the last column's". With a scalar behind it the
+//     two stop being the same thing.
 const ociDescribeQuery = `SELECT CAST(1 AS NUMBER(10,2)) AS n2,
        CAST('x' AS VARCHAR2(4000)) AS big,
        1/3 AS flt,
@@ -354,7 +375,12 @@ const ociDescribeQuery = `SELECT CAST(1 AS NUMBER(10,2)) AS n2,
        SYSTIMESTAMP AS ts,
        CAST('ab' AS CHAR(5)) AS c5,
        UTL_RAW.CAST_TO_RAW('zz') AS r,
-       dbbat_cap_obj(1, 'x') AS obj
+       dbbat_cap_obj(1, 'x') AS obj,
+       dbbat_o(2) AS o,
+       dbbat_cap_object_with_a_long_name(3) AS objlong,
+       TO_CLOB('cl') AS cl,
+       XMLTYPE('<a/>') AS x,
+       CAST(2 AS NUMBER(3)) AS tail
   FROM dual;`
 
 // oci64DescribeFixture is the 64-bit dialect's describe evidence. **Nothing
@@ -371,8 +397,44 @@ const ociDescribeQuery = `SELECT CAST(1 AS NUMBER(10,2)) AS n2,
 // mean re-recording all of them.
 const oci64DescribeFixture = "testdata/oci64_describe.hex"
 
-// ociDescribeObjectType is the object type ociDescribeQuery's last column needs.
-const ociDescribeObjectType = `CREATE OR REPLACE TYPE dbbat_cap_obj AS OBJECT (a NUMBER, b VARCHAR2(10))`
+// ociDescribeObjectTypes are the object types ociDescribeQuery's object columns
+// need, and the three type **names** are the measurement: 13, 7 and 33
+// characters, so the three records that carry one differ in that field and in
+// nothing else. A single object type could only ever say "consistent with".
+var ociDescribeObjectTypes = []string{
+	`CREATE OR REPLACE TYPE dbbat_cap_obj AS OBJECT (a NUMBER, b VARCHAR2(10))`,
+	`CREATE OR REPLACE TYPE dbbat_o AS OBJECT (a NUMBER)`,
+	`CREATE OR REPLACE TYPE dbbat_cap_object_with_a_long_name AS OBJECT (a NUMBER)`,
+}
+
+// ociDescribeObjectTypeNames is the same list as the names to drop afterwards,
+// in the same order.
+var ociDescribeObjectTypeNames = []string{
+	"dbbat_cap_obj",
+	"dbbat_o",
+	"dbbat_cap_object_with_a_long_name",
+}
+
+// ociDescribeObjectTypeScript is ociDescribeObjectTypes as sqlplus statements,
+// for the capture route that has no side channel to the database.
+func ociDescribeObjectTypeScript() string {
+	script := ""
+	for _, ddl := range ociDescribeObjectTypes {
+		script += ddl + ";\n/\n"
+	}
+
+	return script
+}
+
+// ociDescribeObjectDropScript is the matching teardown.
+func ociDescribeObjectDropScript() string {
+	script := ""
+	for _, name := range ociDescribeObjectTypeNames {
+		script += "DROP TYPE " + name + ";\n"
+	}
+
+	return script
+}
 
 // writeDescribeHexFixture keeps every server payload that leads with a describe
 // message, as one hex line each.
