@@ -10,34 +10,20 @@
 // A describe (TTC message 0x10) is where a query's column names and types come
 // from. An OCI client gets the same records as a thin one, marshaled fixed-width
 // — see describeColumnLayoutWide and TestOCIDescribeRecordsParse.
+//
+// Like its siblings in capture_refcursor_test.go, this harness records the
+// **4-byte** dialect only, and the recording is held to that before a byte is
+// written — see requireRecordedDialect.
 package oracle
 
 import (
-	"fmt"
-	"os/exec"
-	"path/filepath"
 	"testing"
-	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 // TestCapture_SQLPlusDescribe records sqlplus describing that query and keeps
 // every describe response of the session, as hex lines.
 func TestCapture_SQLPlusDescribe(t *testing.T) {
-	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
-	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := filepath.Join(t.TempDir(), "sqlplus_describe.pcapng")
-
-	requireOracleReachable(t, oracleAddr)
-
-	sqlplus, err := exec.LookPath("sqlplus")
-	if err != nil {
-		t.Skipf("sqlplus unavailable: %v", err)
-	}
-
-	w := newCaptureWriter(t, outPath, "capture-sqlplus-describe")
-	relayAddr := startCaptureRelay(t, oracleAddr, w)
+	client := sqlplusCaptureClient(t)
 
 	body := ociDescribeObjectTypeScript() + `SET PAGESIZE 0
 SET FEEDBACK OFF
@@ -46,17 +32,16 @@ SET FEEDBACK OFF
 ` + ociDescribeObjectDropScript() + `EXIT
 `
 
-	script := writeTempScript(t, body)
+	outPath := runSQLPlusCapture(t, client, "capture-sqlplus-describe", body)
 
-	cmd := exec.CommandContext(t.Context(), sqlplus, "-S",
-		fmt.Sprintf("system/oracle@//%s/%s", relayAddr, oracleService), "@"+script)
-
-	out, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "sqlplus failed: %s", out)
-	t.Logf("sqlplus: %s", out)
-
-	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
-	require.NoError(t, w.Close())
+	// ociDescribeFixture is the 4-byte set's describe evidence, and
+	// writeDescribeHexFixture stamps whatever it is handed with a header naming
+	// the dialect. A 64-bit sqlplus on PATH would otherwise overwrite audited
+	// 4-byte bytes with the other dialect's, under the 4-byte name — the
+	// overwrite the guard exists to refuse, reached through this entry point
+	// instead of the REF-cursor one. The 64-bit describe fixture is recorded by
+	// TestCapture_OCIFixturesThroughDBBat (`-tags integration`).
+	requireRecordedDialect(t, client, outPath)
 
 	writeDescribeHexFixture(t, outPath, ociDescribeFixture)
 }
