@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/fclairamb/dbbat/internal/dump"
 )
@@ -147,7 +148,6 @@ func TestFile_UnsupportedProtocol(t *testing.T) {
 
 	for _, protocol := range []string{
 		dump.ProtocolOracle,
-		dump.ProtocolMongo,
 		dump.ProtocolMSSQL,
 	} {
 		t.Run(protocol, func(t *testing.T) {
@@ -169,6 +169,56 @@ func TestFile_UnsupportedProtocol(t *testing.T) {
 
 	assert.True(t, Supported(dump.ProtocolPostgreSQL))
 	assert.True(t, Supported(dump.ProtocolMySQL))
+	assert.True(t, Supported(dump.ProtocolMongo))
+}
+
+// TestFile_MongoDB is the end-to-end pass over a real capture written by
+// dump.Writer, reader included.
+func TestFile_MongoDB(t *testing.T) {
+	t.Parallel()
+
+	command := mongoOpMsgMessage(1, 0, 0, mongoSection0(t, bson.D{
+		{Key: "find", Value: "customers"},
+		{Key: "filter", Value: bson.D{{Key: "email", Value: "alice@example.com"}}},
+		{Key: "$db", Value: "app"},
+	}))
+
+	reply := mongoOpMsgMessage(2, 1, 0, mongoSection0(t, bson.D{
+		{Key: "cursor", Value: bson.D{
+			{Key: "id", Value: int64(0)},
+			{Key: "firstBatch", Value: bson.A{bson.D{{Key: "email", Value: "alice@example.com"}}}},
+		}},
+		{Key: "ok", Value: 1.0},
+	}))
+
+	path := writeCapture(t, dump.ProtocolMongo, []dump.Packet{
+		{Direction: dump.DirClientToServer, Data: command},
+		{Direction: dump.DirServerToClient, Data: reply},
+	})
+
+	t.Run("redacted by default", func(t *testing.T) {
+		t.Parallel()
+
+		var out bytes.Buffer
+		require.NoError(t, File(path, Options{}, &out))
+
+		assert.Equal(t, []string{
+			"# mongodb session 11111111-2222-3333-4444-555555555555",
+			"C> find customers db=app (filter: 1 keys)",
+			"<S Reply ok=1 (cursor: 0, firstBatch: 1 docs)",
+		}, textOf(t, out.String()))
+
+		assert.NotContains(t, out.String(), "alice@example.com")
+	})
+
+	t.Run("--rows opts into documents", func(t *testing.T) {
+		t.Parallel()
+
+		var out bytes.Buffer
+		require.NoError(t, File(path, Options{ShowRows: true}, &out))
+
+		assert.Contains(t, out.String(), "alice@example.com")
+	})
 }
 
 // TestFile_MySQL is the end-to-end pass: a real capture written by dump.Writer,

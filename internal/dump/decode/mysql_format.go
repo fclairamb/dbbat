@@ -1,7 +1,6 @@
 package decode
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -78,7 +77,7 @@ func formatMySQLCommand(cmd byte, args []byte) string {
 	case gomysql.COM_PROCESS_KILL:
 		return fmt.Sprintf("%s connection=%s", name, mysqlUint32(args))
 	case gomysql.COM_CHANGE_USER:
-		user, _, _ := mysqlNullString(args)
+		user, _, _ := cstring(args)
 
 		return fmt.Sprintf("%s user=%s (auth redacted)", name, quote(user))
 	default:
@@ -89,7 +88,7 @@ func formatMySQLCommand(cmd byte, args []byte) string {
 // formatMySQLGreeting renders the server's initial handshake packet. The
 // scramble it carries is an authentication payload and never reaches a trace.
 func formatMySQLGreeting(payload []byte) string {
-	version, n, ok := mysqlNullString(payload[1:])
+	version, n, ok := cstring(payload[1:])
 	if !ok {
 		return "InitialHandshake (unreadable)"
 	}
@@ -124,7 +123,7 @@ func formatMySQLHandshakeResponse(payload []byte, capabilities uint32) string {
 
 	body := payload[headerLen:]
 
-	user, used, ok := mysqlNullString(body)
+	user, used, ok := cstring(body)
 	if !ok {
 		return "HandshakeResponse (unreadable, auth redacted)"
 	}
@@ -164,7 +163,7 @@ func mysqlHandshakeDatabase(body []byte, capabilities uint32) (string, bool) {
 
 		used = 1 + int(body[0])
 	default:
-		_, n, ok := mysqlNullString(body)
+		_, n, ok := cstring(body)
 		if !ok {
 			return "", false
 		}
@@ -172,7 +171,7 @@ func mysqlHandshakeDatabase(body []byte, capabilities uint32) (string, bool) {
 		used = n
 	}
 
-	database, _, ok := mysqlNullString(sliceFrom(body, used))
+	database, _, ok := cstring(sliceFrom(body, used))
 
 	return database, ok
 }
@@ -180,7 +179,7 @@ func mysqlHandshakeDatabase(body []byte, capabilities uint32) (string, bool) {
 // formatMySQLAuthSwitch names the plugin the server wants used instead. The
 // plugin data that follows is a fresh scramble and stays out of the trace.
 func formatMySQLAuthSwitch(payload []byte) string {
-	plugin, _, ok := mysqlNullString(payload[1:])
+	plugin, _, ok := cstring(payload[1:])
 	if !ok {
 		return "AuthSwitchRequest (redacted)"
 	}
@@ -377,17 +376,6 @@ func mysqlLenEncString(b []byte) ([]byte, bool, int, bool) {
 	}
 
 	return b[n:end], false, end, true
-}
-
-// mysqlNullString reads a NUL-terminated string and how many bytes it consumed,
-// terminator included.
-func mysqlNullString(b []byte) (string, int, bool) {
-	idx := bytes.IndexByte(b, 0)
-	if idx < 0 {
-		return "", 0, false
-	}
-
-	return string(b[:idx]), idx + 1, true
 }
 
 // mysqlUint32 renders a little-endian uint32 at the front of b, or "?" when it

@@ -18,6 +18,7 @@
 package decode
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -98,6 +99,8 @@ func newSplitter(protocol string, opts Options) (splitter, error) {
 		return newPostgresSplitter(opts), nil
 	case dump.ProtocolMySQL:
 		return newMySQLSplitter(opts), nil
+	case dump.ProtocolMongo:
+		return newMongoSplitter(opts), nil
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedProtocol, protocol)
 	}
@@ -106,7 +109,7 @@ func newSplitter(protocol string, opts Options) (splitter, error) {
 // Supported reports whether a capture of the given protocol can be decoded.
 func Supported(protocol string) bool {
 	switch protocol {
-	case dump.ProtocolPostgreSQL, dump.ProtocolMySQL:
+	case dump.ProtocolPostgreSQL, dump.ProtocolMySQL, dump.ProtocolMongo:
 		return true
 	default:
 		return false
@@ -174,6 +177,17 @@ func writeMessages(out io.Writer, messages []Message) error {
 // per line, and a multi-line statement would break that.
 func collapse(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// cstring reads a NUL-terminated string and how many bytes it consumed,
+// terminator included. Three of the five protocols frame names this way.
+func cstring(b []byte) (string, int, bool) {
+	idx := bytes.IndexByte(b, 0)
+	if idx < 0 {
+		return "", 0, false
+	}
+
+	return string(b[:idx]), idx + 1, true
 }
 
 // quote renders a string as a Go-quoted literal, which is how a trace shows an
