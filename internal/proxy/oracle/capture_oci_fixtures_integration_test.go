@@ -160,6 +160,39 @@ EXIT
 	writeLOBFetchHexFixture(t, lobDump, fixture)
 }
 
+// TestCapture_OCISevenColumnFetchThroughDBBat re-records the seven-column
+// describe, in whichever OCI dialect the client speaks.
+//
+//	ORACLE_CAPTURE_OCI_FIXTURES=1 \
+//	  go test -tags integration -run TestCapture_OCISevenColumnFetchThroughDBBat ./internal/proxy/oracle/
+//
+// It is a capture of its own for the same reason the LOB one is: it needs none
+// of the procedures or object types the fixture test above sets up, and the
+// column count is the entire point of the frames it keeps — folding it into a
+// script that also runs the type-rich describes would put a second query's
+// frames in the same file and leave "which one is the seven" to a reader.
+func TestCapture_OCISevenColumnFetchThroughDBBat(t *testing.T) {
+	if os.Getenv(ociFixtureCaptureEnv) != "1" {
+		t.Skipf("set %s=1 to re-record the OCI fixtures", ociFixtureCaptureEnv)
+	}
+
+	env := startOracleThroughProxyForOCI(t, nil)
+	oci := requireOCIClient(t, env)
+
+	dump := recordOCIScriptThroughProxy(t, env, oci, "capture-oci-sevencols", `SET PAGESIZE 0
+SET FEEDBACK OFF
+`+sevenColumnQuery+`;
+EXIT
+`)
+
+	fixture := ociSevenColumnFixture
+	if recordedDialectIsWide64(t, dump) {
+		fixture = oci64SevenColumnFixture
+	}
+
+	writeDescribeHexFixture(t, dump, fixture)
+}
+
 // refCursorCaptureProcedure and scalarOutBindCaptureProcedure are the two
 // procedures the hex fixtures are recorded against. They are spelled out here
 // rather than shared with capture_refcursor_test.go because that file is behind

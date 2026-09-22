@@ -749,3 +749,71 @@ func TestCapture_GoOraDML(t *testing.T) {
 
 	t.Logf("capture written to %s", outPath)
 }
+
+// TestCapture_GoOraSevenColumns records sevenColumnQuery — the compressed
+// dialect's seven-column fetch, which is the one column count the corpus had no
+// sample of and the one at which the old forward scan for the ROW_DATA byte
+// stopped on the header's own column count instead. See sevencols_test.go.
+func TestCapture_GoOraSevenColumns(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_SEVENCOLS", "testdata/"+sevenColumnFixture)
+
+	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
+	if err != nil {
+		t.Skipf("Oracle not reachable at %s: %v", oracleAddr, err)
+	}
+	_ = probe.Close()
+
+	w, err := dump.NewWriter(outPath, dump.Header{
+		SessionID: "capture-go-ora-sevencols",
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+	}, 32*1024*1024)
+	require.NoError(t, err)
+
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	dsn := fmt.Sprintf("oracle://system:oracle@%s/%s?PREFETCH_ROWS=1000", relayAddr, oracleService)
+	db, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	rows, err := db.QueryContext(t.Context(), sevenColumnQuery)
+	require.NoError(t, err)
+
+	cols, err := rows.Columns()
+	require.NoError(t, err)
+	require.Len(t, cols, 7, "the fixture is worthless at any other column count")
+
+	want := sevenColumnRows()
+	got := 0
+
+	for rows.Next() {
+		values := make([]string, 7)
+		into := make([]interface{}, 7)
+
+		for i := range values {
+			into[i] = &values[i]
+		}
+
+		require.NoError(t, rows.Scan(into...))
+		require.Lessf(t, got, len(want), "more rows than ground truth at row %d", got)
+		require.Equalf(t, want[got], values, "row %d", got)
+
+		got++
+	}
+
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Len(t, want, got, "ground truth row count")
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s (%d rows)", outPath, got)
+}
