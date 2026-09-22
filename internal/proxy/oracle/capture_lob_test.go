@@ -108,6 +108,33 @@ func TestCapture_PythonThinLOB(t *testing.T) {
 	t.Logf("capture written to %s", outPath)
 }
 
+// longTableDropDDL and longTableDDL build the two tables longQuery and
+// longRawQuery select from. They run on the **same session** the fetch does, which is why
+// the recordings carry their setup: go-ora opens exactly one working connection
+// per process against this server (a second one is answered with EOF, measured
+// 2026-09-22 on gvenzl/oracle-free:23-slim), so a tidier setup connection of its
+// own would cost the capture the session it is there to record. The replay
+// picks the fetch out by SQL marker, so the extra frames cost nothing.
+//
+// The drops are a list of their own because their failure is expected — the
+// capture is re-run against a container that may or may not already hold the
+// tables.
+var (
+	longTableDropDDL = []string{
+		`DROP TABLE dbbat_cap_long`,
+		`DROP TABLE dbbat_cap_longraw`,
+	}
+
+	longTableDDL = []string{
+		`CREATE TABLE dbbat_cap_long (n NUMBER, l1 LONG)`,
+		`CREATE TABLE dbbat_cap_longraw (n NUMBER, r1 LONG RAW)`,
+		`INSERT INTO dbbat_cap_long VALUES (1, 'longvalue-0123456789')`,
+		`INSERT INTO dbbat_cap_long VALUES (2, NULL)`,
+		`INSERT INTO dbbat_cap_longraw VALUES (1, HEXTORAW('DEADBEEF'))`,
+		`INSERT INTO dbbat_cap_longraw VALUES (2, NULL)`,
+	}
+)
+
 // TestCapture_GoOraLong records longQuery and longRawQuery — columns the
 // **describe** reports as LONG (8) and LONG RAW (24), rather than a LOB a
 // client re-declared as one — driven by go-ora with nothing configured.
@@ -149,6 +176,7 @@ func TestCapture_GoOraLong(t *testing.T) {
 // configured, which is the same ask the go-ora recording makes: what a second,
 // independently written thin driver does with a column the describe reports as
 // a LONG.
+//
 // The argument list is the DDL, then a lone "--", then the two queries — the
 // setup runs on the recorded session for the same reason the go-ora capture's
 // does (see longTableDDL), and a statement that fails before the separator is

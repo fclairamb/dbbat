@@ -29,33 +29,6 @@ const (
 	pythonThinLongFixture = "python_thin_long.pcapng"
 )
 
-// longTableDropDDL and longTableDDL build the two tables the queries below
-// select from. They run on the **same session** the fetch does, which is why
-// the recordings carry their setup: go-ora opens exactly one working connection
-// per process against this server (a second one is answered with EOF, measured
-// 2026-09-22 on gvenzl/oracle-free:23-slim), so a tidier setup connection of its
-// own would cost the capture the session it is there to record. The replay
-// picks the fetch out by SQL marker, so the extra frames cost nothing.
-//
-// The drops are a list of their own because their failure is expected — the
-// capture is re-run against a container that may or may not already hold the
-// tables.
-var (
-	longTableDropDDL = []string{
-		`DROP TABLE dbbat_cap_long`,
-		`DROP TABLE dbbat_cap_longraw`,
-	}
-
-	longTableDDL = []string{
-		`CREATE TABLE dbbat_cap_long (n NUMBER, l1 LONG)`,
-		`CREATE TABLE dbbat_cap_longraw (n NUMBER, r1 LONG RAW)`,
-		`INSERT INTO dbbat_cap_long VALUES (1, 'longvalue-0123456789')`,
-		`INSERT INTO dbbat_cap_long VALUES (2, NULL)`,
-		`INSERT INTO dbbat_cap_longraw VALUES (1, HEXTORAW('DEADBEEF'))`,
-		`INSERT INTO dbbat_cap_longraw VALUES (2, NULL)`,
-	}
-)
-
 // longQuery and longRawQuery put the LONG column **between** ordinary CHAR
 // columns, the same alternation goOraLOBQuery uses and for the same reason: a
 // column read at the wrong width drifts the two behind it, and the row is then
