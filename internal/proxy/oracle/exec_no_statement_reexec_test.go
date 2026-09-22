@@ -309,6 +309,13 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// the recording made for a 300-character CLOB: the value's length changes
 	// nothing about the ask.
 	//
+	// jdbc_thin_lob.pcapng's one is a define too, and the one execDefineLOBShape
+	// does **not** read — not because the entries are shaped differently but
+	// because ojdbc re-declares the ordinary CHAR columns as VARCHAR2 (1), which
+	// defineTypeAgrees refuses. It costs nothing: what JDBC is asking for is
+	// locators, which is what an unread define leaves the session on anyway. See
+	// TestJDBCThinDefineBlockIsNotReadAndDoesNotNeedToBe.
+	//
 	// go_ora_long.pcapng's two are the same frame again, one per query, and they
 	// say the prefetch-off rule is the column's rather than the LOB's: a
 	// **genuine** LONG column turns it off too. The define re-declares each
@@ -326,6 +333,7 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 		"python_thin_lob.pcapng":       1,
 		"go_ora_long.pcapng":           2,
 		"go_ora_lob_big.pcapng":        1,
+		"jdbc_thin_lob.pcapng":         1,
 	}, reexecs, "only these recordings carry an execute that declares no statement")
 }
 

@@ -57,6 +57,11 @@ func TestDefineBlockSaysWhichLOBReadingTheClientAsked(t *testing.T) {
 // goOraLOBQuery's shape. Exactly two frames may answer — the two recordings
 // above that really do carry one — and every other client frame of every other
 // recording must come back empty-handed.
+//
+// jdbc_thin_lob.pcapng is in the corpus and is deliberately **not** among the
+// answers, although it carries a define block for this very cursor: ojdbc
+// re-declares the ordinary CHAR columns as VARCHAR2, which the type-agreement
+// rule refuses. See TestJDBCThinDefineBlockIsNotReadAndDoesNotNeedToBe.
 func TestDefineBlockIsNotFoundInFramesThatAreNotOne(t *testing.T) {
 	t.Parallel()
 

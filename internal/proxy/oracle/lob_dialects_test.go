@@ -275,6 +275,7 @@ func TestThinLOBFetchIsNotOfferedTheOtherReading(t *testing.T) {
 		{goOraLOBFixture, &locator},
 		{goOraLOBStreamFixture, &inline},
 		{pythonThinLOBFixture, &inline},
+		{jdbcThinLOBFixture, &inline},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
 			t.Parallel()
@@ -403,4 +404,52 @@ func TestPythonThinLOBFetchCapturesItsLocators(t *testing.T) {
 	require.Len(t, rows, 1, "the query selects from dual and returns exactly one row")
 
 	assert.Equal(t, goOraLOBLocatorRow, rows[0])
+}
+
+// TestJDBCThinLOBFetchCapturesItsLocators is the third thin driver, recorded
+// 2026-09-23, and it is the one the other two could not answer for.
+//
+// JDBC thin prefetches LOB data by default — `oracle.jdbc.defaultLobPrefetchSize`
+// is non-zero out of the box — so "JDBC asks for the bodies" was a documented
+// possibility with nothing measured behind it, and a fetch dbbat could not walk
+// would have lost every row of it in silence. What the recording says is that
+// it is **neither** of the two readings: the row carries the LOB's head *and*
+// its locator, in that order, which is a third shape and the one
+// skipPrefetchedLOBValue was written for.
+//
+// The captured row is therefore byte for byte goOraLOBLocatorRow, the same
+// expectation the two no-prefetch locator recordings carry, and that is the
+// point: the prefetched body is the head of a LOB rather than the LOB, so the
+// column still says what it is rather than half of what it holds.
+func TestJDBCThinLOBFetchCapturesItsLocators(t *testing.T) {
+	t.Parallel()
+
+	rows := replayCapturedRows(t, loadTestDump(t, jdbcThinLOBFixture), goOraLOBSQLMarker)
+	require.Len(t, rows, 1, "the query selects from dual and returns exactly one row")
+
+	assert.Equal(t, goOraLOBLocatorRow, rows[0])
+}
+
+// TestJDBCThinDefineBlockIsNotReadAndDoesNotNeedToBe is the other half of the
+// measurement, and it is a finding rather than a gap left open.
+//
+// JDBC sends a define block for this cursor — the corpus census in
+// TestOJDBC6ReexecDoesNotDisturbTheParsePath counts it — and its entries are
+// the same record layout readDefineEntry walks on both other thin drivers. What
+// refuses it is defineTypeAgrees: ojdbc re-declares the ordinary CHAR columns
+// as VARCHAR2 (1), where go-ora and python-oracledb thin echo back the 96 the
+// describe reported, so no offset walks all twelve entries.
+//
+// Relaxing that would buy nothing. The ask JDBC is making is for **locators**
+// (it keeps each LOB column the LOB type it already was and takes the bodies as
+// prefetch), and a locator is exactly what a session that learned nothing reads.
+// So the rule stays tight and this recording pins that the fallback is the
+// right answer rather than a lucky one.
+func TestJDBCThinDefineBlockIsNotReadAndDoesNotNeedToBe(t *testing.T) {
+	t.Parallel()
+
+	shape, ok := lobShapeFromDump(t, loadTestDump(t, jdbcThinLOBFixture), describeColumnTypes(goOraLOBColumns))
+
+	assert.False(t, ok, "ojdbc's define re-declares CHAR as VARCHAR2, which the walk refuses")
+	assert.Equal(t, lobRowLocator, shape, "and what it falls back to is the reading JDBC actually asked for")
 }

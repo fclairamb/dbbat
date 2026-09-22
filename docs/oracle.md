@@ -1764,6 +1764,7 @@ the row. `readRowColumn` steps over the framing instead:
   | 64-bit OCI | `maxSize` ub4 LE · `size` ub8 LE · `chunkSize` ub4 LE · locator CLR | `testdata/oci64_lob.hex` |
   | 4-byte OCI | `maxSize` ub4 LE · `size` **compressed** · `chunkSize` ub4 LE · locator CLR | `testdata/oci_lob.hex` |
   | Thin, locators | `maxSize` · (`size` · `chunkSize`) · locator CLR, all compressed | `testdata/go_ora_lob_stream.pcapng`, `testdata/python_thin_lob.pcapng` |
+  | Thin, locators **with the LOB prefetched** | the same, plus the charset pair on a character LOB and the LOB's head as a CLR, all *before* the locator | `testdata/jdbc_thin_lob.pcapng` |
   | Thin, inlined | the LOB's **own bytes** as a CLR, then its indicator and return code | `testdata/go_ora_lob.pcapng` |
 
   So the 4-byte dialect's column is six bytes shorter than the skip it was being
@@ -1787,13 +1788,14 @@ carries one entry per column of a cursor already described — where it
 re-declares each LOB column as a LONG type. Oracle then sends a LONG column:
 the value, then its indicator and return code. Absent that, it sends a locator.
 
-Three recordings of one query, and they do not agree, which is the point:
+Four recordings of one query, and they do not agree, which is the point:
 
 | Client | What it sends | What comes back |
 |---|---|---|
 | go-ora, nothing configured | a define turning CLOB into LONG VARCHAR (94) and BLOB into LONG RAW (24) | the bodies |
 | python-oracledb thin, nothing configured | a define keeping each LOB column the LOB type it already was | locators |
 | go-ora, `lob fetch=post` | no define at all | locators |
+| JDBC thin, nothing configured | a define keeping each LOB column its own type — but re-declaring the ordinary CHAR columns as VARCHAR2, so dbbat reads nothing from it | locators, each with the LOB's head prefetched in front of it |
 
 So inlining is go-ora's default rather than the thin dialect's, and the locator
 is what the protocol sends unless it was asked otherwise. `execDefineLOBShape`
@@ -1815,6 +1817,17 @@ the *other* client's reading comes back with no rows at all
 Until this was read, `lob fetch=post` and **every python-oracledb thin LOB
 query** captured nothing: the walk read the locator as an inlined value, came
 out on the wrong byte, and `rowEndsAtMarker` cost the row.
+
+JDBC thin is the fourth recording and the one that says the refusal is safe
+rather than merely cheap. Its define block is one dbbat does not read — ojdbc
+re-declares the scalar CHAR columns as VARCHAR2 and `defineTypeAgrees` refuses
+that, by design — so the session falls back to the locator reading, which is
+exactly what JDBC asked for. What it *also* does is prefetch the LOB
+(`oracle.jdbc.defaultLobPrefetchSize`, non-zero out of the box), so the head of
+the value rides in front of the locator; `skipPrefetchedLOBValue` steps over it
+and the column still captures the placeholder, because the head of a LOB is not
+the LOB. Until that was measured, **every JDBC thin LOB query captured no rows
+at all**.
 
 - **Opaque / object** — the image header is *read*, not measured: the image
   length arrives twice, as a four-byte little-endian field and as a single byte,

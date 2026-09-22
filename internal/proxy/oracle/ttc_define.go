@@ -12,6 +12,14 @@ package oracle
 //	go-ora, default          testdata/go_ora_lob.pcapng         the LOB's own bytes
 //	go-ora, lob fetch=post   testdata/go_ora_lob_stream.pcapng  a locator
 //	python-oracledb thin     testdata/python_thin_lob.pcapng    a locator
+//	JDBC thin, default       testdata/jdbc_thin_lob.pcapng      a locator, prefetched
+//
+// The fourth is the one this walk does **not** read, and it costs nothing:
+// ojdbc re-declares the ordinary CHAR columns as VARCHAR2, which
+// defineTypeAgrees refuses, so the session keeps the locator reading — which is
+// what JDBC was asking for. Its rows carry the LOB's head in front of the
+// locator as well, which is a row-walk concern rather than a define one; see
+// skipPrefetchedLOBValue.
 //
 // The ask is a **define block**: an execute that declares no statement and
 // carries one entry per column of the cursor already described. A client that

@@ -2508,7 +2508,7 @@ func readCompressedLOBColumn(
 		return readInlineLongColumn(payload, offset, shape, colTypes, col)
 	}
 
-	return readCompressedLOBLocatorColumn(payload, offset, colTypes, col)
+	return readCompressedLOBLocatorColumn(payload, offset, shape, colTypes, col)
 }
 
 // lobCompressedLocatorMaxSkips is how many compressed integers may sit between
@@ -2527,22 +2527,23 @@ const lobCompressedLocatorMaxSkips = 2
 
 // readCompressedLOBLocatorColumn reads a LOB column on the thin dialect when
 // the row carries a locator: a leading size as a compressed integer, then the
-// LOB's own size and chunk size on the clients that send them, then the locator
-// as a CLR.
+// LOB's own size and chunk size on the clients that send them, then — on a
+// client that prefetched the LOB — its bytes, and then the locator as a CLR.
 //
 // The reading validates itself the way readFixedLOBColumn's does — the locator
 // length is spelled **twice**, once as the leading size and once as the CLR's
 // own length byte, and only a column where the two agree is read as a locator.
 // That is also what locates the CLR: the walk steps forward over compressed
 // integers until the byte it is looking at is that size and that many bytes are
-// there to be had.
+// there to be had, and a walk that comes out anywhere else costs the row rather
+// than inventing a value.
 //
 // A zero leading size is the NULL LOB and ends the column there, exactly as it
-// does on both OCI dialects. The captured value is the placeholder — the
-// contents are not in this packet and dbbat will not go and ask for them (see
-// lobLocatorPlaceholder).
+// does on both OCI dialects. The captured value is the placeholder — a
+// prefetched body is not the LOB, only the head of one, so dbbat says what the
+// column is rather than half of what it holds (see lobLocatorPlaceholder).
 func readCompressedLOBLocatorColumn(
-	payload []byte, offset int, colTypes []int, col int,
+	payload []byte, offset int, shape oerShape, colTypes []int, col int,
 ) (string, int, bool) {
 	maxSize, n := readCompressedInt(payload[offset:])
 	if n == 0 {
@@ -2561,20 +2562,100 @@ func readCompressedLOBLocatorColumn(
 		return "", 0, false
 	}
 
+	if end, ok := compressedLOBLocatorEnd(payload, offset, maxSize); ok {
+		return lobLocatorPlaceholder(colTypes, col), end, true
+	}
+
+	next, ok := skipPrefetchedLOBValue(payload, offset, shape, colTypes, col)
+	if !ok {
+		return "", 0, false
+	}
+
+	if end, ok := compressedLOBLocatorEnd(payload, next, maxSize); ok {
+		return lobLocatorPlaceholder(colTypes, col), end, true
+	}
+
+	return "", 0, false
+}
+
+// compressedLOBLocatorEnd steps forward over compressed integers until the byte
+// it is looking at is the locator length the column already declared, and
+// returns the offset behind the locator.
+func compressedLOBLocatorEnd(payload []byte, offset, maxSize int) (int, bool) {
 	for range lobCompressedLocatorMaxSkips + 1 {
 		if offset < len(payload) && int(payload[offset]) == maxSize && offset+1+maxSize <= len(payload) {
-			return lobLocatorPlaceholder(colTypes, col), offset + 1 + maxSize, true
+			return offset + 1 + maxSize, true
 		}
 
 		next, ok := skipCompressedInt(payload, offset)
 		if !ok {
-			return "", 0, false
+			return 0, false
 		}
 
 		offset = next
 	}
 
-	return "", 0, false
+	return 0, false
+}
+
+// skipPrefetchedLOBValue steps over the LOB's own bytes when the client asked
+// the server to send them **in front of** the locator rather than instead of it.
+//
+// That is a third shape, and it is JDBC thin's default: ojdbc prefetches LOB
+// data (`oracle.jdbc.defaultLobPrefetchSize`, non-zero out of the box), so the
+// column carries the sizes, then the head of the LOB, then the locator — where
+// go-ora's `lob fetch=post` and python-oracledb thin send the sizes and the
+// locator with nothing between them. Measured on testdata/jdbc_thin_lob.pcapng,
+// column for column against testdata/python_thin_lob.pcapng, which is the same
+// query recorded with no prefetch at all:
+//
+//	cint  the LOB's own size
+//	cint  the chunk size
+//	cint  n, then n bytes of charset id, then one byte of charset form
+//	                                     — character LOBs only; a BLOB has neither
+//	CLR   the prefetched bytes, chunked in this session's long form
+//
+// It is deliberately not offered as an alternative *reading* of the column: the
+// locator's length is spelled twice either way, so a walk that steps over a
+// block that was not there comes out somewhere the second spelling is not and
+// the row is refused, exactly as a wrong reading of any other column is.
+func skipPrefetchedLOBValue(
+	payload []byte, offset int, shape oerShape, colTypes []int, col int,
+) (int, bool) {
+	// The LOB's own size and its chunk size.
+	for range 2 {
+		next, ok := skipCompressedInt(payload, offset)
+		if !ok {
+			return 0, false
+		}
+
+		offset = next
+	}
+
+	if isCharacterLOBColumn(colTypes, col) {
+		charsetLen, n := readCompressedInt(payload[offset:])
+		if n == 0 {
+			return 0, false
+		}
+
+		offset += n + charsetLen + 1 // the charset id, then the charset form
+		if offset > len(payload) {
+			return 0, false
+		}
+	}
+
+	_, consumed := readCLRVariant(payload[offset:], shape.bigClrChunks)
+	if consumed == 0 {
+		return 0, false
+	}
+
+	return offset + consumed, true
+}
+
+// isCharacterLOBColumn reports whether a describe's type code is a LOB with a
+// character set — the two fields a prefetched BLOB has no use for.
+func isCharacterLOBColumn(colTypes []int, col int) bool {
+	return col < len(colTypes) && colTypes[col] == tnsTypeCLOB
 }
 
 // lobLocatorMaxLen bounds a locator's declared length. A CLR spells its length
