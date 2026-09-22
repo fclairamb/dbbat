@@ -17,6 +17,7 @@ package oracle
 import (
 	"database/sql"
 	"fmt"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -38,6 +39,71 @@ func TestCapture_GoOraLOBInline(t *testing.T) {
 func TestCapture_GoOraLOBStream(t *testing.T) {
 	captureGoOraLOB(t, "capture-go-ora-lob-stream", "testdata/"+goOraLOBStreamFixture,
 		"?lob+fetch=post&lob+read=no")
+}
+
+// pythonLOBScript runs goOraLOBQuery on python-oracledb thin with **nothing
+// configured**, which is the whole point of the recording: it says what a
+// second, independently written thin driver asks for when the application says
+// nothing about LOBs.
+//
+// `oracledb.defaults.fetch_lobs` is left alone (it is True), so the driver
+// fetches LOB objects — handles — and each value is printed by type rather than
+// read, because reading one would issue LOB reads of its own and those are not
+// what this fixture is about.
+const pythonLOBScript = `
+import sys, oracledb
+dsn = sys.argv[1]
+sql = sys.argv[2]
+
+with oracledb.connect(user="system", password="oracle", dsn=dsn, retry_count=0) as conn:
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        cols = [d[0] for d in cur.description]
+        print("columns:", cols)
+        n = 0
+        for row in cur:
+            n += 1
+            for name, value in zip(cols, row):
+                print("  %s = %s %r" % (name, type(value).__name__, value))
+        print("rows:", n)
+print("ok")
+`
+
+// TestCapture_PythonThinLOB records goOraLOBQuery on python-oracledb thin with
+// its own default LOB policy.
+//
+// It is the third thin recording and the one that says whether go-ora's inline
+// default is the thin dialect's norm or go-ora's own habit — which is the fact
+// the row walk's default reading rests on, and which two recordings of one
+// driver cannot establish.
+func TestCapture_PythonThinLOB(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_LOB_PY", "testdata/"+pythonThinLOBFixture)
+	python := captureEnv("PYTHON_BIN", "python3")
+
+	requireOracleReachable(t, oracleAddr)
+
+	if out, err := exec.Command(python, "-c", "import oracledb").CombinedOutput(); err != nil {
+		t.Skipf("python-oracledb unavailable via %s: %v (%s)", python, err, out)
+	}
+
+	w := newCaptureWriter(t, outPath, "capture-python-thin-lob")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	script := writeTempScript(t, pythonLOBScript)
+
+	cmd := exec.CommandContext(t.Context(), python, script,
+		fmt.Sprintf("%s/%s", relayAddr, oracleService), goOraLOBQuery)
+
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "python client failed: %s", out)
+	t.Logf("python client: %s", out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
 }
 
 // captureGoOraLOB runs ociLOBQuery through a recording relay and writes the

@@ -36,6 +36,14 @@ const (
 	goOraLOBStreamFixture = "go_ora_lob_stream.pcapng"
 )
 
+// pythonThinLOBFixture is the same query on a second, independently written
+// thin driver — python-oracledb, with nothing configured — and it is what says
+// whether go-ora's inline default is the thin dialect's norm or go-ora's own
+// habit. Regenerate with:
+//
+//	go test -tags capture -timeout 300s -run TestCapture_PythonThinLOB ./internal/proxy/oracle/
+const pythonThinLOBFixture = "python_thin_lob.pcapng"
+
 // goOraLOBSQLMarker picks the thin recordings' statement out of the dump. It
 // stops at the first column, so it is a substring of the text on the wire.
 const goOraLOBSQLMarker = "'aaaaaa' AS c1"
