@@ -28,9 +28,10 @@ import "encoding/binary"
 // That last line used to say the 25 bytes could not be placed, and the walk
 // below used to route around the column records because of it: it anchored the
 // trailing block on a signature — a DLC of exactly seven bytes carrying an
-// Oracle DATE — and validated by landing. The recording that closed it added
-// three object columns at three type-name lengths, a CLOB, a SYS.XMLTYPE and an
-// ordinary NUMBER placed **last**, which is what separated "the object column"
+// Oracle DATE — and validated by landing. What closed it was a second describe
+// in the same session (ociDescribeTypedQuery): three object columns at three
+// type-name lengths, a SYS.XMLTYPE at a fourth schema length, a CLOB, and an
+// ordinary NUMBER placed **last** — which is what separated "the object column"
 // from "the column with a type OID" from "the last column"
 // (specs/todos/2026-09-21-01-oracle-wide64-column-record-layout.md).
 //

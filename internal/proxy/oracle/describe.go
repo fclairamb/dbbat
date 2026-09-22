@@ -488,8 +488,8 @@ const (
 	// than to the header it first showed up in.
 	//
 	// Its **value** is set on every recorded column without a type OID and
-	// clear on every column with one, all thirteen of them — but the walk reads
-	// no meaning into it. The pad below keys on the OID's own length field
+	// clear on every column with one, in both recorded describes — but the walk
+	// reads no meaning into it. The pad below keys on the OID's own length field
 	// instead, which is a value this walk reads and then validates a CLR
 	// against; a flag whose meaning is a correlation over one recording is not.
 	wide64ColumnRecordLeadLen = 1
@@ -497,9 +497,9 @@ const (
 	// wide64ColumnArrayAndContFlagLen is maxNoOfArrayElements and contFlag
 	// together, the way the 4-byte dialect spends five bytes on the pair
 	// without saying which owns the fifth. Twelve here, and pinned: the type
-	// OID's four-byte length sits exactly twelve bytes past maxLen on the
-	// object column, whose maxLen (2000) and OID (16 bytes behind a 0x10 CLR
-	// marker) are both real values.
+	// OID's four-byte length sits exactly twelve bytes past maxLen on all four
+	// recorded columns that carry one, whose maxLen (2000) and OID (16 bytes
+	// behind a 0x10 CLR marker) are both real values.
 	wide64ColumnArrayAndContFlagLen = 12
 
 	// wide64ColumnEmptyTypeOIDPad is what an **absent** type OID costs beyond
@@ -511,8 +511,8 @@ const (
 	// version-gated trailing integers, the data-use-case domain schema and name,
 	// and the annotation count — 18 bytes in the 4-byte dialect, 24 here. It is
 	// a span rather than five fields because only its first is ever non-zero in
-	// the corpus (the object column's `07`), so the rest have no boundaries to
-	// measure. A column carrying a 23ai SQL domain or an annotation would extend
+	// the corpus (`07` on the object columns, `0b` on the XMLTYPE one), so the
+	// rest have no boundaries to measure. A column carrying a 23ai SQL domain or an annotation would extend
 	// it and misalign the walk, which costs the describe (the caller falls back
 	// to scanAndPadColumnNames) and never a wrong name.
 	wide64ColumnRecordTailLen = 24
@@ -530,7 +530,7 @@ const (
 //     dialect spends five;
 //   - `version` is **one** byte where the 4-byte dialect spends two, and
 //     `charsetForm` is **two** where it spends one — measured on the object
-//     column, whose version is 1, and on the VARCHAR2(4000), whose charset id
+//     columns, whose version is 1, and on the VARCHAR2(4000), whose charset id
 //     (873), maximum character length (4000) and collation id (16382) pin every
 //     boundary around them;
 //   - an absent type OID costs eleven bytes more than its length field
@@ -580,8 +580,9 @@ func parseColumnDescribeWide64(c *dcursor) (string, int) {
 // bytes on a column carrying a 16-byte OID and 27 on one carrying none, while
 // the OID's own CLR is 17 — so the absent case spends **six more** bytes than
 // removing the CLR would account for, and the length field cannot simply move,
-// because the object column pins it twelve bytes past maxLen. No fixed layout
-// fits both; this one fits both and nothing in the corpus contradicts it.
+// because four recorded columns pin it twelve bytes past maxLen. No fixed layout
+// fits both; this one fits both, and the corpus it fits has the two cases side
+// by side in one describe (ociDescribeTypedQuery) rather than one of each.
 //
 // What the corpus cannot say is *why*, and the walk does not pretend to: the
 // eleven bytes are zero wherever they appear, so "padding an absent DLC" and

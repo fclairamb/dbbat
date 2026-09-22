@@ -922,7 +922,8 @@ session (`capture_oci_fixtures_integration_test.go`):
 - the IO vector's fixed header is **50 bytes** where the 4-byte dialect spends
   22, and its bind count sits at a different offset;
 - the descriptor header is the same field list at the same widths, plus one byte
-  before the first column record;
+  before the first column record — which turned out to be that record's own lead
+  byte rather than a header field, see below;
 - the descriptor's **trailing block is byte-for-byte identical** — the describe
   timestamp, four integers, an empty DLC, the cursor id;
 - and the per-column record in between is 25 bytes longer.
