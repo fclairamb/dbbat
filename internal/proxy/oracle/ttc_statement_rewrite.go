@@ -25,7 +25,7 @@ import (
 //
 // So `locateStatementRewrite` answers only when it can name, to the byte:
 //
-//   - the SQL-length field's offset, its encoded width and which of the three
+//   - the SQL-length field's offset, its encoded width and which of the four
 //     encodings it uses;
 //   - the span holding the statement value, with whatever CLR framing wraps it;
 //   - the statement bytes themselves.
@@ -36,7 +36,7 @@ import (
 // change it. It runs on every frame, not just on the first, and costs one
 // comparison of a few hundred bytes.
 //
-// Three shapes are covered, all of them measured against the recordings in
+// Four shapes are covered, all of them measured against the recordings in
 // testdata/ (see ttc_statement_rewrite_survey_test.go):
 //
 //   - **thin exec** (`03 5e`, and the same op stapled behind a `11 69` close
@@ -46,15 +46,23 @@ import (
 //     before the text; ojdbc and DBeaver write the run bare, with the header
 //     field as its only length. Both are handled, and told apart by what is
 //     actually in front of the run.
-//   - **OCI wide exec** (sqlplus, SQL*Developer, Instant Client): the length is
-//     a little-endian ub4 holding `sqlLen * 3` behind the `fe x8` pointer
-//     sentinel, and the CLR body carries the trailing NUL the client counts.
-//     The NUL rides along at the end of the run and needs no special case: the
-//     rewriter prepends to the *value*, not to the text. It covers the
-//     anonymous PL/SQL block with a bind that sqlplus staples behind a
-//     close-cursors piggyback too — a shape once thought to be outside this
+//   - **OCI wide exec, 4-byte dialect** (sqlplus, SQL*Developer, Instant
+//     Client): the length is a little-endian ub4 holding `sqlLen * 3` behind the
+//     `fe x8` pointer sentinel, and the CLR body carries the trailing NUL the
+//     client counts. The NUL rides along at the end of the run and needs no
+//     special case: the rewriter prepends to the *value*, not to the text. It
+//     covers the anonymous PL/SQL block with a bind that sqlplus staples behind
+//     a close-cursors piggyback too — a shape once thought to be outside this
 //     list, and measured not to be (testdata/sqlplus_refcursor.pcapng, and
 //     "A shape that was thought to be outside that count" in docs/oracle.md).
+//   - **OCI wide exec, 64-bit dialect** (the sqlplus bundled in the Oracle
+//     image, which is the client CI runs): the same field list at this
+//     dialect's widths, so the length sits at offset 33 rather than 21 — and it
+//     is a ub8 holding the **plain byte count**, not `sqlLen * 3`. Which of the
+//     two OCI readings applies comes from the session's learned dialect
+//     (`clientWide64Encoding`), never from sniffing the frame. No pcapng
+//     recording carries this client, so its measurement is
+//     testdata/oci64_parse_execs.hex — see the survey.
 //   - **OALL8** (`0x0e`, legacy pre-v315): `decodeVarLen` (1 byte / `0xFE`+2BE /
 //     `0xFF`+4BE) with the text immediately behind it and the bind count
 //     immediately behind that. No recording carries one, so it is covered by

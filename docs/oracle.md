@@ -2835,8 +2835,36 @@ The surface, all of it:
 |---|---|---|---|
 | thin exec `03 5e` (also stapled behind `11 69`) | go-ora, python-oracledb thin | TTC compressed int, **width grows with the value** | CLR short form: the length repeated as one byte in front of the text |
 | same op | ojdbc thin, DBeaver | same | **bare run** — the header field is its only length |
-| OCI wide exec | sqlplus, SQL\*Developer, Instant Client | `sqlLen * 3` as a little-endian ub4 behind the `fe x8` sentinel, fixed width | CLR short form, sometimes including a trailing NUL in the declared length |
+| OCI wide exec, **4-byte dialect** | sqlplus, SQL\*Developer, Instant Client | `sqlLen * 3` as a little-endian ub4 at offset 21, behind the `fe x8` sentinel, fixed width | CLR short form, sometimes including a trailing NUL in the declared length |
+| OCI wide exec, **64-bit dialect** | the sqlplus bundled in `gvenzl/oracle-free:23-slim` — the client CI runs | the **plain byte count** as a little-endian ub8 at offset 33, behind the same `fe x8` sentinel, fixed width | same |
 | `OALL8` (pre-v315) | legacy | `decodeVarLen`: 1 byte / `0xFE`+2BE / `0xFF`+4BE, width grows | none; the bind count sits immediately behind the text |
+
+The two OCI rows are one field list at two widths (see "Two OCI encodings, not
+one"), and they are separate rows because widening the first one would have been
+wrong twice over: the 64-bit header spends **eight** bytes on the sequence pad
+where the 4-byte one spends one — so options land at 17, the cursor id at 21, the
+sentinel at 25 and the length at 33 — and its length is the statement's byte
+count **rather than three times it**. Reading it with the `sqlLen * 3` convention
+would have declared three times the statement and re-encoded it consistently, so
+the round-trip identity would have passed while the server read a third of it.
+Which reading applies is decided by the session's learned dialect
+(`clientWide64Encoding`, off the client's own AUTH Phase 1), never by trying one
+layout after another: exclusively, the way `execNoStatementCursorAt` selects,
+because the exec headers are each other's near-misses.
+
+**This is the dialect the tag did not reach until 2026-09-22.** `stmtLenKind`
+named three encodings, none of them this one, so `execSQLLengthWideField` refused
+the header, `locateStatementRewrite` could not certify the frame, and — exactly
+as designed — every session on that client ran untagged start to finish. The
+behaviour was correct by the rule below; what was missing was the reading. It is
+`stmtLenWide64UB8` / `execSQLLengthWide64Field` now, measured against
+`testdata/oci64_parse_execs.hex` (`TestSurveyStatementRewriteWide64OCI`: all three
+recorded parses locate, rewrite to themselves byte for byte, and read back as the
+tagged statement) and live against a real 23ai by
+`TestIntegration_StatementTagFromOCIClient` and
+`TestIntegration_StatementTagFromOCIPLSQLCall` with
+`ORACLE_TEST_OCI_CLIENT=container` — both of which asserted `tagged=1` and were
+red on that client for this one reason.
 
 **OALL8 is written but not wired** (`oall8RewriteEnabled = false`). No recording
 in `testdata/` carries one and no client the e2e suite drives sends one, so
@@ -2847,7 +2875,7 @@ the run against itself and only the length half does any work. The encoder stays
 unit-tested as the specification of what to re-enable once a real OALL8 capture
 exists; see `specs/todos/2026-09-16-11-oracle-tag-oall8-rewrite.md`.
 
-Two of the three length encodings change *width* with their value, so growing a
+Two of the four length encodings change *width* with their value, so growing a
 statement can shift every byte behind the field — which is why the rewriter
 rebuilds the message rather than patching it. The CLR format change at 252 bytes
 is the one a tag provokes directly: a ~50-byte tag is exactly what pushes a
@@ -2897,6 +2925,24 @@ itself byte for byte and reading back as the tagged statement, across all five
 recorded client shapes (go-ora and python-oracledb thin as
 `compressed`/`clr-short`, ojdbc thin and DBeaver as `compressed`/`bare`, sqlplus
 as `wide-ub4`/`clr-short`).
+
+The sixth shape, `wide64-ub8`/`clr-short`, is not in that count and cannot be:
+no recording in `testdata/*.pcapng` is a 64-bit OCI session, because a bare relay
+never decodes that client's frames and so never records usable ones (see
+`ociFixtureProvenance`). It gets the same two properties against the hex fixture
+recorded through dbbat instead — `TestSurveyStatementRewriteWide64OCI` over
+`testdata/oci64_parse_execs.hex`, identity and round trip on all three parses,
+plus the length field read out of the frame's own bytes so that the plain-byte-
+count convention is pinned by something other than dbbat agreeing with itself.
+Two guards sit beside it, because a dialect selected by a flag has two ways to
+be wrong rather than one: `TestWide64StatementRewriteIsSelectedByTheSessionNotByTheBytes`
+requires that a 64-bit parse is refused under the other dialects' readings **and**
+that all 186 corpus frames are refused under the 64-bit one, so a mis-flagged
+session fails closed instead of overwriting eight bytes of somebody else's
+header; and `TestWide64DrivesCarryNoStatementToTag` requires that this dialect's
+`PRINT rc` drives are not offered to the locator at all — reading one as a frame
+the locator cannot certify is what would leave a whole sqlplus session untagged
+over a frame that never carried a statement.
 
 **A shape that was thought to be outside that count, and is not.** While the
 REF-cursor fixtures were being recorded (2026-09-19) an sqlplus session running
