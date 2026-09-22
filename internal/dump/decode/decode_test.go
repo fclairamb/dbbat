@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,15 +139,14 @@ func TestFile_PostgreSQL(t *testing.T) {
 	})
 }
 
-// TestFile_UnsupportedProtocol pins the deliberate refusal: the four other
-// protocols have no decoder yet, and a capture of one must say so rather than
-// print nothing or misread the bytes as PostgreSQL.
+// TestFile_UnsupportedProtocol pins the deliberate refusal: a capture of a
+// protocol with no decoder must say so rather than print nothing or misread
+// the bytes as something it is not.
 func TestFile_UnsupportedProtocol(t *testing.T) {
 	t.Parallel()
 
 	for _, protocol := range []string{
 		dump.ProtocolOracle,
-		dump.ProtocolMySQL,
 		dump.ProtocolMongo,
 		dump.ProtocolMSSQL,
 	} {
@@ -168,6 +168,56 @@ func TestFile_UnsupportedProtocol(t *testing.T) {
 	}
 
 	assert.True(t, Supported(dump.ProtocolPostgreSQL))
+	assert.True(t, Supported(dump.ProtocolMySQL))
+}
+
+// TestFile_MySQL is the end-to-end pass: a real capture written by dump.Writer,
+// read back through File, reader included.
+func TestFile_MySQL(t *testing.T) {
+	t.Parallel()
+
+	path := writeCapture(t, dump.ProtocolMySQL, []dump.Packet{
+		{
+			Direction: dump.DirClientToServer,
+			Data:      mysqlPacket(0, mysqlCommandPayload(gomysql.COM_QUERY, "SELECT email FROM customers")),
+		},
+		{
+			Direction: dump.DirServerToClient,
+			Data: mysqlPackets(
+				[]byte{0x01},
+				mysqlColumnDefPayload("email"),
+				mysqlTextRowPayload(strptr("alice@example.com")),
+				mysqlResultEndOKPayload(),
+			),
+		},
+	})
+
+	t.Run("redacted by default", func(t *testing.T) {
+		t.Parallel()
+
+		var out bytes.Buffer
+		require.NoError(t, File(path, Options{}, &out))
+
+		assert.Equal(t, []string{
+			"# mysql session 11111111-2222-3333-4444-555555555555",
+			`C> COM_QUERY "SELECT email FROM customers"`,
+			"<S ResultSet(1 cols)",
+			"<S ColumnDefinition",
+			"<S Row(1 cols)",
+			"<S OK affected=1 insertId=0 status=0x0002 warnings=0",
+		}, textOf(t, out.String()))
+
+		assert.NotContains(t, out.String(), "alice@example.com")
+	})
+
+	t.Run("--rows opts into values", func(t *testing.T) {
+		t.Parallel()
+
+		var out bytes.Buffer
+		require.NoError(t, File(path, Options{ShowRows: true}, &out))
+
+		assert.Contains(t, out.String(), `Row(1 cols) ["alice@example.com"]`)
+	})
 }
 
 func TestFile_MissingFile(t *testing.T) {

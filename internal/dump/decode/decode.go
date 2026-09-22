@@ -93,16 +93,24 @@ type splitter interface {
 // newSplitter picks the decoder for a capture's protocol. The protocol comes
 // from the capture header, never from sniffing the bytes.
 func newSplitter(protocol string, opts Options) (splitter, error) {
-	if protocol == dump.ProtocolPostgreSQL {
+	switch protocol {
+	case dump.ProtocolPostgreSQL:
 		return newPostgresSplitter(opts), nil
+	case dump.ProtocolMySQL:
+		return newMySQLSplitter(opts), nil
+	default:
+		return nil, fmt.Errorf("%w: %s", ErrUnsupportedProtocol, protocol)
 	}
-
-	return nil, fmt.Errorf("%w: %s", ErrUnsupportedProtocol, protocol)
 }
 
 // Supported reports whether a capture of the given protocol can be decoded.
 func Supported(protocol string) bool {
-	return protocol == dump.ProtocolPostgreSQL
+	switch protocol {
+	case dump.ProtocolPostgreSQL, dump.ProtocolMySQL:
+		return true
+	default:
+		return false
+	}
 }
 
 // File decodes the capture at path and writes the trace to out.
