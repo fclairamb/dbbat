@@ -294,12 +294,20 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// `oci_refcursor_drives.hex` fixture pair alone — so this is the line that
 	// makes a regression in it fail here. Two rather than three because sqlplus
 	// drives the cursor the script asks it to print, and the script prints twice.
+	// go_ora_lob.pcapng is the one entry that is not a REF cursor, and it is
+	// the LOB round trip's own shape: with a LOB in the select list Oracle
+	// turns row prefetch off, the describe comes back with no rows, and go-ora
+	// goes and fetches them — a statement-less execute naming the cursor it was
+	// just given. Its streamed sibling (go_ora_lob_stream.pcapng) is absent for
+	// the same reason inverted: asked for locators rather than bodies, the
+	// server prefetches the row into the describe and there is nothing to fetch.
 	assert.Equal(t, map[string]int{
 		"ojdbc6_legacy.pcapng":         1,
 		"go_ora_refcursor.pcapng":      3,
 		"jdbc_thin_refcursor.pcapng":   3,
 		"python_thin_refcursor.pcapng": 5,
 		"sqlplus_refcursor.pcapng":     2,
+		"go_ora_lob.pcapng":            1,
 	}, reexecs, "only these recordings carry an execute that declares no statement")
 }
 

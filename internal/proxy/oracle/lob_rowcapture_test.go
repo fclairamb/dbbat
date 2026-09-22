@@ -229,7 +229,7 @@ func TestLOBRowIsRefusedWhenTheFramingSkipLandsWrong(t *testing.T) {
 	types = append(types, describeColumnTypes(ociLOBColumns)...)
 	types = append(types, tnsTypeCHAR)
 
-	assert.Empty(t, parseRowStream(fetch, start, drifted, allColumns(drifted), nil, types),
+	assert.Empty(t, parseRowStream(fetch, start, drifted, allColumns(drifted), nil, types, oci64OERShape()),
 		"a walk that comes out of the framing on the wrong byte must cost the row, not fill it")
 }
 
