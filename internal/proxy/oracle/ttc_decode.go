@@ -2250,14 +2250,14 @@ func rowValueShapeOf(colTypes []int, col int) rowValueShape {
 // the next value begins. The four non-NULL locators are followed by the *same*
 // sixteen bytes whatever the type and whatever the length of the LOB behind
 // them — the block is framing, not content — and the NULL one, which sends a
-// zero-length locator, by four.
+// zero-length locator, by three.
 //
 // Nothing here is load-bearing on its own: a wrong skip drifts the columns
 // after it, and parseRowStream then refuses the whole row (rowEndsAtMarker)
 // rather than capturing one that decoded into the framing.
 const (
 	lobLocatorTrailerLen = 16
-	lobNullTrailerLen    = 4
+	lobNullTrailerLen    = 3
 )
 
 // objectImageSearchWindow bounds how far past an object locator skipObjectImage

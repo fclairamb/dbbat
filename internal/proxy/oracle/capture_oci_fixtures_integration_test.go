@@ -129,6 +129,37 @@ EXIT
 	}
 }
 
+// TestCapture_OCILOBFetchThroughDBBat re-records the LOB fetch fixture.
+//
+//	ORACLE_CAPTURE_OCI_FIXTURES=1 ORACLE_TEST_OCI_CLIENT=container \
+//	  go test -tags integration -run TestCapture_OCILOBFetchThroughDBBat ./internal/proxy/oracle/
+//
+// It is a capture of its own rather than a fourth script in the test above
+// because it needs nothing that one sets up — no procedures, no object types —
+// and because the fixture it writes is the one a failure in any of the others
+// must not take down with it.
+func TestCapture_OCILOBFetchThroughDBBat(t *testing.T) {
+	if os.Getenv(ociFixtureCaptureEnv) != "1" {
+		t.Skipf("set %s=1 to re-record the OCI fixtures", ociFixtureCaptureEnv)
+	}
+
+	env := startOracleThroughProxyForOCI(t, nil)
+	oci := requireOCIClient(t, env)
+
+	lobDump := recordOCIScriptThroughProxy(t, env, oci, "capture-oci-lob", `SET PAGESIZE 0
+SET FEEDBACK OFF
+`+ociLOBQuery+`
+EXIT
+`)
+
+	fixture := ociLOBFixture
+	if recordedDialectIsWide64(t, lobDump) {
+		fixture = oci64LOBFixture
+	}
+
+	writeLOBFetchHexFixture(t, lobDump, fixture)
+}
+
 // refCursorCaptureProcedure and scalarOutBindCaptureProcedure are the two
 // procedures the hex fixtures are recorded against. They are spelled out here
 // rather than shared with capture_refcursor_test.go because that file is behind

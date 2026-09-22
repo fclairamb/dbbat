@@ -238,9 +238,15 @@ func TestOCI64RowValuesAreNotOfferedToTheOtherTwoEncodings(t *testing.T) {
 //
 // It runs the pattern the walk keys on — 0x06, the 0x22 flag two bytes later,
 // and a 0x07 exactly 50 bytes in — over **every frame of every .hex fixture in
-// the corpus**, without the column-count check the walk also applies. It matches
-// twice: the two 64-bit ROW_HEADERs, at the column counts their describes
-// declare. Nowhere else, and on no 4-byte or compressed payload.
+// the corpus**, without the column-count check the walk also applies. Every
+// match is a real 64-bit ROW_HEADER, at the column count its own describe
+// declares. Nowhere else, and on no 4-byte or compressed payload.
+//
+// The last of them is the one the pattern was not originally written for: it is
+// the head of a **packet**, not a run of bytes inside a describe, because a
+// select list with a LOB in it defers the whole fetch (see oci64LOBFrames). That
+// it matches there under the same reading is what says fetchRowDataStart is the
+// same measurement rather than a second one.
 func TestOCI64RowHeaderPatternIsUniqueInTheCorpus(t *testing.T) {
 	t.Parallel()
 
@@ -278,6 +284,8 @@ func TestOCI64RowHeaderPatternIsUniqueInTheCorpus(t *testing.T) {
 	assert.Equal(t, []hit{
 		{fixture: oci64Describes, frame: 0, count: 1},
 		{fixture: oci64Describes, frame: 1, count: 8},
+		{fixture: oci64LOBFrames, frame: 0, count: 1},
+		{fixture: oci64LOBFrames, frame: 2, count: 13},
 	}, hits)
 }
 

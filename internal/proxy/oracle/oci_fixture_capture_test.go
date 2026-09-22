@@ -492,6 +492,115 @@ func writeDescribeHexFixture(t *testing.T, dumpPath, outPath string) {
 	t.Logf("%d describe responses written to %s", frames, outPath)
 }
 
+// oci64LOBFixture is the evidence behind the LOB row walk: an sqlplus session
+// whose select list carries LOBs, recorded through dbbat. It holds the query's
+// describe (TTC 0x10) and — the frame the whole fixture exists for — the
+// **separate** packet its rows arrive in (TTC 0x06).
+//
+// It is a fixture of its own rather than five more columns on ociDescribeQuery
+// because a LOB in the select list changes the *shape of the round trip*, not
+// just the column records: Oracle turns row prefetch off, so the describe comes
+// back with no rows at all and the fetch follows in a packet that opens with a
+// ROW_HEADER. Folding the two together would have left one frame standing for
+// both, and neither readable.
+const oci64LOBFixture = "testdata/oci64_lob.hex"
+
+// ociLOBFixture is the same recording from a 4-byte-dialect client. Which of
+// the two a run writes is decided by the recorded frames (recordedDialectIsWide64),
+// never by which client was asked for.
+const ociLOBFixture = "testdata/oci_lob.hex"
+
+// ociLOBQuery is a select list that alternates LOBs with ordinary columns, and
+// the alternation is the measurement rather than a flourish: each six-character
+// string says exactly where the value after the locator beside it begins, so the
+// framing between them can be counted instead of guessed.
+//
+// The five LOBs are chosen to separate what a single one conflates. `d1` and
+// `d2` are CLOBs of 4 and 26 characters — the same framing at two content
+// lengths, which is what says the block is framing and not content. `d3` is a
+// BLOB and `d4` an NCLOB, so the reading covers the family rather than the one
+// type that produced it. `d5` is a NULL CLOB, which sends a zero-length locator
+// and a shorter block, and it is the case a fixed skip would get wrong. `x1` is
+// an XMLTYPE: an opaque type, whose locator is followed by the object's own
+// image instead, and the reason the walk reads that image's header rather than
+// hard-coding its distance.
+//
+// `c7` is last and ordinary on purpose. Before this, a LOB anywhere in a select
+// list cost the *whole* row, so a query that ends in an ordinary column is
+// exactly the shape that has to come back.
+const ociLOBQuery = `SELECT 'aaaaaa' AS c1,
+       TO_CLOB('body') AS d1,
+       'bbbbbb' AS c2,
+       TO_CLOB('muchlongervalue-0123456789') AS d2,
+       'cccccc' AS c3,
+       TO_BLOB(UTL_RAW.CAST_TO_RAW('7a7a')) AS d3,
+       'dddddd' AS c4,
+       TO_NCLOB('nn') AS d4,
+       'eeeeee' AS c5,
+       XMLTYPE('<a/>') AS x1,
+       'ffffff' AS c6,
+       TO_CLOB(NULL) AS d5,
+       'gggggg' AS c7
+  FROM dual;`
+
+// writeLOBFetchHexFixture keeps every server payload of a recording that leads
+// with a describe (TTC 0x10) or with a ROW_HEADER (TTC 0x06), as one hex line
+// each.
+//
+// Both message types are kept because the pair is the point: on a select list
+// with a LOB in it the describe carries no rows and the ROW_HEADER packet
+// carries all of them, and a fixture holding only one of the two could not show
+// that. The selection is by the message's own leading byte, never by decoding
+// the frame.
+func writeLOBFetchHexFixture(t *testing.T, dumpPath, outPath string) {
+	t.Helper()
+
+	body := "# An sqlplus session through dbbat against Oracle 23ai Free whose select\n" +
+		"# list carries LOBs (see ociLOBQuery): every server payload that leads with\n" +
+		"# a describe (TTC 0x10) or a ROW_HEADER (TTC 0x06), as the TNS Data payload\n" +
+		"# with its two data-flag bytes first — exactly as extractTTCPayload gets it.\n" +
+		"#\n" +
+		"# The last two frames are the pair the fixture exists for: a describe that\n" +
+		"# carries no row values at all, because Oracle turns row prefetch off when a\n" +
+		"# LOB is in the select list, and the packet the whole fetch then arrives in.\n" +
+		"#\n" +
+		"# Regenerate with:\n" +
+		"#   ORACLE_CAPTURE_OCI_FIXTURES=1 ORACLE_TEST_OCI_CLIENT=container \\\n" +
+		"#     go test -tags integration -run TestCapture_OCILOBFetchThroughDBBat ./internal/proxy/oracle/\n"
+
+	describes, fetches := 0, 0
+
+	eachRecordedTNSPayload(t, dumpPath, func(clientToServer bool, payload []byte) {
+		if clientToServer {
+			return
+		}
+
+		ttc := extractTTCPayload(payload)
+		if len(ttc) == 0 {
+			return
+		}
+
+		switch ttc[0] {
+		case byte(TTCFuncQueryResult):
+			describes++
+		case byte(TTCFuncContinuation):
+			fetches++
+		default:
+			return
+		}
+
+		body += hex.EncodeToString(payload) + "\n"
+	})
+
+	require.Positive(t, describes, "the sqlplus session must have described at least one query")
+	require.Positive(t, fetches,
+		"the LOB query's rows must have arrived in a ROW_HEADER packet of their own — "+
+			"without one there is nothing here to pin")
+	require.NoError(t, os.WriteFile(outPath, []byte(body), 0o600))
+
+	t.Logf("%d describes and %d row packets written to %s", describes, fetches, outPath)
+}
+
 // writeStatementFrameHexFixture keeps every client frame of a recording whose
 // payload contains one of markers, as one hex line each.
 //
