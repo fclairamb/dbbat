@@ -148,7 +148,6 @@ func TestFile_UnsupportedProtocol(t *testing.T) {
 
 	for _, protocol := range []string{
 		dump.ProtocolOracle,
-		dump.ProtocolMSSQL,
 	} {
 		t.Run(protocol, func(t *testing.T) {
 			t.Parallel()
@@ -170,6 +169,53 @@ func TestFile_UnsupportedProtocol(t *testing.T) {
 	assert.True(t, Supported(dump.ProtocolPostgreSQL))
 	assert.True(t, Supported(dump.ProtocolMySQL))
 	assert.True(t, Supported(dump.ProtocolMongo))
+	assert.True(t, Supported(dump.ProtocolMSSQL))
+}
+
+// TestFile_MSSQL is the end-to-end pass over a real capture written by
+// dump.Writer, reader included.
+func TestFile_MSSQL(t *testing.T) {
+	t.Parallel()
+
+	batch := tdsPacket(tdsTypeSQLBatch, true,
+		mysqlConcat(tdsAllHeaders(), tdsUCS2("SELECT email FROM customers")))
+
+	response := tdsPacket(tdsTypeReply, true, mysqlConcat(
+		tdsColMetadata(tdsNVarCharColumn("email")),
+		tdsRow(tdsNVarCharValue("alice@example.com")),
+		tdsDone(1),
+	))
+
+	path := writeCapture(t, dump.ProtocolMSSQL, []dump.Packet{
+		{Direction: dump.DirClientToServer, Data: batch},
+		{Direction: dump.DirServerToClient, Data: response},
+	})
+
+	t.Run("redacted by default", func(t *testing.T) {
+		t.Parallel()
+
+		var out bytes.Buffer
+		require.NoError(t, File(path, Options{}, &out))
+
+		assert.Equal(t, []string{
+			"# mssql session 11111111-2222-3333-4444-555555555555",
+			`C> SQLBatch "SELECT email FROM customers"`,
+			"<S ColMetaData(1 cols)",
+			"<S Row(1 cols)",
+			"<S Done status=0x0010 rows=1",
+		}, textOf(t, out.String()))
+
+		assert.NotContains(t, out.String(), "alice@example.com")
+	})
+
+	t.Run("--rows opts into values", func(t *testing.T) {
+		t.Parallel()
+
+		var out bytes.Buffer
+		require.NoError(t, File(path, Options{ShowRows: true}, &out))
+
+		assert.Contains(t, out.String(), `Row(1 cols) ["alice@example.com"]`)
+	})
 }
 
 // TestFile_MongoDB is the end-to-end pass over a real capture written by

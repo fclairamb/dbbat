@@ -101,6 +101,8 @@ func newSplitter(protocol string, opts Options) (splitter, error) {
 		return newMySQLSplitter(opts), nil
 	case dump.ProtocolMongo:
 		return newMongoSplitter(opts), nil
+	case dump.ProtocolMSSQL:
+		return newMSSQLSplitter(opts), nil
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedProtocol, protocol)
 	}
@@ -109,7 +111,7 @@ func newSplitter(protocol string, opts Options) (splitter, error) {
 // Supported reports whether a capture of the given protocol can be decoded.
 func Supported(protocol string) bool {
 	switch protocol {
-	case dump.ProtocolPostgreSQL, dump.ProtocolMySQL, dump.ProtocolMongo:
+	case dump.ProtocolPostgreSQL, dump.ProtocolMySQL, dump.ProtocolMongo, dump.ProtocolMSSQL:
 		return true
 	default:
 		return false
