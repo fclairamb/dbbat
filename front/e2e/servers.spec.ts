@@ -87,9 +87,9 @@ test.describe("Servers Management", () => {
 
       // Look for form fields typical for database configuration
       const formContent = await authenticatedPage.textContent("body");
-      expect(
-        formContent?.toLowerCase()
-      ).toMatch(/host|port|database|name|connection/);
+      expect(formContent?.toLowerCase()).toMatch(
+        /host|port|database|name|connection/,
+      );
     }
   });
 
@@ -112,7 +112,7 @@ test.describe("Servers Management", () => {
     // trail. The input's native HTML5 pattern must catch that before any
     // request is made.
     const isValid = await nameInput.evaluate((el: HTMLInputElement) =>
-      el.checkValidity()
+      el.checkValidity(),
     );
     expect(isValid).toBe(false);
 
@@ -280,10 +280,10 @@ test.describe("Servers Management", () => {
 
     // Nothing is pinned yet, and this is *not* the insecure escape hatch.
     await expect(
-      row.locator('[data-testid^="tunnel-insecure-badge-"]')
+      row.locator('[data-testid^="tunnel-insecure-badge-"]'),
     ).toHaveCount(0);
     await expect(
-      row.locator('[data-testid^="tunnel-ca-pinned-badge-"]')
+      row.locator('[data-testid^="tunnel-ca-pinned-badge-"]'),
     ).toHaveCount(0);
   });
 
@@ -317,8 +317,8 @@ test.describe("Servers Management", () => {
     await expect(testButton).toBeVisible();
 
     const [response] = await Promise.all([
-      authenticatedPage.waitForResponse(
-        (r) => /\/api\/v1\/servers\/[^/]+\/test$/.test(r.url())
+      authenticatedPage.waitForResponse((r) =>
+        /\/api\/v1\/servers\/[^/]+\/test$/.test(r.url()),
       ),
       testButton.click(),
     ]);
@@ -360,15 +360,17 @@ test.describe("Servers Management", () => {
       await authenticatedPage.locator("#password").fill("oracle-password");
       await authenticatedPage.getByTestId("database-create-submit").click();
       await expect(
-        authenticatedPage.locator("tr", { hasText: name }).first()
+        authenticatedPage.locator("tr", { hasText: name }).first(),
       ).toBeVisible({ timeout: 10000 });
     };
 
     await createOracleRow(first, `oracle-${stamp}.db.example.com`);
     // Before the second row exists there is nothing to disagree with.
-    const firstRow = authenticatedPage.locator("tr", { hasText: first }).first();
+    const firstRow = authenticatedPage
+      .locator("tr", { hasText: first })
+      .first();
     await expect(
-      firstRow.locator('[data-testid^="database-oracle-conflict-"]')
+      firstRow.locator('[data-testid^="database-oracle-conflict-"]'),
     ).toHaveCount(0);
 
     await createOracleRow(second, `${stamp}.eu-west-3.rds.amazonaws.com`);
@@ -405,7 +407,7 @@ test.describe("Servers Management", () => {
     await authenticatedPage.locator("#password").fill("reopen-secret");
     await authenticatedPage.getByTestId("database-create-submit").click();
     await expect(
-      authenticatedPage.locator("tr", { hasText: name }).first()
+      authenticatedPage.locator("tr", { hasText: name }).first(),
     ).toBeVisible({ timeout: 10000 });
 
     // Reopening immediately is the interesting moment: while the dialog was
@@ -413,11 +415,15 @@ test.describe("Servers Management", () => {
     // `fixed inset-0 z-50` sheet over the trigger — so this click could be
     // swallowed and the retry would toggle the dialog straight back shut.
     await authenticatedPage.getByTestId("add-database-button").click();
-    await expect(authenticatedPage.getByTestId("protocol-select")).toBeVisible();
+    await expect(
+      authenticatedPage.getByTestId("protocol-select"),
+    ).toBeVisible();
 
     // And it comes back blank rather than pre-filled with the server just
     // created, password included.
-    await expect(authenticatedPage.getByTestId("database-name-input")).toHaveValue("");
+    await expect(
+      authenticatedPage.getByTestId("database-name-input"),
+    ).toHaveValue("");
     await expect(authenticatedPage.locator("#host")).toHaveValue("");
     await expect(authenticatedPage.locator("#username")).toHaveValue("");
     await expect(authenticatedPage.locator("#password")).toHaveValue("");
@@ -452,7 +458,7 @@ test.describe("Servers Management", () => {
 
     // Untouched, there is nothing to warn about yet.
     await expect(
-      authenticatedPage.getByTestId("server-rename-warning")
+      authenticatedPage.getByTestId("server-rename-warning"),
     ).toHaveCount(0);
 
     const input = authenticatedPage.getByTestId("database-rename-input");
@@ -467,10 +473,10 @@ test.describe("Servers Management", () => {
 
     await expect(dialog).not.toBeVisible({ timeout: 10000 });
     await expect(
-      authenticatedPage.locator("tr", { hasText: after }).first()
+      authenticatedPage.locator("tr", { hasText: after }).first(),
     ).toBeVisible({ timeout: 10000 });
     await expect(
-      authenticatedPage.locator("tr", { hasText: before })
+      authenticatedPage.locator("tr", { hasText: before }),
     ).toHaveCount(0);
   });
 
@@ -496,7 +502,7 @@ test.describe("Servers Management", () => {
 
     await row.locator('[data-testid^="database-rename-"]').click();
     await expect(
-      authenticatedPage.getByTestId("database-rename-dialog")
+      authenticatedPage.getByTestId("database-rename-dialog"),
     ).toBeVisible();
 
     const input = authenticatedPage.getByTestId("database-rename-input");
@@ -510,14 +516,14 @@ test.describe("Servers Management", () => {
     // The slug gate the create dialog enforces applies to the rename too: the
     // form's own pattern refuses to submit, so the dialog stays open.
     const isValid = await input.evaluate((el: HTMLInputElement) =>
-      el.checkValidity()
+      el.checkValidity(),
     );
     expect(isValid).toBe(false);
     await expect(
-      authenticatedPage.getByTestId("database-rename-dialog")
+      authenticatedPage.getByTestId("database-rename-dialog"),
     ).toBeVisible();
     await expect(
-      authenticatedPage.locator("tr", { hasText: name }).first()
+      authenticatedPage.locator("tr", { hasText: name }).first(),
     ).toBeVisible();
   });
 
@@ -565,6 +571,140 @@ test.describe("Servers Management", () => {
     await expect(editDialog).not.toBeVisible({ timeout: 10000 });
     await expect(sshSection.getByText(after)).toBeVisible({ timeout: 10000 });
   });
+
+  // The bastion in front of a cluster's API server used to be set-once: the
+  // create dialog offered it and the edit dialog did not, so changing it meant
+  // deleting the cluster and orphaning every database row dialed through it.
+  test("a Kubernetes cluster's bastion can be set and cleared from its edit dialog", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
+    await expect(sshSection).toBeVisible();
+
+    const stamp = Date.now();
+    const bastionName = `e2e_via_bastion_${stamp}`;
+    const clusterName = `e2e_via_cluster_${stamp}`;
+
+    // A bastion to dial through…
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("protocol-select").click();
+    await authenticatedPage.getByTestId("protocol-option-ssh").click();
+    await authenticatedPage
+      .getByTestId("database-name-input")
+      .fill(bastionName);
+    await authenticatedPage.locator("#host").fill("bastion.example.com");
+    await authenticatedPage.locator("#username").fill("bastion-user");
+    await authenticatedPage.locator("#password").fill("bastion-password");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+    await expect(
+      sshSection.locator("tr", { hasText: bastionName }),
+    ).toBeVisible({ timeout: 10000 });
+
+    // …and a cluster created *without* one, so the edit dialog is what sets it.
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("protocol-select").click();
+    await authenticatedPage.getByTestId("protocol-option-kubernetes").click();
+    await authenticatedPage
+      .getByTestId("database-name-input")
+      .fill(clusterName);
+    await authenticatedPage.locator("#host").fill("api.cluster.example.com");
+    await authenticatedPage.locator("#port").fill("6443");
+    await authenticatedPage.locator("#username").fill("dbbat");
+    await authenticatedPage.locator("#password").fill("sa-token");
+    await authenticatedPage.getByTestId("k8s-namespace-input").fill("data");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const clusterRow = sshSection.locator("tr", { hasText: clusterName });
+    await expect(clusterRow).toBeVisible({ timeout: 10000 });
+
+    const openClusterEdit = async () => {
+      await clusterRow.locator('[data-testid^="ssh-server-edit-"]').click();
+      const dialog = authenticatedPage.getByTestId("ssh-server-edit-dialog");
+      await expect(dialog).toBeVisible();
+      return dialog;
+    };
+
+    // Seeded from the row: nothing in front of it yet.
+    let dialog = await openClusterEdit();
+    const viaSelect = authenticatedPage.getByTestId(
+      "k8s-server-edit-via-select",
+    );
+    await expect(viaSelect).toContainText("Direct (no tunnel)");
+
+    await viaSelect.click();
+    await authenticatedPage
+      .getByRole("option", { name: new RegExp(`^${bastionName}`) })
+      .click();
+    await expect(viaSelect).toContainText(bastionName);
+    await authenticatedPage.getByTestId("ssh-server-edit-submit").click();
+    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+
+    // Re-read it from the server, not from the form state we just typed into.
+    await authenticatedPage.reload();
+    await authenticatedPage.waitForLoadState("networkidle");
+    await expect(clusterRow).toBeVisible({ timeout: 10000 });
+
+    dialog = await openClusterEdit();
+    await expect(
+      authenticatedPage.getByTestId("k8s-server-edit-via-select"),
+    ).toContainText(bastionName);
+
+    // And back to direct — a cleared selector has to send clear_via_uid, since
+    // an omitted via_uid would leave the bastion in place.
+    await authenticatedPage.getByTestId("k8s-server-edit-via-select").click();
+    await authenticatedPage
+      .getByRole("option", { name: "Direct (no tunnel)" })
+      .click();
+    await authenticatedPage.getByTestId("ssh-server-edit-submit").click();
+    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+
+    await authenticatedPage.reload();
+    await authenticatedPage.waitForLoadState("networkidle");
+    await expect(clusterRow).toBeVisible({ timeout: 10000 });
+
+    await openClusterEdit();
+    await expect(
+      authenticatedPage.getByTestId("k8s-server-edit-via-select"),
+    ).toContainText("Direct (no tunnel)");
+  });
+
+  // An SSH bastion has no via selector of its own: chaining one behind another
+  // is configured on the row that dials, and the create dialog does not offer
+  // it either.
+  test("an SSH bastion's edit dialog offers no via selector", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
+    await expect(sshSection).toBeVisible();
+
+    const name = `e2e_novia_bastion_${Date.now()}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("protocol-select").click();
+    await authenticatedPage.getByTestId("protocol-option-ssh").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("bastion.example.com");
+    await authenticatedPage.locator("#username").fill("bastion-user");
+    await authenticatedPage.locator("#password").fill("bastion-password");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = sshSection.locator("tr", { hasText: name });
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    await row.locator('[data-testid^="ssh-server-edit-"]').click();
+    await expect(
+      authenticatedPage.getByTestId("ssh-server-edit-dialog"),
+    ).toBeVisible();
+    await expect(
+      authenticatedPage.getByTestId("k8s-server-edit-via-select"),
+    ).toHaveCount(0);
+  });
 });
 
 // A database row's connection details — host, port, the upstream database
@@ -605,10 +745,10 @@ test.describe("Database row editing", () => {
 
     // Seeded from the row, and nothing has moved yet.
     await expect(
-      authenticatedPage.getByTestId("database-edit-host-input")
+      authenticatedPage.getByTestId("database-edit-host-input"),
     ).toHaveValue("localhost");
     await expect(
-      authenticatedPage.getByTestId("database-edit-target-warning")
+      authenticatedPage.getByTestId("database-edit-target-warning"),
     ).toHaveCount(0);
 
     await authenticatedPage
@@ -617,12 +757,12 @@ test.describe("Database row editing", () => {
 
     // Moving the target says what follows it, and counts what follows it.
     const warning = authenticatedPage.getByTestId(
-      "database-edit-target-warning"
+      "database-edit-target-warning",
     );
     await expect(warning).toBeVisible();
     await expect(warning).toContainText(/moves where the row points/i);
     await expect(
-      authenticatedPage.getByTestId("database-edit-target-counts")
+      authenticatedPage.getByTestId("database-edit-target-counts"),
     ).toContainText(/reference this row/i, { timeout: 10000 });
 
     await authenticatedPage.getByTestId("database-edit-submit").click();
@@ -638,7 +778,7 @@ test.describe("Database row editing", () => {
 
     await saved.locator('[data-testid^="database-edit-"]').click();
     await expect(
-      authenticatedPage.getByTestId("database-edit-host-input")
+      authenticatedPage.getByTestId("database-edit-host-input"),
     ).toHaveValue("127.0.0.2");
   });
 
@@ -671,7 +811,7 @@ test.describe("Database row editing", () => {
 
     await row.locator('[data-testid^="database-edit-"]').click();
     await expect(
-      authenticatedPage.getByTestId("database-edit-dialog")
+      authenticatedPage.getByTestId("database-edit-dialog"),
     ).toBeVisible();
 
     // One field, and a password rotation: the form sends exactly those two.
@@ -683,7 +823,7 @@ test.describe("Database row editing", () => {
       .fill("rotated-secret");
     await authenticatedPage.getByTestId("database-edit-submit").click();
     await expect(
-      authenticatedPage.getByTestId("database-edit-dialog")
+      authenticatedPage.getByTestId("database-edit-dialog"),
     ).not.toBeVisible({ timeout: 10000 });
 
     const servers = await request.get(`${API_BASE}/servers`, {
@@ -691,26 +831,26 @@ test.describe("Database row editing", () => {
     });
     expect(servers.status()).toBe(200);
     const uid = (await servers.json()).databases.find(
-      (db: { name: string; uid: string }) => db.name === name
+      (db: { name: string; uid: string }) => db.name === name,
     ).uid;
 
     const audit = await request.get(
       `${API_BASE}/audit?event_type=database.updated&limit=50`,
-      { headers: auth }
+      { headers: auth },
     );
     expect(audit.status()).toBe(200);
-    const entries: { details: Record<string, unknown> }[] = (
-      await audit.json()
-    ).audit_events;
+    const entries: { details: Record<string, unknown> }[] = (await audit.json())
+      .audit_events;
 
     const mine = entries.find(
       (entry) =>
-        (entry.details as { database_uid?: string }).database_uid === uid
+        (entry.details as { database_uid?: string }).database_uid === uid,
     );
     expect(mine).toBeTruthy();
 
-    const fields = (mine!.details as { updated_fields: Record<string, unknown> })
-      .updated_fields;
+    const fields = (
+      mine!.details as { updated_fields: Record<string, unknown> }
+    ).updated_fields;
 
     expect(fields.description).toBe("edited by e2e");
     expect(fields.password_changed).toBe(true);
