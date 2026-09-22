@@ -558,6 +558,15 @@ const ociLOBQuery = `SELECT 'aaaaaa' AS c1,
 func writeLOBFetchHexFixture(t *testing.T, dumpPath, outPath string) {
 	t.Helper()
 
+	// Which client the run must be started with to reproduce *this* file. The
+	// two OCI dialects are two bodies of evidence here — their LOB headers
+	// differ by two bytes — so a header naming the wrong one would send the
+	// next person to re-record the other dialect over it.
+	client := "ORACLE_TEST_OCI_CLIENT=path"
+	if recordedDialectIsWide64(t, dumpPath) {
+		client = "ORACLE_TEST_OCI_CLIENT=container"
+	}
+
 	body := "# An sqlplus session through dbbat against Oracle 23ai Free whose select\n" +
 		"# list carries LOBs (see ociLOBQuery): every server payload that leads with\n" +
 		"# a describe (TTC 0x10) or a ROW_HEADER (TTC 0x06), as the TNS Data payload\n" +
@@ -568,7 +577,7 @@ func writeLOBFetchHexFixture(t *testing.T, dumpPath, outPath string) {
 		"# LOB is in the select list, and the packet the whole fetch then arrives in.\n" +
 		"#\n" +
 		"# Regenerate with:\n" +
-		"#   ORACLE_CAPTURE_OCI_FIXTURES=1 ORACLE_TEST_OCI_CLIENT=container \\\n" +
+		"#   ORACLE_CAPTURE_OCI_FIXTURES=1 " + client + " \\\n" +
 		"#     go test -tags integration -run TestCapture_OCILOBFetchThroughDBBat ./internal/proxy/oracle/\n"
 
 	describes, fetches := 0, 0

@@ -23,33 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// goOraLOBQuery is ociLOBQuery with the XMLTYPE column removed and nothing else
-// changed — same names, same order, same values — so the two recordings line up
-// column for column.
-//
-// The removal is not a simplification, it is go-ora's limit: the driver has no
-// coder for XMLTYPE and refuses the *describe*, so a query carrying one never
-// reaches a fetch and records nothing at all. The opaque column is therefore
-// out of this dialect's reach, which costs nothing the walk depends on — the
-// object image's own header is read rather than measured, and already spans the
-// dialects (skipObjectImage). The LOB framing, which is not, is entirely here.
-//
-// It has no trailing semicolon because go-ora parses the text itself and reads
-// one as a syntax error, where sqlplus needs it.
-const goOraLOBQuery = `SELECT 'aaaaaa' AS c1,
-       TO_CLOB('body') AS d1,
-       'bbbbbb' AS c2,
-       TO_CLOB('muchlongervalue-0123456789') AS d2,
-       'cccccc' AS c3,
-       TO_BLOB(UTL_RAW.CAST_TO_RAW('7a7a')) AS d3,
-       'dddddd' AS c4,
-       TO_NCLOB('nn') AS d4,
-       'eeeeee' AS c5,
-       'ffffff' AS c6,
-       TO_CLOB(NULL) AS d5,
-       'gggggg' AS c7
-  FROM dual`
-
 // TestCapture_GoOraLOBInline records ociLOBQuery driven by go-ora with its
 // **default** LOB policy, and the default is the finding: a thin client asks
 // for the LOB bodies up front, so the server inlines them and the row carries

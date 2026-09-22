@@ -2376,9 +2376,9 @@ func rowValueShapeOf(colTypes []int, col int) rowValueShape {
 // that is not there. A thin client that asks for locators instead
 // (`lob fetch=post`, testdata/go_ora_lob_stream.pcapng) frames them a third way
 // again, and nothing in the describe tells the two apart — so those rows are
-// refused, exactly as they were before any of this. See
-// specs/todos for the follow-up that would need the client's own execute
-// options to decide it.
+// refused, exactly as they were before any of this. Telling them apart needs
+// the client's own execute read for the policy it asked for, which is
+// specs/todos/2026-09-22-09-oracle-a-thin-client-that-asks-for-lob-locators-loses-its-rows.md.
 //
 // None of it is load-bearing on its own: a wrong skip drifts the columns after
 // it, and parseRowStream then refuses the whole row (rowEndsAtMarker) rather
@@ -2617,6 +2617,11 @@ func readRowColumn(
 	offset += valLen
 
 	switch rowValueShapeOf(colTypes, col) {
+	case rowValueLOBLocator:
+		// Answered above, before the length byte was read: a LOB column does
+		// not open with one, which is the whole of what the dialects differ on.
+		return "", 0, false
+
 	case rowValueObjectImage:
 		next, ok := skipObjectImage(payload, offset)
 		if !ok {

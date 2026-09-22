@@ -1745,18 +1745,41 @@ Three type families do not send a length-prefixed datum:
 
 | Type | Codes | What the row carries |
 |---|---|---|
-| CLOB / NCLOB, BLOB, BFILE | 112, 113, 114 | a 40-byte locator, then **16 bytes** of framing — or, for a NULL LOB, a zero-length locator and **3** |
+| CLOB / NCLOB, BLOB, BFILE | 112, 113, 114 | a header and then a 40-byte locator — spelled differently in each dialect, see below |
 | Opaque (`SYS.XMLTYPE`) | 58 | a 36-byte locator, then framing, then the object's own image |
 | Named object type | 121 | the same |
 
 Reading one of those as a scalar and carrying on is what used to lose the rest of
 the row. `readRowColumn` steps over the framing instead:
 
-- **LOB** — the trailer lengths are measured off `testdata/oci64_lob.hex`, whose
-  query alternates LOBs with six-character strings so the distance between them
-  can be counted. Four non-NULL locators (two CLOBs at different content
-  lengths, a BLOB, an NCLOB) are followed by the *same* sixteen bytes, which is
-  what says the block is framing rather than content.
+- **LOB** — the framing started life as "16 bytes after a locator, 3 after a
+  NULL one", measured off the one recording there was
+  (`testdata/oci64_lob.hex`, the 64-bit OCI dialect). Recording the same query
+  on the other two says those sixteen were the sum of four fields, and that no
+  other dialect adds up to them:
+
+  | Dialect | What a LOB column carries | Recording |
+  |---|---|---|
+  | 64-bit OCI | `maxSize` ub4 LE · `size` ub8 LE · `chunkSize` ub4 LE · locator CLR | `testdata/oci64_lob.hex` |
+  | 4-byte OCI | `maxSize` ub4 LE · `size` **compressed** · `chunkSize` ub4 LE · locator CLR | `testdata/oci_lob.hex` |
+  | Thin / compressed | the LOB's **own bytes** as a CLR, then two compressed integers | `testdata/go_ora_lob.pcapng` |
+
+  So the 4-byte dialect's column is six bytes shorter than the skip it was being
+  given, and every row of such a fetch was refused — the same silent "no rows"
+  the LOB reading exists to end, one dialect over. Both OCI dialects spell the
+  locator's length **twice**, as the ub4 `maxSize` ahead of the header and as
+  the CLR length byte behind it, and only a column where the two agree is read
+  as a locator. A zero `maxSize` is the NULL LOB and ends the column there.
+
+  The thin dialect is not a locator at all: under the LOB policy a thin client
+  defaults to, the server inlines the contents, so dbbat captures the value
+  rather than a placeholder naming a handle that is not there. A thin client
+  that asks for locators instead (go-ora's `lob fetch=post`) frames the column a
+  third way again — two CLRs — and **nothing in the describe tells the two
+  apart**, because the difference was asked for in the execute's options. Those
+  rows are refused rather than guessed at; see
+  `TestThinStreamedLOBFetchIsRefusedRatherThanGuessed` and its fixture
+  `testdata/go_ora_lob_stream.pcapng`.
 - **Opaque / object** — the image header is *read*, not measured: the image
   length arrives twice, as a four-byte little-endian field and as a single byte,
   with a constant `0x01 0x00` between them. Two spellings of one number agreeing
@@ -1778,6 +1801,11 @@ the session's behalf is a statement the user never wrote — so the column is
 captured as `<CLOB locator>`, `<BLOB locator>` or `<BFILE locator>`: a marker
 naming the type, distinguishable from real data and from a NULL, which still
 captures as `""`.
+
+The same rule read the other way is why a **thin** session captures the value
+instead: there the contents *are* in the packet, because the client asked the
+server to inline them. The deciding fact is where the data is, not which type
+the column has.
 
 An **opaque or object** column keeps capturing its locator's bytes as hex, which
 is what it has always captured. The difference is not inconsistency but where the
