@@ -1652,7 +1652,7 @@ func scanRowValues(data []byte, numCols int, colTypes []int, shape oerShape) [][
 const ttcMsgRowHeader = 0x06
 
 // The 64-bit OCI dialect's ROW_HEADER, measured rather than inferred — see
-// findRowDataStartWide64 for what each constant is pinned by.
+// wide64RowDataStartAt for what each constant is pinned by.
 const (
 	wide64RowHeaderFlagOffset  = 2
 	wide64RowHeaderFlag        = 0x22
@@ -1660,15 +1660,72 @@ const (
 	wide64RowHeaderLen         = 50
 )
 
+// The 4-byte OCI dialect's ROW_HEADER, measured the same way — see
+// wideRowDataStartAt.
+const (
+	wideRowHeaderFlagOffset  = 1
+	wideRowHeaderFlag        = 0x22
+	wideRowHeaderCountOffset = 2
+	wideRowHeaderLen         = 22
+)
+
+// compressedRowHeaderInts is how many TTC compressed integers stand between the
+// compressed dialect's 0x22 flag and its ROW_DATA byte — see
+// compressedRowDataStartAt. The header has no fixed length there, because those
+// integers are self-sizing, so it is walked rather than measured.
+const compressedRowHeaderInts = 6
+
+// compressedRowHeaderCountUnit is the multiplier on the compressed header's
+// second integer, which carries the column count's high part: the count field
+// itself is a two-byte one, so a select list past 255 columns spills into it.
+// Every sample in the corpus has it zero (the widest is 45 columns), so this is
+// the one constant here the recordings do not exercise.
+const compressedRowHeaderCountUnit = 0x100
+
 // rowDataStart locates the first row value of a fetch, in whichever encoding the
 // session speaks. The row area itself is the same in all three (parseRowStream);
 // what differs is the ROW_HEADER object standing in front of it.
+//
+// The header is found by validating one at each candidate offset, never by
+// scanning forward from it for the ROW_DATA byte. That distinction is the whole
+// of specs/todos/2026-09-22-06: a forward scan reads the header's own column
+// count as the `0x07` that opens the rows whenever a query has exactly seven
+// columns, on both dialects that encode seven as the single byte 0x07.
 func rowDataStart(data []byte, numCols int, shape oerShape) int {
-	if shape.fixedWidth64 {
-		return findRowDataStartWide64(data, numCols)
+	for i := 0; i+1 < len(data); i++ {
+		if data[i] != ttcMsgRowHeader {
+			continue
+		}
+
+		if start := rowHeaderRowDataStart(data, i, numCols, shape); start >= 0 {
+			return start
+		}
 	}
 
-	return findRowDataStart(data)
+	return -1
+}
+
+// rowHeaderRowDataStart reads the ROW_HEADER that must begin at data[at] in the
+// encoding the session speaks, and returns the offset of the first row value —
+// or -1 when what is there is not that dialect's header for a numCols-column
+// fetch.
+//
+// All three readings fail closed the same way: the header's own column count
+// must be the describe's, and the ROW_DATA byte must land exactly where the
+// header ends.
+func rowHeaderRowDataStart(data []byte, at, numCols int, shape oerShape) int {
+	if numCols <= 0 || at < 0 || at >= len(data) || data[at] != ttcMsgRowHeader {
+		return -1
+	}
+
+	switch {
+	case shape.fixedWidth64:
+		return wide64RowDataStartAt(data, at, numCols)
+	case shape.fixedWidth:
+		return wideRowDataStartAt(data, at, numCols)
+	default:
+		return compressedRowDataStartAt(data, at, numCols)
+	}
 }
 
 // fetchRowDataStart locates the row values of a fetch response that arrives in
@@ -1676,47 +1733,23 @@ func rowDataStart(data []byte, numCols int, shape oerShape) int {
 // rather than embedding it behind a describe.
 //
 // It is rowDataStart with one extra demand: the header must sit at offset 0.
-// The two readings behind it scan, which is right in a QueryResult (the header
-// follows the column records) and wrong here, where scanning would let a
-// mid-stream continuation packet supply a header-shaped run of bytes from
-// inside its own row data. A fetch response leads with the object or it is not
-// one.
+// rowDataStart tries every offset, which is right in a QueryResult (the header
+// follows the column records) and wrong here, where it would let a mid-stream
+// continuation packet supply a header-shaped run of bytes from inside its own
+// row data. A fetch response leads with the object or it is not one.
 func fetchRowDataStart(data []byte, numCols int, shape oerShape) int {
-	if len(data) == 0 || data[0] != ttcMsgRowHeader {
-		return -1
-	}
-
-	start := rowDataStart(data, numCols, shape)
-	if start < 0 {
-		return -1
-	}
-
-	if shape.fixedWidth64 {
-		// The 64-bit header has a measured length, so a header at offset 0 puts
-		// the first value at exactly one byte past it.
-		if start != wide64RowHeaderLen+1 {
-			return -1
-		}
-
-		return start
-	}
-
-	if findBytes(data, []byte{ttcMsgRowHeader, 0x22}) != 0 {
-		return -1
-	}
-
-	return start
+	return rowHeaderRowDataStart(data, 0, numCols, shape)
 }
 
-// findRowDataStartWide64 locates the row values of a **64-bit** OCI fetch.
+// wide64RowDataStartAt reads a **64-bit** OCI fetch's ROW_HEADER at data[at].
 //
-// It exists because findRowDataStart below finds nothing at all on this dialect,
+// It exists because the compressed reading finds nothing at all on this dialect,
 // which is why a 64-bit OCI session captured rows that were empty JSON objects
-// even after its describes became readable: the two-byte `06 22` marker it looks
-// for is `06 01 22 xx` here, and no `06 22` pair occurs anywhere in the payload.
-// The values behind the header are byte-for-byte the same shape as the 4-byte
-// dialect's — a one-byte length then the raw bytes, which is what let both
-// fixtures be compared value by value.
+// even after its describes became readable: the two-byte `06 22` marker that
+// reading keys on is `06 01 22 xx` here, and no `06 22` pair occurs anywhere in
+// the payload. The values behind the header are byte-for-byte the same shape as
+// the 4-byte dialect's — a one-byte length then the raw bytes, which is what let
+// both fixtures be compared value by value.
 //
 // The header is measured off testdata/oci64_describe.hex, from the two frames
 // that carry one, against their counterparts in testdata/oci_describe.hex. The
@@ -1730,7 +1763,7 @@ func fetchRowDataStart(data []byte, numCols int, shape oerShape) int {
 //	+2       | ub4 column count    | 0x22 flag
 //	+3       |                     | padding, stale (0xaf / 0x59)
 //	+4       |                     | ub4 column count
-//	+6/+8    | ub4 = 0x00010000    | ub8 = 0x10000
+//	+6/+8    | ub2 = 0, ub2 = rows | ub8 = 0x10000
 //	+10/+16  | 3 × ub4 = 0         | 4 × ub8, then a ub2 = 0
 //	+22/+50  | 0x07 ROW_DATA       | 0x07 ROW_DATA
 //
@@ -1740,9 +1773,7 @@ func fetchRowDataStart(data []byte, numCols int, shape oerShape) int {
 // in both frames and at the same two offsets. That is what a 64-bit struct looks
 // like when the server writes a 32-bit value into it and leaves the top half
 // stale — and it is also why nothing here reads those slots. Their low halves
-// are zero in every sample, so the corpus says nothing about what they mean; the
-// 4-byte dialect's ub4 at +6 (0x00010000, identical on all four frames, both
-// dialects) is unread for the same reason.
+// are zero in every sample, so the corpus says nothing about what they mean.
 //
 // The reading fails closed, which is the behavior the dialect had before it
 // existed: the count must be the describe's own, and the ROW_DATA byte must land
@@ -1750,49 +1781,122 @@ func fetchRowDataStart(data []byte, numCols int, shape oerShape) int {
 // every .hex fixture in the corpus that pattern matches exactly twice — the two
 // 64-bit headers — and never on a 4-byte or compressed payload, so a session
 // offered the wrong reading gets no rows rather than plausible-looking ones.
-func findRowDataStartWide64(data []byte, numCols int) int {
-	if numCols <= 0 {
+func wide64RowDataStartAt(data []byte, at, numCols int) int {
+	if at+wide64RowHeaderLen >= len(data) {
 		return -1
 	}
 
-	for i := 0; i+wide64RowHeaderLen < len(data); i++ {
-		if data[i] != ttcMsgRowHeader || data[i+wide64RowHeaderFlagOffset] != wide64RowHeaderFlag {
-			continue
-		}
-
-		if data[i+wide64RowHeaderLen] != ttcMsgBindOutput {
-			continue
-		}
-
-		count := binary.LittleEndian.Uint32(data[i+wide64RowHeaderCountOffset : i+wide64RowHeaderCountOffset+4])
-		if int(count) != numCols {
-			continue
-		}
-
-		return i + wide64RowHeaderLen + 1
+	if data[at+wide64RowHeaderFlagOffset] != wide64RowHeaderFlag {
+		return -1
 	}
 
-	return -1
+	if data[at+wide64RowHeaderLen] != ttcMsgBindOutput {
+		return -1
+	}
+
+	count := binary.LittleEndian.Uint32(data[at+wide64RowHeaderCountOffset : at+wide64RowHeaderCountOffset+4])
+	if int(count) != numCols {
+		return -1
+	}
+
+	return at + wide64RowHeaderLen + 1
 }
 
-// findRowDataStart locates where row data begins in the response.
-// Finds the 0x06 0x22 marker, skips the descriptor, and positions
-// after the 0x07 separator that precedes the first row.
-func findRowDataStart(data []byte) int {
-	marker := []byte{0x06, 0x22}
-	idx := findBytes(data, marker)
-	if idx < 0 {
+// wideRowDataStartAt reads a **4-byte** OCI fetch's ROW_HEADER at data[at].
+//
+// The header is a measured 22 bytes, pinned the same way the 64-bit one was and
+// off the same recordings: the two frames of testdata/oci_describe.hex that
+// carry a header (column counts 1 and 8) and the four in sqlplus_*.pcapng
+// (counts 1, 2 and 3). The layout is the table above, read down the left-hand
+// column — `0x06`, the `0x22` flag, a ub4 column count, then a ub4 and three
+// more, all of which are 0 except the second half of the first (the fetch's
+// array size: 1 on both describe frames, 15 on the REF-cursor recording, which
+// is what says that slot is a field rather than padding). Then `0x07` at +22.
+//
+// It replaces a forward scan for that `0x07`, and the difference is a live bug
+// rather than a tidy-up: the byte the scan started on is the low byte of the
+// column count, so a seven-column fetch's own count *is* the `0x07` and the scan
+// returned +3 instead of +23, handing parseRowStream the middle of the header.
+// The count check is what makes the measured reading fail closed instead, the
+// way the 64-bit one does.
+func wideRowDataStartAt(data []byte, at, numCols int) int {
+	if at+wideRowHeaderLen >= len(data) {
 		return -1
 	}
 
-	// Skip past the marker + descriptor to find the 0x07 before first row
-	for offset := idx + 2; offset < len(data)-1; offset++ {
-		if data[offset] == 0x07 {
-			return offset + 1 // Start reading values after the 0x07
-		}
+	if data[at+wideRowHeaderFlagOffset] != wideRowHeaderFlag {
+		return -1
 	}
 
-	return -1
+	if data[at+wideRowHeaderLen] != ttcMsgBindOutput {
+		return -1
+	}
+
+	count := binary.LittleEndian.Uint32(data[at+wideRowHeaderCountOffset : at+wideRowHeaderCountOffset+4])
+	if int(count) != numCols {
+		return -1
+	}
+
+	return at + wideRowHeaderLen + 1
+}
+
+// compressedRowDataStartAt reads a **compressed/thin** fetch's ROW_HEADER at
+// data[at] — go-ora, python-oracledb thin, the JDBC thin driver, DBeaver.
+//
+// This dialect's header has no fixed length, because its integers are TTC
+// compressed ones that carry their own width, so it is **walked** rather than
+// measured: `0x06`, the `0x22` flag, then six compressed integers, then the
+// `0x07` that opens the rows. The field list is the 4-byte dialect's, which is
+// what says six is the count rather than a number that happened to fit —
+// counting the ub2 pair at +6 separately, that reading has six integers behind
+// its flag too.
+//
+// Pinned across every thin recording in testdata/ that carries a header
+// (go_ora*, python_thin*, jdbc_thin*, dbeaver*, ojdbc6_legacy), at column counts
+// 1, 2, 3, 4, 6, 9, 15, 35 and 45. Only two of the six fields ever vary: the
+// count, and the third one, which is the client's prefetch size (10 for the JDBC
+// thin driver, 25 and 1000 for go-ora, 2 and 100 for python-oracledb). The other
+// four are a single `0x00` byte in every sample, so whether they are integers or
+// bare bytes is not something the corpus can say — they are walked as integers
+// because the 4-byte dialect spells the same tail as three ub4s, and because a
+// compressed walk of a zero byte consumes exactly the one byte either way.
+//
+// Fails closed like the other two: the walk must land the `0x07` exactly, and
+// the count it read must be the describe's. That is what keeps it off the
+// `06 22` pairs that occur *inside* row data — the midfetch recordings carry
+// several — which the forward scan it replaces would happily have followed.
+func compressedRowDataStartAt(data []byte, at, numCols int) int {
+	if at+1 >= len(data) || data[at+1] != wideRowHeaderFlag {
+		return -1
+	}
+
+	pos, count, high := at+2, 0, 0
+
+	for field := range compressedRowHeaderInts {
+		val, n := readCompressedInt(data[pos:])
+		if n == 0 {
+			return -1
+		}
+
+		switch field {
+		case 0:
+			count = val
+		case 1:
+			high = val
+		}
+
+		pos += n
+	}
+
+	if pos >= len(data) || data[pos] != ttcMsgBindOutput {
+		return -1
+	}
+
+	if count+high*compressedRowHeaderCountUnit != numCols {
+		return -1
+	}
+
+	return pos + 1
 }
 
 // decodeOracleRawValue converts raw Oracle bytes to a readable string.
