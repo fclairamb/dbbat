@@ -82,6 +82,7 @@ dbbat/
 │   ├── approval/            # Registry of queries parked awaiting a human
 │   ├── mcp/                 # MCP server for AI agents; executes SQL by dialing our own proxy listeners (see docs/mcp.md)
 │   ├── dump/                # Session packet dump format (read/write/anonymise)
+│   │   └── decode/          # `dbbat dump decode`: a capture as one line per protocol message, redacted by default (PostgreSQL only so far)
 │   ├── api/                 # REST API handlers and middleware
 │   │   └── openapi.yml      # OpenAPI 3.0 specification
 │   ├── proxy/
@@ -174,6 +175,7 @@ This applies even when the current task is otherwise complete — capture the fo
 ./dbbat db rollback                # Rollback last migration group
 ./dbbat db status                  # Show migration status
 ./dbbat dump anonymise <in> [out]  # Strip session metadata from a .pcapng capture
+./dbbat dump decode <in> [--rows]  # Print a capture as one line per protocol message (PostgreSQL only so far; values redacted unless --rows)
 ./dbbat audit verify               # Walk the audit_log HMAC chain; non-zero exit on a break
 ./dbbat audit verify --queries [--connection <uid>]  # Same for the per-connection query chains
 ./dbbat audit verify --rows [--connection <uid>]     # Same for the per-query captured result row chains

@@ -381,6 +381,38 @@ python3 scripts/replay_dump.py <capture>.pcapng
 Programmatically, `internal/dump.Reader` yields `(RelativeNs, Direction, Data)`
 per payload, stripping the synthesized headers back off.
 
+## Decoding without Wireshark
+
+`dbbat dump decode <capture>.pcapng` prints the capture as one line per protocol
+message, both directions, with the offset from the start of the session:
+
+```
+234ms C> Execute portal="" maxRows=501
+251ms <S RowDescription(8 fields)
+329ms <S PortalSuspended
+329ms <S ReadyForQuery I
+```
+
+`C>` is client-to-server, `<S` is server-to-client, and a message split across
+packets is timed by the packet that completed it. The protocol comes from the
+capture header, never from sniffing the bytes; **PostgreSQL is the only one
+decoded so far** and a capture of any other protocol is refused by name rather
+than misread. `internal/dump/decode` does the framing itself — one type byte
+plus an int32 length, with the untyped `StartupMessage`/`SSLRequest` and the
+one-byte SSL answer handled first — and hands only complete messages to
+`pgproto3`.
+
+**Output is redacted by default**, because the point of a decoded trace is that
+it can be pasted into a bug report: `DataRow` values and bind parameters
+collapse to their count, `COPY` payloads to a byte count, and the backend key to
+its pid. `--rows` opts into the values and the column names. Authentication
+messages are named but their payloads — passwords, salts, SCRAM nonces, server
+signatures — are never printed, with or without `--rows`.
+
+A capture truncated by `DBB_DUMP_MAX_SIZE` loses whole packets, so its stream
+stops framing at some point. Everything decoded up to that point is still
+printed; the command then exits non-zero naming the packet it gave up on.
+
 ## Anonymisation
 
 `dbbat dump anonymise <input> [output]` produces a shareable copy:

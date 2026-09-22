@@ -22,6 +22,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/dump/decode"
 	"github.com/fclairamb/dbbat/internal/events"
 	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/proxy/mongodb"
@@ -1663,6 +1664,22 @@ func dumpCommand() *cli.Command {
 					return runDumpAnonymise(cmd)
 				},
 			},
+			{
+				Name: "decode",
+				Usage: "Print a capture as one line per protocol message, both directions " +
+					"(PostgreSQL captures only, for now)",
+				ArgsUsage: "<input-file>",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name: "rows",
+						Usage: "print result-row and bind-parameter values instead of their counts " +
+							"(authentication payloads stay redacted either way)",
+					},
+				},
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					return runDumpDecode(cmd)
+				},
+			},
 		},
 	}
 }
@@ -1878,6 +1895,25 @@ func runDumpAnonymise(cmd *cli.Command) error {
 		"path", outputPath,
 		"addresses_rewritten", rewriteAddresses,
 	)
+
+	return nil
+}
+
+var errDumpDecodeUsage = errors.New("usage: dbbat dump decode [--rows] <input-file>")
+
+// runDumpDecode prints a capture as a protocol trace on stdout: one line per
+// message, both directions, values redacted unless --rows was given.
+func runDumpDecode(cmd *cli.Command) error {
+	args := cmd.Args()
+	if args.Len() < 1 {
+		return errDumpDecodeUsage
+	}
+
+	opts := decode.Options{ShowRows: cmd.Bool("rows")}
+
+	if err := decode.File(args.Get(0), opts, os.Stdout); err != nil {
+		return fmt.Errorf("decode failed: %w", err)
+	}
 
 	return nil
 }
