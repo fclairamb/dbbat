@@ -470,7 +470,16 @@ that passes `limit + StatementTimeoutGrace` (2s, a constant, not a setting). The
 250ms poll means the kill lands within 2.25s of the limit. **Time parked on an
 approval hold does not count**: the clock starts when the statement is actually
 sent upstream, which a held statement has not been — and the server-side
-settings agree by construction, having never seen it.
+settings agree by construction, having never seen it. The clock is kept honest
+at every protocol boundary: PostgreSQL's extended protocol pops the pending
+queue on **all four** `Execute` terminators (`CommandComplete`, `ErrorResponse`,
+`EmptyQueryResponse`, `PortalSuspended` — a suspended portal is idle, not
+executing) and, as a backstop, finishes at each `ReadyForQuery` any pending
+entry whose batch the protocol has already closed (one RFQ answers one
+forwarded `Sync`/simple `Query`, and the entry stamps the count it was queued
+under), logging it as `no completion message from upstream`; on a termination,
+the limit text lands on the **oldest** in-flight entry — the statement the
+clock measured — and the others complete as aborted.
 
 On a trip, in this order: **cancel upstream, then close both sockets**. Closing
 alone is not enough — a PostgreSQL backend in a long sequential scan does not
