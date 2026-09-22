@@ -178,7 +178,7 @@ func execSQLLength(body []byte, wide64 bool) (int, bool) {
 }
 
 // execSQLLenField is where an exec op declares its statement's length, and in
-// which of the two encodings execSQLLength knows.
+// which of the three encodings execSQLLength knows.
 //
 // It exists for the rewriter, which has to put a *different* number in that
 // field: a decoder only needs the value, an encoder needs the exact span it
@@ -572,7 +572,8 @@ func execWide64NoStatementCursor(body []byte) (uint16, bool) {
 const wideCharWidth = 3
 
 // It keeps the field's position as well as its value, for the same reason
-// execSQLLengthField does: a decoder needs the number, an encoder needs the span.
+// execSQLLengthFieldFor does: a decoder needs the number, an encoder needs the
+// span.
 func execSQLLengthWideField(body []byte) (execSQLLenField, bool) {
 	const (
 		sentinelAt   = execWideSentinelAt
