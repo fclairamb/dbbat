@@ -3628,6 +3628,64 @@ surfaced there: `parseRowStream` treated a leading `0x08` as the end-of-rows foo
 the full footer fixes it. SQLcl SELECT results (columns + rows, single- and multi-row) are
 now captured like any other client.
 
+##### The 64-bit dialect's rows are behind a wider ROW_HEADER
+
+`scanRowValues` takes the same **encoding** axis `parseColumnDescribes` does, and for the
+same reason: reading a 64-bit OCI session's describes fixed its column *names* and left its
+values untouched, so its captured rows went from empty objects with no keys to empty objects
+with the right keys. Measured 2026-09-22 over both describe fixtures, one row per frame: the
+4-byte one yielded a row on the login probe and on the eight-column query, the 64-bit one
+yielded nothing on either.
+
+The values are not the problem and never were — a one-byte length then that many raw bytes,
+byte-for-byte the same shape in both dialects, which is what let the two fixtures be compared
+value for value. What differs is the **ROW_HEADER** object (`0x06`) standing in front of the
+`0x07` that opens the row data. `findRowDataStart` locates it by the two-byte pair `06 22`;
+on this dialect the header opens `06 01 22 xx`, so that pair occurs nowhere in the payload at
+all and the row area was never entered.
+
+Read off `testdata/oci64_describe.hex` against its 4-byte counterpart, on the two frames that
+carry a header — the login probe and the eight-column query, which is what varies the one
+field either reading takes from it:
+
+|  | 4-byte dialect | 64-bit dialect |
+|---|---|---|
+| +0 | `0x06` ROW_HEADER | `0x06` ROW_HEADER |
+| +1 | `0x22` flag | `0x01` |
+| +2 | ub4 column count | `0x22` flag |
+| +3 | | padding, stale (`0xaf` / `0x59`) |
+| +4 | | ub4 column count |
+| +6 / +8 | ub4 = `0x00010000` | ub8 = `0x10000` |
+| +10 / +16 | 3 × ub4 = 0 | 4 × ub8, then a ub2 = 0 |
+| +22 / +50 | `0x07` ROW_DATA | `0x07` ROW_DATA |
+
+**What says the wider tail is that field list at 64-bit widths** — rather than a guess that
+happens to total 50 — is where the non-zero bytes fall. Two of those four ub8 slots carry a
+non-zero **upper** half (`ffffa5a9…`, `ffffa382…` / `0001a382…`) over a zero lower half, at
+the same two offsets in both frames. That is what a 64-bit struct looks like when the server
+writes a 32-bit value into it and leaves the top half stale, and it is also why nothing reads
+those slots: their low halves are zero in every sample, so the corpus says what the layout is
+and nothing about what the fields mean. The 4-byte dialect's ub4 at +6 is unread for the same
+reason — `0x00010000` on all four frames of both fixtures, varying with nothing.
+
+`findRowDataStartWide64` therefore reads exactly one field, the column count, and **fails
+closed**: the count must be the describe's own and the `0x07` must land exactly where the
+header ends. Nothing is scanned for, so a payload offered the wrong reading yields no rows,
+which is the behaviour the dialect had before — not different ones.
+`TestOCI64RowHeaderPatternIsUniqueInTheCorpus` is what licenses the hard-coded length: run
+over every frame of every `.hex` fixture *without* the column-count check, the pattern matches
+exactly twice — the two 64-bit headers, at the counts their describes declare — and on no
+4-byte or compressed payload. `TestOCI64RowCaptureCarriesTheDescribesValues` holds the result
+to the bar `TestOCIRowCaptureCarriesTheDescribesColumnNames` sets, against the 4-byte
+fixture's own values column for column (the two temporal columns excepted, the recordings
+being ~40 s apart).
+
+> The third frame of **both** fixtures — `ociDescribeTypedQuery`, whose select list carries a
+> CLOB and an XMLTYPE — still captures no row, under either dialect. That is a different
+> defect with its own spec
+> (`2026-09-22-03-oracle-row-capture-drops-every-row-of-a-fetch-carrying-a-lob.md`): neither
+> frame carries a ROW_HEADER at all, so there is nothing here for this reading to find.
+
 #### A mid-fetch `0x08` is row data, not a Response
 
 The byte at TNS payload offset 2 is only a TTC function code **at a call boundary**. While
