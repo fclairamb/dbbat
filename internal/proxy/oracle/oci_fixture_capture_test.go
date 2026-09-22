@@ -347,27 +347,6 @@ const ociDescribeFixture = "testdata/oci_describe.hex"
 // fixed CHAR, a RAW, and an object whose record carries a non-null 16-byte type
 // OID (the one column that proves the toID field is a DLC with a four-byte
 // length rather than a bare CLR).
-//
-// The first eight columns are the original set and are kept in their original
-// order, because the 4-byte dialect's fixture is pinned against them by name and
-// by type. The five after them were added for the 64-bit dialect, where one
-// object column was not enough to say where that record's extra bytes sit
-// (specs/todos/2026-09-21-01-oracle-wide64-column-record-layout.md), and each
-// one separates an effect the original eight conflate:
-//
-//   - `o` and `objlong` carry a type OID like `obj` does, with a one-character
-//     name and a 7- and 33-character type name against `obj`'s 3 and 13. Three
-//     samples of the same shape at three lengths is what turns "consistent with
-//     one record" into a measured field, and `o` is also the column with a
-//     non-empty toID and a one-character name the spec asks for.
-//   - `cl` and `x` are the two shapes that might carry a type name *without* an
-//     ordinary object OID — a CLOB and a SYS.XMLTYPE. Whether 23ai actually
-//     sends either that way is the measurement, not the assumption.
-//   - `tail` is an ordinary NUMBER and it is deliberately **last**, which is the
-//     whole reason it exists: in the first recording the object column was the
-//     last column, so every per-record byte that differed on it was equally
-//     "the object column's" and "the last column's". With a scalar behind it the
-//     two stop being the same thing.
 const ociDescribeQuery = `SELECT CAST(1 AS NUMBER(10,2)) AS n2,
        CAST('x' AS VARCHAR2(4000)) AS big,
        1/3 AS flt,
@@ -375,26 +354,61 @@ const ociDescribeQuery = `SELECT CAST(1 AS NUMBER(10,2)) AS n2,
        SYSTIMESTAMP AS ts,
        CAST('ab' AS CHAR(5)) AS c5,
        UTL_RAW.CAST_TO_RAW('zz') AS r,
-       dbbat_cap_obj(1, 'x') AS obj,
+       dbbat_cap_obj(1, 'x') AS obj
+  FROM dual;`
+
+// ociDescribeTypedQuery is the second describe of the same session, and it
+// exists because the query above conflates three things its object column is
+// all of at once: the only column with a type OID, the only one with a schema
+// and type name, and the **last** column. Every byte the 64-bit dialect's
+// record spent differently on it was therefore equally all three, which is why
+// that record's extra 25 bytes could not be placed from the first recording
+// (specs/todos/2026-09-21-01-oracle-wide64-column-record-layout.md).
+//
+// Each column here separates one of them:
+//
+//   - `obj`, `o` and `objlong` are three object types at type-name lengths 13,
+//     7 and 33, at name lengths 3, 1 and 7. Three samples of one shape at two
+//     independent lengths is what turns "consistent with one record" into a
+//     measured field, and `o` is also the column with a non-empty toID and a
+//     one-character name.
+//   - `x` is a SYS.XMLTYPE: the same shape again at a *schema* length of 3
+//     against `SYSTEM`'s 6 — and, as it turned out, a column whose TTC type
+//     code isKnownTNSType did not cover at all (see tnsTypeOPAQUE).
+//   - `cl` is a CLOB: a column with no OID, schema or type name although its
+//     type is not a scalar one.
+//   - `tail` is an ordinary NUMBER and it is deliberately **last**, so "the
+//     object column" and "the last column" stop being the same record.
+//
+// It is a query of its own rather than five more columns on the one above for a
+// reason measured the moment they were: with a CLOB and an XMLTYPE in the
+// select list, the row capture of that describe's fetch comes back **empty**,
+// so folding them in would have cost
+// TestOCIRowCaptureCarriesTheDescribesColumnNames its row. That is a real gap
+// and it is filed as one
+// (specs/todos/2026-09-22-03-oracle-row-capture-drops-every-row-of-a-fetch-carrying-a-lob.md);
+// keeping the two queries apart is what stops it from being absorbed into a
+// spec about column records and never looked at again.
+const ociDescribeTypedQuery = `SELECT dbbat_cap_obj(1, 'x') AS obj,
        dbbat_o(2) AS o,
        dbbat_cap_object_with_a_long_name(3) AS objlong,
-       TO_CLOB('cl') AS cl,
        XMLTYPE('<a/>') AS x,
+       TO_CLOB('cl') AS cl,
        CAST(2 AS NUMBER(3)) AS tail
   FROM dual;`
 
-// oci64DescribeFixture is the 64-bit dialect's describe evidence. **Nothing
-// reads it yet**, and that is the honest status rather than an oversight: the
-// fixed-width column record is wider in that dialect, and the recording is what
-// turns the field boundaries from runs of zeros into measurable ones — a
-// charset id of 873, a maximum character length of 4000, a collation id of
-// 16382, a 16-byte object type OID. It is not enough on its own, because one
-// column carries all three of the variable-length fields at once, so the
-// walk that would consume it is deferred together with the columns it needs:
-// specs/todos/2026-09-21-01-oracle-wide64-column-record-layout.md, which starts
-// by extending the query above. It is recorded now because it comes free with
-// the session that records everything else, and re-recording it later would
-// mean re-recording all of them.
+// oci64DescribeFixture is the 64-bit dialect's describe evidence, and what
+// TestOCI64DescribeRecordsParse and parseColumnDescribeWide64 are pinned
+// against. The recording is what turns that record's field boundaries from runs
+// of zeros into measurable ones — a charset id of 873, a maximum character
+// length of 4000, a collation id of 16382, a version of 1, four 16-byte type
+// OIDs and three type names at three different lengths.
+//
+// Its first cut, taken with one object column at the end of the query, was not
+// enough on its own: that column carried all three variable-length fields at
+// once *and* was last, so three effects could not be separated. The five
+// columns the query grew afterwards are what separated them; see
+// ociDescribeQuery.
 const oci64DescribeFixture = "testdata/oci64_describe.hex"
 
 // ociDescribeObjectTypes are the object types ociDescribeQuery's object columns

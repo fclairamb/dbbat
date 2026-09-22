@@ -916,10 +916,8 @@ cursor id and therefore gated no drive: the pre-feature behaviour on the
 visible side, the same ungated re-execution underneath.
 
 The drive half is the header reading above at this dialect's widths. The
-bind-output half could not be the walk above widened, and
-`internal/proxy/oracle/refcursor_bind_wide64.go` says why rather than papering
-over it. Recorded from one live session
-(`capture_oci_fixtures_integration_test.go`):
+bind-output half could not be the walk above widened. Recorded from one live
+session (`capture_oci_fixtures_integration_test.go`):
 
 - the IO vector's fixed header is **50 bytes** where the 4-byte dialect spends
   22, and its bind count sits at a different offset;
@@ -927,24 +925,107 @@ over it. Recorded from one live session
   before the first column record;
 - the descriptor's **trailing block is byte-for-byte identical** — the describe
   timestamp, four integers, an empty DLC, the cursor id;
-- but the per-column record in between is 25 bytes longer, and *where* those 25
-  bytes sit cannot be decided from the recordings in hand. Seven are ahead of
-  the type OID (the object column in `testdata/oci64_describe.hex` pins that),
-  eleven appear only when that OID is absent, and the last seven only when the
-  schema and type names are absent too — and the corpus holds exactly **one**
-  column with any of those three non-empty, so the three effects cannot be
-  separated. Widening the record walk would mean shipping offsets no recording
-  can falsify. Closing that — by recording the columns that separate them — is
-  `specs/todos/2026-09-21-01-oracle-wide64-column-record-layout.md`, and it is
-  also what would let `parseColumnDescribes` read this dialect at all.
+- and the per-column record in between is 25 bytes longer.
 
-So the column records are not parsed at all. The walk is header-driven at both
-ends and anchors the middle on the trailing block's own signature: a DLC of
-exactly seven bytes carrying an Oracle DATE, which is checked for being one.
-What makes that safe is what makes the 4-byte walk safe — everything after the
-anchor must decode and the block must **land** on the message that follows it,
-so a layout this gets wrong yields *no id*, which is the behaviour the dialect
-had before. It does not yield a different number.
+###### Where those 25 bytes sit
+
+For a while, nowhere that could be written down. The first recording's describe
+held exactly **one** column with a type OID, and it was also the only column
+with a schema name, the only one with a type name, and the **last** column of
+the query — so every byte the record spent differently on it was equally "the
+object column's", "the column with an OID's" and "the last column's". Any
+placement consistent with the seven scalar columns was consistent with that one
+too, and shipping a field walk would have meant shipping offsets no recording
+could falsify. Hence the walk that shipped first: header-driven at both ends,
+anchoring the middle on the trailing block's own signature — a DLC of exactly
+seven bytes carrying an Oracle DATE — and validating by landing.
+
+The recording that closed it (2026-09-22) added a **second** describe to the
+same session — `ociDescribeTypedQuery` — whose six columns separate those
+effects one by one: three object types at type-name lengths **13**, **7** and
+**33** and name lengths 3, 1 and 7; a `SYS.XMLTYPE`, the same shape again at a
+*schema* length of 3 against `SYSTEM`'s 6; a CLOB, which carries none of the
+three although its type is not scalar either; and an ordinary NUMBER placed
+**last**. It is a query of its own rather than five more columns on the first
+one because with a CLOB and an XMLTYPE in the select list the row capture of
+that fetch comes back empty — a separate defect, filed as
+`specs/todos/2026-09-22-03-oracle-row-capture-drops-every-row-of-a-fetch-carrying-a-lob.md`.
+
+The record then comes apart cleanly, and every width below is read off a column
+whose value for that field is non-zero — runs of zeros decide nothing and were
+not asked to:
+
+| | 4-byte dialect | 64-bit dialect | pinned by |
+|---|---|---|---|
+| lead flag | — | **1 byte, before every record** | see below |
+| type, flag, precision, scale | 4 | 4 | `NUMBER(10,2)`, and `1/3`'s 0x81 |
+| maxLen | 4 | 4 | 4000 on a `VARCHAR2(4000)`, 2000 on the object |
+| maxNoOfArrayElements + contFlag | 5 | **12** | the type OID's length, 12 bytes past maxLen on four object columns |
+| type OID | `[len ub4][CLR]` | same, **plus 11 bytes when absent** | see below |
+| version | 2 | **1** | the object columns, whose version is 1 |
+| charsetID | 2 | 2 | 873 |
+| charsetForm | 1 | **2** | 1, between charsetID and a maxCharLen of 4000 |
+| maxCharLen, oaccollid | 8 | 8 | 4000 and 16382 |
+| allowNull, v7 name length | 2 | 2 | |
+| name, schema, type name | 3 DLCs | 3 DLCs | `O`/`OBJ`/`OBJLONG`, `SYS`/`SYSTEM`, `XMLTYPE`/`DBBAT_CAP_OBJ`/… |
+| trailing block | 18 | **24** | measured whole: only its first byte is ever non-zero |
+
+The fixed part is then a constant **87** bytes with the three DLCs empty and
+**76** with them present, across every column of both describes — which is what
+turns "a layout consistent with one record" into a measurement.
+
+Two of those rows are worth their own sentence.
+
+**The lead flag** is the extra byte that was first measured *before the first
+record*, and it is not a header field. Read as a trailing flag, the eight
+records of the original fixture come out with two different tail lengths — 25
+bytes on the seven scalar columns, 23 on the object one — for no reason any
+field could supply. Read as a **lead** byte, every tail is 24 and the record
+differs only in its DLC payloads. Its value is set on every column without a
+type OID and clear on every column with one, in both describes; the `TAIL`
+column is what says this is not "another record follows", because it is last and
+carries the flag set, while `X` two columns earlier carries it clear. The walk
+keys on the OID's own length field rather than on this byte, because that field
+is a value it reads and validates a CLR against.
+
+**The eleven bytes an absent type OID costs** are the one part of this record
+that is not a field list. The distance from maxLen to `version` is 33 bytes on a
+column carrying a 16-byte OID and 27 on one carrying none, while the OID's CLR
+is 17 — so the absent case spends six more than removing the CLR accounts for,
+and the length field cannot simply move, because four object columns pin it
+twelve bytes past maxLen. No fixed layout fits both. What the corpus cannot say
+is *why*: the eleven bytes are zero wherever they appear, so "padding an absent
+DLC" and "an inline area a present OID displaces" are the same bytes, and
+`wide64TypeOID` says so instead of picking one. It is the field's own, not every
+empty DLC's — the descriptor's trailing empty DLC, in the same payload, costs
+four bytes and nothing else.
+
+So the column records are now **walked**, in both places that need them:
+`parseColumnDescribes` reads this dialect's describes (it used to be handed the
+4-byte layout — `describeWireLayout` keyed on `fixedWidth` alone — misalign on
+the first record and return nil, dropping every one of that session's row
+captures back to `scanAndPadColumnNames`), and the bind-output walk reaches the
+cursor id *through* the records rather than around them, which lets it use
+`isKnownTNSType` as the alignment proof the anchored version could not.
+`TestOCI64DescribeRecordsParse` holds the first to the bar
+`TestOCIDescribeRecordsParse` sets for the 4-byte dialect: every name and every
+type of **both** describes, against the same two expected column lists the
+4-byte dialect's test uses — two marshalings of the same two queries, so the
+reading that says they agree is the reading that says both walks are right.
+
+What has not changed is what happens when the walk is wrong: everything after
+the records must still decode and the block must still **land** on the message
+that follows it, so a layout this gets wrong yields *no id*, which is the
+behavior the dialect had before. It does not yield a different number.
+`TestOCI64DecoyTailSignatureIsWalkedStraightPast` keeps the old anchored reading
+alive in the test file for one job — proving that the decoy it plants is one
+that reading actually fell for.
+
+> A `SYS.XMLTYPE` column reports TTC type **58**, which `isKnownTNSType` did not
+> cover. That is a finding from this fixture and not a 64-bit one: under *all
+> three* encodings, a query with an XMLTYPE column anywhere in its select list
+> had its whole describe discarded and captured its rows under the scanner's
+> guesses. See `tnsTypeOPAQUE`.
 
 The cross-check is the same cross-check, and it is falsifiable because the ids
 differ: `TestDumpReplay_OCI64RefCursorIDsMatchTheCursorsTheClientDrives` pairs

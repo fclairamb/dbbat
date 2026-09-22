@@ -41,18 +41,12 @@ func TestOCIDescribeRecordsParse(t *testing.T) {
 			"every describe an OCI session receives must parse under the fixed-width reading: frame %d", i)
 	}
 
-	cols := parseColumnDescribes(extractTTCPayload(frames[len(frames)-1]), ociOERShape())
+	require.Len(t, frames, 3, "the fixture must carry the login probe and both describes")
 
-	assert.Equal(t, []columnDesc{
-		{Name: "N2", Type: tnsTypeNUMBER},
-		{Name: "BIG", Type: tnsTypeVARCHAR},
-		{Name: "FLT", Type: tnsTypeNUMBER},
-		{Name: "D", Type: tnsTypeDATE},
-		{Name: "TS", Type: tnsTypeTSTZDTY},
-		{Name: "C5", Type: tnsTypeCHAR},
-		{Name: "R", Type: tnsTypeRAW},
-		{Name: "OBJ", Type: ociObjectColumnType},
-	}, cols)
+	assert.Equal(t, ociDescribeColumns,
+		parseColumnDescribes(extractTTCPayload(frames[1]), ociOERShape()))
+	assert.Equal(t, ociDescribeTypedColumns,
+		parseColumnDescribes(extractTTCPayload(frames[2]), ociOERShape()))
 }
 
 // ociObjectColumnType is the TTC type code 23ai reports for an object column in
@@ -126,11 +120,11 @@ func TestOCIRowCaptureCarriesTheDescribesColumnNames(t *testing.T) {
 				"N2":  "1",
 				"BIG": "x",
 				"FLT": "0.3333333333333333333333333333333333333333",
-				"D":   "2026-09-20 20:11:58",
-				"TS":  "2026-09-20 20:11:58.527544 +00:00",
+				"D":   "2026-09-22 08:24:34",
+				"TS":  "2026-09-22 08:24:34.244767 +00:00",
 				"C5":  "ab   ",
 				"R":   "7a7a",
-				"OBJ": "00000024002202085bf0bee82b6b0146e06303d7a8c0ea1b000000000000000000000000",
+				"OBJ": "00000024002202085c0f18b7351e0110e06304d7a8c09ec0000000000000000000000000",
 			},
 			scanned: []string{"N2", "BIG", "FLT", "TS", "C5", "OBJ", "SYSTEM", "DBBAT_CAP_OBJ"},
 		},

@@ -7,30 +7,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The column list of ociDescribeQuery as the 64-bit dialect's fixture records
-// it, name and TTC type code, in wire order. It is the bar TestOCIDescribeRecordsParse
-// sets for the 4-byte dialect, applied to this one — and it is a bar rather
-// than a smoke test because thirteen records only all come out right if every
-// field boundary in between is right.
+// The two describes of a recorded session, name and TTC type code, in wire
+// order — and one pair of lists for **both** OCI dialects on purpose. The two
+// fixtures are two marshalings of the same two queries against the same server,
+// so the reading that says they agree is the reading that says both walks are
+// right; two pairs of lists would let one drift into agreeing with itself.
 //
-// Which thirteen is the measurement. The first eight are the original query,
-// unchanged. The five after them were added to separate three things the
-// original conflated, and each pulls its weight here:
-//
-//   - `O`, `OBJLONG` and `X` carry a type OID like `OBJ` does, at type-name
-//     lengths 7, 33 and 7 against its 13, at name lengths 1, 7 and 1 against
-//     its 3, and — `X` alone — at schema length 3 against `SYSTEM`'s 6. Four
-//     records of one shape at three independent lengths is what turns "a layout
-//     consistent with one record" into a measurement.
-//   - `CL` is a CLOB: a column whose record carries **no** OID, schema or type
-//     name although its type is not a scalar one, which is what says the
-//     eleven-byte pad tracks the absent OID and not the column's type code.
-//   - `TAIL` is an ordinary NUMBER and it is the query's **last** column. In
-//     the first recording the object column was last, so the one byte that
-//     differed on it could equally have meant "no more records follow". It does
-//     not: `TAIL` carries that byte set and `X`, two columns earlier, carries
-//     it clear.
-var oci64DescribeColumns = []columnDesc{
+// ociDescribeColumns is ociDescribeQuery, unchanged since the 4-byte dialect's
+// walk was written against it.
+var ociDescribeColumns = []columnDesc{
 	{Name: "N2", Type: tnsTypeNUMBER},
 	{Name: "BIG", Type: tnsTypeVARCHAR},
 	{Name: "FLT", Type: tnsTypeNUMBER},
@@ -39,10 +24,31 @@ var oci64DescribeColumns = []columnDesc{
 	{Name: "C5", Type: tnsTypeCHAR},
 	{Name: "R", Type: tnsTypeRAW},
 	{Name: "OBJ", Type: ociObjectColumnType},
+}
+
+// ociDescribeTypedColumns is ociDescribeTypedQuery, the describe added to place
+// the 64-bit record's extra 25 bytes. Every column in it separates something the
+// list above conflates, and each pulls its weight here:
+//
+//   - `OBJ`, `O` and `OBJLONG` are one shape at type-name lengths 13, 7 and 33
+//     and name lengths 3, 1 and 7. Three samples at two independent lengths is
+//     what turns "a layout consistent with one record" into a measurement.
+//   - `X` is that shape again at a schema length of 3 against `SYSTEM`'s 6 —
+//     and its type code, 58, is one isKnownTNSType did not cover at all until
+//     this fixture produced it (tnsTypeOPAQUE).
+//   - `CL` is a CLOB: no OID, no schema, no type name, and not a scalar type
+//     either, which is what says the eleven-byte pad tracks the absent OID and
+//     not the column's type code.
+//   - `TAIL` is an ordinary NUMBER and it is **last**. In the first recording
+//     the object column was last, so the one byte that differed on it could
+//     equally have meant "no more records follow". It does not: `TAIL` carries
+//     that byte set and `X` carries it clear.
+var ociDescribeTypedColumns = []columnDesc{
+	{Name: "OBJ", Type: ociObjectColumnType},
 	{Name: "O", Type: ociObjectColumnType},
 	{Name: "OBJLONG", Type: ociObjectColumnType},
-	{Name: "CL", Type: ociCLOBColumnType},
 	{Name: "X", Type: tnsTypeOPAQUE},
+	{Name: "CL", Type: ociCLOBColumnType},
 	{Name: "TAIL", Type: tnsTypeNUMBER},
 }
 
@@ -78,8 +84,12 @@ func TestOCI64DescribeRecordsParse(t *testing.T) {
 			"every describe a 64-bit OCI session receives must parse under its own reading: frame %d", i)
 	}
 
-	cols := parseColumnDescribes(extractTTCPayload(frames[len(frames)-1]), oci64OERShape())
-	assert.Equal(t, oci64DescribeColumns, cols)
+	require.Len(t, frames, 3, "the fixture must carry the login probe and both describes")
+
+	assert.Equal(t, ociDescribeColumns,
+		parseColumnDescribes(extractTTCPayload(frames[1]), oci64OERShape()))
+	assert.Equal(t, ociDescribeTypedColumns,
+		parseColumnDescribes(extractTTCPayload(frames[2]), oci64OERShape()))
 }
 
 // TestOCI64DescribeIsNotOfferedToTheOtherTwoEncodings is the gate every reading

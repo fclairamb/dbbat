@@ -42,6 +42,7 @@ func TestCapture_SQLPlusDescribe(t *testing.T) {
 	body := ociDescribeObjectTypeScript() + `SET PAGESIZE 0
 SET FEEDBACK OFF
 ` + ociDescribeQuery + `
+` + ociDescribeTypedQuery + `
 ` + ociDescribeObjectDropScript() + `EXIT
 `
 

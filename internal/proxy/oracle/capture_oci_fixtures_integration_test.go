@@ -106,6 +106,7 @@ EXIT
 	describeDump := recordOCIScriptThroughProxy(t, env, oci, "capture-oci-describe", `SET PAGESIZE 0
 SET FEEDBACK OFF
 `+ociDescribeQuery+`
+`+ociDescribeTypedQuery+`
 EXIT
 `)
 

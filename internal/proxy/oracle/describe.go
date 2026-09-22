@@ -486,6 +486,12 @@ const (
 	// wide64ColumnRecordLeadLen is the one-byte flag every record opens with.
 	// See describeColumnLayoutWide64 for why it belongs to the record rather
 	// than to the header it first showed up in.
+	//
+	// Its **value** is set on every recorded column without a type OID and
+	// clear on every column with one, all thirteen of them — but the walk reads
+	// no meaning into it. The pad below keys on the OID's own length field
+	// instead, which is a value this walk reads and then validates a CLR
+	// against; a flag whose meaning is a correlation over one recording is not.
 	wide64ColumnRecordLeadLen = 1
 
 	// wide64ColumnArrayAndContFlagLen is maxNoOfArrayElements and contFlag
