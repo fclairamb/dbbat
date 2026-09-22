@@ -2309,8 +2309,8 @@ func decodeRowValue(colTypes []int, col int, b []byte) string {
 }
 
 // rowValueShape says how a column's value is laid out in the row stream. Only
-// the first is a length-prefixed datum; the other two are a locator followed by
-// bytes the scalar walk has no business reading as a value.
+// the first is a length-prefixed datum; the other three carry bytes behind the
+// value that the scalar walk has no business reading as the next column.
 type rowValueShape int
 
 const (
@@ -2325,6 +2325,10 @@ const (
 	// rowValueObjectImage is an opaque type (XMLTYPE) or a named object type: a
 	// length-prefixed locator, then framing, then the object's own image.
 	rowValueObjectImage
+
+	// rowValueLongInline is a LONG or LONG RAW: the value as a CLR, then the
+	// column's indicator and return code. See readInlineLongColumn.
+	rowValueLongInline
 )
 
 // rowValueShapeOf reads a column's shape off the describe's type codes. With no
@@ -2340,9 +2344,40 @@ func rowValueShapeOf(colTypes []int, col int) rowValueShape {
 		return rowValueLOBLocator
 	case tnsTypeOPAQUE, tnsTypeNamedObject:
 		return rowValueObjectImage
+	case tnsTypeLONG, tnsTypeLONGRAW:
+		return rowValueLongInline
 	}
 
 	return rowValueScalar
+}
+
+// rowColumnIsFramed reports whether this column's reading steps over bytes a
+// scalar walk would have read as the next column's value — which is both what
+// picks the reading in readRowColumn and what arms parseRowStream's
+// rowEndsAtMarker check.
+//
+// It takes the dialect because one of the four shapes is dialect-dependent: a
+// LONG column is read inline on the thin dialect and left on the scalar reading
+// on the two OCI ones, where nothing has been recorded. Asking the question in
+// one place is what keeps the two from drifting — a column read as a scalar but
+// counted as framed would hold an OCI row to a terminator it never had to land
+// on before.
+func rowColumnIsFramed(shape oerShape, colTypes []int, col int) bool {
+	switch rowValueShapeOf(colTypes, col) {
+	case rowValueLOBLocator, rowValueObjectImage:
+		return true
+
+	case rowValueLongInline:
+		// Both OCI dialects frame their LOB columns their own way and no
+		// recording says what they do with a LONG one, so they keep the reading
+		// they have always had rather than inheriting a shape measured
+		// somewhere else. See docs/oracle.md.
+		return !shape.fixedWidth
+
+	case rowValueScalar:
+	}
+
+	return false
 }
 
 // The LOB column's framing, and it is a *reading* rather than the pair of
@@ -2393,10 +2428,11 @@ const (
 	// whole of the difference between them.
 	lobFixedSize64Len = 8
 
-	// lobCompressedTrailingInts is how many compressed integers follow the
-	// inlined content on the thin dialect: the column's indicator and its
+	// inlineLongTrailingInts is how many compressed integers follow the value of
+	// a column the server sent inline on the thin dialect — a LONG, a LONG RAW,
+	// or a LOB a client re-declared as one: the column's indicator and its
 	// return code.
-	lobCompressedTrailingInts = 2
+	inlineLongTrailingInts = 2
 )
 
 // skipCompressedInt steps over a TTC compressed integer at payload[offset] and
@@ -2483,10 +2519,10 @@ func readFixedLOBColumn(
 // LONG. A define dbbat could not walk therefore lands here too, where a wrong
 // walk costs the row rather than filling it with framing bytes.
 func readCompressedLOBColumn(
-	payload []byte, offset int, colTypes []int, col int, lob lobRowShape,
+	payload []byte, offset int, shape oerShape, colTypes []int, col int, lob lobRowShape,
 ) (string, int, bool) {
 	if lob == lobRowInline {
-		return readCompressedInlineLOBColumn(payload, offset, colTypes, col)
+		return readInlineLongColumn(payload, offset, shape, colTypes, col)
 	}
 
 	return readCompressedLOBLocatorColumn(payload, offset, colTypes, col)
@@ -2563,31 +2599,44 @@ func readCompressedLOBLocatorColumn(
 // something other than a length — is not one.
 const lobLocatorMaxLen = 0xFB
 
-// readCompressedInlineLOBColumn reads a LOB column on the thin dialect when the
-// client re-declared it as a LONG and the server put the bytes in the row: a
-// CLR carrying the value, then the column's indicator and return code as two
-// compressed integers. A NULL LOB is the empty CLR with the same two behind it
-// (spelled -1 and 1405 — ORA-01403, "fetched column value is NULL" — rather
-// than 0 and 0, which is why they are skipped as integers instead of being
-// counted as a fixed block).
-func readCompressedInlineLOBColumn(
-	payload []byte, offset int, colTypes []int, col int,
+// readInlineLongColumn reads a column whose value the server put in the row
+// followed by the column's indicator and return code: a CLR carrying the value,
+// then two compressed integers. A NULL is the empty CLR with the same two
+// behind it (spelled -1 and 1405 — ORA-01403, "fetched column value is NULL" —
+// rather than 0 and 0, which is why they are skipped as integers instead of
+// being counted as a fixed block).
+//
+// Two families arrive in that shape and they are the same shape because they
+// are the same thing. A **LOB** a thin client re-declared as a LONG is, from
+// the server's side, a LONG column (see execDefineLOBShape). A **genuine** LONG
+// or LONG RAW column — one the describe itself reports as type 8 or 24 — is one
+// without the re-declaration. Measured 2026-09-22 on both thin drivers
+// (testdata/go_ora_long.pcapng, testdata/python_thin_long.pcapng): identical
+// framing, down to the `81 01` / `02 05 7d` a NULL spells its pair with.
+//
+// The one difference the LONG recordings added is the **value's** encoding. An
+// inlined LOB arrived as a short-form CLR, so this read a single length byte
+// and never saw anything else; a genuine LONG arrives as the 0xFE long form
+// whatever its length — 20 bytes of text came back as `fe 01 14 … 00`. So the
+// value is read as a CLR proper, in the long form this session negotiated
+// (shape.bigClrChunks), which also fixes the case that was always there and
+// never recorded: an inlined LOB over the 252-byte short-form limit is chunked
+// too, and was costing its row.
+func readInlineLongColumn(
+	payload []byte, offset int, shape oerShape, colTypes []int, col int,
 ) (string, int, bool) {
 	if offset >= len(payload) {
 		return "", 0, false
 	}
 
-	contentLen := int(payload[offset])
-	offset++
-
-	if contentLen > rowValueMaxLen || offset+contentLen > len(payload) {
+	raw, consumed := readCLRVariant(payload[offset:], shape.bigClrChunks)
+	if consumed == 0 || len(raw) > rowValueMaxLen {
 		return "", 0, false
 	}
 
-	raw := payload[offset : offset+contentLen]
-	offset += contentLen
+	offset += consumed
 
-	for range lobCompressedTrailingInts {
+	for range inlineLongTrailingInts {
 		next, ok := skipCompressedInt(payload, offset)
 		if !ok {
 			return "", 0, false
@@ -2596,7 +2645,7 @@ func readCompressedInlineLOBColumn(
 		offset = next
 	}
 
-	if contentLen == 0 {
+	if len(raw) == 0 {
 		return "", offset, true
 	}
 
@@ -2825,12 +2874,13 @@ const rowValueMaxLen = 4000
 // readRowColumn reads one column's value at payload[offset] and returns it with
 // the offset the next column starts at.
 //
-// A scalar column is a one-byte length and then that many bytes. The other two
-// shapes are not: an object or opaque column is a length-prefixed locator
-// followed by framing and the object's own image, and a LOB column is a header
+// A scalar column is a one-byte length and then that many bytes. The other
+// three shapes are not: an object or opaque column is a length-prefixed locator
+// followed by framing and the object's own image, a LOB column is a header
 // whose layout is the dialect's own (see readFixedLOBColumn and
-// readCompressedLOBColumn). Reading either as a scalar and then carrying on is
-// what used to lose the whole rest of the row.
+// readCompressedLOBColumn), and a LONG column is a CLR with its indicator and
+// return code behind it. Reading any of them as a scalar and then carrying on
+// is what used to lose the whole rest of the row.
 func readRowColumn(
 	payload []byte, offset int, shape oerShape, colTypes []int, col int, lob lobRowShape,
 ) (string, int, bool) {
@@ -2838,12 +2888,20 @@ func readRowColumn(
 		return "", 0, false
 	}
 
-	if rowValueShapeOf(colTypes, col) == rowValueLOBLocator {
+	switch rowValueShapeOf(colTypes, col) {
+	case rowValueLOBLocator:
 		if shape.fixedWidth {
 			return readFixedLOBColumn(payload, offset, shape, colTypes, col)
 		}
 
-		return readCompressedLOBColumn(payload, offset, colTypes, col, lob)
+		return readCompressedLOBColumn(payload, offset, shape, colTypes, col, lob)
+
+	case rowValueLongInline:
+		if rowColumnIsFramed(shape, colTypes, col) {
+			return readInlineLongColumn(payload, offset, shape, colTypes, col)
+		}
+
+	case rowValueScalar, rowValueObjectImage:
 	}
 
 	valLen := int(payload[offset])
@@ -2877,7 +2935,9 @@ func readRowColumn(
 
 		return decodeRowValue(colTypes, col, raw), next, true
 
-	case rowValueScalar:
+	case rowValueScalar, rowValueLongInline:
+		// rowValueLongInline reaches here only on an OCI dialect, where it is
+		// deliberately still read as a scalar — see the switch above.
 		fallthrough
 	default:
 		if valLen == 0 {
@@ -2906,9 +2966,38 @@ func rowEndsAtMarker(payload []byte, offset int) bool {
 	switch payload[offset] {
 	case 0x07, continuationDescriptorMarker, 0x08:
 		return true
-	default:
-		return false
 	}
+
+	return rowEndsAtEndOfData(payload, offset)
+}
+
+// rowEndsAtEndOfData reports whether offset sits on the OER object that ends a
+// fetch — ORA-01403, "no data found", the fourth thing that can legitimately
+// follow the last row of a row area.
+//
+// It is here because two clients end the same fetch differently: go-ora's rows
+// are followed by the 0x08 footer and then the OER, python-oracledb thin's run
+// straight into the OER with no footer at all (testdata/python_thin_long.pcapng
+// against testdata/go_ora_long.pcapng, the same two queries). Without this, a
+// python session lost the **last** row of every fetch with a framed column in
+// it — a LOB, an object or a LONG — because the row was refused for landing on
+// a perfectly good terminator.
+//
+// The signature is deliberately the whole object rather than its 0x04 marker
+// byte: the seven leading fields have to decode, and the error field has to be
+// 1403. A fourth accepted byte value would have widened the gate that makes
+// every framed reading in this package safe to get wrong; a decoded end-of-data
+// object is a measurement, the same kind the readings themselves are.
+//
+// The end-of-call bit decodeOERAt demands is *not* required, because this
+// object does not carry it: measured `callStatus 1, errNum 1403` on both thin
+// recordings. That bit separates an OER that ends the **call** from one
+// traveling inside a stream, which is a different question from the one asked
+// here.
+func rowEndsAtEndOfData(payload []byte, offset int) bool {
+	info, _ := decodeOERFieldsAt(payload, offset)
+
+	return info != nil && info.ErrorCode == oraNoDataFound
 }
 
 // parseRowStream decodes a run of compressed rows starting at payload[offset].
@@ -2968,7 +3057,7 @@ func parseRowStream(
 				break
 			}
 
-			skipped = skipped || rowValueShapeOf(colTypes, col) != rowValueScalar
+			skipped = skipped || rowColumnIsFramed(shape, colTypes, col)
 			row[col] = decoded
 			cur[col] = decoded
 			offset = next

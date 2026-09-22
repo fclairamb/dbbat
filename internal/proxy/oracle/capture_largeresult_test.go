@@ -63,6 +63,7 @@ func replayCapturedRowsUnder(t *testing.T, td *testDump, sqlMarker string, force
 		lastRow  []string
 		rows     [][]string
 		lobShape lobRowShape
+		oer      oerShape
 	)
 
 	if forced != nil {
@@ -72,6 +73,15 @@ func replayCapturedRowsUnder(t *testing.T, td *testDump, sqlMarker string, force
 	for _, pkt := range td.Packets {
 		if done {
 			break
+		}
+
+		// session.observeBigClrChunks's half of the pre-auth relay, and the
+		// reason it is read off the recording rather than assumed: the CLR long
+		// form a LONG column's value arrives in is the session's own
+		// negotiation, stated once in the Set Protocol reply. See
+		// readInlineLongColumn.
+		if pkt.Direction == dump.DirServerToClient && observeBigClrChunksFlag(pkt.Data) {
+			oer.bigClrChunks = true
 		}
 
 		tns, err := parseTNSFromDumpPacket(pkt.Data)
@@ -112,7 +122,7 @@ func replayCapturedRowsUnder(t *testing.T, td *testDump, sqlMarker string, force
 
 		switch funcCode { //nolint:exhaustive // only row-bearing response codes matter here
 		case TTCFuncQueryResult:
-			result := decodeQueryResultV2(ttcPayload, oerShape{}, lobShape)
+			result := decodeQueryResultV2(ttcPayload, oer, lobShape)
 			if result == nil {
 				continue
 			}
@@ -127,7 +137,7 @@ func replayCapturedRowsUnder(t *testing.T, td *testDump, sqlMarker string, force
 				lastRow = row
 			}
 		case TTCFuncContinuation:
-			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow, colTypes, oerShape{}, lobShape)
+			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow, colTypes, oer, lobShape)
 			for _, row := range contRows {
 				strRow := make([]string, len(row))
 				for i, v := range row {

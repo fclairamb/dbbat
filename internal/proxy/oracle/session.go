@@ -3253,7 +3253,14 @@ func (s *session) oerShapeSnapshot() oerShape {
 	s.oerMu.Lock()
 	defer s.oerMu.Unlock()
 
-	return s.oer.orDefault()
+	shape := s.oer.orDefault()
+
+	// Outside the learned/unlearned split on purpose, exactly as legacyLength is
+	// in nextOERFrame: the CLR long form is the session's own negotiation, fixed
+	// during the pre-auth relay, and no OER body carries it.
+	shape.bigClrChunks = s.clientBigClrChunks
+
+	return shape
 }
 
 func (s *session) nextOERFrame() (oerShape, int, byte) {

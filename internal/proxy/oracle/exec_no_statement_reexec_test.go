@@ -304,6 +304,14 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// That frame is what execDefineLOBShape reads. go_ora_lob_stream.pcapng is
 	// absent for the reason inverted: it asks for nothing, so there is no
 	// define, and the server prefetches the row into the describe.
+	//
+	// go_ora_long.pcapng's two are the same frame again, one per query, and they
+	// say the prefetch-off rule is the column's rather than the LOB's: a
+	// **genuine** LONG column turns it off too. The define re-declares each
+	// column as exactly what the describe reported — `96 8 96 96` and
+	// `96 24 96 96`, no substitution, because a column that is already a LONG
+	// has nothing to be re-declared as. python_thin_long.pcapng is absent
+	// because python-oracledb thin sends no define there at all.
 	assert.Equal(t, map[string]int{
 		"ojdbc6_legacy.pcapng":         1,
 		"go_ora_refcursor.pcapng":      3,
@@ -312,6 +320,7 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 		"sqlplus_refcursor.pcapng":     2,
 		"go_ora_lob.pcapng":            1,
 		"python_thin_lob.pcapng":       1,
+		"go_ora_long.pcapng":           2,
 	}, reexecs, "only these recordings carry an execute that declares no statement")
 }
 

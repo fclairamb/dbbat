@@ -87,6 +87,17 @@ type oerShape struct {
 	// stamped by nextOERFrame from the Accept. See session.tnsLegacyLength.
 	legacyLength bool
 
+	// bigClrChunks is the session's negotiated UseBigClrChunks
+	// (ServerCompileTimeCaps[37]&0x20), carried here for the one *reader* that
+	// needs it outside the AUTH exchange: a LONG column's row value, which
+	// arrives as a 0xFE long-form CLR whatever its length (see
+	// readInlineLongColumn). Like legacyLength it is neither learned nor
+	// learnable off an OER body — it is stamped from what the pre-auth relay
+	// observed (session.clientBigClrChunks) — and false is the conservative
+	// default for the same reason it is there: single-byte chunk lengths are
+	// what a server that never advertised the bit sends.
+	bigClrChunks bool
+
 	// tailLearned records that extraTailFields, fixedWidth and endOfResponse
 	// came from a real upstream OER rather than the default.
 	tailLearned bool
