@@ -355,14 +355,14 @@ func TestSurveyStatementRewriteWide64OCI(t *testing.T) {
 		back, ok := locateStatementRewrite(out, true, true)
 		require.Truef(t, ok, "frame %d: the tagged frame must locate again", i)
 		assert.Equalf(t, surveyTagPrefix+statement, back.text(), "frame %d", i)
-		assert.Equalf(t, len(tagged), len(back.run), "frame %d: the located run is the tagged one", i)
+		assert.Lenf(t, back.run, len(tagged), "frame %d: the located run is the tagged one", i)
 		assert.Equalf(t, uint64(len(tagged)),
 			binary.LittleEndian.Uint64(out[back.lenAt:back.lenAt+execWide64SQLLenWidth]),
 			"frame %d: the rewritten header must declare the tagged byte count", i)
 
 		// The field is fixed-width, so nothing behind it moved by more than the
 		// statement itself grew.
-		assert.Equalf(t, len(ttc)+len(surveyTagPrefix), len(out), "frame %d", i)
+		assert.Lenf(t, out, len(ttc)+len(surveyTagPrefix), "frame %d", i)
 	}
 }
 
