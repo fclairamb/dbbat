@@ -8,6 +8,7 @@
 //	docker run -d --name dbbat-ora-cap -p 51521:1521 -e ORACLE_PASSWORD=oracle gvenzl/oracle-free:23-slim
 //	# wait for "DATABASE IS READY TO USE!" in docker logs
 //	go test -tags capture -timeout 300s -run TestCapture_GoOraLOB ./internal/proxy/oracle/
+//	go test -tags capture -timeout 300s -run TestCapture_JDBCThinLOB ./internal/proxy/oracle/
 //	go test -tags capture -timeout 300s -run 'TestCapture_(GoOra|PythonThin)Long' ./internal/proxy/oracle/
 //
 // The two OCI dialects are recorded by TestCapture_OCILOBFetchThroughDBBat
@@ -19,6 +20,7 @@ package oracle
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -135,6 +137,88 @@ func TestCapture_PythonThinLOB(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoErrorf(t, err, "python client failed: %s", out)
 	t.Logf("python client: %s", out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
+// jdbcLOBSource runs goOraLOBQuery on Oracle's own JDBC thin driver with
+// **nothing configured**, which is the whole point of the recording: JDBC thin
+// prefetches LOB data by default (`oracle.jdbc.defaultLobPrefetchSize`), so it
+// is the one major thin client that had a documented reason to ask for the
+// bodies and no recording to say whether it does.
+//
+// Each value is reported by class name rather than read: reading a Clob would
+// issue LOB reads of its own, and those are not what this fixture is about.
+const jdbcLOBSource = `
+import java.sql.*;
+public class Lob {
+  public static void main(String[] a) throws Exception {
+    try (Connection c = DriverManager.getConnection("jdbc:oracle:thin:@//" + a[0], "system", "oracle");
+         Statement s = c.createStatement();
+         ResultSet rs = s.executeQuery(a[1])) {
+      ResultSetMetaData md = rs.getMetaData();
+      int n = md.getColumnCount();
+      StringBuilder cols = new StringBuilder();
+      for (int i = 1; i <= n; i++) cols.append(md.getColumnName(i)).append(":").append(md.getColumnTypeName(i)).append(" ");
+      System.out.println("columns: " + cols);
+      int rows = 0;
+      while (rs.next()) {
+        rows++;
+        for (int i = 1; i <= n; i++) {
+          Object v = rs.getObject(i);
+          System.out.println("  " + md.getColumnName(i) + " = " + (v == null ? "null" : v.getClass().getName()));
+        }
+      }
+      System.out.println("rows: " + rows);
+    }
+    System.out.println("ok");
+  }
+}
+`
+
+// TestCapture_JDBCThinLOB records goOraLOBQuery on JDBC thin with its own
+// default LOB policy.
+//
+// It is the fourth thin recording and the third thin driver, and the one the
+// other three could not answer for: go-ora's default inlines, python-oracledb
+// thin's default fetches locators, and JDBC's documented default prefetch said
+// nothing about which define block it writes to get there.
+func TestCapture_JDBCThinLOB(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_LOB_JDBC", "testdata/"+jdbcThinLOBFixture)
+	jar := captureEnv("OJDBC_JAR", "/opt/homebrew/Caskroom/sqlcl/26.1.0.086.1709/sqlcl/lib/ojdbc11.jar")
+
+	requireOracleReachable(t, oracleAddr)
+
+	if _, err := os.Stat(jar); err != nil {
+		t.Skipf("ojdbc jar not found at %s: %v", jar, err)
+	}
+
+	if _, err := exec.LookPath("javac"); err != nil {
+		t.Skipf("javac unavailable: %v", err)
+	}
+
+	dir := t.TempDir()
+	src := dir + "/Lob.java"
+	require.NoError(t, os.WriteFile(src, []byte(jdbcLOBSource), 0o600))
+
+	if out, err := exec.Command("javac", "-d", dir, src).CombinedOutput(); err != nil {
+		t.Skipf("javac failed: %v (%s)", err, out)
+	}
+
+	w := newCaptureWriter(t, outPath, "capture-jdbc-thin-lob")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	cmd := exec.CommandContext(t.Context(), "java", "-cp", dir+":"+jar, "Lob",
+		fmt.Sprintf("%s/%s", relayAddr, oracleService), goOraLOBQuery)
+
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "jdbc client failed: %s", out)
+	t.Logf("jdbc client: %s", out)
 
 	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
 	require.NoError(t, w.Close())

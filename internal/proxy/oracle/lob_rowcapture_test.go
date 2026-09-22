@@ -46,6 +46,20 @@ const (
 //	go test -tags capture -timeout 300s -run TestCapture_PythonThinLOB ./internal/proxy/oracle/
 const pythonThinLOBFixture = "python_thin_lob.pcapng"
 
+// jdbcThinLOBFixture is the fourth thin recording of the same query, and the
+// third thin *driver*: Oracle's own JDBC thin, with nothing configured.
+//
+// It is here because JDBC thin prefetches LOB data by default
+// (`oracle.jdbc.defaultLobPrefetchSize`), so "the driver asks for the bodies"
+// was a documented possibility with no measurement behind it — and a define
+// block dbbat could not walk would have left such a fetch on the locator
+// reading and refused every row of it. See
+// TestJDBCThinLOBFetchCapturesItsLocators for what it turned out to be.
+// Regenerate with:
+//
+//	go test -tags capture -timeout 300s -run TestCapture_JDBCThinLOB ./internal/proxy/oracle/
+const jdbcThinLOBFixture = "jdbc_thin_lob.pcapng"
+
 // goOraLOBSQLMarker picks the thin recordings' statement out of the dump. It
 // stops at the first column, so it is a substring of the text on the wire.
 const goOraLOBSQLMarker = "'aaaaaa' AS c1"
