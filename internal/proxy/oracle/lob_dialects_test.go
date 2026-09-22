@@ -430,26 +430,30 @@ func TestJDBCThinLOBFetchCapturesItsLocators(t *testing.T) {
 	assert.Equal(t, goOraLOBLocatorRow, rows[0])
 }
 
-// TestJDBCThinDefineBlockIsNotReadAndDoesNotNeedToBe is the other half of the
-// measurement, and it is a finding rather than a gap left open.
+// TestJDBCThinDefineBlockIsReadAndLearnsTheLocator is the other half of the
+// measurement, and what it pins is that **reading the frame and not reading it
+// arrive at the same row**.
 //
-// JDBC sends a define block for this cursor — the corpus census in
-// TestOJDBC6ReexecDoesNotDisturbTheParsePath counts it — and its entries are
-// the same record layout readDefineEntry walks on both other thin drivers. What
-// refuses it is defineTypeAgrees: ojdbc re-declares the ordinary CHAR columns
-// as VARCHAR2 (1), where go-ora and python-oracledb thin echo back the 96 the
-// describe reported, so no offset walks all twelve entries.
+// JDBC sends a define block for this cursor, and its entries are the same
+// record layout readDefineEntry walks on both other thin drivers. Until
+// 2026-09-23 defineTypeAgrees refused it anyway: ojdbc re-declares the ordinary
+// CHAR columns as VARCHAR2 (1) where go-ora and python-oracledb thin echo back
+// the 96 the describe reported, so no offset walked all twelve entries and
+// **no** JDBC thin session ever stated a reading, whatever it was asking for.
+// The measured 96 → 1 substitution closed that.
 //
-// Relaxing that would buy nothing. The ask JDBC is making is for **locators**
-// (it keeps each LOB column the LOB type it already was and takes the bodies as
-// prefetch), and a locator is exactly what a session that learned nothing reads.
-// So the rule stays tight and this recording pins that the fallback is the
-// right answer rather than a lucky one.
-func TestJDBCThinDefineBlockIsNotReadAndDoesNotNeedToBe(t *testing.T) {
+// The ask JDBC is making is for **locators** — it keeps each LOB column the LOB
+// type it already was and takes the bodies as prefetch — which is also what an
+// unlearned session falls back to. So the assertion here is deliberately about
+// the *mechanism*: the shape is now learned (ok is true) rather than defaulted,
+// and TestJDBCThinLOBFetchCapturesItsLocators above says the captured row did
+// not move a byte. That pair is what makes the relaxation a widening of what
+// dbbat can read rather than a change to what it records.
+func TestJDBCThinDefineBlockIsReadAndLearnsTheLocator(t *testing.T) {
 	t.Parallel()
 
 	shape, ok := lobShapeFromDump(t, loadTestDump(t, jdbcThinLOBFixture), describeColumnTypes(goOraLOBColumns))
 
-	assert.False(t, ok, "ojdbc's define re-declares CHAR as VARCHAR2, which the walk refuses")
-	assert.Equal(t, lobRowLocator, shape, "and what it falls back to is the reading JDBC actually asked for")
+	assert.True(t, ok, "ojdbc's define walks once the CHAR → VARCHAR2 spelling is accepted")
+	assert.Equal(t, lobRowLocator, shape, "and what it states is the locator reading JDBC actually asked for")
 }

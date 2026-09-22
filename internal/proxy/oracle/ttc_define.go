@@ -14,12 +14,15 @@ package oracle
 //	python-oracledb thin     testdata/python_thin_lob.pcapng    a locator
 //	JDBC thin, default       testdata/jdbc_thin_lob.pcapng      a locator, prefetched
 //
-// The fourth is the one this walk does **not** read, and it costs nothing:
-// ojdbc re-declares the ordinary CHAR columns as VARCHAR2, which
-// defineTypeAgrees refuses, so the session keeps the locator reading — which is
-// what JDBC was asking for. Its rows carry the LOB's head in front of the
-// locator as well, which is a row-walk concern rather than a define one; see
-// skipPrefetchedLOBValue.
+// The fourth is the one that costs the rule its exact-match shape: ojdbc
+// re-declares the ordinary CHAR columns as VARCHAR2 although it is changing
+// none of them, so defineTypeAgrees carries that pair as a second measured
+// substitution (one-way, 96 → 1). What the frame then says is *locators* —
+// JDBC keeps every LOB column the LOB type it already was — which is the same
+// answer an unread define falls back to, so the relaxation changed what dbbat
+// learns and not what it captures. Its rows carry the LOB's head in front of
+// the locator as well, which is a row-walk concern rather than a define one;
+// see skipPrefetchedLOBValue.
 //
 // The ask is a **define block**: an execute that declares no statement and
 // carries one entry per column of the cursor already described. A client that
@@ -39,8 +42,8 @@ package oracle
 // The walk is bounded the way every other reading in this package is: the
 // entries have to be exactly as many as the describe said, they have to fill
 // the frame to its last byte, and each one's type has to be the type the
-// describe gave or a LONG substituted for a LOB. Exactly one start offset may
-// satisfy all three, or nothing is learned.
+// describe gave or one of the two measured substitutions defineTypeAgrees
+// lists. Exactly one start offset may satisfy all three, or nothing is learned.
 
 // lobRowShape is how a LOB column's value is laid out in this session's rows on
 // the compressed dialect. The zero value is the locator, which is what the
@@ -233,16 +236,32 @@ func walkDefineEntries(body []byte, start int, describeTypes []int) ([]int, bool
 // defineTypeAgrees reports whether a define entry's type is one the describe's
 // type can turn into.
 //
-// The rule is deliberately tight. A client echoes the describe back for every
-// column it is not changing, so anything other than the same code is a walk
-// that landed on the wrong bytes — except for the one substitution this whole
-// reading exists to see, a LOB column re-declared as a LONG.
+// The rule is deliberately tight. A client mostly echoes the describe back for
+// every column it is not changing, so anything other than the same code is
+// usually a walk that landed on the wrong bytes. The exceptions are a **table**
+// rather than a rule, and each pair in it was read off a recording:
+//
+//   - a LOB column re-declared as a LONG (the substitution this whole reading
+//     exists to see), measured on testdata/go_ora_lob.pcapng;
+//   - a CHAR (96) column re-declared as a VARCHAR2 (1), measured on
+//     testdata/jdbc_thin_lob.pcapng, where ojdbc spells every ordinary CHAR
+//     column that way although it is changing none of them.
+//
+// Both are **one-way**. A CHAR declared as a LONG is not a LOB being inlined,
+// and a VARCHAR2 column re-declared as a CHAR is something no recording shows —
+// accepting either direction would widen the walk's per-byte search back toward
+// the near-miss the exact-match rule exists to close.
 func defineTypeAgrees(describeType, defined int) bool {
 	if describeType == defined {
 		return true
 	}
 
-	return isLOBTypeCode(describeType) && isLongTypeCode(defined)
+	if isLOBTypeCode(describeType) && isLongTypeCode(defined) {
+		return true
+	}
+
+	// ojdbc's scalar spelling, one-way: 96 may be declared 1, never the reverse.
+	return describeType == tnsTypeCHAR && defined == tnsTypeVARCHAR
 }
 
 // isLOBTypeCode reports whether a describe's type code is one of the three

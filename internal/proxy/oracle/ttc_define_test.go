@@ -54,14 +54,15 @@ func TestDefineBlockSaysWhichLOBReadingTheClientAsked(t *testing.T) {
 // is a frame with one chance per byte to look like one.
 //
 // The whole pcapng corpus is swept for a define naming twelve columns of
-// goOraLOBQuery's shape. Exactly two frames may answer — the two recordings
-// above that really do carry one — and every other client frame of every other
+// goOraLOBQuery's shape. Exactly three frames may answer — the three recordings
+// that really do carry one — and every other client frame of every other
 // recording must come back empty-handed.
 //
-// jdbc_thin_lob.pcapng is in the corpus and is deliberately **not** among the
-// answers, although it carries a define block for this very cursor: ojdbc
-// re-declares the ordinary CHAR columns as VARCHAR2, which the type-agreement
-// rule refuses. See TestJDBCThinDefineBlockIsNotReadAndDoesNotNeedToBe.
+// jdbc_thin_lob.pcapng is the third, and it is the census this test exists for:
+// it was refused until the CHAR → VARCHAR2 substitution was added to
+// defineTypeAgrees (2026-09-23), and the relaxation is only worth keeping
+// because exactly that one recording joined the answers and nothing else did.
+// See TestJDBCThinDefineBlockIsReadAndLearnsTheLocator.
 func TestDefineBlockIsNotFoundInFramesThatAreNotOne(t *testing.T) {
 	t.Parallel()
 
@@ -95,7 +96,8 @@ func TestDefineBlockIsNotFoundInFramesThatAreNotOne(t *testing.T) {
 	assert.Equal(t, map[string]int{
 		goOraLOBFixture:      1,
 		pythonThinLOBFixture: 1,
-	}, found, "only the two recordings that carry a define may be read as carrying one")
+		jdbcThinLOBFixture:   1,
+	}, found, "only the three recordings that carry a define may be read as carrying one")
 }
 
 // TestDefineBlockIsRefusedWhenMoreThanOneOffsetWalks pins the tie-break, and it
@@ -136,12 +138,16 @@ func TestDefineBlockIsRefusedWhenMoreThanOneOffsetWalks(t *testing.T) {
 }
 
 // TestDefineBlockNeedsEveryColumnToAgreeWithTheDescribe is the other half of
-// what makes the walk a measurement: a client echoes the describe back for
-// every column it is not changing, so anything else is a walk that landed on
-// the wrong bytes.
+// what makes the walk a measurement: a client mostly echoes the describe back
+// for every column it is not changing, so anything else is usually a walk that
+// landed on the wrong bytes.
 //
-// The LOB substitution is the one exception, and it is one-way — a CHAR column
-// re-declared as a LONG is not a LOB being inlined, it is a misread.
+// The exceptions are a table of two measured pairs, and **both are one-way**.
+// A CHAR column re-declared as a LONG is not a LOB being inlined, it is a
+// misread; and a VARCHAR2 column re-declared as a CHAR is not ojdbc's scalar
+// spelling, because no recording shows a client writing that direction. The
+// one-way half is the whole reason the relaxation is safe, so it is asserted
+// here rather than left implied.
 func TestDefineBlockNeedsEveryColumnToAgreeWithTheDescribe(t *testing.T) {
 	t.Parallel()
 
@@ -149,8 +155,12 @@ func TestDefineBlockNeedsEveryColumnToAgreeWithTheDescribe(t *testing.T) {
 	assert.True(t, defineTypeAgrees(tnsTypeCLOB, tnsTypeCLOB), "a LOB kept as itself is the ask for locators")
 	assert.True(t, defineTypeAgrees(tnsTypeCLOB, tnsTypeLongVarChar), "go-ora's CLOB substitution")
 	assert.True(t, defineTypeAgrees(tnsTypeBLOB, tnsTypeLONGRAW), "and its BLOB one")
+	assert.True(t, defineTypeAgrees(tnsTypeCHAR, tnsTypeVARCHAR), "ojdbc spells an unchanged CHAR column VARCHAR2")
+	assert.False(t, defineTypeAgrees(tnsTypeVARCHAR, tnsTypeCHAR), "but that pair is one-way: no client was seen writing the reverse")
 	assert.False(t, defineTypeAgrees(tnsTypeCHAR, tnsTypeLongVarChar), "a scalar is not a LOB being inlined")
+	assert.False(t, defineTypeAgrees(tnsTypeLongVarChar, tnsTypeCLOB), "and the LOB pair is one-way too")
 	assert.False(t, defineTypeAgrees(tnsTypeCLOB, tnsTypeBLOB), "nor is one LOB type another")
+	assert.False(t, defineTypeAgrees(tnsTypeVARCHAR, tnsTypeNUMBER), "and no other scalar pair agrees")
 }
 
 // TestMixedLOBDefineLearnsNothing pins the case no recording shows: a client
