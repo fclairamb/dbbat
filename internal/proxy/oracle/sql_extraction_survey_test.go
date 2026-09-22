@@ -498,6 +498,11 @@ func TestSurveyStapledOALL8(t *testing.T) {
 // measure the cost of. This half is the measurement that decided whether closing
 // that was worth a hot-path change, and the answer is in
 // TestSurveyWide64ScanReadsAPrefixPastTheShortCLRForm.
+//
+// Its long statements are encoded by dbbat's own rewriter rather than by a
+// client, for the reason wide64DerivedFrames spells out. The live version, where
+// sqlplus writes every byte itself, is
+// TestIntegration_OCILongStatementIsRecordedWhole.
 
 // wide64ScanReading is decodePiggybackExecSQL's fallback, and only its fallback:
 // the 40-70 offset window followed by the keyword scan. It is what a 64-bit OCI

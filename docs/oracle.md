@@ -344,6 +344,13 @@ A silent prefix is not a cosmetic misreading: it is what `read_only`,
 against, and what the `queries` row stores. A `MERGE` whose write clause sits
 past byte 252 was gated on its first 252 bytes and recorded as them.
 
+The survey's long statements are encoded by dbbat's **own** rewriter, which is
+sound for the header it reproduces byte for byte but is not a recorded client's
+CLR long form — no fixture carries a 64-bit statement past 251 bytes.
+`TestIntegration_OCILongStatementIsRecordedWhole` is the live version, where
+sqlplus writes every byte: a 322-byte statement whose tail marker starts at byte
+292, asserted present and byte-identical in the `queries` row.
+
 ### `ALTER SESSION SET …` and the statement gate
 
 Once the gate saw `ALTER SESSION SET …` for what it is, `ALTER` being in both
