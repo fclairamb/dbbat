@@ -85,10 +85,17 @@ const (
 //
 // Redaction follows the PostgreSQL splitter: statement text is printed, result
 // rows collapse to counts unless Options.ShowRows is set, and authentication
-// payloads are never printed either way. COM_STMT_EXECUTE parameters and
-// binary-protocol rows are always counted and never printed — decoding them
-// needs the prepared statement's type metadata, which a capture that starts
-// after the prepare does not carry.
+// payloads are never printed either way.
+//
+// Binary-protocol rows and COM_STMT_EXECUTE parameters are counted even under
+// --rows, and the reason is worth stating precisely for whoever extends this:
+// it is not that the types are out of reach. A binary result set re-sends its
+// column definitions, type byte included, ahead of its rows exactly as a text
+// one does — serverDefinition parses that very packet and keeps only the name
+// — and a COM_STMT_EXECUTE carries its own parameter types whenever the
+// new-params-bound flag is set, inheriting the previous execute's when it is
+// not. What is missing is the reader: a NULL bitmap plus a decoder per MySQL
+// type, which this pass did not write.
 type mysqlSplitter struct {
 	opts Options
 
@@ -218,10 +225,11 @@ func (m *mysqlSplitter) clientMessage(payload []byte) (string, error) {
 		return m.clientHandshake(payload), nil
 	case mysqlClientAuth:
 		// A password, a scramble or a public-key request. Named, never
-		// printed, and --rows does not lift this.
+		// printed: the rendering is a free function precisely so that no
+		// Options is reachable from it and --rows cannot grow a way in.
 		m.clientPhase = mysqlClientCommand
 
-		return fmt.Sprintf("AuthResponse(%d bytes, redacted)", len(payload)), nil
+		return formatMySQLAuthResponse(payload), nil
 	case mysqlClientInfile:
 		return m.clientInfile(payload), nil
 	case mysqlClientCommand:
@@ -332,11 +340,11 @@ func (m *mysqlSplitter) serverAuth(payload []byte) string {
 	case gomysql.MORE_DATE_HEADER:
 		m.clientPhase = mysqlClientAuth
 
-		return fmt.Sprintf("AuthMoreData(%d bytes, redacted)", len(payload)-1)
+		return formatMySQLAuthMoreData(payload)
 	default:
 		m.clientPhase = mysqlClientAuth
 
-		return fmt.Sprintf("AuthPacket(%d bytes, redacted)", len(payload))
+		return formatMySQLAuthPacket(payload)
 	}
 }
 

@@ -1,6 +1,7 @@
 package decode
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -384,6 +385,47 @@ func TestMySQLSplitter_PartialMessagesYieldNothing(t *testing.T) {
 	assert.Equal(t,
 		[]string{`2ms C> COM_QUERY "SELECT 1"`},
 		feedSplitter(t, split, 2*ms, dump.DirClientToServer, query[len(query)-1:]),
+	)
+}
+
+// TestMySQLSplitter_LargePayloadContinuation exercises the one framing rule
+// that has no counterpart in the other four protocols: a payload of exactly
+// 0xFFFFFF bytes is not a message, it is a chunk, and the next packet carries
+// the rest. The rule fires only at that exact length, so nothing short of a
+// real 16MB packet proves the branch is taken — a TCP-level split at an
+// arbitrary offset exercises the buffering, not this.
+//
+// Two full chunks are used rather than one, because a splitter that handled
+// the first continuation and then treated the second as a fresh message would
+// pass a single-chunk test.
+func TestMySQLSplitter_LargePayloadContinuation(t *testing.T) {
+	t.Parallel()
+
+	// COM_STMT_SEND_LONG_DATA is the command to build this out of: its
+	// rendering reports the payload's byte count without echoing it, so the
+	// assertion stays one line while still proving every byte arrived.
+	head := []byte{gomysql.COM_STMT_SEND_LONG_DATA, 7, 0, 0, 0, 0, 0}
+
+	const tailLen = 123
+
+	split := newMySQLSplitter(Options{})
+
+	assert.Empty(t, feedSplitter(t, split, 0, dump.DirClientToServer,
+		mysqlPacket(0, mysqlConcat(head, make([]byte, mysqlMaxPayload-len(head))))))
+	assert.Empty(t, feedSplitter(t, split, ms, dump.DirClientToServer,
+		mysqlPacket(1, make([]byte, mysqlMaxPayload))))
+
+	// The short packet is what ends the run, and the message is timed by it.
+	lines := feedSplitter(t, split, 2*ms, dump.DirClientToServer,
+		mysqlPacket(2, make([]byte, tailLen)))
+
+	// Two full chunks plus the tail, less the command byte, the statement id
+	// and the parameter id.
+	const wantBytes = 2*mysqlMaxPayload + tailLen - 7
+
+	assert.Equal(t,
+		[]string{fmt.Sprintf("2ms C> COM_STMT_SEND_LONG_DATA stmt=7 (%d bytes)", wantBytes)},
+		lines,
 	)
 }
 

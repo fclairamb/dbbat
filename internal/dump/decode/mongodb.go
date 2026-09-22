@@ -166,7 +166,7 @@ func (m *mongoSplitter) renderOpMsg(direction byte, requestID, responseTo int32,
 	if mongoIsCredentialCommand(name, command) {
 		m.markRedacted(requestID)
 
-		return name + " (redacted)" + mongoFlagSuffix(flags)
+		return formatMongoRedactedCommand(name) + mongoFlagSuffix(flags)
 	}
 
 	return formatMongoCommand(name, command, sections, m.opts) + mongoFlagSuffix(flags)
@@ -178,7 +178,7 @@ func (m *mongoSplitter) renderReplyBody(responseTo int32, command bson.Raw, sect
 	if m.redactedRequests[responseTo] {
 		delete(m.redactedRequests, responseTo)
 
-		return "Reply (redacted)"
+		return mongoRedactedReply
 	}
 
 	return formatMongoReply(command, sections, m.opts)
@@ -196,7 +196,7 @@ func (m *mongoSplitter) renderOpQuery(requestID int32, body []byte) string {
 	if mongoIsCredentialCommand(name, query) {
 		m.markRedacted(requestID)
 
-		return "OP_QUERY " + collection + " " + name + " (redacted)"
+		return "OP_QUERY " + collection + " " + formatMongoRedactedCommand(name)
 	}
 
 	return "OP_QUERY " + collection + " " + formatMongoCommand(name, query, nil, m.opts)
@@ -213,7 +213,7 @@ func (m *mongoSplitter) renderOpReply(responseTo int32, body []byte) string {
 	if m.redactedRequests[responseTo] {
 		delete(m.redactedRequests, responseTo)
 
-		return "OP_REPLY (redacted)"
+		return mongoRedactedOpReply
 	}
 
 	doc, _, ok := readMongoDoc(body[prefix:])

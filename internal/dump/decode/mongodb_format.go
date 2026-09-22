@@ -101,6 +101,25 @@ func mongoIsCredentialCommand(name string, doc bson.Raw) bool {
 	return !doc.Lookup("speculativeAuthenticate").IsZero()
 }
 
+// The two redacted renderings below take no Options, and the two constants
+// take nothing at all. Every credential-bearing command and every reply to one
+// goes through them, so "--rows does not lift this" holds because there is no
+// Options in scope to consult — not because a reviewer remembered.
+
+// mongoRedactedReply / mongoRedactedOpReply stand in for the server's half of
+// a credential exchange. A reply carries no command name of its own, so it is
+// redacted by the request it answers and there is nothing left to render.
+const (
+	mongoRedactedReply   = "Reply (redacted)"
+	mongoRedactedOpReply = "OP_REPLY (redacted)"
+)
+
+// formatMongoRedactedCommand names a credential-bearing command and stops
+// there: its body is a password, a SCRAM step or a key exchange.
+func formatMongoRedactedCommand(name string) string {
+	return name + " (redacted)"
+}
+
 // formatMongoCommand renders a client command: the verb, what it acts on, and
 // the *shape* of the data it carries.
 func formatMongoCommand(name string, doc bson.Raw, sections []mongoSection, opts Options) string {

@@ -58,8 +58,10 @@ func mysqlCommandName(cmd byte) string {
 
 // formatMySQLCommand renders a command packet. Statement text is printed —
 // reading it is the point of the tool, and the queries table holds it anyway.
-// Prepared-statement parameters are not: they are binary and typed by the
-// prepare, which a capture starting mid-session has not seen.
+// A COM_STMT_EXECUTE's bound parameters are not: they are binary, and no
+// decoder for the binary value encoding was written in this pass. Their types
+// are on the wire when the new-params-bound flag is set, so this is a gap to
+// be filled, not a wall.
 func formatMySQLCommand(cmd byte, args []byte) string {
 	name := mysqlCommandName(cmd)
 
@@ -174,6 +176,32 @@ func mysqlHandshakeDatabase(body []byte, capabilities uint32) (string, bool) {
 	database, _, ok := cstring(sliceFrom(body, used))
 
 	return database, ok
+}
+
+// The authentication renderings below, and formatMySQLAuthSwitch with them,
+// take no Options on purpose. Every one of them handles a password, a
+// scramble, a salt or a key exchange, and taking no Options is what makes
+// "--rows does not lift this" a property of the code rather than of the
+// reviewer: adding the flag to one of them is a signature change, not a
+// one-line edit that compiles silently.
+
+// formatMySQLAuthResponse names the client's reply to a greeting or an auth
+// switch: a password, a scramble, or a request for the server's public key.
+func formatMySQLAuthResponse(payload []byte) string {
+	return fmt.Sprintf("AuthResponse(%d bytes, redacted)", len(payload))
+}
+
+// formatMySQLAuthMoreData names the plugin-specific continuation the server
+// sends mid-authentication — a caching_sha2 status byte, or an RSA public key.
+func formatMySQLAuthMoreData(payload []byte) string {
+	return fmt.Sprintf("AuthMoreData(%d bytes, redacted)", len(payload)-1)
+}
+
+// formatMySQLAuthPacket is the catch-all for a packet exchanged during
+// authentication that matches none of the known headers. Unrecognized is not a
+// reason to print it.
+func formatMySQLAuthPacket(payload []byte) string {
+	return fmt.Sprintf("AuthPacket(%d bytes, redacted)", len(payload))
 }
 
 // formatMySQLAuthSwitch names the plugin the server wants used instead. The
@@ -291,8 +319,10 @@ func mysqlColumnName(payload []byte) (string, bool) {
 // and every one of them is customer data.
 //
 // A binary-protocol row (the answer to COM_STMT_EXECUTE) is counted and never
-// printed: its values are typed by the column definitions of the prepare, which
-// a capture that starts mid-session has not recorded.
+// printed, and not for want of type information: the result set re-sent its
+// column definitions, type byte and all, immediately before these rows. What is
+// missing is a binary value reader — a NULL bitmap and a decoder per MySQL
+// type — which this pass did not write.
 func formatMySQLRow(payload []byte, columns int, binaryRow bool, opts Options) string {
 	if binaryRow {
 		return fmt.Sprintf("Row(%d cols, binary)", columns)

@@ -208,6 +208,54 @@ func TestOracleSplitter_PartialMessagesYieldNothing(t *testing.T) {
 	)
 }
 
+// oracleFixtureDir holds the Oracle proxy's recorded sessions: real clients
+// (go-ora, python-oracledb, the JDBC thin driver, DBeaver, sqlplus, ojdbc6)
+// against a real 23ai, written by dump.Writer.
+const oracleFixtureDir = "../../proxy/oracle/testdata"
+
+// oracleFixturePaths lists the recorded captures, skipping the test when the
+// corpus is not in the tree.
+func oracleFixturePaths(t *testing.T) []string {
+	t.Helper()
+
+	paths, err := filepath.Glob(filepath.Join(oracleFixtureDir, "*"+dump.FileExt))
+	require.NoError(t, err)
+
+	if len(paths) == 0 {
+		t.Skipf("no capture fixtures under %s", oracleFixtureDir)
+	}
+
+	return paths
+}
+
+// TestFile_OracleFixtureCorpus decodes every recorded session, not just the
+// one TestFile_Oracle pins line by line.
+//
+// It asserts nothing about content — that is the golden test's job. What it
+// proves is the thing a single fixture cannot: that no client shape in the
+// corpus desynchronizes the TNS framing. The corpus spans both packet-length
+// encodings (ojdbc6 negotiates v310 and its 2-byte length, the rest v315+ and
+// its 4-byte one), the Connect whose descriptor is appended past the declared
+// length, the OCI clients that fragment a TTC message across packets, and the
+// mid-fetch failures — so a regression in the cut would surface here rather
+// than in production evidence nobody can re-read.
+func TestFile_OracleFixtureCorpus(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range oracleFixturePaths(t) {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			t.Parallel()
+
+			var out strings.Builder
+			require.NoError(t, File(path, Options{}, &out))
+
+			// The header line plus at least one decoded message: a capture
+			// that framed nothing would otherwise pass silently.
+			assert.Greater(t, len(textOf(t, out.String())), 1)
+		})
+	}
+}
+
 // oracleFixture is a recorded session from the Oracle proxy's own corpus.
 // Unlike the other four protocols there are real captures in the tree, so the
 // end-to-end test runs against bytes a real client actually sent rather than
@@ -219,7 +267,7 @@ const oracleFixture = "go_ora.pcapng"
 func TestFile_Oracle(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join("..", "..", "proxy", "oracle", "testdata", oracleFixture)
+	path := filepath.Join(oracleFixtureDir, oracleFixture)
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("fixture %s not available", path)
 	}
