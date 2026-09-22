@@ -173,9 +173,13 @@ place, breaks no chain — and `dbbat audit verify` will not report it.
 What it leaves behind is the pair of chained audit entries every session writes:
 `connection.opened` when the session starts and `connection.closed` when it
 ends, each carrying the row's immutable identity (connection uid, user,
-database, source IP, `connected_at`, the instance and run stamps, the grant) and
-the close additionally carrying `disconnected_at` and the session's sealed
-query-chain head. Those entries live in the audit log, which the cascade does
+database, source IP, `connected_at`, the instance and run stamps, the grant),
+the open one additionally carrying the target it actually reached
+(`target_host`, `target_port`, `target_database`) and the close one
+`disconnected_at` and the session's sealed query-chain head. The target matters
+because a server row is editable: `database_id` alone would stop saying where a
+past session went as soon as someone corrected the host. Those entries live in
+the audit log, which the cascade does
 not touch and `DBB_QUERY_STORAGE_RETENTION` never reaps. So the evidence exists
 — but turning it into a finding is a **comparison you run**, listing
 `?event_type=connection.opened` against the connections that still exist, not

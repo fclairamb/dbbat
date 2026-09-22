@@ -428,6 +428,23 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   **Deactivating** a definition is different from that archival — it withdraws
   the whole lineage and fails closed at auth time; hard deletion is refused
   (409) while anything references it.
+- **A server row is editable; its protocol is not.** `PUT /servers/{uid}`
+  takes host, port, database/service name, credentials, `ssl_mode`, `listable`,
+  the tunnel and the name, and the admin UI's edit dialog offers all of them
+  (the name in its own dialog, for its own warning). Editing does **not**
+  re-issue anything: every grant already covering the row reaches the new
+  target on the next connect, sessions already open stay on the upstream they
+  dialed, and `GET /servers/{uid}/references` is what the dialog counts that
+  with — live grants (anchored **or** group-bound, under the auth path's own
+  liveness predicate) and the server groups carrying the row. Same trade as
+  live server-group membership, same answer: warn at the point of edit rather
+  than make the row immutable. `protocol` is the exception, refused **409**
+  once any grant or connection references the row — it is the one edit that
+  makes the row a *different server*, and the history under its uid would
+  silently re-label itself. A pristine row may still change protocol, so a
+  create-dialog typo stays a one-click fix. `redactUpdateForAudit` replaces the
+  secrets with "changed" markers and the UI sends only the fields that actually
+  moved, so `database.updated` reads as the edit that was made.
 
 ### Per-statement time limits
 
@@ -621,8 +638,15 @@ sentinel, which is what keeps the two apart.
   `connection.closed` from whichever writer closes it (`CloseConnection` or the
   reconcile, recorded as `closed_by`) — carrying the row's **immutable**
   identity (connection uid, user, database, source IP, `connected_at`,
-  instance/run, grant) plus, on close, `disconnected_at` and the session's
-  sealed `query_chain_mac`. The mutable counters stay out. That is what makes
+  instance/run, grant) plus, on open, the target it actually reached —
+  `target_host`, `target_port`, `target_database` (the SERVICE_NAME on Oracle),
+  read from the `servers` row in `recordConnectionOpened` so no proxy call site
+  can forget it — and, on close, `disconnected_at` and the session's sealed
+  `query_chain_mac`. The target is there because `database_id` names an
+  **editable** row: without it the ledger would stop saying where a past
+  session went the moment an admin corrected a host, which is precisely the
+  property the old UI-level immutability was standing in for. It is immutable
+  for the *session*, never for the row. The mutable counters stay out. That is what makes
   `DELETE FROM connections` (which cascades to `queries` and `query_rows`) leave
   evidence — but only **by comparison**: no walk reports it, and every column of
   a connection row, `connected_at` included, is still unsealed. The write is

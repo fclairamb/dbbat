@@ -133,7 +133,14 @@ new chain has to be reconciled against `CleanupOldQueryRows`.
 
 Each entry's `details` carries the connection row's **immutable identity** — the
 connection uid, the user, the database, the source IP, `connected_at`, the
-instance and run stamps, and the grant it authenticated under. The close entry
+instance and run stamps, and the grant it authenticated under. The open entry
+also records the *target itself* — `target_host`, `target_port`,
+`target_database` (the SERVICE_NAME on Oracle) — read from the `servers` row at
+open time. `database_id` names a row an admin can edit, so without these three
+the ledger would stop saying where a past session went the moment someone fixed
+a typo in the host. They are immutable for the **session** even though they are
+not immutable for the row, which is the property that makes the server edit form
+safe to have at all. The close entry
 adds `disconnected_at`, who closed it (`session` or `reconcile`) and the
 session's `query_chain_mac` / `query_chain_len` / `query_chain_stamp_version`, so
 the sealed record points at the query chain that session owned. The mutable
