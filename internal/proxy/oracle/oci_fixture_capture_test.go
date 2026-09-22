@@ -513,6 +513,16 @@ const oci64LOBFixture = "testdata/oci64_lob.hex"
 // never by which client was asked for.
 const ociLOBFixture = "testdata/oci_lob.hex"
 
+// ociLongFixture and oci64LongFixture are the same pair for a select list
+// carrying a **genuine** LONG and LONG RAW column — one the describe reports as
+// type 8 or 24 rather than a LOB a client re-declared. Written by
+// TestCapture_OCILongFetchThroughDBBat, and which one a run writes is decided
+// the same way.
+const (
+	ociLongFixture   = "testdata/oci_long.hex"
+	oci64LongFixture = "testdata/oci64_long.hex"
+)
+
 // ociLOBQuery is a select list that alternates LOBs with ordinary columns, and
 // the alternation is the measurement rather than a flourish: each six-character
 // string says exactly where the value after the locator beside it begins, so the
@@ -558,6 +568,43 @@ const ociLOBQuery = `SELECT 'aaaaaa' AS c1,
 func writeLOBFetchHexFixture(t *testing.T, dumpPath, outPath string) {
 	t.Helper()
 
+	writeFetchHexFixture(t, dumpPath, outPath,
+		"# An sqlplus session through dbbat against Oracle 23ai Free whose select\n"+
+			"# list carries LOBs (see ociLOBQuery): every server payload that leads with\n"+
+			"# a describe (TTC 0x10) or a ROW_HEADER (TTC 0x06), as the TNS Data payload\n"+
+			"# with its two data-flag bytes first — exactly as extractTTCPayload gets it.\n"+
+			"#\n"+
+			"# The last two frames are the pair the fixture exists for: a describe that\n"+
+			"# carries no row values at all, because Oracle turns row prefetch off when a\n"+
+			"# LOB is in the select list, and the packet the whole fetch then arrives in.\n",
+		"TestCapture_OCILOBFetchThroughDBBat")
+}
+
+// writeLongFetchHexFixture is writeLOBFetchHexFixture for the LONG columns —
+// the same selection over a session whose select list carries a column the
+// describe itself reports as LONG (8) or LONG RAW (24).
+func writeLongFetchHexFixture(t *testing.T, dumpPath, outPath string) {
+	t.Helper()
+
+	writeFetchHexFixture(t, dumpPath, outPath,
+		"# An sqlplus session through dbbat against Oracle 23ai Free whose select\n"+
+			"# list carries a genuine LONG and a genuine LONG RAW column (see\n"+
+			"# ociLongQuery): every server payload that leads with a describe (TTC 0x10)\n"+
+			"# or a ROW_HEADER (TTC 0x06), as the TNS Data payload with its two data-flag\n"+
+			"# bytes first — exactly as extractTTCPayload gets it.\n"+
+			"#\n"+
+			"# It exists to answer one question the thin recordings could not: whether\n"+
+			"# the indicator-and-return-code trailer a LONG column carries there is the\n"+
+			"# thin dialect's spelling or the protocol's. See readInlineLongColumn.\n",
+		"TestCapture_OCILongFetchThroughDBBat")
+}
+
+// writeFetchHexFixture is the body both of those share: every server payload
+// leading with 0x10 or 0x06, one hex line each, behind the given header and a
+// regeneration line naming the test that produced it.
+func writeFetchHexFixture(t *testing.T, dumpPath, outPath, header, testName string) {
+	t.Helper()
+
 	// Which client the run must be started with to reproduce *this* file. The
 	// two OCI dialects are two bodies of evidence here — their LOB headers
 	// differ by two bytes — so a header naming the wrong one would send the
@@ -567,18 +614,11 @@ func writeLOBFetchHexFixture(t *testing.T, dumpPath, outPath string) {
 		client = "ORACLE_TEST_OCI_CLIENT=container"
 	}
 
-	body := "# An sqlplus session through dbbat against Oracle 23ai Free whose select\n" +
-		"# list carries LOBs (see ociLOBQuery): every server payload that leads with\n" +
-		"# a describe (TTC 0x10) or a ROW_HEADER (TTC 0x06), as the TNS Data payload\n" +
-		"# with its two data-flag bytes first — exactly as extractTTCPayload gets it.\n" +
-		"#\n" +
-		"# The last two frames are the pair the fixture exists for: a describe that\n" +
-		"# carries no row values at all, because Oracle turns row prefetch off when a\n" +
-		"# LOB is in the select list, and the packet the whole fetch then arrives in.\n" +
+	body := header +
 		"#\n" +
 		"# Regenerate with:\n" +
 		"#   ORACLE_CAPTURE_OCI_FIXTURES=1 " + client + " \\\n" +
-		"#     go test -tags integration -run TestCapture_OCILOBFetchThroughDBBat ./internal/proxy/oracle/\n"
+		"#     go test -tags integration -run " + testName + " ./internal/proxy/oracle/\n"
 
 	describes, fetches := 0, 0
 
@@ -606,7 +646,7 @@ func writeLOBFetchHexFixture(t *testing.T, dumpPath, outPath string) {
 
 	require.Positive(t, describes, "the sqlplus session must have described at least one query")
 	require.Positive(t, fetches,
-		"the LOB query's rows must have arrived in a ROW_HEADER packet of their own — "+
+		"the query's rows must have arrived in a ROW_HEADER packet of their own — "+
 			"without one there is nothing here to pin")
 	require.NoError(t, os.WriteFile(outPath, []byte(body), 0o600))
 

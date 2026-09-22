@@ -159,6 +159,140 @@ func TestScalarFetchIsNotOfferedTheLongReading(t *testing.T) {
 	}
 }
 
+// TestOCILongFetchKeepsEveryOrdinaryColumn is the OCI half, and it is the
+// measurement the thin recordings could not stand in for: **every field** of a
+// LONG column is spelled differently there. The chunk lengths are ub4s where
+// thin sends compressed integers, the indicator and return code are ub2s where
+// thin sends two more of them, and a NULL spells the pair `ffff 7d05` — the
+// same -1 and 1403, in OCI's own encoding.
+//
+// Both dialects, because their *LOB* columns differ from each other by six
+// bytes and nothing said a LONG one would not. It does not: the two fixtures
+// carry the same bytes here, which makes this the one column shape in this
+// package with a single OCI reading rather than two.
+func TestOCILongFetchKeepsEveryOrdinaryColumn(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		fixture string
+		shape   oerShape
+		want    [][]string
+	}{
+		{ociLongFrames, ociOERShape(), longRows},
+		{oci64LongFrames, oci64OERShape(), longRows[:1]},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			t.Parallel()
+
+			frames := recordedFrames(t, tc.fixture)
+			require.Len(t, frames, 6,
+				"the fixture must carry the login probe, then a describe and its rows for each query")
+
+			// The same expectations the thin recordings are pinned against,
+			// deliberately: what a column captures is not allowed to depend on
+			// which client asked for it.
+			//
+			// With one exception, and it is not about LONG columns at all.
+			// sqlplus fetches this result set over two round trips, and the
+			// **second** packet's ROW_HEADER carries flag 0x02 where the first
+			// carries 0x22. On the 4-byte dialect the fallback scan still finds
+			// the ROW_DATA byte — its header is 22 bytes, inside the 25-byte
+			// window that scan searches — but the 64-bit header is 50, so that
+			// packet is located by nothing and its row is lost before any
+			// column is read. Pre-existing, unrelated to this reading, and
+			// filed as its own spec; the NULL row it costs is pinned on the
+			// other three recordings, the LONG RAW fetch below included.
+			assert.Equal(t, tc.want,
+				ociLongFetchRows(t, tc.shape, longColumns, frames[1], frames[2], frames[3]))
+			assert.Equal(t, longRawRows,
+				ociLongFetchRows(t, tc.shape, longRawColumns, frames[4], frames[5]))
+		})
+	}
+}
+
+// TestOCILongFetchIsNotOfferedTheThinReading is the gate across the two
+// spellings, and here it is worth more than usual: both start on the value's
+// own bytes, so a walk offered either has two plausible-looking places to
+// finish a column.
+//
+// Each OCI fetch is re-read as a thin one and must come back with nothing — the
+// compressed reading takes the ub4 chunk length's first byte for a whole field
+// and comes out on the wrong byte, where rowEndsAtMarker costs it the row.
+func TestOCILongFetchIsNotOfferedTheThinReading(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		fixture string
+		shape   oerShape
+	}{
+		{ociLongFrames, ociOERShape()},
+		{oci64LongFrames, oci64OERShape()},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			t.Parallel()
+
+			frames := recordedFrames(t, tc.fixture)
+			types := describeColumnTypes(longColumns)
+			fetch := extractTTCPayload(frames[2])
+
+			require.NotEmpty(t, parseContinuationRows(fetch, len(types), nil, types, tc.shape, lobRowLocator),
+				"the fixture must yield its row under the shape it was recorded from")
+
+			for _, wrong := range []oerShape{{}, {bigClrChunks: true}} {
+				assert.Empty(t, parseContinuationRows(fetch, len(types), nil, types, wrong, lobRowLocator),
+					"an OCI LONG column must not be read as a thin one")
+			}
+		})
+	}
+}
+
+// ociLongFetchRows reads one recorded OCI fetch — its describe and the packets
+// its rows arrive in — and returns the rows as strings.
+//
+// The column types come off the recorded describe rather than from want, and
+// are checked against it: a fixture whose columns Oracle did not report as LONG
+// would prove nothing, and that is the one thing these recordings exist to
+// establish.
+//
+// Each row packet is parsed on its own, threading the previous row the way a
+// session does, because sqlplus fetches this result set over several round
+// trips — the client FETCH between them is not in a server-frames fixture.
+func ociLongFetchRows(
+	t *testing.T, shape oerShape, want []columnDesc, describe []byte, fetches ...[]byte,
+) [][]string {
+	t.Helper()
+
+	descs := parseColumnDescribes(extractTTCPayload(describe), shape)
+	require.NotNil(t, descs, "the recorded describe must decode")
+	require.Equal(t, want, descs, "and report the columns the query selected, LONG type code included")
+
+	types := describeColumnTypes(descs)
+
+	var (
+		prev []string
+		out  [][]string
+	)
+
+	for _, fetch := range fetches {
+		for _, row := range parseContinuationRows(
+			extractTTCPayload(fetch), len(types), prev, types, shape, lobRowLocator,
+		) {
+			strRow := make([]string, len(row))
+
+			for i, v := range row {
+				if s, ok := v.(string); ok {
+					strRow[i] = s
+				}
+			}
+
+			out = append(out, strRow)
+			prev = strRow
+		}
+	}
+
+	return out
+}
+
 // scalarizeLongColumns returns colTypes with every LONG and LONG RAW declared an
 // ordinary VARCHAR — the reading rowValueShapeOf gave those columns before
 // rowValueLongInline existed, expressed as the one type code that differs.

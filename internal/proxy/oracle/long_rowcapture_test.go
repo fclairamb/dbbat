@@ -29,6 +29,20 @@ const (
 	pythonThinLongFixture = "python_thin_long.pcapng"
 )
 
+// ociLongFrames and oci64LongFrames are the same two queries recorded from the
+// two OCI dialects — sqlplus through dbbat, an Instant Client on PATH for the
+// first and the Oracle image's own bundled client for the second. Both were
+// needed: those two dialects frame a LOB column six bytes apart from each
+// other, so nothing said they would agree about a LONG one. They do, byte for
+// byte, and both differ from thin. Regenerate with:
+//
+//	ORACLE_CAPTURE_OCI_FIXTURES=1 [ORACLE_TEST_OCI_CLIENT=container] \
+//	  go test -tags integration -run TestCapture_OCILongFetchThroughDBBat ./internal/proxy/oracle/
+const (
+	ociLongFrames   = "testdata/oci_long.hex"
+	oci64LongFrames = "testdata/oci64_long.hex"
+)
+
 // longQuery and longRawQuery put the LONG column **between** ordinary CHAR
 // columns, the same alternation goOraLOBQuery uses and for the same reason: a
 // column read at the wrong width drifts the two behind it, and the row is then

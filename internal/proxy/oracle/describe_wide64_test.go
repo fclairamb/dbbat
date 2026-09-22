@@ -298,11 +298,18 @@ func TestOCI64RowHeaderPatternIsUniqueInTheCorpus(t *testing.T) {
 		}
 	}
 
+	// oci64_long.hex's three are the same thing again on the fixture recorded
+	// for the LONG columns: its login probe, and the two packets its two
+	// four-column fetches arrive in — a LONG in the select list defers a fetch
+	// exactly as a LOB does.
 	assert.Equal(t, []hit{
 		{fixture: oci64Describes, frame: 0, count: 1},
 		{fixture: oci64Describes, frame: 1, count: 8},
 		{fixture: oci64LOBFrames, frame: 0, count: 1},
 		{fixture: oci64LOBFrames, frame: 2, count: 13},
+		{fixture: oci64LongFrames, frame: 0, count: 1},
+		{fixture: oci64LongFrames, frame: 2, count: 4},
+		{fixture: oci64LongFrames, frame: 5, count: 4},
 	}, hits)
 }
 
