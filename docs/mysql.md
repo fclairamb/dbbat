@@ -383,6 +383,15 @@ statement it forwards:
 feeds the same `GET /api/v1/connections?uid_suffix=` lookup. Off by default —
 it changes the bytes the server receives.
 
+The variable is the **deployment default**, not the switch. The `tagging.enabled`
+global parameter wins over it when set — in both directions, so a stored `false`
+turns tagging off on a deployment that ships `DBB_QUERY_TAGGING=true` — and that
+parameter is edited from the Settings page or through
+`PUT /api/v1/instance/tagging`, with no restart. The decision is resolved **once
+per session, at authentication**: a session already running keeps what it
+authenticated under, because a statement tagged on some executions and not
+others would get two digests where the point is one.
+
 **Where it is applied.** `COM_QUERY` and `COM_STMT_PREPARE`. `COM_STMT_EXECUTE`
 is a binary payload with no statement text at all, and needs none: it runs the
 statement prepared (and tagged) by its `COM_STMT_PREPARE`, so the tag is

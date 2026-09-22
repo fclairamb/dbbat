@@ -2705,6 +2705,19 @@ So the tag is affordable, and `DBB_QUERY_TAGGING_ORACLE=user` turns it on. It is
 an operator who accepted it on PostgreSQL did not accept it here. `off` is the
 default and the only other value; anything else fails the process at startup.
 
+The variable is the **deployment default**, not the switch. The `tagging.oracle`
+global parameter wins over it when set, and that parameter is edited from the
+Settings page or through `PUT /api/v1/instance/tagging`, with no restart — which
+is the point, because the cursor cost above is exactly the kind of thing an
+operator wants to stop paying within seconds of seeing it. The same two values
+apply, and anything else is a `400` on write rather than a startup failure: a
+settings write that crashed every replica on its next restart would be a worse
+failure than the one it is modeled on. A value that reaches the store anyway
+resolves to `off` with a WARN. The mode is read **once per session, at
+authentication**, so a live session keeps the decision it authenticated under —
+the same all-or-nothing rule the locator already imposes, for the same
+two-SQL_IDs reason.
+
 ### What had to exist first: a TTC statement writer
 
 Every other protocol re-encodes each message on its way upstream, which is why

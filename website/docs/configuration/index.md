@@ -300,6 +300,15 @@ sockets. See
 | `DBB_QUERY_TAGGING` | Tag every statement forwarded to the target with the dbbat identity — a comment on PostgreSQL and MySQL, the `comment` command field on MongoDB | `false` |
 | `DBB_QUERY_TAGGING_ORACLE` | Oracle's own switch: `off`, or `user` for a tag carrying the version, the user and the grant and **no** `conn=` | `off` |
 
+Both are the **deployment default**. The `tagging.enabled` and `tagging.oracle`
+[global parameters](#global-parameters) win over them when set — that is the
+layer an operator edits from the Settings page, mid-incident, without a
+redeploy, in either direction: a stored `false` turns tagging off although
+`DBB_QUERY_TAGGING=true`. The decision is taken **per session, at
+authentication**, so a session already running keeps what it authenticated
+under; terminate it (`POST /api/v1/connections/{uid}/terminate`) to make it
+reconnect under the new one.
+
 Every dbbat session logs in to the target as the **same shared database role**,
 from the **same host** — the proxy. So the target's own tooling attributes the
 whole fleet's load to one client: RDS Performance Insights shows one user and
@@ -363,7 +372,10 @@ that frame back to the client's own bytes. A session whose client shape it
 cannot certify runs untagged from start to finish and logs why — deliberately
 all-or-nothing per session, because a statement tagged on some executions and
 not others would get *two* SQL_IDs and double the cursor count the whole design
-is about. Anything other than `off` or `user` fails the process at startup. The
+is about. Anything other than `off` or `user` fails the process at startup —
+through `PUT /api/v1/instance/tagging` the same value is a `400` instead, and a
+stored value dbbat does not recognize resolves to `off` with a warning rather
+than failing every replica's next restart. The
 numbers and the encoding details are in
 [the Oracle notes](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md).
 SQL Server is a follow-up.
@@ -734,6 +746,8 @@ values are exposed by `GET /api/v1/instance`.
 |-----------|-------------|
 | `public.web_ui_url` | Externally reachable base URL of the web UI, used for Slack deep-links. **Takes precedence over `DBB_PUBLIC_URL`** when set. |
 | `limits.statement_timeout` | Instance-wide per-statement time limit, as a Go duration (`30s`, `5m`). **Takes precedence over `DBB_STATEMENT_TIMEOUT`** when set; `"0"` disables the limit outright. Edited from the Settings page, or through `PUT /api/v1/instance/limits`. |
+| `tagging.enabled` | `"true"` or `"false"` — the PostgreSQL / MySQL / MongoDB [statement tag](#statement-tagging-optional). **Takes precedence over `DBB_QUERY_TAGGING`** when set, in both directions. Edited from the Settings page, or through `PUT /api/v1/instance/tagging`. Read once per session, at authentication. |
+| `tagging.oracle` | `"off"` or `"user"` — Oracle's own statement tag. **Takes precedence over `DBB_QUERY_TAGGING_ORACLE`** when set. Same editors; anything else is a `400` on write, and folds to `off` with a warning if it somehow reaches the store. |
 
 ```bash
 # Read the current parameters

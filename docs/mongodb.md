@@ -494,6 +494,14 @@ it inline rather than collapsing it. `conn=` is the same 12 hex characters as
 `appName`'s `c=` tag, so it feeds the same
 `GET /api/v1/connections?uid_suffix=` lookup.
 
+The variable is the **deployment default**, not the switch. The `tagging.enabled`
+global parameter wins over it when set — in both directions, so a stored `false`
+turns tagging off on a deployment that ships `DBB_QUERY_TAGGING=true` — and that
+parameter is edited from the Settings page or through
+`PUT /api/v1/instance/tagging`, with no restart. The decision is resolved **once
+per session, at authentication**: a session already running keeps what it
+authenticated under.
+
 **A client-supplied `comment` wins, and that command is then forwarded
 untouched.** Unlike a SQL comment — dead text nothing else owns — `comment` is
 a single-valued field drivers and ORMs set for their own tracing, and whoever

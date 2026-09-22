@@ -108,6 +108,15 @@ comment to every statement it forwards:
 `conn=` is the same 12 hex characters as `application_name`'s `c=` tag, so it
 feeds the same `GET /api/v1/connections?uid_suffix=` lookup.
 
+The variable is the **deployment default**, not the switch. The `tagging.enabled`
+global parameter wins over it when set — in both directions, so a stored `false`
+turns tagging off on a deployment that ships `DBB_QUERY_TAGGING=true` — and that
+parameter is edited from the Settings page or through
+`PUT /api/v1/instance/tagging`, with no restart. The decision is resolved **once
+per session, at authentication**: a session already running keeps what it
+authenticated under, because a statement tagged on some executions and not
+others would get two digests where the point is one.
+
 **Off by default.** It changes the bytes the database receives, so a
 deployment that pins statement text — a `pg_stat_statements` allowlist, a
 query firewall, a per-statement plan cache — turns it on knowingly.
