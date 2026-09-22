@@ -1795,7 +1795,7 @@ Four recordings of one query, and they do not agree, which is the point:
 | go-ora, nothing configured | a define turning CLOB into LONG VARCHAR (94) and BLOB into LONG RAW (24) | the bodies |
 | python-oracledb thin, nothing configured | a define keeping each LOB column the LOB type it already was | locators |
 | go-ora, `lob fetch=post` | no define at all | locators |
-| JDBC thin, nothing configured | a define keeping each LOB column its own type — but re-declaring the ordinary CHAR columns as VARCHAR2, so dbbat reads nothing from it | locators, each with the LOB's head prefetched in front of it |
+| JDBC thin, nothing configured | a define keeping each LOB column its own type, and re-declaring the ordinary CHAR columns as VARCHAR2 | locators, each with the LOB's head prefetched in front of it |
 
 So inlining is go-ora's default rather than the thin dialect's, and the locator
 is what the protocol sends unless it was asked otherwise. `execDefineLOBShape`
@@ -1807,22 +1807,40 @@ framing bytes.
 
 The walk is bounded the way the rest of this package's readings are: the entries
 have to be as many as the describe named, fill the frame to its last byte, and
-each declare the type the describe gave or a LONG substituted for a LOB — at
-exactly one offset, or nothing is learned. Swept across every `testdata/*.pcapng`
-recording, exactly the two frames that are defines answer
+each declare the type the describe gave or one of two **measured** substitutions
+— at exactly one offset, or nothing is learned. Swept across every
+`testdata/*.pcapng` recording, exactly the three frames that are defines answer
 (`TestDefineBlockIsNotFoundInFramesThatAreNotOne`), and each recording read under
 the *other* client's reading comes back with no rows at all
 (`TestThinLOBFetchIsNotOfferedTheOtherReading`).
+
+The substitutions are a table rather than a rule, and **both are one-way**:
+
+| Describe says | A define may say | Read off | Meaning |
+|---|---|---|---|
+| CLOB / BLOB / BFILE | LONG (8), LONG RAW (24), LONG VARCHAR (94) | `go_ora_lob.pcapng` | the ask for the bodies |
+| CHAR (96) | VARCHAR2 (1) | `jdbc_thin_lob.pcapng` | no ask at all, just ojdbc's spelling |
+
+The reverse of either is refused. A CHAR declared as a LONG is a misread, not a
+LOB being inlined, and no client was ever recorded re-declaring a VARCHAR2
+column as a CHAR — accepting that direction too would widen the per-byte offset
+search back toward the near-miss the exact-match rule exists to close.
 
 Until this was read, `lob fetch=post` and **every python-oracledb thin LOB
 query** captured nothing: the walk read the locator as an inlined value, came
 out on the wrong byte, and `rowEndsAtMarker` cost the row.
 
-JDBC thin is the fourth recording and the one that says the refusal is safe
-rather than merely cheap. Its define block is one dbbat does not read — ojdbc
-re-declares the scalar CHAR columns as VARCHAR2 and `defineTypeAgrees` refuses
-that, by design — so the session falls back to the locator reading, which is
-exactly what JDBC asked for. What it *also* does is prefetch the LOB
+JDBC thin is the fourth recording, and it is what bought the CHAR → VARCHAR2
+row of that table. Until 2026-09-23 `defineTypeAgrees` refused its define, so
+**no JDBC thin session ever stated a reading**, whatever it was asking for. It
+cost nothing at the time — what JDBC asks for is locators, which is what an
+unread define leaves the session on — but a future JDBC deployment that *did*
+ask for inlining would have been silently refused, which is the failure mode
+this whole reading exists to end. Reading the frame changed what dbbat learns
+and not what it captures: the row is byte for byte the one the refusal produced
+(`TestJDBCThinLOBFetchCapturesItsLocators` is unchanged, and
+`TestJDBCThinDefineBlockIsReadAndLearnsTheLocator` asserts the mechanism).
+What JDBC *also* does is prefetch the LOB
 (`oracle.jdbc.defaultLobPrefetchSize`, non-zero out of the box), so the head of
 the value rides in front of the locator; `skipPrefetchedLOBValue` steps over it
 and the column still captures the placeholder, because the head of a LOB is not
