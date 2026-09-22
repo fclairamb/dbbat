@@ -1467,7 +1467,7 @@ func decodeQueryResultV2(ttcPayload []byte, shape oerShape) *QueryResultV2 {
 	// Row values appear after the column definitions. We look for a marker
 	// pattern that separates column defs from row data.
 	// The row data area starts roughly after the column definitions.
-	result.Rows = scanRowValues(ttcPayload, len(result.Columns), result.ColumnTypes)
+	result.Rows = scanRowValues(ttcPayload, len(result.Columns), result.ColumnTypes, shape)
 
 	return result
 }
@@ -1616,8 +1616,14 @@ func skipColumnMetadata(data []byte) int {
 // prefixed values for each active column, 0x07 / 0x15 descriptors between rows,
 // terminated by the 0x08 footer or an ORA-01403 marker — so it delegates to the
 // shared parseRowStream. The first QRESULT row carries every column.
-func scanRowValues(data []byte, numCols int, colTypes []int) [][]string {
-	rowStart := findRowDataStart(data)
+//
+// The values themselves are encoding-independent — a one-byte length then that
+// many raw bytes, in all three dialects — but the ROW_HEADER object that
+// introduces them is not, so `shape` (the session's learned encoding, never
+// anything sniffed from the payload) decides how the stream is found. See
+// rowDataStart.
+func scanRowValues(data []byte, numCols int, colTypes []int, shape oerShape) [][]string {
+	rowStart := rowDataStart(data, numCols, shape)
 	if rowStart < 0 || numCols == 0 {
 		return nil
 	}
@@ -1637,6 +1643,99 @@ func scanRowValues(data []byte, numCols int, colTypes []int) [][]string {
 	}
 
 	return out
+}
+
+// ttcMsgRowHeader is go-ora's `case 6`: the object a fetch sends ahead of its
+// values, naming how many columns each row carries. The message that follows it
+// is 0x07 — ttcMsgBindOutput, which is the same block under the name the
+// bind-output walk knows it by.
+const ttcMsgRowHeader = 0x06
+
+// The 64-bit OCI dialect's ROW_HEADER, measured rather than inferred — see
+// findRowDataStartWide64 for what each constant is pinned by.
+const (
+	wide64RowHeaderFlagOffset  = 2
+	wide64RowHeaderFlag        = 0x22
+	wide64RowHeaderCountOffset = 4
+	wide64RowHeaderLen         = 50
+)
+
+// rowDataStart locates the first row value of a fetch, in whichever encoding the
+// session speaks. The row area itself is the same in all three (parseRowStream);
+// what differs is the ROW_HEADER object standing in front of it.
+func rowDataStart(data []byte, numCols int, shape oerShape) int {
+	if shape.fixedWidth64 {
+		return findRowDataStartWide64(data, numCols)
+	}
+
+	return findRowDataStart(data)
+}
+
+// findRowDataStartWide64 locates the row values of a **64-bit** OCI fetch.
+//
+// It exists because findRowDataStart below finds nothing at all on this dialect,
+// which is why a 64-bit OCI session captured rows that were empty JSON objects
+// even after its describes became readable: the two-byte `06 22` marker it looks
+// for is `06 01 22 xx` here, and no `06 22` pair occurs anywhere in the payload.
+// The values behind the header are byte-for-byte the same shape as the 4-byte
+// dialect's — a one-byte length then the raw bytes, which is what let both
+// fixtures be compared value by value.
+//
+// The header is measured off testdata/oci64_describe.hex, from the two frames
+// that carry one, against their counterparts in testdata/oci_describe.hex. The
+// column count is the only field read, and it is the only one either recording
+// varies (1 on the login probe, 8 on the rich query), so it is also the only one
+// that could be pinned at all:
+//
+//	         | 4-byte dialect      | 64-bit dialect
+//	+0       | 0x06 ROW_HEADER     | 0x06 ROW_HEADER
+//	+1       | 0x22 flag           | 0x01
+//	+2       | ub4 column count    | 0x22 flag
+//	+3       |                     | padding, stale (0xaf / 0x59)
+//	+4       |                     | ub4 column count
+//	+6/+8    | ub4 = 0x00010000    | ub8 = 0x10000
+//	+10/+16  | 3 × ub4 = 0         | 4 × ub8, then a ub2 = 0
+//	+22/+50  | 0x07 ROW_DATA       | 0x07 ROW_DATA
+//
+// What says the wider tail is that same field list at 64-bit widths, rather than
+// a guess that happens to total 50: two of those four ub8 slots carry a non-zero
+// **upper** half (0xffffa5a9…, 0xffffa382… / 0x0001a382…) over a zero lower half,
+// in both frames and at the same two offsets. That is what a 64-bit struct looks
+// like when the server writes a 32-bit value into it and leaves the top half
+// stale — and it is also why nothing here reads those slots. Their low halves
+// are zero in every sample, so the corpus says nothing about what they mean; the
+// 4-byte dialect's ub4 at +6 (0x00010000, identical on all four frames, both
+// dialects) is unread for the same reason.
+//
+// The reading fails closed, which is the behaviour the dialect had before it
+// existed: the count must be the describe's own, and the ROW_DATA byte must land
+// exactly where the header ends. Nothing is scanned for. Across every frame of
+// every .hex fixture in the corpus that pattern matches exactly twice — the two
+// 64-bit headers — and never on a 4-byte or compressed payload, so a session
+// offered the wrong reading gets no rows rather than plausible-looking ones.
+func findRowDataStartWide64(data []byte, numCols int) int {
+	if numCols <= 0 {
+		return -1
+	}
+
+	for i := 0; i+wide64RowHeaderLen < len(data); i++ {
+		if data[i] != ttcMsgRowHeader || data[i+wide64RowHeaderFlagOffset] != wide64RowHeaderFlag {
+			continue
+		}
+
+		if data[i+wide64RowHeaderLen] != ttcMsgBindOutput {
+			continue
+		}
+
+		count := binary.LittleEndian.Uint32(data[i+wide64RowHeaderCountOffset : i+wide64RowHeaderCountOffset+4])
+		if int(count) != numCols {
+			continue
+		}
+
+		return i + wide64RowHeaderLen + 1
+	}
+
+	return -1
 }
 
 // findRowDataStart locates where row data begins in the response.

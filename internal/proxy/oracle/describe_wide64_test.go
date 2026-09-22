@@ -1,6 +1,8 @@
 package oracle
 
 import (
+	"encoding/binary"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -123,6 +125,160 @@ func TestOCI64DescribeIsNotOfferedToTheOtherTwoEncodings(t *testing.T) {
 
 	assert.Nil(t, parseColumnDescribes(oci, oci64OERShape()),
 		"and the 4-byte dialect's describe must not be read as a 64-bit one")
+}
+
+// TestOCI64RowCaptureCarriesTheDescribesValues is the 64-bit dialect's half of
+// TestOCIRowCaptureCarriesTheDescribesColumnNames, and it asserts the half that
+// test asserts and this dialect did not have: the **values**.
+//
+// The names came right when parseColumnDescribes learned this dialect's records.
+// The values did not, and the gap was visible rather than theoretical: a 64-bit
+// OCI session wrote its rows to query_rows as empty JSON objects, because
+// findRowDataStart looks for a two-byte `06 22` ROW_HEADER marker that is
+// `06 01 22 xx` here and therefore occurs nowhere in the payload at all.
+//
+// The expected values are the 4-byte fixture's own, column for column, and that
+// is the point: the two fixtures are the same two queries against the same
+// server, so anything but agreement on `N2`, `BIG`, `FLT`, `C5`, `R` and `OBJ`
+// is a reading that found bytes rather than values. The two temporal columns are
+// the recordings' own clocks, ~40 seconds apart, so they are the one pair that
+// cannot be shared — they are spelled out at this recording's timestamps.
+func TestOCI64RowCaptureCarriesTheDescribesValues(t *testing.T) {
+	t.Parallel()
+
+	frames := recordedFrames(t, oci64Describes)
+	require.GreaterOrEqual(t, len(frames), 2, "the fixture must carry both describes")
+
+	tests := []struct {
+		name  string
+		frame int
+		want  map[string]interface{}
+	}{
+		{
+			name:  "an expression column the scanner cannot see at all",
+			frame: 0,
+			want:  map[string]interface{}{ociExpressionColumnName: "SYSTEM"},
+		},
+		{
+			name:  "eight columns, two of them one character long",
+			frame: 1,
+			want: map[string]interface{}{
+				"N2":  "1",
+				"BIG": "x",
+				"FLT": "0.3333333333333333333333333333333333333333",
+				"D":   "2026-09-22 08:25:03",
+				"TS":  "2026-09-22 08:25:03.830104 +00:00",
+				"C5":  "ab   ",
+				"R":   "7a7a",
+				"OBJ": "00000024002202085c0f1a6dae5600fce06306d7a8c06455000000000000000000000000",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ttc := extractTTCPayload(frames[tc.frame])
+
+			s, rowStore, _ := newCapturingSession(t, 10000)
+			s.oer = oci64OERShape()
+			require.True(t, s.oerShapeSnapshot().fixedWidth64,
+				"the session must speak the encoding the frame was recorded on")
+
+			s.trackerMu.Lock()
+			s.handleQueryResultV2(ttc)
+			s.trackerMu.Unlock()
+
+			require.NotNil(t, s.tracker.pendingQuery, "the fetch must still be open")
+
+			s.tracker.pendingQuery.rowSink.Flush(t.Context())
+
+			rows := rowStore.rowData(t)
+			require.Len(t, rows, 1, "the frame carries exactly one row")
+			assert.Equal(t, tc.want, rows[0])
+		})
+	}
+}
+
+// TestOCI64RowValuesAreNotOfferedToTheOtherTwoEncodings is the row half of the
+// gate TestOCI64DescribeIsNotOfferedToTheOtherTwoEncodings holds on the describe
+// path, and it is what keeps the 64-bit ROW_HEADER reading from being a third
+// chance at a plausible-looking row: the encoding comes from the session, and
+// each fixture must yield its row under the one shape it was recorded from and
+// nothing under the other.
+//
+// The reading fails closed by construction — it validates the header's own
+// column count against the describe's and requires the ROW_DATA byte exactly
+// where the header ends — so the failure here is "no rows", never different
+// ones.
+func TestOCI64RowValuesAreNotOfferedToTheOtherTwoEncodings(t *testing.T) {
+	t.Parallel()
+
+	oci64 := extractTTCPayload(recordedFrames(t, oci64Describes)[1])
+	oci := extractTTCPayload(recordedFrames(t, ociDescribes)[1])
+
+	require.Len(t, decodeQueryResultV2(oci64, oci64OERShape()).Rows, 1,
+		"the fixture must yield its row under the shape it was recorded from")
+	assert.Empty(t, decodeQueryResultV2(oci64, ociOERShape()).Rows,
+		"a 64-bit OCI fetch must not be read as a 4-byte OCI one")
+	assert.Empty(t, decodeQueryResultV2(oci64, oerShape{}).Rows,
+		"a 64-bit OCI fetch must not be read as a compressed one")
+
+	require.Len(t, decodeQueryResultV2(oci, ociOERShape()).Rows, 1,
+		"and the 4-byte dialect's fetch must still yield its own row")
+	assert.Empty(t, decodeQueryResultV2(oci, oci64OERShape()).Rows,
+		"a 4-byte OCI fetch must not be read as a 64-bit one")
+}
+
+// TestOCI64RowHeaderPatternIsUniqueInTheCorpus is what turns "a layout
+// consistent with two records" into a measurement, and it is the reason the
+// walk hard-codes the header's length instead of scanning forward for the
+// ROW_DATA byte the way the 4-byte reading does.
+//
+// It runs the pattern the walk keys on — 0x06, the 0x22 flag two bytes later,
+// and a 0x07 exactly 50 bytes in — over **every frame of every .hex fixture in
+// the corpus**, without the column-count check the walk also applies. It matches
+// twice: the two 64-bit ROW_HEADERs, at the column counts their describes
+// declare. Nowhere else, and on no 4-byte or compressed payload.
+func TestOCI64RowHeaderPatternIsUniqueInTheCorpus(t *testing.T) {
+	t.Parallel()
+
+	fixtures, err := filepath.Glob("testdata/*.hex")
+	require.NoError(t, err)
+	require.NotEmpty(t, fixtures)
+
+	type hit struct {
+		fixture string
+		frame   int
+		count   uint32
+	}
+
+	var hits []hit
+
+	for _, fixture := range fixtures {
+		for i, frame := range recordedFrames(t, fixture) {
+			for p := 0; p+wide64RowHeaderLen < len(frame); p++ {
+				if frame[p] != ttcMsgRowHeader ||
+					frame[p+wide64RowHeaderFlagOffset] != wide64RowHeaderFlag ||
+					frame[p+wide64RowHeaderLen] != ttcMsgBindOutput {
+					continue
+				}
+
+				hits = append(hits, hit{
+					fixture: fixture,
+					frame:   i,
+					count: binary.LittleEndian.Uint32(
+						frame[p+wide64RowHeaderCountOffset : p+wide64RowHeaderCountOffset+4]),
+				})
+			}
+		}
+	}
+
+	assert.Equal(t, []hit{
+		{fixture: oci64Describes, frame: 0, count: 1},
+		{fixture: oci64Describes, frame: 1, count: 8},
+	}, hits)
 }
 
 // lastRecordedFrame is the final frame of a hex fixture — for the describe
