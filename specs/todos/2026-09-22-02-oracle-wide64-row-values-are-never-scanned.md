@@ -41,6 +41,19 @@ The visible consequence is the one
 for names, one layer down: a 64-bit OCI session's captured rows are empty JSON
 objects. The names being right now makes that *more* visible, not less.
 
+**It is also why `TestIntegration_OCIRowCaptureCarriesRealColumnNames` fails
+under the container client**, and that was checked rather than assumed. Run with
+`ORACLE_TEST_OCI_CLIENT=container` (the 23.26 sqlplus bundled in the image, which
+speaks the 64-bit dialect), it stops at `no captured row for a statement
+containing "UPPER('x')"` — before it ever reaches the column-name assertion it
+exists for. Restoring the pre-change decode input at the one call site
+(`decodeQueryResultV2(ttcPayload, oerShape{fixedWidth: …})`, i.e. the reading
+that was in place before the describe records were readable at all) and running
+the same test against the same image fails **identically**, same message, 77s vs
+79s. So the failure is this defect, not the describe work: it is the row scan,
+and it predates the records being read. With a 4-byte Instant Client on PATH the
+same test passes.
+
 (The third line of the table is a different defect and has its own spec:
 `2026-09-22-03-oracle-row-capture-drops-every-row-of-a-fetch-carrying-a-lob.md`.)
 
