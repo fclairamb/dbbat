@@ -344,12 +344,31 @@ A silent prefix is not a cosmetic misreading: it is what `read_only`,
 against, and what the `queries` row stores. A `MERGE` whose write clause sits
 past byte 252 was gated on its first 252 bytes and recorded as them.
 
-The survey's long statements are encoded by dbbat's **own** rewriter, which is
-sound for the header it reproduces byte for byte but is not a recorded client's
-CLR long form — no fixture carries a 64-bit statement past 251 bytes.
-`TestIntegration_OCILongStatementIsRecordedWhole` is the live version, where
-sqlplus writes every byte: a 322-byte statement whose tail marker starts at byte
-292, asserted present and byte-identical in the `queries` row.
+**The live measurement found a second gap, and a worse one.** The survey's long
+statements are encoded by dbbat's **own** rewriter — sound for the header it
+reproduces byte for byte, but not a recorded client's CLR long form, and no
+fixture carries a 64-bit statement past 251 bytes. So
+`TestIntegration_OCILongStatementIsRecordedWhole` runs the statement from a real
+sqlplus and reads the `queries` row back, and it was sized by running it against
+a build deliberately told the wrong dialect:
+
+- a **322-byte** statement passes either way. This client writes it as one
+  contiguous run, so the keyword scan walks it end to end. The 253-byte boundary
+  is real for the long form dbbat's rewriter writes; sqlplus does not write that
+  form at that size;
+- a **40KB** one fails, for a reason the survey could not see. The message is
+  larger than the negotiated SDU, so `collectStatementMessage` asks
+  `execFragmentShortfall` how much more is owed — and that walk could not read
+  this dialect's header either, so the continuation packets were never
+  collected. Measured: **7877 bytes of 40610** recorded, cut at the fragment
+  boundary.
+
+That is the 2026-08-31 reassembly incident exactly (see `reassembly.go`), still
+live on this one client family: the gate enforced against the first packet's
+worth of statement, `/queries` recorded it, and everything past the fragment
+boundary — `oracleBlockedPatterns`, the approval patterns, the dynamic-SQL scan
+— was evadable by padding a statement past the SDU. It is why `execSQLLength`'s
+reassembly caller takes the dialect too, and not only the decode.
 
 ### `ALTER SESSION SET …` and the statement gate
 

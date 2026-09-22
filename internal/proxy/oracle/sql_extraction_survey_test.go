@@ -502,7 +502,10 @@ func TestSurveyStapledOALL8(t *testing.T) {
 // Its long statements are encoded by dbbat's own rewriter rather than by a
 // client, for the reason wide64DerivedFrames spells out. The live version, where
 // sqlplus writes every byte itself, is
-// TestIntegration_OCILongStatementIsRecordedWhole.
+// TestIntegration_OCILongStatementIsRecordedWhole — and it found the worse half
+// of this, which no frame-level survey could: the same unread header meant a
+// statement past the SDU was never *reassembled*, so the gate saw the first
+// packet and nothing else. 7877 bytes of 40610, measured.
 
 // wide64ScanReading is decodePiggybackExecSQL's fallback, and only its fallback:
 // the 40-70 offset window followed by the keyword scan. It is what a 64-bit OCI
