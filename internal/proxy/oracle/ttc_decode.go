@@ -2225,7 +2225,7 @@ const (
 
 // rowValueShapeOf reads a column's shape off the describe's type codes. With no
 // type codes — the heuristic path — every column is a scalar, which is the
-// behaviour this package had throughout.
+// behavior this package had throughout.
 func rowValueShapeOf(colTypes []int, col int) rowValueShape {
 	if col < 0 || col >= len(colTypes) {
 		return rowValueScalar
@@ -2396,7 +2396,7 @@ func readRowColumn(payload []byte, offset int, colTypes []int, col int) (string,
 //
 // It is the check that makes the locator skips above safe to get wrong. A row
 // with no locator in it is accepted wherever it ends, exactly as before — the
-// stream simply stops at the first byte readRowSeparator does not recognise. A
+// stream simply stops at the first byte readRowSeparator does not recognize. A
 // row that needed a skip is accepted only if the columns after that skip landed
 // on their own values, which is what a clean terminator says and what a drifted
 // walk almost never produces.

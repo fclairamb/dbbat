@@ -242,7 +242,7 @@ const tnsTypeOPAQUE = 58
 // handle naming the LOB inside the server, and a client that wants the bytes
 // asks for them in a round trip of its own. dbbat does not, and must not — a
 // proxy issuing reads on the session's behalf is a statement the user never
-// wrote. So these three are named here to be *recognised*, not decoded: see
+// wrote. So these three are named here to be *recognized*, not decoded: see
 // rowValueShapeOf and lobLocatorPlaceholder.
 //
 // NCLOB has no code of its own; it is a CLOB with the national character set,
