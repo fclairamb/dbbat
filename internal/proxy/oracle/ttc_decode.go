@@ -2366,7 +2366,7 @@ func rowValueShapeOf(colTypes []int, col int) rowValueShape {
 // maxSize ahead of the header and as the CLR length byte behind it. Only a
 // column where the two agree is read as a locator, which is what makes the skip
 // a measurement rather than an arithmetic that happens to land (the same rule
-// skipObjectImage holds the object image's header to). A zero maxSize is the
+// readObjectImage holds the object image's header to). A zero maxSize is the
 // NULL LOB and ends the column on the spot — the four bytes the old
 // lobNullTrailerLen counted with the length byte in front of it.
 //
@@ -2504,14 +2504,14 @@ func readCompressedLOBColumn(payload []byte, offset int, colTypes []int, col int
 	return decodeRowValue(colTypes, col, raw), offset, true
 }
 
-// objectImageSearchWindow bounds how far past an object locator skipObjectImage
+// objectImageSearchWindow bounds how far past an object locator readObjectImage
 // will look for the image header. The two dialects measured put it 12 and 14
 // bytes in; the window is wide enough for a third to differ and narrow enough
 // that it cannot wander into the next row.
 const objectImageSearchWindow = 32
 
-// skipObjectImage steps over the framing and the image that follow an object or
-// opaque locator, returning the offset of the next column's value.
+// readObjectImage finds the image that follows an object or opaque locator and
+// returns it together with the offset of the next column's value.
 //
 // It reads the image header rather than hard-coding its distance, because that
 // distance is one of the things the OCI dialects spell differently (12 bytes of
@@ -2525,7 +2525,11 @@ const objectImageSearchWindow = 32
 // is not matched and the row is refused. That is deliberate: no such image has
 // been recorded, and a guess at how the longer form is framed would be a guess
 // the capture then presents as a value.
-func skipObjectImage(payload []byte, offset int) (int, bool) {
+//
+// It was a pure skip until the image was decoded (decodeObjectImage): the
+// bounds it already measured are the bounds of the value, so returning the
+// bytes as well as the resume offset is the whole of the change.
+func readObjectImage(payload []byte, offset int) ([]byte, int, bool) {
 	const imageHeaderLen = 7
 
 	for i := offset; i+imageHeaderLen <= len(payload) && i-offset <= objectImageSearchWindow; i++ {
@@ -2538,15 +2542,152 @@ func skipObjectImage(payload []byte, offset int) (int, bool) {
 			continue
 		}
 
-		end := i + imageHeaderLen + int(size)
+		start := i + imageHeaderLen
+
+		end := start + int(size)
 		if end > len(payload) {
-			return 0, false
+			return nil, 0, false
 		}
 
-		return end, true
+		return payload[start:end], end, true
 	}
 
-	return 0, false
+	return nil, 0, false
+}
+
+// The object image's own encoding, and the reason an object column no longer
+// captures the handle in front of it.
+//
+// The image opens with a flag byte, then the image's **own** length as a TTC
+// compressed integer — a third spelling of the number the outer header already
+// gave twice, and the check that makes this a reading rather than a cast. Two
+// flags are decoded and everything else is refused:
+//
+//	0x84  a named object type: the attributes follow, each one a CLR, in the
+//	      same length-prefixed encoding the rest of the row uses.
+//	      Measured: `84 01 08 02 c1 02 01 78` is dbbat_cap_obj(1, 'x') —
+//	      length 8, then the NUMBER 1 as `c1 02` and the string `x` as `78`.
+//	0x85  an opaque type (SYS.XMLTYPE): a 0x01, then a big-endian ub4 naming
+//	      what the payload behind it is, then the payload to the end of the
+//	      image. Measured: `85 01 0c 01 00000014 3c 61 2f 3e` is
+//	      XMLTYPE('<a/>') — length 12, kind 0x14 (text), payload `<a/>`.
+//
+// The two images above are the only two in the corpus: the whole of
+// testdata/ carries them and nothing else of this shape (oci_describe.hex and
+// oci64_describe.hex hold the first, oci_lob.hex and oci64_lob.hex the second).
+// The reading is pinned against both dialects of each, and it agrees with
+// go-ora's own — same flags, same compressed length, same `1`-then-ub4 header
+// on the opaque one, same eight bytes before an XMLTYPE's text.
+//
+// Everything not measured fails closed to the locator hex the column captured
+// before, rather than to a value that would read as data: the 0x88 collection
+// flag, an opaque kind other than text (0x11 is a locator, so the payload is
+// not in this packet either), an attribute walk that does not land exactly on
+// the image's end, and the 0xFE/0xFF CLR forms — a chunked or NULL attribute,
+// neither of which has been recorded.
+const (
+	// objectImageFlagNamedType is the flag byte of a named object type's
+	// image, whose body is its attributes.
+	objectImageFlagNamedType = 0x84
+
+	// objectImageFlagOpaque is the flag byte of an opaque type's image
+	// (SYS.XMLTYPE), whose body is a kind and a payload.
+	objectImageFlagOpaque = 0x85
+
+	// opaqueImageKindText is the only opaque kind decoded: the payload behind
+	// it is the value's own text. 0x11, the other one go-ora reads, is a LOB
+	// locator — the data is not in the packet, so there is nothing to render.
+	opaqueImageKindText = 0x14
+
+	// opaqueImageKindLen is the width of the kind field, a big-endian ub4.
+	opaqueImageKindLen = 4
+
+	// objectImageMaxAttributes bounds the attribute walk. An image is at most
+	// 255 bytes and every attribute costs its length byte, so this can only be
+	// reached by a walk that is already wrong.
+	objectImageMaxAttributes = 255
+)
+
+// decodeObjectImage renders an object or opaque column's image as the value it
+// carries, or reports that it could not be read.
+//
+// A false return is the fail-closed path and it is the point of the split:
+// readRowColumn then captures the locator hex it always captured, so an image
+// shape nothing has recorded costs the reader nothing and invents nothing.
+func decodeObjectImage(image []byte) (string, bool) {
+	const flagLen = 1
+
+	if len(image) < flagLen {
+		return "", false
+	}
+
+	declared, n := readCompressedInt(image[flagLen:])
+	if n == 0 || declared != len(image) {
+		return "", false
+	}
+
+	body := image[flagLen+n:]
+
+	switch image[0] {
+	case objectImageFlagNamedType:
+		return decodeNamedObjectAttributes(body)
+	case objectImageFlagOpaque:
+		return decodeOpaqueImageBody(body)
+	default:
+		return "", false
+	}
+}
+
+// decodeNamedObjectAttributes walks a named object type's attributes and joins
+// them into one readable value.
+//
+// The attributes carry no types — the row says how long each one is and nothing
+// more, and the describe names the object's type without describing its shape —
+// so each is rendered by decodeOracleRawValue, the same type-less reading this
+// package already applies wherever a column's type code is not known. On the
+// one recorded object that is `1` and `x` rather than `c102` and `78`.
+//
+// The walk must consume the image **exactly**. A remainder or an overrun means
+// the attributes are not laid out the way this reads them, and the whole image
+// is refused rather than reported in part.
+func decodeNamedObjectAttributes(body []byte) (string, bool) {
+	values := make([]string, 0, 4)
+
+	for offset := 0; offset < len(body); {
+		length := int(body[offset])
+		if length >= 0xFE {
+			return "", false // a chunked CLR or a NULL attribute: unrecorded
+		}
+
+		offset++
+
+		if offset+length > len(body) || len(values) >= objectImageMaxAttributes {
+			return "", false
+		}
+
+		values = append(values, decodeOracleRawValue(body[offset:offset+length]))
+		offset += length
+	}
+
+	return "(" + strings.Join(values, ", ") + ")", true
+}
+
+// decodeOpaqueImageBody reads an opaque type's image body: a constant 0x01, a
+// big-endian ub4 naming the payload's kind, and the payload to the end of the
+// image.
+func decodeOpaqueImageBody(body []byte) (string, bool) {
+	const markerLen = 1
+
+	if len(body) < markerLen+opaqueImageKindLen || body[0] != 0x01 {
+		return "", false
+	}
+
+	kind := binary.BigEndian.Uint32(body[markerLen : markerLen+opaqueImageKindLen])
+	if kind != opaqueImageKindText {
+		return "", false
+	}
+
+	return string(body[markerLen+opaqueImageKindLen:]), true
 }
 
 // lobLocatorPlaceholder is what dbbat captures for a LOB column, and the
@@ -2623,9 +2764,16 @@ func readRowColumn(
 		return "", 0, false
 
 	case rowValueObjectImage:
-		next, ok := skipObjectImage(payload, offset)
+		image, next, ok := readObjectImage(payload, offset)
 		if !ok {
 			return "", 0, false
+		}
+
+		// The image is the value; the locator in front of it is a handle. Only
+		// an image this package has measured is rendered — anything else keeps
+		// the locator hex the column captured before (decodeObjectImage).
+		if value, ok := decodeObjectImage(image); ok {
+			return value, next, true
 		}
 
 		return decodeRowValue(colTypes, col, raw), next, true

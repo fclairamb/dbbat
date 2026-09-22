@@ -28,6 +28,23 @@ var ociDescribeColumns = []columnDesc{
 	{Name: "OBJ", Type: ociObjectColumnType},
 }
 
+// ociDescribeObjectValue is what the `OBJ` column captures on **both** fixtures:
+// the object's own image, rendered, rather than the locator in front of it.
+//
+// The column is `dbbat_cap_obj(1, 'x')` and its image is `84 01 08 02 c1 02 01
+// 78` — the flag, the length 8, then the NUMBER 1 and the string `x` as two
+// ordinary CLRs. The attributes carry no types, so each is read by
+// decodeOracleRawValue, the same type-less reading the package applies to any
+// column whose type code it does not have.
+//
+// Sharing one constant across the two dialects is the argument for the change
+// rather than a convenience. The locators these two sessions captured for this
+// one value did **not** match — `...5c0f1a6dae5600fc...` on the 64-bit
+// recording against `...5c0f18b7351e0110...` on the 4-byte one, forty seconds
+// apart against the same row — because a locator is a per-fetch handle. The
+// image matches to the byte.
+const ociDescribeObjectValue = "(1, x)"
+
 // ociDescribeTypedColumns is ociDescribeTypedQuery, the describe added to place
 // the 64-bit record's extra 25 bytes. Every column in it separates something the
 // list above conflates, and each pulls its weight here:
@@ -170,7 +187,7 @@ func TestOCI64RowCaptureCarriesTheDescribesValues(t *testing.T) {
 				"TS":  "2026-09-22 08:25:03.830104 +00:00",
 				"C5":  "ab   ",
 				"R":   "7a7a",
-				"OBJ": "00000024002202085c0f1a6dae5600fce06306d7a8c06455000000000000000000000000",
+				"OBJ": ociDescribeObjectValue,
 			},
 		},
 	}

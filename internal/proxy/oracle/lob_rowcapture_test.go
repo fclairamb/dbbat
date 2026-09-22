@@ -49,7 +49,7 @@ const goOraLOBSQLMarker = "'aaaaaa' AS c1"
 // reaches a fetch and records nothing at all. The opaque column is therefore
 // out of this dialect's reach, which costs nothing the walk depends on — the
 // object image's own header is read rather than measured, and already spans the
-// dialects (skipObjectImage). The LOB framing, which is not, is entirely here.
+// dialects (readObjectImage). The LOB framing, which is not, is entirely here.
 //
 // It has no trailing semicolon because go-ora parses the text itself and reads
 // one as a syntax error, where sqlplus needs it.
@@ -104,18 +104,21 @@ var ociLOBColumns = []columnDesc{
 	{Name: "C7", Type: tnsTypeCHAR},
 }
 
-// ociLOBXMLLocator is what the XMLTYPE column captures: the opaque locator's
-// own bytes, the same value an object column has always captured.
+// ociLOBXMLValue is what the XMLTYPE column captures: the opaque type's own
+// image, decoded — `XMLTYPE('<a/>')` read back as `<a/>`.
 //
-// It is deliberately *not* the placeholder the LOB columns get, and the
-// difference is the one fact that decides it — where the data is. A LOB's
+// It is deliberately *not* the placeholder the LOB columns beside it get, and
+// the difference is the one fact that decides it — where the data is. A LOB's
 // contents are not in this packet at all and dbbat will not go and ask for
-// them, so there is nothing to render and the column says so. An opaque or
-// object column carries its own image a few bytes further along the same row,
-// so replacing the column wholesale with a marker would be discarding bytes
-// dbbat is holding. Reading that image instead of the locator is a better
-// value than either and is filed as its own piece of work.
-const ociLOBXMLLocator = "000000240022020800000000000000000000000000020100000000000000000000000000"
+// them, so there is nothing to render and the column says so. An opaque column
+// carries its own image a few bytes further along the same row: here
+// `85 01 0c 01 00000014 3c 61 2f 3e`, the flag, the length 12, the kind 0x14
+// (text) and the four bytes of `<a/>`.
+//
+// Until decodeObjectImage this was the locator in front of it, captured as
+// `0000002400220208...` — thirty-six bytes of per-fetch handle where four bytes
+// of value were already in hand.
+const ociLOBXMLValue = "<a/>"
 
 // TestOCI64LOBDescribeCarriesNoRowValuesAtAll is the measurement the LOB fix
 // rests on, and it is the half that was guessed wrong before the session was
@@ -202,7 +205,7 @@ func TestOCI64LOBFetchKeepsEveryOrdinaryColumn(t *testing.T) {
 		"C4": "dddddd",
 		"D4": "<CLOB locator>",
 		"C5": "eeeeee",
-		"X1": ociLOBXMLLocator,
+		"X1": ociLOBXMLValue,
 		"C6": "ffffff",
 		"D5": "",
 		"C7": "gggggg",
@@ -260,11 +263,11 @@ func TestLOBRowIsRefusedWhenTheFramingSkipLandsWrong(t *testing.T) {
 		"a walk that comes out of the framing on the wrong byte must cost the row, not fill it")
 }
 
-// TestSkipObjectImageReadsTheLengthTwiceOrNotAtAll pins the one thing that
-// makes the object-image skip a reading rather than a pattern match: the image
-// length arrives as a four-byte field and as a single byte, and only a header
-// where the two agree is accepted.
-func TestSkipObjectImageReadsTheLengthTwiceOrNotAtAll(t *testing.T) {
+// TestReadObjectImageReadsTheLengthTwiceOrNotAtAll pins the one thing that
+// makes the object-image header a reading rather than a pattern match: the
+// image length arrives as a four-byte field and as a single byte, and only a
+// header where the two agree is accepted.
+func TestReadObjectImageReadsTheLengthTwiceOrNotAtAll(t *testing.T) {
 	t.Parallel()
 
 	// Twelve bytes of framing, then the header the 64-bit dialect writes ahead
@@ -276,19 +279,124 @@ func TestSkipObjectImageReadsTheLengthTwiceOrNotAtAll(t *testing.T) {
 		0x07,
 	}
 
-	next, ok := skipObjectImage(payload, 0)
+	image, next, ok := readObjectImage(payload, 0)
 	require.True(t, ok)
-	assert.Equal(t, len(payload)-1, next, "the skip must land on the next column's length byte")
+	assert.Equal(t, len(payload)-1, next, "the resume offset must be the next column's length byte")
+	assert.Equal(t, []byte{0xde, 0xad, 0xbe, 0xef}, image,
+		"and the bytes between the header and it are the image")
 
 	// The same bytes with the one-byte length disagreeing with the four-byte
 	// one: no header, no row.
 	disagreeing := append([]byte(nil), payload...)
 	disagreeing[18] = 0x05
 
-	_, ok = skipObjectImage(disagreeing, 0)
+	_, _, ok = readObjectImage(disagreeing, 0)
 	assert.False(t, ok, "two spellings of one length that disagree are not a header")
 
 	// And nothing at all to find within the window.
-	_, ok = skipObjectImage(make([]byte, 64), 0)
+	_, _, ok = readObjectImage(make([]byte, 64), 0)
 	assert.False(t, ok, "a run of zeros is not an image header")
+}
+
+// TestObjectImageDecodesOrKeepsTheLocator is the fail-closed half of the
+// decode, held on synthesized images because the corpus carries only the two
+// that *do* decode — one named object and one XMLTYPE, each recorded on both
+// OCI dialects (TestOCI64RowCaptureCarriesTheDescribesValues,
+// TestOCIRowCaptureCarriesTheDescribesColumnNames and the two LOB fetches pin
+// those). What has never been recorded is every other shape, which is exactly
+// what must not be guessed at.
+func TestObjectImageDecodesOrKeepsTheLocator(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		image []byte
+		want  string
+	}{
+		{
+			name:  "the recorded named object, attributes read with no types to read them by",
+			image: []byte{0x84, 0x01, 0x08, 0x02, 0xc1, 0x02, 0x01, 0x78},
+			want:  ociDescribeObjectValue,
+		},
+		{
+			name:  "the recorded XMLTYPE, kind 0x14 and its text behind it",
+			image: []byte{0x85, 0x01, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x14, 0x3c, 0x61, 0x2f, 0x3e},
+			want:  ociLOBXMLValue,
+		},
+		{
+			name:  "an object with no attributes at all",
+			image: []byte{0x84, 0x01, 0x03},
+			want:  "()",
+		},
+		{
+			name:  "a length the image's own header disagrees with",
+			image: []byte{0x84, 0x01, 0x09, 0x02, 0xc1, 0x02, 0x01, 0x78},
+			want:  "",
+		},
+		{
+			name:  "an attribute walk that overruns the image",
+			image: []byte{0x84, 0x01, 0x08, 0x02, 0xc1, 0x02, 0x04, 0x78},
+			want:  "",
+		},
+		{
+			name:  "an attribute walk that leaves a remainder is the same refusal",
+			image: []byte{0x84, 0x01, 0x08, 0x02, 0xc1, 0x02, 0x00, 0x78},
+			want:  "",
+		},
+		{
+			name:  "a NULL or chunked attribute, neither of which has been recorded",
+			image: []byte{0x84, 0x01, 0x05, 0xff, 0x01, 0x78},
+			want:  "",
+		},
+		{
+			name:  "the collection flag, which nothing in the corpus carries",
+			image: []byte{0x88, 0x01, 0x08, 0x02, 0xc1, 0x02, 0x01, 0x78},
+			want:  "",
+		},
+		{
+			name:  "an opaque kind that is a LOB locator, so the data is not here either",
+			image: []byte{0x85, 0x01, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x11, 0x3c, 0x61, 0x2f, 0x3e},
+			want:  "",
+		},
+		{
+			name:  "an opaque image too short to carry a kind",
+			image: []byte{0x85, 0x01, 0x05, 0x01, 0x00},
+			want:  "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := decodeObjectImage(tc.image)
+			assert.Equal(t, tc.want != "", ok,
+				"an image dbbat has not measured must be refused, not rendered")
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestUnreadableObjectImageKeepsTheLocatorHex is the refusal above seen where it
+// matters: in the value the column captures. A row whose object image does not
+// decode keeps every other column and falls back to the locator's own bytes —
+// the value this package captured before the image was read at all — rather
+// than losing the row or inventing an object.
+func TestUnreadableObjectImageKeepsTheLocatorHex(t *testing.T) {
+	t.Parallel()
+
+	// A two-byte locator, twelve bytes of framing, then the header and an image
+	// carrying the collection flag decodeObjectImage refuses.
+	payload := []byte{
+		0x02, 0xab, 0xcd,
+		0x00, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0,
+		0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x03,
+		0x88, 0x01, 0x03,
+		0x07,
+	}
+
+	value, next, ok := readRowColumn(payload, 0, oci64OERShape(), []int{tnsTypeNamedObject}, 0)
+	require.True(t, ok, "the column must still be stepped over — the row is not lost")
+	assert.Equal(t, len(payload)-1, next)
+	assert.Equal(t, "abcd", value, "and the capture falls back to the locator hex")
 }

@@ -129,7 +129,7 @@ func TestOCIRowCaptureCarriesTheDescribesColumnNames(t *testing.T) {
 				"TS":  "2026-09-22 08:24:34.244767 +00:00",
 				"C5":  "ab   ",
 				"R":   "7a7a",
-				"OBJ": "00000024002202085c0f18b7351e0110e06304d7a8c09ec0000000000000000000000000",
+				"OBJ": ociDescribeObjectValue,
 			},
 			scanned: []string{"N2", "BIG", "FLT", "TS", "C5", "OBJ", "SYSTEM", "DBBAT_CAP_OBJ"},
 		},

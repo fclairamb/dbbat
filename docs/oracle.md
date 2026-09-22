@@ -1739,9 +1739,9 @@ read, a query with a CLOB column anywhere in it captured **no rows at all** —
 not an unreadable value for that column, the whole row, every ordinary column
 beside it included, and nothing in the audit trail saying so.
 
-#### LOB, opaque and object columns are locators, not values
+#### LOB, opaque and object columns do not send a length-prefixed datum
 
-Three type families do not send a length-prefixed datum:
+Three type families do not:
 
 | Type | Codes | What the row carries |
 |---|---|---|
@@ -1785,7 +1785,9 @@ the row. `readRowColumn` steps over the framing instead:
   with a constant `0x01 0x00` between them. Two spellings of one number agreeing
   is what makes a hit a measurement, and it is also why the walk needs no
   per-dialect constant (the framing ahead of the header is 12 bytes on the
-  64-bit dialect and 14 on the 4-byte one).
+  64-bit dialect and 14 on the 4-byte one). `readObjectImage` returns the bytes
+  between that header and the next column, and `decodeObjectImage` reads them —
+  see "An object column captures its image" below.
 
 Because those skips are measured, a row that used one is kept **only** when the
 columns after it come out on a row marker (`0x07`, `0x15` or the `0x08` footer).
@@ -1807,12 +1809,49 @@ instead: there the contents *are* in the packet, because the client asked the
 server to inline them. The deciding fact is where the data is, not which type
 the column has.
 
-An **opaque or object** column keeps capturing its locator's bytes as hex, which
-is what it has always captured. The difference is not inconsistency but where the
-data is: that column's own image travels a few bytes further along the same row,
-so replacing the column wholesale with a marker would be discarding bytes dbbat
-is holding. Rendering that image instead of the locator would be a better value
-than either, and is filed as its own piece of work.
+#### An object column captures its image, not the locator in front of it
+
+An **opaque or object** column is not in the LOB's position, and it no longer
+captures like one. Its value is not somewhere else on the server: the object's
+own image travels a few bytes further along the same row, and the walk above was
+already measuring exactly where it starts and ends in order to find the next
+column. It threw those bytes away.
+
+The image opens with a flag byte, then its **own** length as a TTC compressed
+integer — a third spelling of the number the outer header already gave twice,
+and the check that makes this a reading rather than a cast. Two flags are
+decoded:
+
+| Flag | Shape | Recorded image | Captured as |
+|---|---|---|---|
+| `0x84` | a named object type: the attributes, each an ordinary CLR | `84 01 08 · 02 c1 02 · 01 78` | `(1, x)` |
+| `0x85` | an opaque type (`SYS.XMLTYPE`): a `0x01`, a big-endian ub4 kind, then the payload | `85 01 0c · 01 · 00000014 · 3c 61 2f 3e` | `<a/>` |
+
+Those two images are the whole corpus: `testdata/` carries them and nothing else
+of this shape — `oci_describe.hex` and `oci64_describe.hex` hold the first
+(`dbbat_cap_obj(1, 'x')`), `oci_lob.hex` and `oci64_lob.hex` the second
+(`XMLTYPE('<a/>')`). Each is recorded on **both** OCI dialects, and the two
+recordings of the object captured *different* locators for the same value
+(`…5c0f1a6dae5600fc…` against `…5c0f18b7351e0110…`, forty seconds apart against
+the same row) while their images match to the byte. That is the argument in one
+line: the locator is a per-fetch handle, the image is the value. The reading
+also agrees with go-ora's own — same flags, same compressed length, same
+`0x01`-then-ub4 header on the opaque one.
+
+A named object's attributes carry **no types**: the row says how long each one
+is and nothing more, and the describe names the object's type without describing
+its shape. So each attribute is rendered by `decodeOracleRawValue`, the same
+type-less reading this package already applies wherever a column's type code is
+not known — which is what turns `c1 02` into `1` and `78` into `x` rather than
+into hex.
+
+Everything not measured **fails closed to the locator hex the column captured
+before**, which is a value rather than a lost row: the `0x88` collection flag, an
+opaque kind other than text (`0x11` is a LOB locator, so that payload is not in
+this packet either), an attribute walk that does not land exactly on the image's
+end, and the `0xFE`/`0xFF` CLR forms — a chunked or NULL attribute, neither of
+which has been recorded. See `TestObjectImageDecodesOrKeepsTheLocator` and
+`TestUnreadableObjectImageKeepsTheLocatorHex`.
 
 #### DML status (OER, func=0x04)
 

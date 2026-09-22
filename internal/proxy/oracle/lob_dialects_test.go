@@ -31,7 +31,7 @@ import (
 // header is two bytes shorter.
 //
 // `X1` is the one field the two dialects do agree on, byte for byte
-// (ociLOBXMLLocator), which is the other half of the same point: the object
+// (ociLOBXMLValue), which is the other half of the same point: the object
 // image's framing is *read* rather than counted, so it spans both already.
 func TestOCILOBFetchKeepsEveryOrdinaryColumn(t *testing.T) {
 	t.Parallel()
@@ -72,7 +72,7 @@ func TestOCILOBFetchKeepsEveryOrdinaryColumn(t *testing.T) {
 		"C4": "dddddd",
 		"D4": "<CLOB locator>",
 		"C5": "eeeeee",
-		"X1": ociLOBXMLLocator,
+		"X1": ociLOBXMLValue,
 		"C6": "ffffff",
 		"D5": "",
 		"C7": "gggggg",
