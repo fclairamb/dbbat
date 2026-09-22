@@ -113,7 +113,9 @@ execute stapled behind the close list; the "python exec" sub-op (`0x11`/`0x98`)
 appears in **zero** frames across all 22 recordings in `testdata/`.
 
 **The execute declares its own statement length — read it, do not search for
-it** (`ttc_exec_statement.go`). Two header encodings carry it:
+it** (`ttc_exec_statement.go`). Three header encodings carry it, one per client
+dialect, and each is read only on the sessions that speak it
+(`execSQLLengthFieldFor`):
 
 ```
 thin (go-ora, python-oracledb thin, JDBC thin, DBeaver):
@@ -134,6 +136,16 @@ OCI wide (sqlplus, SQL*Developer via OCI, Instant Client):
   [21..24] sqlLen * 3   uint32 LE — the client sizes the buffer for its widest
                         character encoding, and counts a trailing NUL when it
                         writes one
+
+OCI 64-bit (the DB-bundled sqlplus 23.x — the dialect CI runs):
+  [0..2]   03 5e seq
+  [3..4]   00 00        where the 4-byte header puts [01][seq+1]
+  [5..8]   ub4          the last error number this session saw
+  [9..16]  sb8 = seq+1  the NEXT message's sequence number
+  [17..20] options      uint32 LE
+  [21..24] cursorID     uint32 LE
+  [25..32] fe x8        pointer sentinel
+  [33..40] sqlLen       uint64 LE — the **plain** byte count, not 3x it
 ```
 
 Verified byte-for-byte: go-ora's 56-byte `UPDATE dbbat_dml_test SET name =
@@ -289,6 +301,48 @@ requiring the chunks to concatenate to exactly `sqlLen` printable bytes behind
 a verb — and reports where the statement's wire bytes end, because bind capture
 cannot anchor a chunked statement by searching for its text
 (`execStatement.End`).
+
+#### The 64-bit exec header reaches the gate, not just the rewriter
+
+The third encoding above landed with the statement tag, and for a while only the
+*rewriter* used it. `decodeExecStatementText` and its callees took no dialect,
+so on a 64-bit OCI session the 4-byte walk refused the header (`body[3]` is
+`0x00`) and the thin walk read the low byte of that header's ub4 error number as
+a compressed-int size — so the decode declined and the frame fell through to the
+40–70 offset window and the keyword scan. The mechanism this section exists to
+replace was, on that whole client family, still the one in charge.
+
+`wide64` is now threaded `decodeExecStatement` → `decodeExecStatementText` →
+`decodeExecStatementAt` → `execSQLLength` → `execSQLLengthFieldFor`, which
+already had the parameter, and down `execFragmentShortfall` with it — the length
+reassembly owes is the length the decode reads, so a 64-bit session whose header
+the walk refused never reassembled an oversized statement in the first place.
+The dialect comes from the session (`session.clientWide64Encoding`, off the
+client's own AUTH Phase 1), never from trying one layout after another.
+
+**It was measured first, because the measurement could have said no**
+(`sql_extraction_survey_test.go`, the `TestSurveyWide64…` pair):
+
+- On the recorded bytes — `testdata/oci64_parse_execs.hex`, three parses of one
+  33-byte `BEGIN dbbat_cap_refcur(:rc); END;` — the window scan reads **every
+  frame whole**. That corpus alone says there is no gap, and it is asserted as
+  such so nobody re-derives the opposite from it.
+- Widened to the same recorded headers carrying ten statements — the rewriter
+  reproduces each frame byte for byte (`TestSurveyStatementRewriteWide64OCI`),
+  which is what makes it sound to stand in for the client on other text — the
+  gap appears at a boundary found by bisection rather than derived: **at or below
+  252 bytes the scan reads the statement whole; from 253 on it hands the gate
+  exactly 252 bytes**. On this dialect the statement's length prefix sits at a
+  fixed offset the window happens to cover, so the scan works precisely as long
+  as that prefix is one byte. 9 of 30 frames, and every one of them **silent** —
+  `Truncated` unset, because a window scan has no declared length to check its
+  run against. The header-anchored decode reads all 30 whole; before the dialect
+  was threaded down it read none of them at all.
+
+A silent prefix is not a cosmetic misreading: it is what `read_only`,
+`block_ddl`, the approval patterns and `ValidateOracleQuery` are evaluated
+against, and what the `queries` row stores. A `MERGE` whose write clause sits
+past byte 252 was gated on its first 252 bytes and recorded as them.
 
 ### `ALTER SESSION SET …` and the statement gate
 
@@ -4156,14 +4210,17 @@ by unit tests on both dialects.
 client, `fixed_width=true fixed_width_64=false` against a 64-bit client is the whole bug,
 and nothing else in the log distinguishes the two layouts.
 
-**The same flag is what two statement-gate readings key on**, and they were added
-later: the REF-cursor bind-output walk (`refcursor_bind_wide64.go`) and the
-SQL-less execute's cursor id (`execWide64NoStatementCursor`). Both had held for
-the 4-byte dialect only, which meant every cursor re-execution on the 64-bit one
-— the dialect CI runs — was forwarded ungated. See "Learning a REF cursor's id"
-and "Cursor re-execution"; the point to carry over here is that a new reading
-added for one OCI dialect is not a reading for the other, and the flag is how
-each is offered to its own session and to nothing else.
+**The same flag is what three statement-gate readings key on**, and they were
+added later: the REF-cursor bind-output walk (`refcursor_bind_wide64.go`), the
+SQL-less execute's cursor id (`execWide64NoStatementCursor`), and the statement
+decode itself (`execSQLLengthWide64Field`, reached through
+`execSQLLengthFieldFor`). Each had held for the 4-byte dialect only, which meant
+every cursor re-execution on the 64-bit one — the dialect CI runs — was
+forwarded ungated, and every statement on it was read by the window scan. See
+"Learning a REF cursor's id", "Cursor re-execution" and "The 64-bit exec header
+reaches the gate, not just the rewriter"; the point to carry over here is that a
+new reading added for one OCI dialect is not a reading for the other, and the
+flag is how each is offered to its own session and to nothing else.
 
 #### OCI break/reset before AUTH Phase 2 — root cause and fix
 
