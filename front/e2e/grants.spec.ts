@@ -111,8 +111,13 @@ test.describe("Access Grants Management", () => {
     // Verify it's a valid datetime-local format (YYYY-MM-DDTHH:mm)
     expect(startsAtValue).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
 
-    // Verify the date portion is today
-    const today = new Date().toISOString().split("T")[0];
+    // Verify the date portion is today. `datetime-local`'s value is always the
+    // browser's LOCAL date/time per the HTML spec, so the expectation must be
+    // built from local date components — not `toISOString()`, which is UTC and
+    // disagrees with the local date for part of every day in any timezone
+    // ahead of UTC.
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     expect(startsAtValue.split("T")[0]).toBe(today);
   });
 
