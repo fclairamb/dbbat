@@ -3958,6 +3958,43 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /instance/tagging:
+    put:
+      tags:
+        - Instance
+      summary: Update instance-wide statement tagging
+      description: >-
+        Writes the `tagging.*` parameter group. Admin-only. `enabled` is a
+        boolean, so the store always ends up holding an explicit choice —
+        "false" overrides a `DBB_QUERY_TAGGING` default of true. An empty
+        `oracle` clears the parameter, falling back to
+        DBB_QUERY_TAGGING_ORACLE. An unrecognised `oracle` is a 400 here, never
+        a stored value: through the environment variable the same mistake is a
+        startup failure, and a settings write that would crash every replica on
+        restart is a worse trade. Sessions already running keep the decision
+        they authenticated under; the change reaches new sessions.
+      operationId: updateInstanceTagging
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstanceTagging'
+      responses:
+        '204':
+          description: Settings saved
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /mcp:
     post:
       tags:
@@ -7382,10 +7419,73 @@ components:
           $ref: '#/components/schemas/ResolvedEndpoints'
         resolved_limits:
           $ref: '#/components/schemas/ResolvedInstanceLimits'
+        resolved_tagging:
+          $ref: '#/components/schemas/ResolvedInstanceTagging'
+        tagging:
+          $ref: '#/components/schemas/InstanceTagging'
+          nullable: true
+          description: Only present for admin callers
       required:
         - listen
         - resolved
         - resolved_limits
+        - resolved_tagging
+
+    InstanceTagging:
+      type: object
+      description: >-
+        Raw operator-configured statement-tagging settings (the `tagging.*`
+        parameter group), before the environment-variable fallback is applied.
+        Admin-only on GET /instance; the body of PUT /instance/tagging.
+      properties:
+        enabled:
+          type: string
+          description: >-
+            "true" or "false" — the PostgreSQL / MySQL / MongoDB statement
+            tag. Empty means the parameter is unset and DBB_QUERY_TAGGING
+            applies.
+        oracle:
+          type: string
+          description: >-
+            "off" or "user" — Oracle's own per-user statement tag. Empty means
+            the parameter is unset and DBB_QUERY_TAGGING_ORACLE applies.
+      required:
+        - enabled
+        - oracle
+
+    ResolvedInstanceTagging:
+      type: object
+      description: The statement-tagging settings that actually apply.
+      properties:
+        enabled:
+          type: boolean
+          description: >-
+            Effective PostgreSQL / MySQL / MongoDB tagging decision.
+        enabled_source:
+          type: string
+          enum: ['', parameter, env]
+          description: >-
+            Where the effective value came from: `parameter` when the store
+            parameter is set (either polarity), `env` when
+            DBB_QUERY_TAGGING supplies it, empty when neither is configured.
+        oracle:
+          type: string
+          enum: [off, user]
+          description: Effective Oracle per-user tagging mode.
+        oracle_source:
+          type: string
+          enum: ['', parameter, env]
+          description: >-
+            Where the effective mode came from: `parameter` when the store
+            parameter is set (including one the resolver folded to `off`
+            because it was not recognised), `env` when
+            DBB_QUERY_TAGGING_ORACLE supplies it, empty when neither is
+            configured.
+      required:
+        - enabled
+        - enabled_source
+        - oracle
+        - oracle_source
 
     InstanceLimits:
       type: object

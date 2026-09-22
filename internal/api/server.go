@@ -507,6 +507,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticated.GET("/instance", s.handleGetInstance)
 			authenticated.PUT("/instance/public", s.requireAdmin(), s.handleUpdateInstancePublic)
 			authenticated.PUT("/instance/limits", s.requireAdmin(), s.handleUpdateInstanceLimits)
+			authenticated.PUT("/instance/tagging", s.requireAdmin(), s.handleUpdateInstanceTagging)
 
 			// Model Context Protocol endpoint (Streamable HTTP), for AI
 			// agents. Registered only when enabled: a disabled feature should
