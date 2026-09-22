@@ -1739,15 +1739,16 @@ read, a query with a CLOB column anywhere in it captured **no rows at all** —
 not an unreadable value for that column, the whole row, every ordinary column
 beside it included, and nothing in the audit trail saying so.
 
-#### LOB, opaque and object columns do not send a length-prefixed datum
+#### LOB, opaque, object and LONG columns do not send a length-prefixed datum
 
-Three type families do not:
+Four type families do not:
 
 | Type | Codes | What the row carries |
 |---|---|---|
 | CLOB / NCLOB, BLOB, BFILE | 112, 113, 114 | a header and then a 40-byte locator — spelled differently in each dialect, see below |
 | Opaque (`SYS.XMLTYPE`) | 58 | a 36-byte locator, then framing, then the object's own image |
 | Named object type | 121 | the same |
+| LONG, LONG RAW | 8, 24 | the value itself, then the column's indicator and return code |
 
 Reading one of those as a scalar and carrying on is what used to lose the rest of
 the row. `readRowColumn` steps over the framing instead:
@@ -1814,6 +1815,7 @@ the *other* client's reading comes back with no rows at all
 Until this was read, `lob fetch=post` and **every python-oracledb thin LOB
 query** captured nothing: the walk read the locator as an inlined value, came
 out on the wrong byte, and `rowEndsAtMarker` cost the row.
+
 - **Opaque / object** — the image header is *read*, not measured: the image
   length arrives twice, as a four-byte little-endian field and as a single byte,
   with a constant `0x01 0x00` between them. Two spellings of one number agreeing
@@ -1823,11 +1825,48 @@ out on the wrong byte, and `rowEndsAtMarker` cost the row.
   between that header and the next column, and `decodeObjectImage` reads them —
   see "An object column captures its image" below.
 
+- **LONG / LONG RAW** — the value, then the column's **indicator** and **return
+  code**, the pair a NULL spells `-1` and `1405` (ORA-01403, "fetched column
+  value is NULL"). It is the same shape an *inlined LOB* arrives in, and that is
+  not a coincidence: go-ora's default LOB policy works by re-declaring the
+  column as a LONG, so what it gets back is a LONG column. Until this was
+  measured (2026-09-22) only the substitution had been recorded, and a column
+  the **describe itself** reported as LONG was read as a scalar — the walk read
+  its value and then started the next column on the indicator byte, so the row
+  drifted and was refused. Four recordings of two queries, and they split two
+  ways:
+
+  | Dialect | What a LONG column carries | Recording |
+  |---|---|---|
+  | Thin | value CLR (`0xFE` chunks, compressed lengths) · indicator · retCode, all compressed | `testdata/go_ora_long.pcapng`, `testdata/python_thin_long.pcapng` |
+  | Both OCI | `fe` · chunkLen ub4 LE · chunk · … · `0` ub4 · indicator ub2 · retCode ub2 | `testdata/oci_long.hex`, `testdata/oci64_long.hex` |
+
+  So the split is the familiar one, compressed integers against fixed-width
+  fields — except that here the **two OCI dialects agree with each other byte
+  for byte**, which they do nowhere else in this section. A NULL is the empty
+  CLR with the same pair behind it (`81 01` / `02 05 7d` on thin, `ffff 7d05` on
+  OCI). The value arrives in the `0xFE` long form whatever its length, which an
+  inlined LOB did not, so the thin reading takes the chunk-length spelling from
+  the session's negotiated `UseBigClrChunks` (`oerShape.bigClrChunks`, stamped
+  from the pre-auth relay) rather than assuming one.
+
 Because those skips are measured, a row that used one is kept **only** when the
-columns after it come out on a row marker (`0x07`, `0x15` or the `0x08` footer).
-A skip that is wrong on some future server costs that row rather than filling it
-with framing bytes. Rows with no locator in them are unaffected and are accepted
-wherever they end, exactly as before.
+columns after it come out on something that can legitimately follow a row: the
+`0x07` / `0x15` separators, the `0x08` footer, or the **summary object that ends
+the call**. A skip that is wrong on some future server costs that row rather
+than filling it with framing bytes. Rows with no framed column in them are
+unaffected and are accepted wherever they end, exactly as before.
+
+That fourth terminator is a finding of its own, from the same recordings: only
+go-ora puts the `0x08` footer in front of the summary object. python-oracledb
+thin runs its last row straight into it on every fetch, and sqlplus does so on
+the round trip that returns the result set's final row — so on those clients the
+**last row of every fetch with a framed column in it** was being refused, LOB
+and object columns included. Each encoding is accepted under its own proof,
+never on the `0x04` marker byte alone: the compressed one must decode *and*
+report ORA-01403, the fixed-width one validates itself (its error number is
+repeated as the RetCode 66 bytes on, `decodeOERFieldsAtLayout`), which it has to,
+because the object sqlplus sends there reports plain success.
 
 **What a LOB column captures, and why it is not the data.** A locator is a
 handle into the server: it names a LOB, changes from fetch to fetch, and the

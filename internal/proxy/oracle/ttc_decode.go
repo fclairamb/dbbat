@@ -3007,9 +3007,12 @@ func readRowColumn(
 
 		return decodeRowValue(colTypes, col, raw), next, true
 
-	case rowValueScalar, rowValueLongInline:
-		// rowValueLongInline reaches here only on an OCI dialect, where it is
-		// deliberately still read as a scalar — see the switch above.
+	case rowValueLongInline:
+		// Answered above, before the length byte was read, on every dialect —
+		// the two spellings differ from each other but neither opens with one.
+		return "", 0, false
+
+	case rowValueScalar:
 		fallthrough
 	default:
 		if valLen == 0 {

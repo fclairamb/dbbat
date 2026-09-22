@@ -47,7 +47,7 @@ const (
 
 	// lobRowInline is what a client that re-declared its LOB columns as LONG
 	// gets: the value itself, followed by the column's indicator and return
-	// code. See readCompressedInlineLOBColumn.
+	// code. See readInlineLongColumn.
 	lobRowInline
 )
 
