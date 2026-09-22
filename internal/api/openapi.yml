@@ -3968,7 +3968,7 @@ paths:
         boolean, so the store always ends up holding an explicit choice —
         "false" overrides a `DBB_QUERY_TAGGING` default of true. An empty
         `oracle` clears the parameter, falling back to
-        DBB_QUERY_TAGGING_ORACLE. An unrecognised `oracle` is a 400 here, never
+        DBB_QUERY_TAGGING_ORACLE. An unrecognized `oracle` is a 400 here, never
         a stored value: through the environment variable the same mistake is a
         startup failure, and a settings write that would crash every replica on
         restart is a worse trade. Sessions already running keep the decision
@@ -3982,7 +3982,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/InstanceTagging'
+              $ref: '#/components/schemas/UpdateInstanceTagging'
       responses:
         '204':
           description: Settings saved
@@ -7453,6 +7453,27 @@ components:
         - enabled
         - oracle
 
+    UpdateInstanceTagging:
+      type: object
+      description: >-
+        Body of PUT /instance/tagging. `enabled` is a boolean, so the store
+        always ends up holding an explicit choice: "false" overrides a
+        DBB_QUERY_TAGGING default of true.
+      properties:
+        enabled:
+          type: boolean
+          description: >-
+            Turns the PostgreSQL / MySQL / MongoDB statement tag on or off.
+        oracle:
+          type: string
+          enum: [off, user, '']
+          description: >-
+            Oracle's own mode: "off" or "user". Empty clears the parameter,
+            falling back to DBB_QUERY_TAGGING_ORACLE. Anything else is a 400.
+      required:
+        - enabled
+        - oracle
+
     ResolvedInstanceTagging:
       type: object
       description: The statement-tagging settings that actually apply.
@@ -7478,7 +7499,7 @@ components:
           description: >-
             Where the effective mode came from: `parameter` when the store
             parameter is set (including one the resolver folded to `off`
-            because it was not recognised), `env` when
+            because it was not recognized), `env` when
             DBB_QUERY_TAGGING_ORACLE supplies it, empty when neither is
             configured.
       required:

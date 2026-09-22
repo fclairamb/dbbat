@@ -190,10 +190,10 @@ type instanceInfoResponse struct {
 	Public *instancePublicInfo `json:"public,omitempty"`
 	// Limits is admin-only, like Public: it is an operator setting, not
 	// something a connector needs.
-	Limits         *instanceLimitsInfo    `json:"limits,omitempty"`
-	Tagging        *instanceTaggingInfo   `json:"tagging,omitempty"`
-	Resolved       instanceResolvedInfo   `json:"resolved"`
-	ResolvedLimits instanceResolvedLimits `json:"resolved_limits"`
+	Limits          *instanceLimitsInfo     `json:"limits,omitempty"`
+	Tagging         *instanceTaggingInfo    `json:"tagging,omitempty"`
+	Resolved        instanceResolvedInfo    `json:"resolved"`
+	ResolvedLimits  instanceResolvedLimits  `json:"resolved_limits"`
 	ResolvedTagging instanceResolvedTagging `json:"resolved_tagging"`
 }
 
@@ -247,7 +247,7 @@ func resolveInstanceTagging(tagging store.Tagging, cfg *config.Config) instanceR
 
 	switch {
 	case tagging.Oracle != "":
-		// Including an unrecognised value: it is what the store holds, and the
+		// Including an unrecognized value: it is what the store holds, and the
 		// resolver folded it to off — the Settings page saying "nothing is
 		// configured" would hide a value the operator should go fix.
 		oracleSource = "parameter"
@@ -256,10 +256,10 @@ func resolveInstanceTagging(tagging store.Tagging, cfg *config.Config) instanceR
 	}
 
 	return instanceResolvedTagging{
-		Enabled:        enabled,
-		EnabledSource:  enabledSource,
-		Oracle:         oracle,
-		OracleSource:   oracleSource,
+		Enabled:       enabled,
+		EnabledSource: enabledSource,
+		Oracle:        oracle,
+		OracleSource:  oracleSource,
 	}
 }
 
@@ -326,7 +326,7 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			MSSQLPort: resolved.MSSQLPort,
 			WebUIURL:  resolved.WebUIURL,
 		},
-		ResolvedLimits: resolveInstanceLimits(limits, s.config),
+		ResolvedLimits:  resolveInstanceLimits(limits, s.config),
 		ResolvedTagging: resolveInstanceTagging(tagging, s.config),
 	}
 
@@ -468,7 +468,7 @@ func (s *Server) handleUpdateInstanceTagging(c *gin.Context) {
 	// Refused at the edge rather than folded to "off" the way the proxy path
 	// has to: here there is a human to tell, and a settings write that would
 	// crash every replica on their next restart (the env var's rule) is a
-	// worse failure than the one it is modelled on.
+	// worse failure than the one it is modeled on.
 	oracle := strings.ToLower(strings.TrimSpace(req.Oracle))
 	if oracle != "" && oracle != config.QueryTaggingOracleOff && oracle != config.QueryTaggingOracleUser {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
@@ -476,7 +476,11 @@ func (s *Server) handleUpdateInstanceTagging(c *gin.Context) {
 		return
 	}
 
-	enabled := ""
+	// Written either way, never blank: "false" is a configured choice that
+	// overrides a DBB_QUERY_TAGGING default of true, and storing nothing for it
+	// would silently hand the decision back to the environment — the one thing
+	// an operator turning the feature off in a hurry must not get.
+	enabled := "false"
 	if req.Enabled {
 		enabled = "true"
 	}
