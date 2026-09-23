@@ -25,7 +25,7 @@ require (
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/providers/structs v1.0.1
 	github.com/knadh/koanf/v2 v2.3.6
-	github.com/microsoft/go-mssqldb v1.11.0
+	github.com/microsoft/go-mssqldb v1.11.1
 	github.com/moby/moby/api v1.56.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/sijms/go-ora/v3 v3.0.1
