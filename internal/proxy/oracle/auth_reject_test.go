@@ -509,3 +509,37 @@ func TestAuthRejectFor(t *testing.T) {
 		})
 	}
 }
+
+func TestUpstreamAuthRejectFor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		err          error
+		wantCode     uint16
+		wantFragment string
+	}{
+		{
+			"phase 2 rejection points at the stored credentials",
+			fmt.Errorf("upstream auth failed: %w: ORA-01017 invalid username/password", ErrUpstreamAuthPhase2Rejected),
+			ORA01017, "credentials dbbat stores",
+		},
+		{
+			"phase 1 rejection points at the stored credentials",
+			fmt.Errorf("%w: ORA-28000 the account is locked", ErrUpstreamAuthPhase1Rejected),
+			ORA01017, "credentials dbbat stores",
+		},
+		{"transport failure is not blamed on credentials", ErrUpstreamAuthNotBegun, ORA12520, "could not log in"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, message := upstreamAuthRejectFor(tt.err)
+			assert.Equal(t, tt.wantCode, code)
+			assert.Contains(t, message, tt.wantFragment)
+			assert.NotContains(t, message, "ORA-", "the upstream text stays in the logs")
+		})
+	}
+}

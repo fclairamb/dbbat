@@ -503,6 +503,11 @@ func (s *session) run() error {
 	// proven hand-built summaries and the original ordering.
 	if s.clientWideEncoding || s.tnsLegacyLength {
 		if err := s.beginUpstreamAuth(); err != nil {
+			// The client is not authenticated yet, so it only gets the generic
+			// refusal: what went wrong with the stored credentials is for users
+			// who hold a grant. Still better than a dropped socket.
+			s.sendAuthFailed(ORA01017, "invalid username/password; logon denied")
+
 			return fmt.Errorf("upstream auth failed: %w", err)
 		}
 	}
@@ -523,6 +528,13 @@ func (s *session) run() error {
 	// Step 6: Authenticate to upstream Oracle on the relay-phase socket using
 	// stored database credentials.
 	if err := s.upstreamAuth(); err != nil {
+		// The client is waiting for the answer to its AUTH Phase 2. Closing
+		// the socket here left python-oracledb with a bare DPY-4011 ("the
+		// database or network closed the connection"), and nothing pointed at
+		// the stored credentials. Refuse with a readable ORA error instead.
+		oraCode, message := upstreamAuthRejectFor(err)
+		s.sendAuthFailed(oraCode, message)
+
 		return fmt.Errorf("upstream auth failed: %w", err)
 	}
 
@@ -853,6 +865,20 @@ func authRejectFor(err error) (uint16, string) {
 	}
 
 	return ORA01017, "invalid username/password; logon denied"
+}
+
+// upstreamAuthRejectFor maps a failed upstream login to the ORA code and message
+// dbbat surfaces to a client it has already authenticated. The upstream's own
+// text stays in the logs: it can name hosts and accounts. The client learns
+// which side failed, so it stops suspecting its API key, and who can fix it.
+func upstreamAuthRejectFor(err error) (uint16, string) {
+	if errors.Is(err, ErrUpstreamAuthPhase1Rejected) || errors.Is(err, ErrUpstreamAuthPhase2Rejected) {
+		return ORA01017, "dbbat accepted your API key, but the database refused the credentials " +
+			"dbbat stores for it; ask a dbbat administrator to update them and run the connectivity check"
+	}
+
+	return ORA12520, "dbbat accepted your API key, but could not log in to the database; " +
+		"ask a dbbat administrator to run the connectivity check on it"
 }
 
 // resolveDatabase parses the service name from the Connect payload and looks up the database.
