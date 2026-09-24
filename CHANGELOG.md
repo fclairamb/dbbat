@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.30.1](https://github.com/fclairamb/dbbat/compare/v0.30.0...v0.30.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.37.1 ([#403](https://github.com/fclairamb/dbbat/issues/403)) ([c31f3ed](https://github.com/fclairamb/dbbat/commit/c31f3ed2760ca018a73b6a6756cf5e2ee86e1891))
+* **deps:** update module github.com/microsoft/go-mssqldb to v1.11.2 ([#401](https://github.com/fclairamb/dbbat/issues/401)) ([a29362e](https://github.com/fclairamb/dbbat/commit/a29362e5b9c7ad5f53886c98c23f6d4fbad8734c))
+* **oracle:** refuse with an ORA error when the upstream rejects the stored credentials ([#404](https://github.com/fclairamb/dbbat/issues/404)) ([db0c816](https://github.com/fclairamb/dbbat/commit/db0c81615baa138e03e0409466e6178284dd140d))
+
 ## [0.30.0](https://github.com/fclairamb/dbbat/compare/v0.29.0...v0.30.0) (2026-09-23)
 
 
