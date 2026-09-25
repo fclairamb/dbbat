@@ -4,6 +4,12 @@
     "description": "Database Observability Proxy",
     "background_color": "#2c3e50"
   },
+  "features": {
+    "bot_user": {
+      "display_name": "DBBat",
+      "always_online": false
+    }
+  },
   "oauth_config": {
     "redirect_urls": [
       "https://<YOUR_DBBAT_HOST>/api/v1/auth/slack/callback"
@@ -12,7 +18,6 @@
       "user": [
         "openid",
         "email",
-        "email:read",
         "profile"
       ],
       "bot": [

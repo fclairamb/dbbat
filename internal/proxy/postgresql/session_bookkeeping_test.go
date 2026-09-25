@@ -253,13 +253,35 @@ func (h *loopback) sendForwarded(t *testing.T, msg pgproto3.FrontendMessage) {
 	h.recvUpstream(t)
 }
 
+// ownDurationSlackMs is the only slop allowed between a row's logged duration
+// and the span driveStatement bracketed around that statement's own exchange.
+// The span already contains whatever a loaded CI box charged this statement, so
+// the slack exists purely for clock granularity: it must stay far below the
+// pause every statement here sleeps before its terminator, which is the
+// smallest amount a *later* statement can add to a duration whose terminator
+// popped the wrong entry.
+const ownDurationSlackMs = 10
+
 // driveStatement runs one extended-protocol batch end to end: the client
 // frames go in (each drained upstream as it is forwarded), the harness waits
 // until the Execute is queued, the simulated upstream answers after `pause`
 // (which is what makes the statement's own round trip `pause` long), and the
 // forwarded replies are drained off the client socket.
-func (h *loopback) driveStatement(t *testing.T, sql string, maxRows uint32, term []pgproto3.BackendMessage, pause time.Duration) {
+//
+// It returns the wall-clock span it bracketed, from the first client frame
+// until the ReadyForQuery is drained off the client socket. The session stamps
+// the row's duration strictly inside that span — startTime when the Execute is
+// queued (intercept.go handleExecute), logQuery before the ReadyForQuery is
+// forwarded to the client (session.go's upstream leg) — so the span is a
+// per-statement budget for the row's own duration that cannot be broken by
+// scheduler jitter: every millisecond a slow box charges this exchange is
+// charged to the budget too. What it does not absorb is work the statement
+// never did, i.e. the pause and relay of a *later* statement — which is
+// exactly what a terminator popping the wrong pending entry records.
+func (h *loopback) driveStatement(t *testing.T, sql string, maxRows uint32, term []pgproto3.BackendMessage, pause time.Duration) time.Duration {
 	t.Helper()
+
+	start := time.Now()
 
 	h.sendForwarded(t, &pgproto3.Parse{Name: "", Query: sql})
 	h.sendForwarded(t, &pgproto3.Bind{DestinationPortal: "", PreparedStatement: ""})
@@ -275,6 +297,8 @@ func (h *loopback) driveStatement(t *testing.T, sql string, maxRows uint32, term
 
 	h.answer(t, append([]pgproto3.BackendMessage{}, term...)...)
 	h.answer(t, &pgproto3.ReadyForQuery{})
+
+	return time.Since(start)
 }
 
 // answer writes the given backend messages to the simulated upstream one at a
@@ -302,7 +326,7 @@ func TestLoopback_EmptyQueryResponse(t *testing.T) {
 
 	const sql = ""
 
-	h.driveStatement(t, sql, 0, []pgproto3.BackendMessage{&pgproto3.EmptyQueryResponse{}}, 50*time.Millisecond)
+	span := h.driveStatement(t, sql, 0, []pgproto3.BackendMessage{&pgproto3.EmptyQueryResponse{}}, 50*time.Millisecond)
 
 	assert.Empty(t, h.s.extendedState.pendingQueries)
 	assert.False(t, h.s.statementClock.Running(), "the backend is idle once the exchange closed")
@@ -312,7 +336,8 @@ func TestLoopback_EmptyQueryResponse(t *testing.T) {
 	assert.Equal(t, sql, rows[0].SQLText)
 	require.Nil(t, rows[0].Error, "EmptyQueryResponse is not an error")
 	require.NotNil(t, rows[0].DurationMs, "the row completes at the Sync boundary")
-	assert.LessOrEqual(t, *rows[0].DurationMs, float64(500), "its own duration, not a shifted one")
+	assert.LessOrEqualf(t, *rows[0].DurationMs, float64(span/time.Millisecond)+ownDurationSlackMs,
+		"its own duration (%vms), not a shifted one", *rows[0].DurationMs)
 	require.Nil(t, rows[0].RowsAffected, "EmptyQueryResponse carries no command tag")
 
 	assert.Empty(t, h.logs.warnings(""),
@@ -331,7 +356,7 @@ func TestLoopback_PortalSuspended(t *testing.T) {
 
 	const sql = "SELECT t.* FROM public.widgets t LIMIT 501"
 
-	h.driveStatement(t, sql, 501, []pgproto3.BackendMessage{
+	span := h.driveStatement(t, sql, 501, []pgproto3.BackendMessage{
 		&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("id")}}},
 		&pgproto3.DataRow{Values: [][]byte{[]byte("1")}},
 		&pgproto3.DataRow{Values: [][]byte{[]byte("2")}},
@@ -346,7 +371,8 @@ func TestLoopback_PortalSuspended(t *testing.T) {
 	rows := h.awaitConnectionQueries(t, 1)
 	assert.Equal(t, sql, rows[0].SQLText)
 	require.NotNil(t, rows[0].DurationMs, "the row logs its own duration")
-	assert.LessOrEqual(t, *rows[0].DurationMs, float64(500))
+	assert.LessOrEqualf(t, *rows[0].DurationMs, float64(span/time.Millisecond)+ownDurationSlackMs,
+		"its own duration (%vms), not a shifted one", *rows[0].DurationMs)
 	require.Nil(t, rows[0].Error, "PortalSuspended is not an error")
 	require.Nil(t, rows[0].RowsAffected, "PortalSuspended carries no command tag")
 
@@ -389,8 +415,12 @@ func TestLoopback_DataGripCaptureSequence(t *testing.T) {
 		{name: "isolation level", sql: "SHOW TRANSACTION ISOLATION LEVEL", maxRows: 0, term: []pgproto3.BackendMessage{&pgproto3.CommandComplete{CommandTag: []byte("SHOW")}}},
 	}
 
+	// One span per statement, each bracketed around that statement's own
+	// exchange alone.
+	spans := make(map[string]time.Duration, len(scenarios))
+
 	for _, sc := range scenarios {
-		h.driveStatement(t, sc.sql, sc.maxRows, sc.term, phase)
+		spans[sc.sql] = h.driveStatement(t, sc.sql, sc.maxRows, sc.term, phase)
 	}
 
 	assert.Empty(t, h.s.extendedState.pendingQueries, "no stale entry may survive the capture sequence")
@@ -404,15 +434,18 @@ func TestLoopback_DataGripCaptureSequence(t *testing.T) {
 		row := findRow(t, rows, sc.sql)
 		require.NotNilf(t, row.DurationMs, "%q must log a duration", sc.name)
 
-		// Own duration: about one phase. A shifted one — the time to a later
-		// statement's completion, as the queries page logged during the
-		// incident — is at least twice that. The margin matches the 500ms
-		// absolute threshold the single-statement tests in this file already
-		// use for the same check (10x the 50ms pause): 4x left this flaky
-		// under CI scheduler jitter (measured 227ms against a 200ms budget
-		// with nothing actually shifted), while a real wrong-entry pop still
-		// lands nowhere near 500ms for this scenario's statement count.
-		assert.LessOrEqualf(t, *row.DurationMs, float64(10*phase/time.Millisecond),
+		// Own duration: it must fit inside the span the harness bracketed
+		// around this statement's own batch — a budget that carries whatever a
+		// loaded CI box charged the exchange, so scheduler jitter cannot break
+		// it. The earlier absolute thresholds could: the 501-row grid relayed
+		// its page through unbuffered pipes for longer than a 500ms budget on
+		// a busy runner (measured 549ms), with nothing shifted. A shifted one —
+		// the time to a later statement's completion, as the queries page
+		// logged during the incident — can never fit, because it also carries
+		// at least one later statement's full `phase` pause plus its relay,
+		// work that happens outside this span.
+		assert.LessOrEqualf(t, *row.DurationMs,
+			float64(spans[sc.sql]/time.Millisecond)+ownDurationSlackMs,
 			"%q logged a shifted duration (%vms): its terminator popped the wrong entry", sc.name, *row.DurationMs)
 
 		assert.Nilf(t, row.Error, "%q must complete without an error", sc.name)
