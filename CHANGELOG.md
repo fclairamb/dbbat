@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.30.2](https://github.com/fclairamb/dbbat/compare/v0.30.1...v0.30.2) (2026-09-25)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/knadh/koanf/v2 to v2.3.7 ([#406](https://github.com/fclairamb/dbbat/issues/406)) ([cf4a901](https://github.com/fclairamb/dbbat/commit/cf4a9018a4b4dfe737f47f0b72b9e4ce89357a4a))
+* make slack_app_manifest.json accepted by Slack ([#405](https://github.com/fclairamb/dbbat/issues/405)) ([74742dd](https://github.com/fclairamb/dbbat/commit/74742dd112d107d0782c3dcd093b2b92c042710f))
+
 ## [0.30.1](https://github.com/fclairamb/dbbat/compare/v0.30.0...v0.30.1) (2026-09-24)
 
 
