@@ -371,12 +371,27 @@ func TestIntegration_StatementTimeout_DataGripSequencesKeepTheSessionAlive(t *te
 
 	// The empty statement DataGrip sends right after it sets its
 	// application_name, answered by the fourth terminator.
+	// Each statement's own exchange is bracketed: the logged duration must fit
+	// inside that span (plus clock-granularity slack), so a loaded runner
+	// charges the budget as much as the statement. The pause between them keeps
+	// a duration shifted onto the wrong statement (which adds at least the
+	// pause) far above the slack.
+	const statementPause = 50 * time.Millisecond
+
+	emptyStart := time.Now()
 	term := c.extended(t, "empty", "", 0)
+	emptySpan := time.Since(emptyStart)
+
 	require.IsType(t, &pgproto3.EmptyQueryResponse{}, term,
 		"the empty statement must be answered by EmptyQueryResponse")
 
+	time.Sleep(statementPause)
+
 	// The paged catalog grid, answered by PortalSuspended.
+	gridStart := time.Now()
 	term = c.extended(t, "grid", "SELECT id FROM paged ORDER BY id LIMIT 600", 501)
+	gridSpan := time.Since(gridStart)
+
 	require.IsType(t, &pgproto3.PortalSuspended{}, term,
 		"a 600-row table under a 501-row page must end with PortalSuspended")
 
@@ -403,11 +418,21 @@ func TestIntegration_StatementTimeout_DataGripSequencesKeepTheSessionAlive(t *te
 	require.NoError(t, qErr)
 
 	for _, q := range queries {
-		if q.SQLText == "" || strings.Contains(q.SQLText, "FROM paged") {
-			require.NotNil(t, q.DurationMs, "the %q row must be completed with its own duration", q.SQLText)
-			assert.Less(t, *q.DurationMs, float64(1000), "its own duration, not a shifted one")
-			assert.Nil(t, q.Error)
+		var span time.Duration
+
+		switch {
+		case q.SQLText == "":
+			span = emptySpan
+		case strings.Contains(q.SQLText, "FROM paged"):
+			span = gridSpan
+		default:
+			continue
 		}
+
+		require.NotNil(t, q.DurationMs, "the %q row must be completed with its own duration", q.SQLText)
+		assert.LessOrEqualf(t, *q.DurationMs, float64(span/time.Millisecond)+ownDurationSlackMs,
+			"%q: its own duration (%vms), not a shifted one", q.SQLText, *q.DurationMs)
+		assert.Nil(t, q.Error)
 	}
 }
 
