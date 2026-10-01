@@ -26,7 +26,7 @@ require (
 	github.com/knadh/koanf/providers/structs v1.0.1
 	github.com/knadh/koanf/v2 v2.3.7
 	github.com/microsoft/go-mssqldb v1.11.2
-	github.com/moby/moby/api v1.56.0
+	github.com/moby/moby/api v1.56.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/sijms/go-ora/v3 v3.0.1
 	github.com/slack-go/slack v0.29.0
