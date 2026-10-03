@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.30.2](https://github.com/fclairamb/dbbat/compare/v0.30.1...v0.30.2) (2026-10-03)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/gopacket/gopacket to v1.7.3 ([#409](https://github.com/fclairamb/dbbat/issues/409)) ([150bf3c](https://github.com/fclairamb/dbbat/commit/150bf3c29e8911c4608de8e6014570ed23e465aa))
+* **deps:** update module github.com/gopacket/gopacket to v1.7.4 ([#412](https://github.com/fclairamb/dbbat/issues/412)) ([e52363f](https://github.com/fclairamb/dbbat/commit/e52363f34eba5a45fd373fd10804f1c04ff71c7d))
+* **deps:** update module github.com/knadh/koanf/v2 to v2.3.7 ([#406](https://github.com/fclairamb/dbbat/issues/406)) ([cf4a901](https://github.com/fclairamb/dbbat/commit/cf4a9018a4b4dfe737f47f0b72b9e4ce89357a4a))
+* **deps:** update module github.com/moby/moby/api to v1.56.1 ([#410](https://github.com/fclairamb/dbbat/issues/410)) ([1e72f80](https://github.com/fclairamb/dbbat/commit/1e72f807270eb639ed8c10484e6fa5227c104543))
+* **deps:** update module github.com/urfave/cli/v3 to v3.14.0 ([#411](https://github.com/fclairamb/dbbat/issues/411)) ([c1ea666](https://github.com/fclairamb/dbbat/commit/c1ea666fd0d076b630152467253d37c7191674f2))
+* make slack_app_manifest.json accepted by Slack ([#405](https://github.com/fclairamb/dbbat/issues/405)) ([74742dd](https://github.com/fclairamb/dbbat/commit/74742dd112d107d0782c3dcd093b2b92c042710f))
+
 ## [0.30.1](https://github.com/fclairamb/dbbat/compare/v0.30.0...v0.30.1) (2026-09-24)
 
 
