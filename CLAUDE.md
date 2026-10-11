@@ -145,6 +145,11 @@ make clean            # Clean build artifacts
 
 **Never kill the running dbbat instance.** It is started beforehand with `make dev` which provides live reload (Air). Restarting it would break the dev workflow. The test mode credentials are `admin`/`admintest`.
 
+When debugging the server, read the latest log in `logs/` first: `tail -50 "$(ls -t logs/*.log | head -1)"`.
+
+Deployment-specific notes (hosts, keys, runbooks) stay out of this public file, in the gitignored
+`CLAUDE.priv.md`, imported when present: @CLAUDE.priv.md
+
 ## Follow-up Tasks → `specs/todos/`
 
 **Whenever you identify a follow-up task** — an out-of-scope improvement, a deferred fix, a known limitation, or "we should also do X later" — **write it into `specs/todos/` autonomously**, in the same turn, without being asked. Don't just mention it in chat or leave it only in an ephemeral task list: chat scrolls away, `specs/todos/` is the durable backlog.
@@ -280,6 +285,17 @@ that is a real regression, not a busy laptop.
 ```bash
 make test-e2e  # Builds app, starts server in test mode, runs Playwright
 ```
+
+**⚠️ Locally, never run `make test-e2e` / `bun run test:e2e[:chromium]` without `CI=true`.**
+Without it, `front/e2e/global-setup.ts` runs `docker compose up -d postgres`, which mounts the
+persistent `dbbat_postgres-data` volume that `make dev` uses, then starts dbbat with
+`DBB_RUN_MODE=test`, which drops every table on startup (`DropTablesFirst`, no prompt). That
+wiped months of local `audit_log` history on 2026-09-23. `demo` mode does the same. Instead:
+build, start a throwaway, uniquely named PostgreSQL container on a non-default port (never 5001,
+never the compose `postgres` service), run `./dbbat serve` with `DBB_RUN_MODE=test` against it on
+`:8080`, then `CI=true bun run test:e2e` (the setup then only polls the health endpoint), and
+remove the container. When a subagent runs E2E, check the command it actually ran, not its
+summary.
 
 Test mode credentials: `admin`/`admintest`, `viewer`/`viewer`, `connector`/`connector`
 

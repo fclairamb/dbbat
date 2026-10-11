@@ -3519,6 +3519,42 @@ re-measurement.
 
 For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL extraction details.
 
+### Debugging toolbox (live clients)
+
+Lessons that each cost hours. The replay fixtures do not cover the live handshake: on
+2026-07-11 every live Oracle client failed while all unit and replay tests passed, so an auth or
+negotiation change needs a live client run.
+
+- **O5LOGON reference implementation**: go-ora's `auth_object.go` (today
+  `~/go/pkg/mod/github.com/sijms/go-ora/v3@v3.0.1/auth_object.go`) has the complete verifier 6949
+  and 18453 (PBKDF2, `customHash`) flows. The legacy `go-ora@v1.3.2` module only knows 6949; don't
+  derive the algorithm from captures or from v1.
+- **SQLcl's data flag is `0x0800`** (`END_OF_REQUEST`), and the TTC function code follows the
+  2-byte flag exactly as with python-oracledb. There is no `0x0008` "JDBC framing extension": don't
+  add code to strip one. An `ORA-03120` right after login has been a TTC capability mismatch with
+  the upstream, never framing.
+- **JDBC stack traces**: SQLcl's `bin/sql` wrapper hardcodes its JVM options and ignores
+  `JAVA_TOOL_OPTIONS` / `JAVA_OPTIONS`, so trace flags never activate. Run a single-file Java
+  program instead (`DriverManager.getConnection(...)`, `e.printStackTrace()`) with the
+  `ojdbc11.jar` bundled in SQLcl (`/opt/homebrew/Caskroom/sqlcl/<ver>/sqlcl/lib/`):
+  `java -cp $JDBC JdbcTest.java`. The stack (`T4CTTIfun.receive` ← `T4CTTIoauthenticate.doOAUTH`…)
+  says which AUTH phase fails. For more, `jar xf` a class and `javap -c -p` it.
+- **Local loop with `DBB_RUN_MODE=test`**: test mode provisions stable keys `dbb_admin_key`,
+  `dbb_connector_key`, `dbb_viewer_key`, but wipes everything at each restart, so the Oracle server
+  entry (its name or Oracle service name must match the client's, e.g. `FREEPDB1`) and its grant
+  must be recreated after every restart. Run that dbbat on its own ports (e.g.
+  `DBB_LISTEN_ORA=:1522 DBB_LISTEN_API=:14200 DBB_LISTEN_PG=:15434`) and never kill the `make dev`
+  instance.
+- **python-oracledb hangs instead of raising** on a bad handshake: use `retry_count=0` and wrap the
+  run in a timeout (`perl -e 'alarm 20; exec @ARGV' python3 …`).
+- **sqlplus on the Mac**: `brew install instantclienttap/instantclient/instantclient-arm64-sqlplus`
+  (`brew trust` the tap first). Over loopback the OCI break probe's TCP urgent byte does reach
+  dbbat; point `TNS_ADMIN` at a directory whose `sqlnet.ora` sets `DISABLE_OOB` to switch the probe
+  off or on. Docker Desktop's VM network likely strips urgent data, so an in-container sqlplus is
+  not a faithful repro.
+- **Testing a build on a real cluster**: deploy a test image by digest or a unique tag. With
+  `imagePullPolicy: IfNotPresent`, re-pushing the same tag is never pulled.
+
 ### Integration tests
 
 `internal/proxy/oracle/*_integration_test.go` and `integration_test.go` are behind the
