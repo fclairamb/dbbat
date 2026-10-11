@@ -147,6 +147,9 @@ make clean            # Clean build artifacts
 
 When debugging the server, read the latest log in `logs/` first: `tail -50 "$(ls -t logs/*.log | head -1)"`.
 
+Deployment-specific notes (hosts, keys, runbooks) stay out of this public file, in the gitignored
+`CLAUDE.priv.md`, imported when present: @CLAUDE.priv.md
+
 ## Follow-up Tasks → `specs/todos/`
 
 **Whenever you identify a follow-up task** — an out-of-scope improvement, a deferred fix, a known limitation, or "we should also do X later" — **write it into `specs/todos/` autonomously**, in the same turn, without being asked. Don't just mention it in chat or leave it only in an ephemeral task list: chat scrolls away, `specs/todos/` is the durable backlog.
