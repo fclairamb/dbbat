@@ -747,11 +747,11 @@ func (s *Store) buildListQueriesQuery(
 	q = q.Order("q.uid DESC")
 
 	if filter.Limit > 0 {
-		q = q.Limit(filter.Limit)
+		q = q.Limit(int64(filter.Limit))
 	}
 
 	if filter.Offset > 0 {
-		q = q.Offset(filter.Offset)
+		q = q.Offset(int64(filter.Offset))
 	}
 
 	return q, nil
@@ -857,8 +857,8 @@ func (s *Store) GetQueryRows(ctx context.Context, queryUID uuid.UUID, cursor str
 		Model(&resultRows).
 		Where("query_id = ?", queryUID).
 		Order("row_number ASC").
-		Offset(int(offset)).
-		Limit(limit + 1). // Fetch one extra to check if there are more
+		Offset(offset).
+		Limit(int64(limit + 1)). // Fetch one extra to check if there are more
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get query rows: %w", err)
@@ -867,7 +867,7 @@ func (s *Store) GetQueryRows(ctx context.Context, queryUID uuid.UUID, cursor str
 	// Build result with data size limit enforcement
 	result := &QueryRowsResult{
 		Rows:      make([]QueryRow, 0, limit),
-		TotalRows: int64(totalRows),
+		TotalRows: totalRows,
 	}
 
 	var currentDataSize int64

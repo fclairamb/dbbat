@@ -61,8 +61,8 @@ func (s *Store) GetServerReferences(ctx context.Context, serverUID uuid.UUID) (*
 	}
 
 	return &ServerReferences{
-		ActiveGrants: int64(grants),
-		ServerGroups: int64(groups),
+		ActiveGrants: grants,
+		ServerGroups: groups,
 	}, nil
 }
 

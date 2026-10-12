@@ -306,7 +306,7 @@ func TestListServerGroupMemberUIDsByGroups(t *testing.T) {
 	require.NoError(t, testStore.AddServerToGroup(ctx, groupTwo.UID, dbC.UID))
 
 	hook := &queryCountHook{substring: "server_group_members"}
-	testStore.db.AddQueryHook(hook)
+	testStore.db.AddQueryHook(hook) //nolint:staticcheck // must mutate the shared store DB; WithQueryHook returns a clone
 
 	members, err := testStore.ListServerGroupMemberUIDsByGroups(
 		ctx, []uuid.UUID{groupOne.UID, groupTwo.UID, groupEmpty.UID},

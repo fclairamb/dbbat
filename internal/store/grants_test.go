@@ -1246,7 +1246,7 @@ func TestGetGrantsByUIDs(t *testing.T) {
 	// GetGrantByUID re-reads below use `uid = ?` for the grant itself, but
 	// attachDefinitions uses a list too — so the count is taken before them.
 	hook := &queryCountHook{substring: "uid IN ("}
-	store.db.AddQueryHook(hook)
+	store.db.AddQueryHook(hook) //nolint:staticcheck // must mutate the shared store DB; WithQueryHook returns a clone
 
 	batched, err := store.GetGrantsByUIDs(ctx, uids)
 	if err != nil {

@@ -48,7 +48,7 @@ func countQueryRows(t *testing.T, ctx context.Context, store *Store, queryUID uu
 		Count(ctx)
 	require.NoError(t, err)
 
-	return count
+	return int(count)
 }
 
 func TestCleanupOldQueryRows(t *testing.T) {
@@ -195,7 +195,7 @@ func TestCleanupOldQueryRowsBatches(t *testing.T) {
 		Where("connection_id = ?", conn.UID).
 		Count(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 0, remaining)
+	assert.Equal(t, int64(0), remaining)
 }
 
 // TestCleanupOldQueryRowsTwoWindows is the split: statements expire on their

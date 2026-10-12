@@ -519,7 +519,7 @@ func (s *Store) DeleteGrantDefinition(ctx context.Context, uid uuid.UUID) error 
 		}
 
 		if grants > 0 || requests > 0 {
-			return &GrantDefinitionInUseError{Grants: int64(grants), Requests: int64(requests)}
+			return &GrantDefinitionInUseError{Grants: grants, Requests: requests}
 		}
 
 		if _, err := tx.NewDelete().

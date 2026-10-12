@@ -184,11 +184,11 @@ func (s *Store) ListGrantRequests(ctx context.Context, filter GrantRequestFilter
 	q = q.Order("requested_at DESC")
 
 	if filter.Limit > 0 {
-		q = q.Limit(filter.Limit)
+		q = q.Limit(int64(filter.Limit))
 	}
 
 	if filter.Offset > 0 {
-		q = q.Offset(filter.Offset)
+		q = q.Offset(int64(filter.Offset))
 	}
 
 	if err := q.Scan(ctx); err != nil {

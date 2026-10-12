@@ -439,11 +439,11 @@ func (s *Store) ListAPIKeys(ctx context.Context, filter APIKeyFilter) ([]APIKey,
 	q = q.Order("created_at DESC")
 
 	if filter.Limit > 0 {
-		q = q.Limit(filter.Limit)
+		q = q.Limit(int64(filter.Limit))
 	}
 
 	if filter.Offset > 0 {
-		q = q.Offset(filter.Offset)
+		q = q.Offset(int64(filter.Offset))
 	}
 
 	err := q.Scan(ctx)

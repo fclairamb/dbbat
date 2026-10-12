@@ -262,7 +262,7 @@ func TestResolveServerApproverGroupsByServers(t *testing.T) {
 	// Both queries name the approver columns, and nothing else the resolver
 	// runs does, so this substring counts exactly the resolver's round trips.
 	hook := &queryCountHook{substring: "approver_user_group_uids"}
-	testStore.db.AddQueryHook(hook)
+	testStore.db.AddQueryHook(hook) //nolint:staticcheck // must mutate the shared store DB; WithQueryHook returns a clone
 
 	resolved, err := testStore.ResolveServerApproverGroupsByServers(ctx, all, ApproverKindAccess)
 	if err != nil {

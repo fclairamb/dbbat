@@ -366,7 +366,7 @@ func (s *Store) CountActiveGrantsForServerGroup(ctx context.Context, groupUID uu
 		return 0, fmt.Errorf("count active grants for server group: %w", err)
 	}
 
-	return int64(count), nil
+	return count, nil
 }
 
 // ServerGroupBlastRadius is what a membership edit on a server group moves:

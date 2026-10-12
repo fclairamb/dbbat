@@ -1015,7 +1015,7 @@ func (f *serverApproverFixture) newTargetServersInGroup(
 // TestListGrantDefinitions_ScopedDatabaseUIDs pins its own batching.
 func (f *serverApproverFixture) approverResolutionQueryHook() *apiQueryCountHook {
 	hook := &apiQueryCountHook{substring: "access_approver_user_group_uids"}
-	f.dataStore.DB().AddQueryHook(hook)
+	f.dataStore.DB().AddQueryHook(hook) //nolint:staticcheck // must mutate the store DB the handlers use; WithQueryHook returns a clone
 
 	return hook
 }
@@ -1308,8 +1308,8 @@ func (f *serverApproverFixture) grantResolutionQueryHooks() (*apiQueryCountHook,
 	connections := &apiQueryCountHook{substring: "query_chain_stamp_version"}
 	grants := &apiQueryCountHook{substring: "access_grants"}
 
-	f.dataStore.DB().AddQueryHook(connections)
-	f.dataStore.DB().AddQueryHook(grants)
+	f.dataStore.DB().AddQueryHook(connections) //nolint:staticcheck // must mutate the store DB the handlers use; WithQueryHook returns a clone
+	f.dataStore.DB().AddQueryHook(grants)      //nolint:staticcheck // must mutate the store DB the handlers use; WithQueryHook returns a clone
 
 	return connections, grants
 }

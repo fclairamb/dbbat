@@ -1030,11 +1030,11 @@ func (s *Store) buildListConnectionsQuery(
 	q = q.Order("uid DESC")
 
 	if filter.Limit > 0 {
-		q = q.Limit(filter.Limit)
+		q = q.Limit(int64(filter.Limit))
 	}
 
 	if filter.Offset > 0 {
-		q = q.Offset(filter.Offset)
+		q = q.Offset(int64(filter.Offset))
 	}
 
 	return q, nil

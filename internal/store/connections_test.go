@@ -1452,7 +1452,7 @@ func TestGetConnectionsByUIDs(t *testing.T) {
 	// The uid-list predicate is on the batched read and on nothing else this
 	// test runs from here on (the per-row re-reads below use `uid = ?`).
 	hook := &queryCountHook{substring: "uid IN ("}
-	store.db.AddQueryHook(hook)
+	store.db.AddQueryHook(hook) //nolint:staticcheck // must mutate the shared store DB; WithQueryHook returns a clone
 
 	batched, err := store.GetConnectionsByUIDs(ctx, uids)
 	require.NoError(t, err)
