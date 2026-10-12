@@ -225,7 +225,7 @@ jobs:
           go-version: "1.27.1"
 
       - name: Download frontend artifacts
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: frontend-dist
           path: internal/api/resources/
@@ -262,7 +262,7 @@ jobs:
           bun-version: "1.4.2"
 
       - name: Download binary
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: dbbat-binary
           path: bin/
