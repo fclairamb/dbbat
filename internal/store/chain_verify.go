@@ -192,7 +192,7 @@ func (s *Store) VerifyAuditChain(ctx context.Context) (AuditChainResult, error) 
 		return result, fmt.Errorf("failed to count unchained audit rows: %w", err)
 	}
 
-	result.Unchained = int64(unchained)
+	result.Unchained = unchained
 
 	expectedSeq := int64(1)
 	prevMAC := s.auditGenesisMAC()
@@ -981,7 +981,7 @@ func (s *Store) countUnchainedRows(ctx context.Context, connectionUID *uuid.UUID
 		return 0, fmt.Errorf("failed to count unchained captured rows: %w", err)
 	}
 
-	return int64(count), nil
+	return count, nil
 }
 
 // CountUnchainedCapturedRows counts one capture's rows written before the row
@@ -999,7 +999,7 @@ func (s *Store) CountUnchainedCapturedRows(ctx context.Context, queryUID uuid.UU
 		return 0, fmt.Errorf("failed to count unchained captured rows: %w", err)
 	}
 
-	return int64(count), nil
+	return count, nil
 }
 
 // capturedQueryUIDs lists the captures worth walking, oldest first.

@@ -562,7 +562,7 @@ func TestListGrantDefinitions_ScopedDatabaseUIDs(t *testing.T) {
 	// membership query, regardless of how many scoped definitions (and
 	// groups) it contains.
 	hook := &apiQueryCountHook{substring: "server_group_members"}
-	dataStore.DB().AddQueryHook(hook)
+	dataStore.DB().AddQueryHook(hook) //nolint:staticcheck // must mutate the store DB the handlers use; WithQueryHook returns a clone
 
 	w, resp := doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions", requesterToken, nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
