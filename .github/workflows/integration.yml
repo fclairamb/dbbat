@@ -54,7 +54,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
 
       # A manual dispatch naming its own package keeps the leg's race setting;
       # the four legs all still run, so `-race` is exercised whichever package
@@ -102,7 +102,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
 
       # The JDK the JDBC probes run under. The runner image ships one, but
       # pinning it is the point: `java Tag.java` single-file source mode is what
@@ -211,7 +211,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.2"
 
       - name: Run Kubernetes tunnel integration suite
         run: go test -race -tags integration -timeout 40m -count=1 -v ./internal/proxy/kubernetes/
