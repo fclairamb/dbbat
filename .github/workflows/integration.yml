@@ -108,7 +108,7 @@ jobs:
       # pinning it is the point: `java Tag.java` single-file source mode is what
       # the probes use, and which JDK compiles them decides which ojdbc build
       # they can load.
-      - uses: actions/setup-java@v6.0.1
+      - uses: actions/setup-java@v6.1.0
         with:
           distribution: temurin
           java-version: "25"
