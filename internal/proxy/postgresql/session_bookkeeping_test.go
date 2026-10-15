@@ -196,7 +196,11 @@ func (h *loopback) awaitPending(t *testing.T, n int) {
 }
 
 // awaitConnectionQueries polls until the connection has exactly `want` query
-// rows. Persistence is asynchronous by design.
+// rows and every one of them is completed (carries a duration, which only the
+// completion path writes). Persistence is asynchronous by design, and a row can
+// exist before it is completed: a started result capture inserts it up front,
+// and the termination tests insert it by hand. Waiting on the row count alone
+// returns while the completion (the error column included) is still in flight.
 func (h *loopback) awaitConnectionQueries(t *testing.T, want int) []store.Query {
 	t.Helper()
 
@@ -206,8 +210,18 @@ func (h *loopback) awaitConnectionQueries(t *testing.T, want int) []store.Query 
 	require.Eventually(t, func() bool {
 		queries, err := h.s.store.ListQueries(ctx, store.QueryFilter{ConnectionID: &connUID, Limit: 50})
 
-		return err == nil && len(queries) == want
-	}, 10*time.Second, 50*time.Millisecond, "expected %d persisted query row(s)", want)
+		if err != nil || len(queries) != want {
+			return false
+		}
+
+		for i := range queries {
+			if queries[i].DurationMs == nil {
+				return false
+			}
+		}
+
+		return true
+	}, 10*time.Second, 50*time.Millisecond, "expected %d persisted, completed query row(s)", want)
 
 	// A stray extra row must not show up later either.
 	time.Sleep(250 * time.Millisecond)
