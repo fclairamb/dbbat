@@ -1012,3 +1012,78 @@ func TestIntegration_UpstreamApplicationNameCarriesConnectionUID(t *testing.T) {
 	assert.True(t, strings.HasPrefix(appName, "dbbat/"), "got %q", appName)
 	assert.Contains(t, appName, "@"+fixtureUser+" c="+wantSuffix)
 }
+
+// TestIntegration_ReadOnlyGrant_RefusesPinEscapes covers the statements that
+// write, or take the session out of read-only mode, without starting with a
+// write keyword. Each is refused by dbbat, the session survives the refusal,
+// and nothing reaches the table.
+func TestIntegration_ReadOnlyGrant_RefusesPinEscapes(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	seed := f.mustConnect(ctx, fixturePass)
+	_, err := seed.Exec(ctx, "CREATE TABLE ro (id int)")
+	require.NoError(t, err)
+	require.NoError(t, seed.Close(ctx))
+
+	f.replaceGrant(ctx, []string{"read_only"})
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	refused := []string{
+		"WITH d AS (INSERT INTO ro VALUES (1) RETURNING id) SELECT * FROM d",
+		"WITH c AS (SELECT 1) DELETE FROM ro",
+		"BEGIN READ WRITE",
+		"SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+		"SET default_transaction_read_only = 'off'",
+		"SET LOCAL default_transaction_read_only = off",
+		"RESET ALL",
+		"SELECT set_config('default_transaction_read_only', 'off', false)",
+		"DO $$ BEGIN INSERT INTO ro VALUES (2); END $$",
+	}
+	for _, sql := range refused {
+		_, err := conn.Exec(ctx, sql, pgx.QueryExecModeSimpleProtocol)
+		require.Error(t, err, "must be refused under a read-only grant: %s", sql)
+	}
+
+	var readOnly string
+	require.NoError(t, conn.QueryRow(ctx, "SHOW default_transaction_read_only").Scan(&readOnly))
+	assert.Equal(t, "on", readOnly, "the pin must have survived every refused statement")
+
+	var got int
+	require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
+	assert.Equal(t, 0, got, "no refused statement may have written")
+}
+
+// TestIntegration_ReadOnlyGrant_TerminatesOnLostPin takes the route no text
+// scan can see — a function, created beforehand, that turns the session
+// default off — and checks that the server's own report of the change ends the
+// session before the client can open a transaction the pin no longer covers.
+func TestIntegration_ReadOnlyGrant_TerminatesOnLostPin(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	seed := f.mustConnect(ctx, fixturePass)
+	_, err := seed.Exec(ctx, "CREATE TABLE ro (id int)")
+	require.NoError(t, err)
+	_, err = seed.Exec(ctx, "CREATE FUNCTION unpin() RETURNS text LANGUAGE sql AS "+
+		"$$ SELECT set_config('default_transaction_' || 'read_only', 'off', false) $$")
+	require.NoError(t, err)
+	require.NoError(t, seed.Close(ctx))
+
+	f.replaceGrant(ctx, []string{"read_only"})
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	_, err = conn.Exec(ctx, "SELECT unpin()", pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "the statement that removed the pin must end the session")
+
+	_, err = conn.Exec(ctx, "INSERT INTO ro VALUES (1)", pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "the session must be gone")
+
+	check := f.mustConnect(ctx, fixturePass)
+
+	var got int
+	require.NoError(t, check.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
+	assert.Equal(t, 0, got)
+}

@@ -90,6 +90,15 @@ func MatchesAnyNormalizedSQL(sql string, patterns []*regexp.Regexp) bool {
 	return false
 }
 
+// CountNormalizedSQLMatches is the number of non-overlapping matches of pattern
+// in sql's comment-normalized form — for a check that has to tell how many of a
+// statement's matches of one pattern are also matches of a stricter one, such
+// as PostgreSQL's "every SET of the read-only setting keeps it on". Like
+// MatchesNormalizedSQL, only a number escapes, never the normalized text.
+func CountNormalizedSQLMatches(sql string, pattern *regexp.Regexp) int {
+	return len(pattern.FindAllStringIndex(matchableSQL(sql, syntaxStandard), -1))
+}
+
 // HasNormalizedSQLPrefix reports whether sql starts with prefix once comments
 // are normalized away, trimmed and upper-cased — the prefix-shaped sibling of
 // MatchesNormalizedSQL, for checks like PostgreSQL's `COPY `. prefix must

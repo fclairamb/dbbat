@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1189,13 +1190,13 @@ func (s *Session) proxyUpstreamToClient() error {
 	var queryError *string
 
 	for {
-		msg, err := s.upstreamFrontend.Receive()
+		msg, err := s.receiveFromUpstream()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
 
-			return fmt.Errorf("failed to receive from upstream: %w", err)
+			return err
 		}
 
 		// Capture query result data for logging.
@@ -1350,6 +1351,66 @@ func (s *Session) proxyUpstreamToClient() error {
 			return verr
 		}
 	}
+}
+
+// receiveFromUpstream reads the next upstream message for the relay, and is
+// where the read-only tripwire runs: before anything is relayed, so that if the
+// pin is gone the client never gets the ReadyForQuery that would let it start
+// the transaction the pin no longer covers.
+func (s *Session) receiveFromUpstream() (pgproto3.BackendMessage, error) {
+	msg, err := s.upstreamFrontend.Receive()
+	if err != nil {
+		return nil, fmt.Errorf("failed to receive from upstream: %w", err)
+	}
+
+	if ps, ok := msg.(*pgproto3.ParameterStatus); ok && s.readOnlyPinLost(ps) {
+		return nil, s.refuseLostReadOnlyPin(ps)
+	}
+
+	return msg, nil
+}
+
+// readOnlyPinLost reports whether upstream just told us that a read_only
+// session is no longer read-only by default.
+//
+// PostgreSQL 14 and later report default_transaction_read_only to the client
+// whenever it changes (it is GUC_REPORT), in the ParameterStatus it sends ahead
+// of ReadyForQuery. That makes the pin observable after the fact, whatever
+// route changed it — a spelling readOnlyBypassPatterns does not know, a
+// set_config built at run time, a function or a procedure that runs one. The
+// text scans in validateStatement remain the first line, since they refuse the
+// statement before it runs; this is the line behind it, which needs no
+// knowledge of how the setting was reached. Older servers never send it, and
+// the tripwire then simply never fires.
+//
+// The pin's own SET runs in runUpstreamSetup, which consumes that exchange
+// before this relay starts, so the only report of the setting this relay can see
+// is a change made by the client.
+func (s *Session) readOnlyPinLost(ps *pgproto3.ParameterStatus) bool {
+	return s.grant.IsReadOnly() &&
+		strings.EqualFold(ps.Name, "default_transaction_read_only") &&
+		!strings.EqualFold(ps.Value, "on")
+}
+
+// refuseLostReadOnlyPin ends a read_only session whose pin upstream reports
+// gone: a FATAL ErrorResponse so the client is told why, then an error from the
+// relay, which tears the session down the ordinary way. The upstream backend is
+// discarded with the session, so the setting it now carries is never reused.
+func (s *Session) refuseLostReadOnlyPin(ps *pgproto3.ParameterStatus) error {
+	s.logger.WarnContext(s.ctx, "terminating read-only session: upstream reports the read-only pin removed",
+		slog.String("parameter", ps.Name), slog.String("value", ps.Value))
+
+	s.clientBackend.Send(&pgproto3.ErrorResponse{
+		Severity: "FATAL",
+		Code:     "25006", // read_only_sql_transaction
+		Message:  ErrReadOnlyPinLost.Error(),
+	})
+
+	if err := s.clientBackend.Flush(); err != nil {
+		s.logger.WarnContext(s.ctx, "failed to send read-only termination to client", slog.Any("error", err))
+	}
+
+	return ErrReadOnlyPinLost
 }
 
 // enforceStreamLimits aborts the in-flight query when a time/bandwidth limit
