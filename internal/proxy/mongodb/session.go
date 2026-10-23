@@ -486,7 +486,10 @@ func (s *Session) relay() error {
 		_ = s.clientConn.Close()
 	}
 
-	<-errCh
+	// The first error is the one reported; the peer's, caused by the close above, is only logged.
+	if peerErr := <-errCh; peerErr != nil {
+		s.logger.DebugContext(s.ctx, "relay: peer pump stopped", slog.Any("error", peerErr))
+	}
 
 	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return nil
