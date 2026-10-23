@@ -19,7 +19,7 @@ ALTER TABLE grant_definitions
 -- last one was. The counter is what dedupes across restarts and replicas: a
 -- notice is only posted by the replica whose conditional UPDATE moved it.
 ALTER TABLE access_grants
-    ADD COLUMN IF NOT EXISTS bytes_notified_steps integer NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS bytes_notified_steps bigint NOT NULL DEFAULT 0;
 
 --bun:split
 

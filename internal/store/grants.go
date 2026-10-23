@@ -523,8 +523,28 @@ func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error
 		return fmt.Errorf("failed to aggregate grant query count: %w", err)
 	}
 
+	bytesTransferred, err := s.grantBytesTransferred(ctx, g)
+	if err != nil {
+		return err
+	}
+
+	g.QueryCount = queryCount
+	g.BytesTransferred = bytesTransferred
+	return nil
+}
+
+// grantBytesTransferred is the grant's cumulative transfer across every
+// connection attributed to it, under the attribution rules populateGrantCounters
+// documents. It is the one definition of "bytes under this grant": the quota
+// and the byte soft limit (SweepGrantBytes) both read it.
+func (s *Store) grantBytesTransferred(ctx context.Context, g *AccessGrant) (int64, error) {
+	upper := g.ExpiresAt
+	if g.RevokedAt != nil && g.RevokedAt.Before(upper) {
+		upper = *g.RevokedAt
+	}
+
 	var bytesTransferred int64
-	err = s.db.NewSelect().
+	err := s.db.NewSelect().
 		ColumnExpr("COALESCE(SUM(bytes_transferred), 0)").
 		Model((*Connection)(nil)).
 		Where("(grant_uid = ? OR (grant_uid IS NULL AND user_id = ? AND "+
@@ -535,12 +555,10 @@ func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error
 		Where("connected_at < ?", upper).
 		Scan(ctx, &bytesTransferred)
 	if err != nil {
-		return fmt.Errorf("failed to aggregate grant bytes transferred: %w", err)
+		return 0, fmt.Errorf("failed to aggregate grant bytes transferred: %w", err)
 	}
 
-	g.QueryCount = queryCount
-	g.BytesTransferred = bytesTransferred
-	return nil
+	return bytesTransferred, nil
 }
 
 // RevokeGrant revokes a grant
