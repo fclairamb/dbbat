@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/go-units"
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/parsers/toml/v2"
 	"github.com/knadh/koanf/parsers/yaml"
@@ -61,6 +62,12 @@ var (
 	// their issuer would get no override, no error, and auto-provisioning still
 	// on for everyone.
 	ErrAuthProviderUnknown = errors.New("unknown OAuth provider in a per-provider auto-provisioning override")
+
+	// ErrSlackNotifyBytesStepInvalid is returned when DBB_SLACK_NOTIFY_BYTES_STEP
+	// is not a byte count (or is negative). Silently reading it as 0 would turn
+	// off the one signal the operator just asked for.
+	ErrSlackNotifyBytesStepInvalid = errors.New(
+		"DBB_SLACK_NOTIFY_BYTES_STEP must be a non-negative byte count such as 1073741824 or 1GiB")
 )
 
 // DefaultOAuthRole is the role an auto-provisioned OAuth user starts with when
@@ -679,6 +686,29 @@ type SlackNotifyConfig struct {
 	// the Slack message. Mirrors ApprovalConfig.SlackSQL: Slack is a lower
 	// trust boundary than the dbbat UI. Default true.
 	SQL bool `koanf:"sql"`
+	// BytesStep is the instance-wide soft limit on bytes per grant: a notice
+	// each time a grant's cumulative bytes cross another multiple of it. A
+	// plain byte count or a binary-suffixed size (1GiB, 512m). "" or "0" =
+	// off, the default. A grant definition's notify_bytes_step overrides it.
+	// Read through ResolveBytesStep.
+	BytesStep string `koanf:"bytes_step"`
+}
+
+// ResolveBytesStep parses BytesStep. Suffixes are binary (1g = 1GiB), so
+// "1GiB" and "1GB" mean the same step. Anything that is not a non-negative
+// size is an error, which validate turns into a startup failure.
+func (c SlackNotifyConfig) ResolveBytesStep() (int64, error) {
+	raw := strings.TrimSpace(c.BytesStep)
+	if raw == "" {
+		return 0, nil
+	}
+
+	step, err := units.RAMInBytes(raw)
+	if err != nil || step < 0 {
+		return 0, fmt.Errorf("%w: got %q", ErrSlackNotifyBytesStepInvalid, c.BytesStep)
+	}
+
+	return step, nil
 }
 
 // Enabled returns true when a bot token is set. Channel is enforced at
@@ -1535,6 +1565,10 @@ func validate(cfg *Config) error {
 	// Same reasoning one rung down: the default role is what an unmatched user
 	// ends up with, so a typo must not survive startup.
 	if err := cfg.Auth.Validate(); err != nil {
+		return err
+	}
+
+	if _, err := cfg.SlackNotify.ResolveBytesStep(); err != nil {
 		return err
 	}
 
