@@ -143,7 +143,10 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 
 	stopPump := func() {
 		_ = upstream.SetReadDeadline(time.Now().Add(pumpDrainGrace))
-		<-pumpDone
+		// The pump's error is normally the read-deadline timeout set just above.
+		if err := <-pumpDone; err != nil {
+			s.logger.DebugContext(s.ctx, "pre-auth relay: pump stopped", slog.Any("error", err))
+		}
 		_ = upstream.SetReadDeadline(time.Time{})
 	}
 

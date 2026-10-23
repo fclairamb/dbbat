@@ -144,8 +144,8 @@ func TestCursorReexec_IsHeldAgainAfterTheFirstHoldIsReleased(t *testing.T) {
 
 	// It really is parked: nothing may be forwarded while a human has not answered.
 	select {
-	case <-secondDone:
-		t.Fatal("the re-execution was released while it was still awaiting approval")
+	case err := <-secondDone:
+		t.Fatalf("the re-execution was released while it was still awaiting approval (err: %v)", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 
