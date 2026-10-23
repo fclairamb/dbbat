@@ -57,7 +57,7 @@ func grantBytesText(ev store.GrantBytesEvent, publicURL string, now time.Time) s
 	)
 
 	if publicURL != "" {
-		text += fmt.Sprintf(" <%s/app/grants|Open grants →>", publicURL)
+		text += fmt.Sprintf(" <%s/app/grants?uid=%s|Open grant →>", publicURL, ev.Grant.UID)
 	}
 
 	return text

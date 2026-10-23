@@ -37,8 +37,20 @@ type fakeGrantStore struct {
 	err          error
 }
 
-func (f *fakeGrantStore) ListGrants(_ context.Context, _ store.GrantFilter) ([]store.Grant, error) {
-	return f.grants, f.err
+func (f *fakeGrantStore) ListGrants(_ context.Context, filter store.GrantFilter) ([]store.Grant, error) {
+	if filter.UserID == nil {
+		return f.grants, f.err
+	}
+
+	var out []store.Grant
+
+	for _, g := range f.grants {
+		if g.UserID == *filter.UserID {
+			out = append(out, g)
+		}
+	}
+
+	return out, f.err
 }
 
 func (f *fakeGrantStore) ListServerGroupMemberUIDs(_ context.Context, groupUID uuid.UUID) ([]uuid.UUID, error) {
@@ -537,3 +549,43 @@ func TestDescribeRendersColumns(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestRevokeGrant(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, store.ProtocolPostgreSQL, store.GrantDefinition{}, nil)
+
+	var revoked []uuid.UUID
+
+	f.server.deps.RevokeGrant = func(_ context.Context, uid uuid.UUID, actor *store.User) error {
+		assert.Equal(t, f.caller.User.UID, actor.UID)
+		revoked = append(revoked, uid)
+
+		return nil
+	}
+
+	own := f.store.grants[0].UID
+
+	_, list, err := f.server.toolListDatabases(f.caller)(context.Background(), nil, ListDatabasesInput{})
+	require.NoError(t, err)
+	assert.Equal(t, own.String(), list.Databases[0].GrantUID)
+
+	_, out, err := f.server.toolRevokeGrant(f.caller)(context.Background(), nil, RevokeGrantInput{GrantUID: own.String()})
+	require.NoError(t, err)
+	assert.Equal(t, own.String(), out.GrantUID)
+	assert.Equal(t, []uuid.UUID{own}, revoked)
+
+	// Someone else's grant and an unknown uid are refused identically, and
+	// never reach the revoke path.
+	other := store.Grant{UID: uuid.New(), UserID: uuid.New()}
+	f.store.grants = append(f.store.grants, other)
+
+	for _, in := range []string{other.UID.String(), uuid.NewString()} {
+		_, _, err = f.server.toolRevokeGrant(f.caller)(context.Background(), nil, RevokeGrantInput{GrantUID: in})
+		require.ErrorIs(t, err, ErrGrantNotYours)
+	}
+
+	_, _, err = f.server.toolRevokeGrant(f.caller)(context.Background(), nil, RevokeGrantInput{GrantUID: "nope"})
+	require.Error(t, err)
+	assert.Len(t, revoked, 1)
+}
