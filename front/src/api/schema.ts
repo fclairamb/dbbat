@@ -718,7 +718,7 @@ export interface paths {
         post?: never;
         /**
          * Revoke grant
-         * @description Revokes an access grant. Requires admin role.
+         * @description Revokes an access grant. Admins may revoke any grant; other users (viewers and connectors, by session or API key) only their own. Live sessions under the grant are disconnected on every replica.
          */
         delete: operations["revokeGrant"];
         options?: never;
@@ -5676,7 +5676,17 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
+            /** @description The grant belongs to another user and the caller is not an admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalError"];
         };
     };
