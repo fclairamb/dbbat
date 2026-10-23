@@ -302,7 +302,8 @@ func (s *Server) postSelfRevocationReply(ctx context.Context, grantUID, userID u
 
 	text := selfRevocationReplyText(s.slackIDForUser(ctx, userID))
 
-	go safe.RunGuarded(context.Background(), s.logger, goroutineNameGrantNotify, func() {
+	// Detached from the request on purpose: the reply outlives the response.
+	go safe.RunGuarded(context.Background(), s.logger, goroutineNameGrantNotify, func() { //nolint:contextcheck // detached by design
 		replyCtx, cancel := context.WithTimeout(context.Background(), slackNotifyTimeout)
 		defer cancel()
 
