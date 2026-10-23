@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.31.0](https://github.com/fclairamb/dbbat/compare/v0.30.1...v0.31.0) (2026-10-23)
+
+
+### Features
+
+* **grants:** users revoke their own grants, Slack soft limit on bytes ([#438](https://github.com/fclairamb/dbbat/issues/438)) ([9fff559](https://github.com/fclairamb/dbbat/commit/9fff559dc491b15ffffd38e4303b25ad28813885))
+* MCP revoke_grant tool and Slack grant deep link ([#442](https://github.com/fclairamb/dbbat/issues/442)) ([c7ca3b2](https://github.com/fclairamb/dbbat/commit/c7ca3b2eb3026d864143bcb81b81275c205a0c0c))
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/gopacket/gopacket to v1.7.3 ([#409](https://github.com/fclairamb/dbbat/issues/409)) ([150bf3c](https://github.com/fclairamb/dbbat/commit/150bf3c29e8911c4608de8e6014570ed23e465aa))
+* **deps:** update module github.com/gopacket/gopacket to v1.7.4 ([#412](https://github.com/fclairamb/dbbat/issues/412)) ([e52363f](https://github.com/fclairamb/dbbat/commit/e52363f34eba5a45fd373fd10804f1c04ff71c7d))
+* **deps:** update module github.com/knadh/koanf/providers/env/v2 to v2.0.2 ([#424](https://github.com/fclairamb/dbbat/issues/424)) ([1ffcf77](https://github.com/fclairamb/dbbat/commit/1ffcf77e25867e969c2375273c3ca63bd19bd1e8))
+* **deps:** update module github.com/knadh/koanf/v2 to v2.3.7 ([#406](https://github.com/fclairamb/dbbat/issues/406)) ([cf4a901](https://github.com/fclairamb/dbbat/commit/cf4a9018a4b4dfe737f47f0b72b9e4ce89357a4a))
+* **deps:** update module github.com/knadh/koanf/v2 to v2.3.8 ([#425](https://github.com/fclairamb/dbbat/issues/425)) ([95ff11c](https://github.com/fclairamb/dbbat/commit/95ff11c977da1732cb903a45d1d8543846bf786d))
+* **deps:** update module github.com/knadh/koanf/v2 to v2.4.1 ([#444](https://github.com/fclairamb/dbbat/issues/444)) ([a4f849f](https://github.com/fclairamb/dbbat/commit/a4f849f8265affc1ec9a30596590f92032e8022c))
+* **deps:** update module github.com/moby/moby/api to v1.56.1 ([#410](https://github.com/fclairamb/dbbat/issues/410)) ([1e72f80](https://github.com/fclairamb/dbbat/commit/1e72f807270eb639ed8c10484e6fa5227c104543))
+* **deps:** update module github.com/slack-go/slack to v0.30.1 ([#428](https://github.com/fclairamb/dbbat/issues/428)) ([8211bca](https://github.com/fclairamb/dbbat/commit/8211bcad7097ee845d751b447facc667adddd6ea))
+* **deps:** update module github.com/uptrace/bun to v1.3.0 ([#413](https://github.com/fclairamb/dbbat/issues/413)) ([a3b38f3](https://github.com/fclairamb/dbbat/commit/a3b38f34d282b76548f9b0b353d99df5e1cec5c0))
+* **deps:** update module github.com/urfave/cli/v3 to v3.14.0 ([#411](https://github.com/fclairamb/dbbat/issues/411)) ([c1ea666](https://github.com/fclairamb/dbbat/commit/c1ea666fd0d076b630152467253d37c7191674f2))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.9.2 ([#426](https://github.com/fclairamb/dbbat/issues/426)) ([fb073cc](https://github.com/fclairamb/dbbat/commit/fb073ccbdb041c40151b45624c8cb2858da19380))
+* **deps:** update module gocloud.dev to v0.47.0 ([#431](https://github.com/fclairamb/dbbat/issues/431)) ([f6b6e3e](https://github.com/fclairamb/dbbat/commit/f6b6e3e3d5eb3edde02b25a392802c199b349f4b))
+* **deps:** update module golang.org/x/crypto to v0.58.0 ([#432](https://github.com/fclairamb/dbbat/issues/432)) ([e044f81](https://github.com/fclairamb/dbbat/commit/e044f81daa2732aecfbe97579fef1e67f9519ee0))
+* **deps:** update module golang.org/x/text to v0.43.0 ([#433](https://github.com/fclairamb/dbbat/issues/433)) ([5e5f49f](https://github.com/fclairamb/dbbat/commit/5e5f49f0e6cc4aac4c016cf1dc440b3b318063d4))
+* make slack_app_manifest.json accepted by Slack ([#405](https://github.com/fclairamb/dbbat/issues/405)) ([74742dd](https://github.com/fclairamb/dbbat/commit/74742dd112d107d0782c3dcd093b2b92c042710f))
+
 ## [0.30.1](https://github.com/fclairamb/dbbat/compare/v0.30.0...v0.30.1) (2026-09-24)
 
 
