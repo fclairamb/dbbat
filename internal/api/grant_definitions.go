@@ -85,6 +85,11 @@ type CreateGrantDefinitionRequest struct {
 	// limit (overriding a global one — the escape hatch for a dump or ETL
 	// definition), and a positive value is the limit in seconds.
 	StatementTimeoutSeconds *int64 `json:"statement_timeout_seconds"`
+	// NotifyBytesStep is the byte soft limit: a Slack notice each time a
+	// grant's cumulative bytes cross another multiple of it. Never blocks.
+	// null/omitted inherits DBB_SLACK_NOTIFY_BYTES_STEP, 0 turns the notice
+	// off for this definition, a positive value is the step in bytes.
+	NotifyBytesStep *int64 `json:"notify_bytes_step"`
 	// Priority, when supplied, is stamped verbatim on every grant
 	// materialized from this definition instead of the tier its controls
 	// would earn. null/omitted — the normal case — leaves it auto.
@@ -165,16 +170,21 @@ type UpdateGrantDefinitionRequest struct {
 	// quotas are, but with a twist: here null and 0 mean *different* things
 	// ("inherit the global" vs "no limit at all"), so the companion Clear flag
 	// is not a convenience — without it a PATCH could never restore inheritance.
-	StatementTimeoutSeconds      *int64      `json:"statement_timeout_seconds"`
-	ClearStatementTimeoutSeconds bool        `json:"clear_statement_timeout_seconds"`
-	Priority                     *int16      `json:"priority"`
-	ClearPriority                bool        `json:"clear_priority"`
-	AutoApprove                  *bool       `json:"auto_approve"`
-	UserGroupUIDs                []uuid.UUID `json:"user_group_uids"`
-	ServerGroupUIDs              []uuid.UUID `json:"server_group_uids"`
-	ApprovalPatterns             []string    `json:"approval_patterns"`
-	SampleQueries                []string    `json:"sample_queries"`
-	ApproverUserGroupUIDs        []uuid.UUID `json:"approver_user_group_uids"`
+	StatementTimeoutSeconds      *int64 `json:"statement_timeout_seconds"`
+	ClearStatementTimeoutSeconds bool   `json:"clear_statement_timeout_seconds"`
+	// NotifyBytesStep follows StatementTimeoutSeconds: null and 0 differ
+	// ("inherit" vs "off"), so ClearNotifyBytesStep is what restores
+	// inheritance.
+	NotifyBytesStep       *int64      `json:"notify_bytes_step"`
+	ClearNotifyBytesStep  bool        `json:"clear_notify_bytes_step"`
+	Priority              *int16      `json:"priority"`
+	ClearPriority         bool        `json:"clear_priority"`
+	AutoApprove           *bool       `json:"auto_approve"`
+	UserGroupUIDs         []uuid.UUID `json:"user_group_uids"`
+	ServerGroupUIDs       []uuid.UUID `json:"server_group_uids"`
+	ApprovalPatterns      []string    `json:"approval_patterns"`
+	SampleQueries         []string    `json:"sample_queries"`
+	ApproverUserGroupUIDs []uuid.UUID `json:"approver_user_group_uids"`
 
 	// RetiredDatabaseUIDs is refused rather than folded; see
 	// CreateGrantDefinitionRequest.RetiredDatabaseUIDs.
@@ -229,6 +239,13 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 		def.StatementTimeoutSeconds = nil
 	case req.StatementTimeoutSeconds != nil:
 		def.StatementTimeoutSeconds = req.StatementTimeoutSeconds
+	}
+
+	switch {
+	case req.ClearNotifyBytesStep:
+		def.NotifyBytesStep = nil
+	case req.NotifyBytesStep != nil:
+		def.NotifyBytesStep = req.NotifyBytesStep
 	}
 
 	switch {
@@ -293,6 +310,12 @@ func validateDefinitionLimits(req *CreateGrantDefinitionRequest) string {
 
 	if req.MaxBytesTransferred != nil && *req.MaxBytesTransferred <= 0 {
 		return "max_bytes_transferred must be > 0 or omitted"
+	}
+
+	// >= 0 like the statement timeout: 0 turns the notice off for this
+	// definition, overriding the instance default.
+	if req.NotifyBytesStep != nil && *req.NotifyBytesStep < 0 {
+		return "notify_bytes_step must be >= 0 or omitted (0 = no notice)"
 	}
 
 	if req.StatementTimeoutSeconds == nil {
@@ -435,6 +458,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		MaxQueryCounts:          req.MaxQueryCounts,
 		MaxBytesTransferred:     req.MaxBytesTransferred,
 		StatementTimeoutSeconds: req.StatementTimeoutSeconds,
+		NotifyBytesStep:         req.NotifyBytesStep,
 		Priority:                req.Priority,
 		AutoApprove:             req.AutoApprove,
 		UserGroupUIDs:           req.UserGroupUIDs,
@@ -685,6 +709,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		MaxQueryCounts:          def.MaxQueryCounts,
 		MaxBytesTransferred:     def.MaxBytesTransferred,
 		StatementTimeoutSeconds: def.StatementTimeoutSeconds,
+		NotifyBytesStep:         def.NotifyBytesStep,
 		Priority:                def.Priority,
 		AutoApprove:             def.AutoApprove,
 		UserGroupUIDs:           def.UserGroupUIDs,

@@ -3013,6 +3013,16 @@ export interface components {
              */
             statement_timeout_seconds?: number | null;
             /**
+             * Format: int64
+             * @description Byte soft limit for grants issued from this definition: a Slack
+             *     notice each time a grant's cumulative bytes cross another multiple
+             *     of this step. Traffic is never blocked. Three states:
+             *     `null`/omitted inherits `DBB_SLACK_NOTIFY_BYTES_STEP`; `0` turns
+             *     the notice off for this definition; a positive value is the step
+             *     in bytes.
+             */
+            notify_bytes_step?: number | null;
+            /**
              * Format: int32
              * @description Selection priority stamped verbatim on every grant materialized
              *     from this definition. `null` — the normal case — means the grant
@@ -3144,6 +3154,16 @@ export interface components {
              */
             statement_timeout_seconds?: number | null;
             /**
+             * Format: int64
+             * @description Byte soft limit for grants issued from this definition: a Slack
+             *     notice each time a grant's cumulative bytes cross another multiple
+             *     of this step. Traffic is never blocked. Three states:
+             *     `null`/omitted inherits `DBB_SLACK_NOTIFY_BYTES_STEP`; `0` turns
+             *     the notice off for this definition; a positive value is the step
+             *     in bytes.
+             */
+            notify_bytes_step?: number | null;
+            /**
              * Format: int32
              * @description Optional selection priority for grants materialized from this
              *     definition. Omit (or send `null`) to let each grant take the tier
@@ -3249,6 +3269,18 @@ export interface components {
             statement_timeout_seconds?: number | null;
             /** @description When true, resets statement_timeout_seconds to null, i.e. back to inheriting the instance-wide default. Needed because `null` and `0` mean different things here, so sending `null` cannot express it. */
             clear_statement_timeout_seconds?: boolean;
+            /**
+             * Format: int64
+             * @description Byte soft limit for grants issued from this definition: a Slack
+             *     notice each time a grant's cumulative bytes cross another multiple
+             *     of this step. Traffic is never blocked. Three states:
+             *     `null`/omitted inherits `DBB_SLACK_NOTIFY_BYTES_STEP`; `0` turns
+             *     the notice off for this definition; a positive value is the step
+             *     in bytes.
+             */
+            notify_bytes_step?: number | null;
+            /** @description When true, resets notify_bytes_step to null, i.e. back to inheriting `DBB_SLACK_NOTIFY_BYTES_STEP`. */
+            clear_notify_bytes_step?: boolean;
             /** Format: int32 */
             priority?: number | null;
             /** @description When true, resets priority to auto (tier derived from controls). */
