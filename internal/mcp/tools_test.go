@@ -37,8 +37,20 @@ type fakeGrantStore struct {
 	err          error
 }
 
-func (f *fakeGrantStore) ListGrants(_ context.Context, _ store.GrantFilter) ([]store.Grant, error) {
-	return f.grants, f.err
+func (f *fakeGrantStore) ListGrants(_ context.Context, filter store.GrantFilter) ([]store.Grant, error) {
+	if filter.UserID == nil {
+		return f.grants, f.err
+	}
+
+	var out []store.Grant
+
+	for _, g := range f.grants {
+		if g.UserID == *filter.UserID {
+			out = append(out, g)
+		}
+	}
+
+	return out, f.err
 }
 
 func (f *fakeGrantStore) ListServerGroupMemberUIDs(_ context.Context, groupUID uuid.UUID) ([]uuid.UUID, error) {
