@@ -78,6 +78,7 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		MaxQueryCounts:          def.MaxQueryCounts,
 		MaxBytesTransferred:     def.MaxBytesTransferred,
 		StatementTimeoutSeconds: def.StatementTimeoutSeconds,
+		NotifyBytesStep:         def.NotifyBytesStep,
 		Priority:                def.Priority,
 		AutoApprove:             def.AutoApprove,
 		UserGroupUIDs:           groupUIDs,
@@ -375,6 +376,7 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 			MaxQueryCounts:          def.MaxQueryCounts,
 			MaxBytesTransferred:     def.MaxBytesTransferred,
 			StatementTimeoutSeconds: def.StatementTimeoutSeconds,
+			NotifyBytesStep:         def.NotifyBytesStep,
 			Priority:                def.Priority,
 			AutoApprove:             def.AutoApprove,
 			UserGroupUIDs:           def.UserGroupUIDs,
@@ -414,6 +416,7 @@ func sameGrantDefinitionShape(a, b *GrantDefinition) bool {
 		equalInt64Ptr(a.MaxQueryCounts, b.MaxQueryCounts) &&
 		equalInt64Ptr(a.MaxBytesTransferred, b.MaxBytesTransferred) &&
 		equalInt64Ptr(a.StatementTimeoutSeconds, b.StatementTimeoutSeconds) &&
+		equalInt64Ptr(a.NotifyBytesStep, b.NotifyBytesStep) &&
 		equalInt16Ptr(a.Priority, b.Priority) &&
 		slices.Equal(a.UserGroupUIDs, b.UserGroupUIDs) &&
 		slices.Equal(a.ServerGroupUIDs, b.ServerGroupUIDs) &&
