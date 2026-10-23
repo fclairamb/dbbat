@@ -650,6 +650,23 @@ the first termination for a given (user, database, reason) posts immediately,
 and any further one within a 10-minute window is folded into a single
 follow-up ("+7 more in the last 10 min") posted once the window closes.
 
+#### Byte soft limit (optional)
+
+A grant can move a lot of data without ever hitting a hard
+`max_bytes_transferred`. The soft limit makes that visible without blocking
+anything: each time a grant's cumulative bytes cross another multiple of a
+step, DBBat replies in the grant request's Slack thread (or posts to
+`DBB_SLACK_NOTIFY_CHANNEL` for a grant assigned directly), for example
+"Grant `…` for @alice on `prod-ro` has transferred 3.0 GiB so far (last 1.0 GiB
+in 12 min). The traffic is not blocked."
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_SLACK_NOTIFY_BYTES_STEP` | The step: a byte count (`1073741824`) or a binary size (`1GiB`, `512m`). Default `0` = off. A grant definition's `notify_bytes_step` overrides it, `0` there turning it off for that definition. A negative or unparsable value is a startup failure. |
+
+See [the soft limit on bytes](/docs/features/access-control#byte-soft-limit) for
+how the bytes are counted.
+
 ## Configuration File
 
 DBBat supports YAML, JSON, and TOML configuration files.

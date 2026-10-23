@@ -56,6 +56,7 @@ Users can also request the same definition themselves — see [Grant requests](.
 | `controls` | definition | Combination of `read_only`, `block_copy`, `block_ddl`. Empty = full write access. |
 | `max_query_counts` | definition | Maximum number of queries allowed |
 | `max_bytes_transferred` | definition | Maximum bytes transferred (response size) |
+| `notify_bytes_step` | definition | [Byte soft limit](#byte-soft-limit): a Slack notice every time this many bytes have moved. `null` = inherit `DBB_SLACK_NOTIFY_BYTES_STEP`, `0` = off. Never blocks. |
 | `duration_seconds` | definition | How long a grant issued from it lasts |
 | `user_group_uids` | definition | User groups whose members may request it. Empty = every user. |
 | `server_group_uids` | definition | Server groups it may be issued against. Empty = every database. |
@@ -320,6 +321,35 @@ Limit the volume of data returned through the proxy:
 When exceeded, subsequent queries return an error. The byte counter accumulates response sizes from the upstream database.
 
 Counters (`query_count`, `bytes_transferred`) are exposed on the grant object so admins can see usage in real time, and the web UI renders them as usage bars (warning at ≥80%, destructive at ≥100%, explicit `unlimited` marker when no limit is set).
+
+### Byte soft limit
+
+A hard `max_bytes_transferred` blocks legitimate dumps, and with an
+auto-approved definition the user just requests another grant. The soft limit
+lets the traffic through and says something instead: each time a grant's
+cumulative bytes cross another multiple of a step, DBBat replies in the grant
+request's Slack thread with the total and the bytes moved since the previous
+notice. A grant assigned directly has no thread, so the notice goes to
+`DBB_SLACK_NOTIFY_CHANNEL`.
+
+```json
+{ "notify_bytes_step": 1073741824 }
+```
+
+- The step is `notify_bytes_step` on the definition, otherwise
+  `DBB_SLACK_NOTIFY_BYTES_STEP` (off by default). `0` on the definition turns
+  it off for that definition, the way a dump definition opts out.
+- The total is the same one the quota reads: every connection of the grant,
+  across replicas.
+- Bytes are counted when a statement **completes**. A chunked export is many
+  statements and is caught as it goes; one multi-GiB `COPY` counts only once it
+  finishes.
+- Every replica checks the active grants with recent activity once a minute.
+  The step counter is stored on the grant, so each step is announced once,
+  whatever the number of replicas and restarts. Several steps crossed within
+  one minute make a single notice naming the current total.
+- Each notice also writes a `grant.bytes_threshold` audit entry, so the signal
+  survives without Slack.
 
 ### Mid-stream enforcement
 
