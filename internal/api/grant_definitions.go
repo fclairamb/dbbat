@@ -220,6 +220,36 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 		def.Controls = req.Controls
 	}
 
+	applyGrantDefinitionLimitsUpdate(def, req)
+
+	if req.AutoApprove != nil {
+		def.AutoApprove = *req.AutoApprove
+	}
+
+	if req.UserGroupUIDs != nil {
+		def.UserGroupUIDs = req.UserGroupUIDs
+	}
+
+	if req.ServerGroupUIDs != nil {
+		def.ServerGroupUIDs = req.ServerGroupUIDs
+	}
+
+	if req.ApprovalPatterns != nil {
+		def.ApprovalPatterns = normalizeStrings(req.ApprovalPatterns)
+	}
+
+	if req.SampleQueries != nil {
+		def.SampleQueries = normalizeStrings(req.SampleQueries)
+	}
+
+	if req.ApproverUserGroupUIDs != nil {
+		def.ApproverUserGroupUIDs = normalizeUUIDs(req.ApproverUserGroupUIDs)
+	}
+}
+
+// applyGrantDefinitionLimitsUpdate applies the nullable numeric fields, each
+// with its Clear* companion. A Clear flag wins over a value sent alongside it.
+func applyGrantDefinitionLimitsUpdate(def *store.GrantDefinition, req *UpdateGrantDefinitionRequest) {
 	switch {
 	case req.ClearMaxQueryCounts:
 		def.MaxQueryCounts = nil
@@ -253,30 +283,6 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 		def.Priority = nil
 	case req.Priority != nil:
 		def.Priority = req.Priority
-	}
-
-	if req.AutoApprove != nil {
-		def.AutoApprove = *req.AutoApprove
-	}
-
-	if req.UserGroupUIDs != nil {
-		def.UserGroupUIDs = req.UserGroupUIDs
-	}
-
-	if req.ServerGroupUIDs != nil {
-		def.ServerGroupUIDs = req.ServerGroupUIDs
-	}
-
-	if req.ApprovalPatterns != nil {
-		def.ApprovalPatterns = normalizeStrings(req.ApprovalPatterns)
-	}
-
-	if req.SampleQueries != nil {
-		def.SampleQueries = normalizeStrings(req.SampleQueries)
-	}
-
-	if req.ApproverUserGroupUIDs != nil {
-		def.ApproverUserGroupUIDs = normalizeUUIDs(req.ApproverUserGroupUIDs)
 	}
 }
 

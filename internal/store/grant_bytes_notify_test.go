@@ -152,12 +152,17 @@ func TestClaimGrantBytesSteps_ConcurrentClaimsHaveOneWinner(t *testing.T) {
 	var (
 		wg   sync.WaitGroup
 		wins atomic.Int32
+		errs = make(chan error, claimers)
 	)
 
 	for range claimers {
 		wg.Go(func() {
 			ok, err := s.ClaimGrantBytesSteps(ctx, f.grant.UID, 1)
-			assert.NoError(t, err)
+			if err != nil {
+				errs <- err
+
+				return
+			}
 
 			if ok {
 				wins.Add(1)
@@ -166,6 +171,11 @@ func TestClaimGrantBytesSteps_ConcurrentClaimsHaveOneWinner(t *testing.T) {
 	}
 
 	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
 	assert.Equal(t, int32(1), wins.Load())
 	assert.Equal(t, int64(1), storedNotifiedSteps(t, ctx, s, f.grant.UID))
