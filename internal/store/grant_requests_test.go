@@ -441,3 +441,43 @@ func TestGrantRequestDefinitionFollowsLineage(t *testing.T) {
 		t.Errorf("approve: definition = %v, want the live version %s", approved.Definition, next.UID)
 	}
 }
+
+func TestGetGrantRequestByResultingGrant(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin, user, db, def := setupRequestFixtures(t, ctx, store, "byresult")
+
+	req, err := store.CreateGrantRequest(ctx, &GrantRequest{
+		UserID:            user.UID,
+		GrantDefinitionID: def.UID,
+		DatabaseID:        db.UID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.SetGrantRequestSlackMessage(ctx, req.UID, "C123", "1700000000.000100"); err != nil {
+		t.Fatal(err)
+	}
+
+	grant, _, err := store.ApproveGrantRequest(ctx, req.UID, admin.UID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.GetGrantRequestByResultingGrant(ctx, grant.UID)
+	if err != nil {
+		t.Fatalf("GetGrantRequestByResultingGrant: %v", err)
+	}
+
+	if got.UID != req.UID || got.SlackChannel == nil || *got.SlackChannel != "C123" {
+		t.Errorf("got request %v channel %v, want %v C123", got.UID, got.SlackChannel, req.UID)
+	}
+
+	if _, err := store.GetGrantRequestByResultingGrant(ctx, uuid.New()); !errors.Is(err, ErrGrantRequestNotFound) {
+		t.Errorf("unknown grant: err = %v, want ErrGrantRequestNotFound", err)
+	}
+}

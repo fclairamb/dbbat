@@ -64,6 +64,8 @@ import { UsageLimit } from "@/components/shared/UsageMeter";
 import { formatBytes } from "@/lib/utils";
 import { autoPriority } from "@/lib/grant-priority";
 
+const GIB = 1024 * 1024 * 1024;
+
 // statementTimeoutPlaceholder shows what an empty field will actually do, so
 // "inherit" is never a guess.
 function statementTimeoutPlaceholder(resolvedSeconds: number): string {
@@ -581,6 +583,14 @@ function DefinitionDialog({
       ? String(editing.statement_timeout_seconds)
       : ""
   );
+  // Byte soft limit, entered in GiB. Same three states as the statement
+  // timeout: "" inherits DBB_SLACK_NOTIFY_BYTES_STEP, "0" turns the notice off
+  // for this definition, a positive value is the step.
+  const [notifyBytesStep, setNotifyBytesStep] = useState<string>(
+    editing?.notify_bytes_step != null
+      ? String(editing.notify_bytes_step / GIB)
+      : ""
+  );
   const [bytesUnit, setBytesUnit] = useState<"KB" | "MB" | "GB">(() => {
     if (editing?.max_bytes_transferred == null) return "MB";
     const v = editing.max_bytes_transferred;
@@ -725,6 +735,10 @@ function DefinitionDialog({
     // "inherit", not "parse this as NaN seconds".
     const statementTimeoutValue =
       statementTimeout.trim() === "" ? null : parseInt(statementTimeout, 10);
+    const notifyBytesStepValue =
+      notifyBytesStep.trim() === ""
+        ? null
+        : Math.round(parseFloat(notifyBytesStep) * GIB);
     const approvalPatternsValue = parsedPatterns();
     const sampleQueriesValue = parsedSampleQueries();
 
@@ -748,6 +762,9 @@ function DefinitionDialog({
         // the only way to restore inheritance.
         statement_timeout_seconds: statementTimeoutValue ?? undefined,
         clear_statement_timeout_seconds: statementTimeoutValue === null,
+        // Same tri-state as the statement timeout.
+        notify_bytes_step: notifyBytesStepValue ?? undefined,
+        clear_notify_bytes_step: notifyBytesStepValue === null,
         priority: priorityValue ?? undefined,
         clear_priority: priorityValue === null,
         auto_approve: autoApprove,
@@ -768,6 +785,7 @@ function DefinitionDialog({
         max_query_counts: maxQueryCounts,
         max_bytes_transferred: maxBytesTransferred,
         statement_timeout_seconds: statementTimeoutValue,
+        notify_bytes_step: notifyBytesStepValue,
         priority: priorityValue,
         auto_approve: autoApprove,
         user_group_uids: userGroupUids,
@@ -1169,6 +1187,27 @@ function DefinitionDialog({
                 </Select>
               </div>
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="def-notify-bytes">Slack notice every (GiB)</Label>
+            <Input
+              id="def-notify-bytes"
+              type="number"
+              min="0"
+              step="0.1"
+              placeholder="Instance default"
+              value={notifyBytesStep}
+              onChange={(e) => setNotifyBytesStep(e.target.value)}
+              data-testid="grant-definition-notify-bytes-step"
+            />
+            <p className="text-sm text-muted-foreground">
+              Posts in the grant request's Slack thread each time a grant's
+              total transfer crosses another multiple of this size. Traffic is
+              never blocked. Leave empty to inherit{" "}
+              <code className="text-xs">DBB_SLACK_NOTIFY_BYTES_STEP</code>, enter{" "}
+              <code className="text-xs">0</code> to turn it off for this
+              definition.
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="def-stmt-timeout">Statement timeout (seconds)</Label>

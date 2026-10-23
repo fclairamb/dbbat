@@ -21,6 +21,7 @@ const (
 	goroutineNameReclaim       = "orphaned connection reclaim"
 	goroutineNameOpenStamps    = "open query chain stamp refresh"
 	goroutineNameTerminations  = "session termination poll"
+	goroutineNameGrantBytes    = "grant byte soft limit sweep"
 )
 
 // instanceHeartbeat keeps this process's row in the instance registry fresh.
@@ -50,6 +51,11 @@ type instanceHeartbeat struct {
 	// last_seen_at we saw then. Nil once the question is settled. See
 	// checkSharedInstanceID.
 	sharedIDCandidates map[string]time.Time
+
+	// grantBytesSince is the activity cutoff of the next byte soft-limit sweep.
+	// Zero at startup, so the first sweep looks at every active grant and a
+	// step crossed while this process was down is not missed.
+	grantBytesSince time.Time
 }
 
 // startInstanceHeartbeat registers this process and starts refreshing its row.
@@ -226,6 +232,12 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 	terminations := time.NewTicker(store.TerminationPollInterval)
 	defer terminations.Stop()
 
+	// The byte soft-limit sweep: another periodic read of the store that must
+	// stop with the process, so it rides here too. Every replica sweeps every
+	// grant; the conditional claim in the store decides which one announces.
+	grantBytes := time.NewTicker(store.GrantBytesSweepInterval)
+	defer grantBytes.Stop()
+
 	// Every unit of work runs under safe.RunMaintenance, per turn and
 	// individually. This is a goroutine of its own, so no recover reaches it and
 	// an unguarded panic in any of these store calls would end the process with
@@ -249,6 +261,8 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 			reclaim.Reset(nextReclaimDelay())
 		case <-terminations.C:
 			h.guarded(ctx, goroutineNameTerminations, func() { h.pollTerminations(ctx) })
+		case <-grantBytes.C:
+			h.guarded(ctx, goroutineNameGrantBytes, func() { h.sweepGrantBytes(ctx) })
 		case <-h.stop:
 			return
 		}
@@ -399,6 +413,35 @@ func (h *instanceHeartbeat) pollTerminations(ctx context.Context) {
 			slog.String("connection_uid", p.ConnectionUID.String()),
 			slog.String("reason", p.Reason),
 			slog.String("requested_by", p.RequestedBy))
+	}
+}
+
+// sweepGrantBytes announces the grants whose cumulative bytes crossed another
+// soft-limit step. See store.SweepGrantBytes.
+//
+// The next cutoff is this sweep's start minus one interval: activity is stamped
+// by whichever replica served it, with that replica's clock, so the overlap
+// absorbs skew between them. Re-checking a grant is cheap and the claim makes
+// it idempotent. On failure the cutoff stays put, so nothing is skipped.
+func (h *instanceHeartbeat) sweepGrantBytes(ctx context.Context) {
+	started := time.Now()
+
+	events, err := h.store.SweepGrantBytes(ctx, h.grantBytesSince)
+	if err != nil {
+		h.logger.WarnContext(ctx, "failed to sweep grants for the byte soft limit",
+			slog.Any("error", err))
+
+		return
+	}
+
+	h.grantBytesSince = started.Add(-store.GrantBytesSweepInterval)
+
+	for _, ev := range events {
+		h.logger.InfoContext(ctx, "Grant crossed a byte soft-limit step",
+			slog.String("grant_uid", ev.Grant.UID.String()),
+			slog.Int64("total_bytes", ev.Total),
+			slog.Int64("step_bytes", ev.Step),
+			slog.Int64("steps", ev.Steps))
 	}
 }
 

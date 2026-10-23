@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -36,6 +37,11 @@ type Store struct {
 	// configured or the operator turned terminations off. See
 	// termination_notify.go.
 	terminationNotifier TerminationNotifier
+
+	// grantBytes holds the byte soft limit's instance default and notifier.
+	// Atomic because the heartbeat goroutine that sweeps it starts before the
+	// API server that owns the Slack client. See grant_bytes_notify.go.
+	grantBytes atomic.Pointer[grantBytesSettings]
 
 	// chainKey is the HMAC key sealing the audit and query chains — an HKDF
 	// subkey of the master encryption key, never the master key itself and
