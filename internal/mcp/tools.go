@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/fclairamb/dbbat/internal/store"
@@ -67,6 +68,19 @@ func (s *Server) registerTools(srv *mcpsdk.Server, caller *Caller) {
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: true},
 	}, s.toolDescribe(caller))
 
+	if s.deps.RevokeGrant != nil {
+		destructive := true
+
+		mcpsdk.AddTool(srv, &mcpsdk.Tool{
+			Name:  "revoke_grant",
+			Title: "Revoke one of your grants",
+			Description: "Revoke your own grant (grant_uid, from list_databases) once your work is done. " +
+				"Live sessions under it are ended and the access is gone until a new grant is issued. " +
+				"Only the API key owner's own grants can be revoked.",
+			Annotations: &mcpsdk.ToolAnnotations{DestructiveHint: &destructive},
+		}, s.toolRevokeGrant(caller))
+	}
+
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:  "await_approval",
 		Title: "Wait for a suspended statement",
@@ -78,6 +92,64 @@ func (s *Server) registerTools(srv *mcpsdk.Server, caller *Caller) {
 	}, s.toolAwaitApproval(caller))
 }
 
+// -- revoke_grant ----------------------------------------------------------
+
+// ErrGrantNotYours is returned for a grant uid the caller does not hold. It
+// covers "unknown" and "someone else's" alike so the tool cannot be used to
+// probe for other users' grants.
+var ErrGrantNotYours = errors.New("no active grant of yours with that uid")
+
+// RevokeGrantInput is the `revoke_grant` tool's arguments.
+type RevokeGrantInput struct {
+	GrantUID string `json:"grant_uid" jsonschema:"the grant_uid reported by list_databases"`
+}
+
+// RevokeGrantOutput is the `revoke_grant` result.
+type RevokeGrantOutput struct {
+	GrantUID string `json:"grant_uid"`
+	Message  string `json:"message"`
+}
+
+func (s *Server) toolRevokeGrant(caller *Caller) mcpsdk.ToolHandlerFor[RevokeGrantInput, RevokeGrantOutput] {
+	return func(ctx context.Context, _ *mcpsdk.CallToolRequest, in RevokeGrantInput) (
+		*mcpsdk.CallToolResult, RevokeGrantOutput, error,
+	) {
+		uid, err := uuid.Parse(strings.TrimSpace(in.GrantUID))
+		if err != nil {
+			return nil, RevokeGrantOutput{}, fmt.Errorf("invalid grant_uid: %w", err)
+		}
+
+		// Always the caller's own grants, even for an admin key: the agent
+		// surface stays small.
+		userUID := caller.User.UID
+
+		grants, err := s.deps.Store.ListGrants(ctx, store.GrantFilter{UserID: &userUID, ActiveOnly: true})
+		if err != nil {
+			return nil, RevokeGrantOutput{}, fmt.Errorf("listing grants: %w", err)
+		}
+
+		owned := false
+
+		for i := range grants {
+			if grants[i].UID == uid {
+				owned = true
+
+				break
+			}
+		}
+
+		if !owned {
+			return nil, RevokeGrantOutput{}, ErrGrantNotYours
+		}
+
+		if err := s.deps.RevokeGrant(ctx, uid, caller.User); err != nil {
+			return nil, RevokeGrantOutput{}, fmt.Errorf("revoking grant: %w", err)
+		}
+
+		return nil, RevokeGrantOutput{GrantUID: uid.String(), Message: "grant revoked"}, nil
+	}
+}
+
 // -- list_databases ---------------------------------------------------------
 
 // ListDatabasesInput takes no arguments: the caller's grants are the scope.
@@ -87,6 +159,7 @@ type ListDatabasesInput struct{}
 // needs to plan: when access ends, what it may not do, and how much of its
 // quota is left.
 type DatabaseInfo struct {
+	GrantUID         string `json:"grant_uid" jsonschema:"pass this to revoke_grant when you are done with the database"`
 	Name             string `json:"name" jsonschema:"the name to pass to query and describe"`
 	Description      string `json:"description,omitempty"`
 	Protocol         string `json:"protocol"`
@@ -120,6 +193,7 @@ func (s *Server) toolListDatabases(caller *Caller) mcpsdk.ToolHandlerFor[ListDat
 
 		for _, a := range list {
 			out.Databases = append(out.Databases, DatabaseInfo{
+				GrantUID:         a.grant.UID.String(),
 				Name:             a.server.Name,
 				Description:      a.server.Description,
 				Protocol:         a.server.Protocol,

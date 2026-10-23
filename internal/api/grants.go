@@ -241,7 +241,7 @@ func (s *Server) handleRevokeGrant(c *gin.Context) {
 		return
 	}
 
-	if err := s.store.RevokeGrant(ctx, uid, currentUser.UID); err != nil {
+	if err := s.revokeGrant(ctx, grant, currentUser, self); err != nil {
 		if errors.Is(err, store.ErrGrantAlreadyRevoked) {
 			writeError(c, http.StatusConflict, ErrCodeConflict, "grant is already revoked")
 			return
@@ -250,6 +250,20 @@ func (s *Server) handleRevokeGrant(c *gin.Context) {
 		writeInternalError(c, s.logger, err, "failed to revoke grant")
 
 		return
+	}
+
+	successResponse(c, gin.H{"message": "grant revoked"})
+}
+
+// revokeGrant is the revoke path shared by REST and MCP, once the caller is
+// known to be allowed: it writes the revocation, signals live sessions, records
+// the grant.revoked audit entry and, for a self-revocation, tells the Slack
+// thread. Authorization stays with the caller.
+func (s *Server) revokeGrant(ctx context.Context, grant *store.Grant, actor *store.User, self bool) error {
+	uid := grant.UID
+
+	if err := s.store.RevokeGrant(ctx, uid, actor.UID); err != nil {
+		return err
 	}
 
 	// Signal any live proxy sessions authenticated under this grant so they
@@ -268,15 +282,15 @@ func (s *Server) handleRevokeGrant(c *gin.Context) {
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
 		EventType:   "grant.revoked",
 		UserID:      &grant.UserID,
-		PerformedBy: &currentUser.UID,
+		PerformedBy: &actor.UID,
 		Details:     details,
 	})
 
 	if self {
-		s.postSelfRevocationReply(ctx, grant.UID, currentUser.UID)
+		s.postSelfRevocationReply(ctx, uid, actor.UID)
 	}
 
-	successResponse(c, gin.H{"message": "grant revoked"})
+	return nil
 }
 
 // postSelfRevocationReply closes the loop for the approver: when a grant that
