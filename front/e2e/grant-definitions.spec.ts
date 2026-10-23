@@ -564,3 +564,62 @@ test.describe("Grant Definition statement timeout", () => {
     await expect(page.locator('[role="dialog"]')).toBeHidden();
   });
 });
+
+/**
+ * The byte soft limit follows the statement timeout's three states: empty
+ * inherits DBB_SLACK_NOTIFY_BYTES_STEP, `0` turns the Slack notice off for
+ * the definition, a positive value (GiB in the form) is the step.
+ */
+test.describe("Grant Definition byte soft limit", () => {
+  test("empty, zero and a positive step are three distinct saved states", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto(DEFS_URL);
+    await page.waitForLoadState("networkidle");
+
+    const stamp = Date.now();
+    const offName = `E2E Notice Off ${stamp}`;
+    const stepName = `E2E Notice Step ${stamp}`;
+    const field = () => page.getByTestId("grant-definition-notify-bytes-step");
+
+    // An explicit 0 comes back as "0", not as an empty (inherit) field.
+    await openCreateDialog(page);
+    await expect(field()).toHaveValue("");
+    await fillDefinition(page, {
+      name: offName,
+      description: "dump definition, no notice",
+      durationValue: "1",
+      durationUnitLabel: "Hours",
+      controls: ["read_only"],
+    });
+    await field().fill("0");
+    await submitDialog(page);
+
+    await openEditDialog(page, offName);
+    await expect(field()).toHaveValue("0");
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[role="dialog"]')).toBeHidden();
+
+    // A positive step round-trips, and clearing it restores inheritance.
+    await openCreateDialog(page);
+    await fillDefinition(page, {
+      name: stepName,
+      description: "notice every 2 GiB",
+      durationValue: "1",
+      durationUnitLabel: "Hours",
+      controls: ["read_only"],
+    });
+    await field().fill("2");
+    await submitDialog(page);
+
+    await openEditDialog(page, stepName);
+    await expect(field()).toHaveValue("2");
+    await field().fill("");
+    await submitDialog(page);
+
+    await openEditDialog(page, stepName);
+    await expect(field()).toHaveValue("");
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[role="dialog"]')).toBeHidden();
+  });
+});
