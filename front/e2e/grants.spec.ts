@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, loginAs } from "./fixtures";
 
 /**
  * A grant is an instance of a grant definition: the admin picks a definition,
@@ -254,5 +254,87 @@ test.describe("Grant Priority", () => {
       path: "test-results/screenshots/grants-list-priority.png",
       fullPage: true,
     });
+  });
+});
+
+// A user revokes their own grant, the way they already revoke their own API
+// keys: the grant is seeded through the admin API on a database and a
+// definition of its own, so no other test's seeded grant is touched.
+test.describe("Self-revocation", () => {
+  const API_BASE = "http://localhost:8080/api/v1";
+
+  test("a connector revokes its own grant from the grants page", async ({
+    page,
+    request,
+  }) => {
+    const login = await request.post(`${API_BASE}/auth/login`, {
+      data: { username: "admin", password: "admintest" },
+    });
+    expect(login.status()).toBe(200);
+    const { token } = await login.json();
+    const headers = { Authorization: `Bearer ${token}` };
+
+    const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    const users = await request.get(`${API_BASE}/users`, { headers });
+    expect(users.status()).toBe(200);
+    const connector = (await users.json()).users.find(
+      (u: { username: string }) => u.username === "connector",
+    );
+    expect(connector).toBeTruthy();
+
+    const server = await request.post(`${API_BASE}/servers`, {
+      headers,
+      data: {
+        name: `e2e_self_revoke_${suffix}`,
+        host: "localhost",
+        port: 5432,
+        database_name: "postgres",
+        username: "postgres",
+        password: "postgres",
+      },
+    });
+    expect(server.status()).toBeLessThan(300);
+    const { uid: databaseUid } = await server.json();
+
+    const def = await request.post(`${API_BASE}/grant-definitions`, {
+      headers,
+      data: {
+        name: `e2e self revoke ${suffix}`,
+        slug: `e2e-self-revoke-${suffix.replace(/_/g, "-")}`,
+        duration_seconds: 3600,
+        controls: ["read_only"],
+      },
+    });
+    expect(def.status()).toBeLessThan(300);
+    const { uid: definitionUid } = await def.json();
+
+    const grant = await request.post(`${API_BASE}/grants`, {
+      headers,
+      data: {
+        grant_definition_id: definitionUid,
+        user_id: connector.uid,
+        database_id: databaseUid,
+      },
+    });
+    expect(grant.status()).toBeLessThan(300);
+    const { uid: grantUid } = await grant.json();
+
+    await loginAs(page, "connector", "connector");
+    await page.goto("grants");
+    await page.waitForLoadState("networkidle");
+
+    const revokeButton = page.getByTestId(`revoke-grant-${grantUid}`);
+    await expect(revokeButton).toBeEnabled();
+    await revokeButton.click();
+    await page.getByTestId("revoke-grant-confirm").click();
+
+    await expect(page.getByText("Grant revoked successfully")).toBeVisible();
+    await expect(page.getByTestId(`revoke-grant-${grantUid}`)).toHaveCount(0);
+
+    const after = await request.get(`${API_BASE}/grants/${grantUid}`, {
+      headers,
+    });
+    expect((await after.json()).revoked_at).toBeTruthy();
   });
 });

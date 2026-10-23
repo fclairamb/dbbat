@@ -412,6 +412,8 @@ curl -X DELETE http://localhost:4200/api/v1/grants/$GRANT_UID \
   -H "Authorization: Bearer $DBBAT_API_KEY"
 ```
 
+Admins can revoke any grant. Any other user can revoke their own grants, from the Revoke button on the Grants page or with the call above using their own API key, for example once a measurement is done instead of waiting for the grant to expire. Revoking someone else's grant is a `403`, and revoking a grant twice is a `409`. When the grant came from a request posted to Slack, a self-revocation is announced in that request's thread.
+
 The grant record is preserved for audit (with `revoked_at` and `revoked_by` populated).
 
 Revocation takes effect immediately across all proxied protocols: further queries are blocked **and sessions already connected under that grant are disconnected**. You do not have to wait for the user to reconnect for a revocation to bite. That holds across replicas too: every dbbat process polls its own live sessions against the store, so a grant revoked through one replica ends the sessions running on all of them.

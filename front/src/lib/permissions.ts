@@ -44,7 +44,11 @@ export const canVerifyChains = (roles: string[] | undefined): boolean => hasRole
 export const canCreateUser = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canCreateDatabase = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canCreateGrant = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
-export const canRevokeGrant = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
+// Admins revoke any grant; everyone else only their own (the API enforces the same rule)
+export const canRevokeGrant = (
+  user: { uid: string; roles?: string[] } | null | undefined,
+  grant: { user_id: string },
+): boolean => !!user && (hasRole(user.roles, 'admin') || grant.user_id === user.uid);
 export const canDeleteUser = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canDeleteDatabase = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canUpdateUser = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
@@ -74,7 +78,7 @@ export const getDisabledReason = (action: string, _roles?: string[]): string => 
     'create-database': 'Only administrators can create databases',
     'create-grant': 'Only administrators can assign grants',
     'create-api-key': 'Viewers cannot create API keys',
-    'revoke-grant': 'Only administrators can revoke grants',
+    'revoke-grant': 'Only administrators can revoke grants of other users',
     'revoke-api-key': 'Viewers cannot revoke API keys',
     'delete-user': 'Only administrators can delete users',
     'delete-database': 'Only administrators can delete databases',

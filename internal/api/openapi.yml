@@ -1326,7 +1326,10 @@ paths:
       tags:
         - Grants
       summary: Revoke grant
-      description: Revokes an access grant. Requires admin role.
+      description: >-
+        Revokes an access grant. Admins may revoke any grant; other users
+        (viewers and connectors, by session or API key) only their own. Live
+        sessions under the grant are disconnected on every replica.
       operationId: revokeGrant
       responses:
         '200':
@@ -1340,7 +1343,15 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: The grant belongs to another user and the caller is not an admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
 

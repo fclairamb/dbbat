@@ -134,7 +134,6 @@ function GrantsPage() {
   }, [refetch]);
 
   const canCreate = canCreateGrant(user?.roles);
-  const canRevoke = canRevokeGrant(user?.roles);
 
   const getUserName = (uid: string) =>
     users?.find((u) => u.uid === uid)?.username ?? uid;
@@ -316,7 +315,8 @@ function GrantsPage() {
           <PermissionButton
             variant="ghost"
             size="icon"
-            disabled={!canRevoke}
+            disabled={!canRevokeGrant(user, g)}
+            data-testid={`revoke-grant-${g.uid}`}
             disabledReason={getDisabledReason("revoke-grant", user?.roles)}
             enabledTooltip={getActionTooltip("revoke-grant")}
             onClick={(e) => {
@@ -649,6 +649,7 @@ function RevokeGrantDialog({
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction
+            data-testid="revoke-grant-confirm"
             onClick={() => grant && revokeGrant.mutate(grant.uid)}
             className="bg-destructive text-white hover:bg-destructive/90"
           >
