@@ -415,7 +415,9 @@ func (s *Server) setupRouter() *gin.Engine {
 			grants.POST("", s.requireAdmin(), s.handleAssignGrant)
 			grants.GET("", s.handleListGrants)
 			grants.GET("/:uid", s.handleGetGrant)
-			grants.DELETE("/:uid", s.requireAdmin(), s.handleRevokeGrant)
+			// Admins revoke any grant, everyone else only their own (checked in
+			// the handler, which has to load the grant to know its owner).
+			grants.DELETE("/:uid", s.handleRevokeGrant)
 
 			// Grant definition endpoints — admin-managed templates that
 			// bound the shapes a user is allowed to request via the grant

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -355,4 +356,164 @@ func TestAssignGrant(t *testing.T) {
 		})
 		require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 	})
+}
+
+// TestRevokeGrant covers who may revoke what: an admin any grant, everyone
+// else (viewer or connector, by session or API key) only their own, with an
+// unknown uid a 404 and a second revoke a 409 rather than a 500.
+func TestRevokeGrant(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := "grantrevoke"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	conn := createTestUser(t, dataStore, "conn-"+suffix, "connpass123", []string{store.RoleConnector})
+	connToken := loginUser(t, server, "conn-"+suffix, "connpass123")
+
+	viewer := createTestUser(t, dataStore, "viewer-"+suffix, "viewerpass123", []string{store.RoleViewer})
+	viewerToken := loginUser(t, server, "viewer-"+suffix, "viewerpass123")
+
+	other := createTestUser(t, dataStore, "other-"+suffix, "otherpass123", []string{store.RoleConnector})
+
+	database, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:         "revoke_db_" + suffix,
+		Host:         "127.0.0.1",
+		Port:         5432,
+		DatabaseName: "prod",
+		Username:     "pg",
+		Password:     "secret",
+		Protocol:     store.ProtocolPostgreSQL,
+		SSLMode:      "disable",
+	}, grantsTestKey)
+	require.NoError(t, err)
+
+	router := gin.New()
+	router.Use(server.authMiddleware())
+	router.DELETE("/api/v1/grants/:uid", server.handleRevokeGrant)
+
+	newGrant := func(t *testing.T, owner uuid.UUID) *store.Grant {
+		t.Helper()
+
+		now := time.Now()
+
+		return persistGrantWithShape(t, dataStore, store.GrantDefinition{}, owner, database.UID, admin.UID,
+			now.Add(-time.Minute), now.Add(time.Hour), 0)
+	}
+
+	revoke := func(t *testing.T, token string, uid uuid.UUID) int {
+		t.Helper()
+
+		w, _ := doJSON(t, router, http.MethodDelete, "/api/v1/grants/"+uid.String(), token, nil)
+
+		return w.Code
+	}
+
+	revokedAt := func(t *testing.T, uid uuid.UUID) *time.Time {
+		t.Helper()
+
+		g, err := dataStore.GetGrantByUID(ctx, uid)
+		require.NoError(t, err)
+
+		return g.RevokedAt
+	}
+
+	t.Run("a connector revokes its own grant", func(t *testing.T) {
+		t.Parallel()
+
+		g := newGrant(t, conn.UID)
+		require.Equal(t, http.StatusOK, revoke(t, connToken, g.UID))
+		require.NotNil(t, revokedAt(t, g.UID))
+
+		eventType := "grant.revoked"
+		events, err := dataStore.ListAuditEvents(ctx, store.AuditFilter{EventType: &eventType, UserID: &conn.UID, Limit: 1000})
+		require.NoError(t, err)
+
+		found := false
+
+		for _, ev := range events {
+			var details map[string]any
+			require.NoError(t, json.Unmarshal(ev.Details, &details))
+
+			if details["grant_uid"] == g.UID.String() {
+				found = true
+
+				require.Equal(t, true, details["self"])
+			}
+		}
+
+		require.True(t, found, "no grant.revoked audit event for %s", g.UID)
+	})
+
+	t.Run("a connector cannot revoke another user's grant", func(t *testing.T) {
+		t.Parallel()
+
+		g := newGrant(t, other.UID)
+		require.Equal(t, http.StatusForbidden, revoke(t, connToken, g.UID))
+		require.Nil(t, revokedAt(t, g.UID))
+	})
+
+	t.Run("a viewer cannot revoke another user's grant", func(t *testing.T) {
+		t.Parallel()
+
+		g := newGrant(t, other.UID)
+		require.Equal(t, http.StatusForbidden, revoke(t, viewerToken, g.UID))
+		require.Nil(t, revokedAt(t, g.UID))
+	})
+
+	t.Run("a viewer revokes its own grant", func(t *testing.T) {
+		t.Parallel()
+
+		g := newGrant(t, viewer.UID)
+		require.Equal(t, http.StatusOK, revoke(t, viewerToken, g.UID))
+		require.NotNil(t, revokedAt(t, g.UID))
+	})
+
+	t.Run("an admin revokes any grant", func(t *testing.T) {
+		t.Parallel()
+
+		g := newGrant(t, other.UID)
+		require.Equal(t, http.StatusOK, revoke(t, adminToken, g.UID))
+		require.NotNil(t, revokedAt(t, g.UID))
+	})
+
+	t.Run("an unknown grant is a 404", func(t *testing.T) {
+		t.Parallel()
+
+		require.Equal(t, http.StatusNotFound, revoke(t, adminToken, uuid.New()))
+		require.Equal(t, http.StatusNotFound, revoke(t, connToken, uuid.New()))
+	})
+
+	t.Run("a second revoke is a 409", func(t *testing.T) {
+		t.Parallel()
+
+		g := newGrant(t, conn.UID)
+		require.Equal(t, http.StatusOK, revoke(t, connToken, g.UID))
+		require.Equal(t, http.StatusConflict, revoke(t, connToken, g.UID))
+	})
+
+	t.Run("an API key revokes its owner's grant", func(t *testing.T) {
+		t.Parallel()
+
+		_, key, err := dataStore.CreateAPIKey(ctx, conn.UID, "revoke-agent", nil)
+		require.NoError(t, err)
+
+		mine := newGrant(t, conn.UID)
+		require.Equal(t, http.StatusOK, revoke(t, key, mine.UID))
+		require.NotNil(t, revokedAt(t, mine.UID))
+
+		theirs := newGrant(t, other.UID)
+		require.Equal(t, http.StatusForbidden, revoke(t, key, theirs.UID))
+		require.Nil(t, revokedAt(t, theirs.UID))
+	})
+}
+
+func TestSelfRevocationReplyText(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "<@U123> revoked this grant themselves.", selfRevocationReplyText("U123"))
+	require.Equal(t, "The requester revoked this grant themselves.", selfRevocationReplyText(""))
 }
