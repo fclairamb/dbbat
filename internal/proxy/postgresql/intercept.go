@@ -21,20 +21,70 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// readOnlyBypassPatterns contains regex patterns that detect attempts to disable read-only mode.
+// readOnlyBypassPatterns detect a statement that would take a read-only
+// session out of read-only mode, or out of the role it logged in as.
+//
+// They protect the pin, not the data: what actually refuses a write on a
+// read_only session is `default_transaction_read_only = on`, set by
+// upstreamSetupStatements before the client is told it is connected, and the
+// write-keyword check in validateStatement is only defense in depth. So every
+// statement that changes what a *transaction* starts as is a bypass, whichever
+// of PostgreSQL's spellings it uses.
 var readOnlyBypassPatterns = []*regexp.Regexp{
-	// SET [SESSION] default_transaction_read_only (=|TO) (off|false|0)
-	regexp.MustCompile(`(?i)\bSET\s+(?:SESSION\s+)?default_transaction_read_only\s*(?:=|TO)\s*(?:off|false|0)\b`),
+	// RESET [SESSION|LOCAL] [default_]transaction_read_only. Quoted names are
+	// matched too: a GUC name is an identifier, and `"transaction_read_only"`
+	// is the same setting.
+	regexp.MustCompile(`(?i)\bRESET\s+(?:SESSION\s+|LOCAL\s+)?"?(?:default_)?transaction_read_only\b`),
 
-	// RESET [SESSION] default_transaction_read_only
-	regexp.MustCompile(`(?i)\bRESET\s+(?:SESSION\s+)?default_transaction_read_only\b`),
+	// READ WRITE, wherever it appears: `BEGIN [TRANSACTION|WORK] READ WRITE`,
+	// `START TRANSACTION … READ WRITE`, `SET TRANSACTION READ WRITE` and
+	// `SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE`. The pin only sets
+	// the *default*; each of these overrides it for the transaction or for the
+	// session. Unanchored, so a string literal spelling the two words is refused
+	// too — fail closed, and READ ONLY stays allowed.
+	regexp.MustCompile(`(?i)\bREAD\s+WRITE\b`),
 
-	// SET [SESSION] AUTHORIZATION (privilege escalation)
-	regexp.MustCompile(`(?i)\bSET\s+(?:SESSION\s+)?AUTHORIZATION\b`),
+	// RESET ALL and DISCARD ALL put every setting back to its connection-time
+	// value — the pin included, since dbbat issues it after the startup packet.
+	regexp.MustCompile(`(?i)\bRESET\s+ALL\b`),
+	regexp.MustCompile(`(?i)\bDISCARD\s+ALL\b`),
 
-	// SET ROLE (privilege escalation)
-	regexp.MustCompile(`(?i)\bSET\s+ROLE\b`),
+	// SET [SESSION|LOCAL] [SESSION] AUTHORIZATION (privilege escalation)
+	regexp.MustCompile(`(?i)\bSET\s+(?:SESSION\s+|LOCAL\s+)?(?:SESSION\s+)?AUTHORIZATION\b`),
+
+	// SET [SESSION|LOCAL] ROLE (privilege escalation)
+	regexp.MustCompile(`(?i)\bSET\s+(?:SESSION\s+|LOCAL\s+)?ROLE\b`),
 }
+
+// readOnlySettingPattern finds every SET of one of the two settings the pin
+// lives in, and readOnlySettingKeptPattern the SETs among them that keep it on.
+// A SET is a bypass unless it is one of the second kind: PostgreSQL's boolean
+// grammar takes `off`, `false`, `no`, `0`, any unique prefix of those (`of`,
+// `f`, `n`), the same quoted, and `DEFAULT` (which restores the pre-pin value),
+// so enumerating the values that turn it off is how the original list missed
+// half of them. The values that keep it on are short.
+var (
+	readOnlySettingPattern = regexp.MustCompile(
+		`(?i)\bSET\s+(?:SESSION\s+|LOCAL\s+)?"?(?:default_)?transaction_read_only\b`)
+	readOnlySettingKeptPattern = regexp.MustCompile(
+		`(?i)\bSET\s+(?:SESSION\s+|LOCAL\s+)?"?(?:default_)?transaction_read_only"?\s*(?:=|\bTO\b)\s*` +
+			`(?:on|true|yes|1|'(?:on|true|yes|1)')\s*(?:;|$)`)
+)
+
+// readOnlySetConfigNames are the settings set_config must not reach on a
+// read-only session: the two the pin lives in, and the two SET ROLE / SET
+// SESSION AUTHORIZATION change. See shared.PostgresSetConfigReaches.
+var readOnlySetConfigNames = []string{
+	"default_transaction_read_only", "transaction_read_only", "role", "session_authorization",
+}
+
+// readOnlyProcedurePattern finds a statement that runs code dbbat cannot see:
+// a `DO` block, or a `CALL`. Both are refused on a read-only session — a DO
+// block can build a statement at run time (`EXECUTE format(…)`), and a
+// procedure may COMMIT and start a fresh transaction after changing the session
+// default, which no reading of the text can rule out. Anchored at the start of
+// a statement, including the second statement of a simple-query batch.
+var readOnlyProcedurePattern = regexp.MustCompile(`(?i)(?:^|;)\s*(?:DO|CALL)\b`)
 
 // statementTimeoutBypassPatterns detect a client trying to unset or widen the
 // statement_timeout dbbat pinned on the session.
@@ -81,6 +131,11 @@ func (s *Session) validateStatement(sqlText string) error {
 	// Control: read_only bypass prevention
 	if s.grant.IsReadOnly() && isReadOnlyBypassAttempt(sqlText) {
 		return ErrReadOnlyBypassAttempt
+	}
+
+	// Control: read_only, code dbbat cannot see
+	if s.grant.IsReadOnly() && shared.MatchesNormalizedSQL(sqlText, readOnlyProcedurePattern) {
+		return shared.ErrReadOnlyProcedureCall
 	}
 
 	// Control: read_only write prevention (defense-in-depth)
@@ -403,7 +458,16 @@ func isCopyQuery(sql string) bool {
 // the statement unchanged — the same hole shared.ValidateQuery closes, in a
 // check that sits one line away from it.
 func isReadOnlyBypassAttempt(sql string) bool {
-	return shared.MatchesAnyNormalizedSQL(sql, readOnlyBypassPatterns)
+	if shared.MatchesAnyNormalizedSQL(sql, readOnlyBypassPatterns) {
+		return true
+	}
+
+	if shared.CountNormalizedSQLMatches(sql, readOnlySettingPattern) >
+		shared.CountNormalizedSQLMatches(sql, readOnlySettingKeptPattern) {
+		return true
+	}
+
+	return shared.PostgresSetConfigReaches(sql, readOnlySetConfigNames...)
 }
 
 // isStatementTimeoutBypassAttempt checks whether a statement would unset or

@@ -17,6 +17,11 @@ var (
 	ErrPasswordChangeNotAllowed = errors.New("password modification is not allowed through the proxy")
 	ErrReadOnlyBypassAttempt    = errors.New("attempt to disable read-only mode is not permitted: " +
 		"your access grant is read-only and cannot be changed for this session")
+	// ErrReadOnlyPinLost ends a read_only session whose upstream reported
+	// default_transaction_read_only no longer on — a route to turning it off
+	// that the statement checks did not recognize. See readOnlyPinLost.
+	ErrReadOnlyPinLost = errors.New("session terminated by dbbat: your access grant is read-only " +
+		"and the session's read-only mode was turned off")
 	// ErrStatementTimeoutManaged refuses a client statement that would unset
 	// or widen the session's statement_timeout. It is a courtesy, not the
 	// security boundary — dbbat's own watchdog is that — but without it a

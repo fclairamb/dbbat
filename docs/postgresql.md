@@ -155,6 +155,46 @@ are exact. This is not fixed on purpose: the only way to make the digest
 per-user is to vary the tag per user, which stops repeated executions
 aggregating at all — a worse outcome than a misleading label.
 
+## Read-only grants
+
+**The enforcement is the server's, not dbbat's.** A `read_only` session is
+pinned with `SET SESSION default_transaction_read_only = on` before the client
+is told it is connected (`upstreamSetupStatements`), so PostgreSQL itself
+refuses a write with SQLSTATE 25006. dbbat's write-keyword check
+(`shared.IsWriteQuery`) is defense in depth. What dbbat has to protect is
+therefore the **pin**: a statement that changes what a transaction starts as is
+a bypass, however it is spelled.
+
+Refused under `read_only`, through `validateStatement` (so the simple and
+extended paths cannot drift), comments normalized away first:
+
+| Route out of read-only mode | Pattern |
+|---|---|
+| a transaction-level override of the default: `BEGIN [TRANSACTION\|WORK] … READ WRITE`, `START TRANSACTION … READ WRITE`, `SET TRANSACTION READ WRITE`, `SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE` | `READ WRITE` anywhere in the text; `READ ONLY` stays allowed |
+| `SET [SESSION\|LOCAL] [default_]transaction_read_only` to anything but `on`/`true`/`yes`/`1` (bare or quoted) — `off`, `'off'`, `no`, `of`, `f`, `DEFAULT`, a list | every SET of the two settings must be one that keeps them on |
+| `RESET [SESSION\|LOCAL] [default_]transaction_read_only`, `RESET ALL`, `DISCARD ALL` | back to the connection-time value, which predates the pin |
+| `SET [SESSION\|LOCAL] ROLE`, `SET [SESSION\|LOCAL] SESSION AUTHORIZATION` | privilege escalation |
+| `set_config(…)` on one of `default_transaction_read_only`, `transaction_read_only`, `role`, `session_authorization` — or with a first argument dbbat cannot read as a plain literal, or from inside a string (`query_to_xml('select set_config(…)')`) | `shared.PostgresSetConfigReaches`; `set_config('search_path', …)`, which pg_dump sends, stays allowed |
+| `DO …` and `CALL …` | `shared.ErrReadOnlyProcedureCall`: a DO block can build its statement at run time, and a procedure can COMMIT and open a new transaction |
+| `WITH d AS (DELETE … RETURNING *) SELECT …`, `WITH c AS (…) DELETE …` | `shared.ErrReadOnlyViolation`: a WITH statement containing INSERT/UPDATE/DELETE/MERGE outside literals |
+
+**The tripwire behind the scans.** PostgreSQL 14 and later report
+`default_transaction_read_only` to the client in a `ParameterStatus` whenever
+it changes (it is `GUC_REPORT`). The upstream→client relay watches for it: on a
+read-only session, a report of anything but `on` ends the session with a FATAL
+`25006` **before the following `ReadyForQuery` is relayed**, so the client never
+gets to open the transaction the pin no longer covers. That catches every route
+the text scans cannot see, such as a function that calls `set_config` with a
+name built at run time. On PostgreSQL 13 and older nothing is reported and the
+tripwire never fires; the scans are then the only line.
+
+**Known limit**: the report arrives at the end of a batch, not after each
+statement in it. A simple-query string such as `SELECT f(); COMMIT; <write>`,
+where `f` is an existing function that turns the default off, runs its last
+statement before the tripwire sees anything. This needs such a function in the
+target database. The guarantee for a database that must never be written to
+through dbbat is a read-only database account, not the `read_only` control.
+
 ## Testing
 
 ### Integration tests
