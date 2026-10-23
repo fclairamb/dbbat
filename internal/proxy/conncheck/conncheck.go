@@ -415,7 +415,8 @@ func (c *Checker) checkTarget(ctx context.Context, dialer *shared.Dialer, srv *s
 		// Give the probe a moment to unwind on the closed transport; either way
 		// the answer is a timeout.
 		select {
-		case <-done:
+		case unwound := <-done:
+			slog.DebugContext(ctx, "connectivity probe unwound after timeout", slog.Any("error", unwound))
 		case <-time.After(time.Second):
 		}
 

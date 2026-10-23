@@ -346,8 +346,8 @@ func TestHandleJDBCExec_ParksOnAnApprovalPattern(t *testing.T) {
 	assert.Equal(t, `(?i)^DELETE`, *pending.ApprovalPattern)
 
 	select {
-	case <-done:
-		t.Fatal("the statement was released while it was still awaiting approval")
+	case err := <-done:
+		t.Fatalf("the statement was released while it was still awaiting approval (err: %v)", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 
