@@ -160,6 +160,29 @@ test.describe("Access Grants Management", () => {
     });
   });
 
+  test("?uid= narrows the list to the linked grant (Slack deep link)", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator('[data-testid^="grant-row-"]');
+    const total = await rows.count();
+    expect(total).toBeGreaterThan(0);
+    const testId = await rows.first().getAttribute("data-testid");
+    const uid = testId!.replace("grant-row-", "");
+
+    await authenticatedPage.goto(`grants?uid=${uid}`);
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await expect(authenticatedPage.getByTestId("grant-focus-banner")).toBeVisible();
+    await expect(rows).toHaveCount(1);
+    await expect(authenticatedPage.getByTestId(`grant-row-${uid}`)).toBeVisible();
+
+    await authenticatedPage.getByTestId("grant-focus-clear").click();
+    await expect(authenticatedPage.getByTestId("grant-focus-banner")).toHaveCount(0);
+  });
+
   test("should display grants with time information", async ({
     authenticatedPage,
   }) => {

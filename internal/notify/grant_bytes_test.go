@@ -58,7 +58,7 @@ func TestNotifyGrantBytes_RepliesInRequestThread(t *testing.T) {
 	assert.Contains(t, text, "3.0 GiB so far")
 	assert.Contains(t, text, "last 1.0 GiB in 12 min")
 	assert.Contains(t, text, "The traffic is not blocked.")
-	assert.Contains(t, text, "https://example.com/app/grants")
+	assert.Contains(t, text, "https://example.com/app/grants?uid=11111111-2222-3333-4444-555555555555|")
 }
 
 func TestNotifyGrantBytes_FallsBackToChannel(t *testing.T) {
