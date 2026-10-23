@@ -425,6 +425,14 @@ func TestCancelRequestReleasesHold(t *testing.T) {
 
 	st.waitPending(t)
 
+	// The row is persisted before the gate announces the uid to the session;
+	// a CancelRequest in that gap finds nothing parked.
+	for deadline := time.Now().Add(3 * time.Second); sess.heldQuery() == uuid.Nil; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("hold never announced to the session")
+		}
+	}
+
 	// A CancelRequest arrives on a separate TCP connection; all it has is the
 	// backend key, which routes it to this session.
 	if !sess.cancelHeldQuery() {
