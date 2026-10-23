@@ -107,3 +107,7 @@ line so the squash-merge closes it. When the spec is archived to `specs/done/`,
 verify the issue is closed and, if the merge did not close it, close it by hand:
 
     gh issue close 436 --comment "Implemented by <PR or commit>; spec: <archived spec path>"
+
+## Resolved open questions
+
+- Self-revocation posts a one-line reply in the grant request's Slack thread via `PostThreadReply`, only when the grant came from a request with a thread. (autopilot: recommended answer)

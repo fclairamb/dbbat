@@ -153,3 +153,8 @@ line so the squash-merge closes it. When the spec is archived to `specs/done/`,
 verify the issue is closed and, if the merge did not close it, close it by hand:
 
     gh issue close 415 --comment "Implemented by <PR or commit>; spec: <archived spec path>"
+
+## Resolved open questions
+
+- No approver or admin mention at a higher step in this spec; file a follow-up if the plain reply proves too quiet. (autopilot: recommended answer)
+- `DBB_SLACK_NOTIFY_BYTES_STEP` defaults to `0` (off). (autopilot: recommended answer)
