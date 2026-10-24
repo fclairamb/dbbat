@@ -694,6 +694,20 @@ optimistically instead used to leave a session that kept running with a
 `DONE_ATTN` owed to nobody, which the next refused statement would take: the
 client saw "cancelled" where it should have seen the real error.
 
+## `read_only` is a text control on SQL Server
+
+SQL Server has no session-level read-only mode, so there is no server-side pin
+as there is on PostgreSQL and MySQL/MariaDB. `ApplicationIntent=ReadOnly` only
+routes to a readable secondary when an availability group exists, and a plain
+instance ignores it. `read_only` is therefore the text classification alone
+(`shared.ValidateQuery`, writing CTEs included). `EXEC <proc>` is **not**
+refused under `read_only`: drivers and tools send `sp_reset_connection`,
+`sp_executesql` wrappers of plain reads and `sp_describe_first_result_set`, and
+the RPC path cannot tell those from a procedure that writes. A procedure or a
+function with side effects therefore remains out of reach. The guarantee is
+the login the server row uses: give it `db_datareader` only (and no `EXECUTE`
+on user procedures).
+
 ## Result accounting
 
 `internal/proxy/mssql/result.go`, `internal/proxy/mssql/tokens.go`,

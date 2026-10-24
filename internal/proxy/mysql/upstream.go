@@ -69,6 +69,13 @@ func (s *Session) connectUpstream() error {
 		return err
 	}
 
+	if err := s.pinReadOnly(); err != nil {
+		_ = up.Close()
+		s.upstreamConn = nil
+
+		return err
+	}
+
 	s.logger.DebugContext(s.ctx, "upstream MySQL connected",
 		slog.String("addr", net.JoinHostPort(s.database.Host, strconv.Itoa(s.database.Port))),
 		slog.String("user", s.database.Username),
@@ -165,6 +172,29 @@ func (s *Session) pinStatementTimeout() error {
 
 	if _, err := s.upstreamConn.Execute(stmt); err != nil {
 		return fmt.Errorf("%w: %w", ErrUpstreamStatementTimeout, err)
+	}
+
+	return nil
+}
+
+// readOnlySetup is the statement a read_only session is pinned with. Valid on
+// MySQL 5.6.5+ and MariaDB 10.0+. It sets the *default* of every later
+// transaction, so a write the text checks miss is refused by the server
+// (error 1792 on MySQL, 1792/1207 on MariaDB). The client cannot lift it:
+// the statements that could are refused in shared.validateMySQLStatement, and
+// COM_RESET_CONNECTION / COM_CHANGE_USER are refused as unknown commands.
+const readOnlySetup = "SET SESSION TRANSACTION READ ONLY"
+
+// pinReadOnly pins the upstream session read-only for a read_only grant, before
+// the client is told it is connected. A session that cannot be pinned fails,
+// the same rule as the statement timeout and the PostgreSQL pin.
+func (s *Session) pinReadOnly() error {
+	if !s.grant.IsReadOnly() {
+		return nil
+	}
+
+	if _, err := s.upstreamConn.Execute(readOnlySetup); err != nil {
+		return fmt.Errorf("%w: %w", ErrUpstreamReadOnlyMode, err)
 	}
 
 	return nil

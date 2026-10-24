@@ -150,10 +150,13 @@ MariaDB is supported as a distinct protocol value (`mariadb`) alongside `mysql`.
 
 ## Read-Only Enforcement
 
-MySQL's session-level `SET SESSION TRANSACTION READ ONLY` only applies to the *next* transaction and is trivially bypassable. Two-layer defense:
+Three layers, the first one being the backstop:
 
-1. **Regex inspection** in the proxy (shared with PG/Oracle): block `INSERT`, `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `CREATE`, `ALTER`, `GRANT`, `REVOKE`, `MERGE`, `REPLACE`. Plus MySQL-specific blocks for `LOAD DATA`, `SELECT ... INTO OUTFILE`, `SELECT ... INTO DUMPFILE`.
-2. **DBA recommendation** (documented, not enforced): grant the MySQL user used by DBBat read-only privileges (`GRANT SELECT ON db.* TO 'dbbat'@'%'`). This is the real protection; the regex is defense-in-depth.
+1. **Server-side pin.** For a `read_only` grant the proxy issues `SET SESSION TRANSACTION READ ONLY` on the upstream session before the client is told it is connected (MySQL 5.6.5+, MariaDB 10.0+). It sets the default of every later transaction, so a write the text checks miss (a function with side effects, a spelling the classifier does not know) is refused by the server. A session that cannot be pinned fails to connect. The statements that would lift it are refused with `ErrReadOnlyPinBypass`: `READ WRITE` anywhere (`START TRANSACTION READ WRITE`, `SET [SESSION] TRANSACTION READ WRITE`) and any `SET` naming `transaction_read_only` or `tx_read_only` (with or without `@@`/scope). `COM_RESET_CONNECTION` and `COM_CHANGE_USER`, which would reset the session variables, are refused as unknown commands. Reading the variable (`SELECT @@tx_read_only`) stays allowed.
+2. **Regex inspection** in the proxy (shared with PG/Oracle): block `INSERT`, `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `CREATE`, `ALTER`, `GRANT`, `REVOKE`, `MERGE`, `REPLACE`. Plus MySQL-specific blocks for `LOAD DATA`, `SELECT ... INTO OUTFILE`, `SELECT ... INTO DUMPFILE`. `CALL` is refused under `read_only` (`ErrReadOnlyProcedureCall`): what a procedure does lives in the database, not in the statement.
+3. **DBA recommendation** (documented, not enforced): grant the MySQL user used by DBBat read-only privileges (`GRANT SELECT ON db.* TO 'dbbat'@'%'`). This is still the strongest protection.
+
+Not done: a tripwire equivalent to PostgreSQL's (reading the variable back after each statement). MySQL's `SESSION_TRACK_SYSTEM_VARIABLES` can report `transaction_read_only` changes in the OK packet, but go-mysql's client does not expose the session-state info, so it would mean parsing OK packets by hand. Tracked as a possible follow-up, not required while the bypass statements are refused by text.
 
 ## MySQL-Specific Blocked Operations
 

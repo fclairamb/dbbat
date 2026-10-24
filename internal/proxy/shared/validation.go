@@ -25,6 +25,11 @@ var (
 	// and the operator needs to know the fix is a grant without read_only.
 	ErrReadOnlyProcedureCall = errors.New("procedure calls and anonymous code blocks are not " +
 		"permitted with read-only access: dbbat cannot see what they would run")
+	// ErrReadOnlyPinBypass — a read_only MySQL/MariaDB session tried to take the
+	// server-side read-only pin off (`SET TRANSACTION READ WRITE`,
+	// `START TRANSACTION READ WRITE`, `SET tx_read_only = 0`, …).
+	ErrReadOnlyPinBypass = errors.New("read-only access is enforced by the server for this " +
+		"session and cannot be switched off")
 )
 
 // Dynamic-SQL refusals. Both are about a statement whose real payload is a
@@ -708,11 +713,38 @@ func ValidateMySQLQuery(sql string, grant *store.Grant) error {
 	})
 }
 
+var (
+	// mysqlReadOnlyBypass matches a statement that changes what a transaction
+	// starts as: `READ WRITE` anywhere (START TRANSACTION / SET [SESSION]
+	// TRANSACTION), or a SET naming the underlying variable (transaction_read_only
+	// on MySQL 5.7.20+/8, tx_read_only on older MySQL and MariaDB, with or without
+	// @@ and scope). Unanchored on purpose: a literal spelling these is refused
+	// too, which fails closed. `READ ONLY` and `SELECT @@tx_read_only` stay allowed.
+	mysqlReadOnlyBypass = regexp.MustCompile(
+		`(?i)\bREAD\s+WRITE\b|\bSET\b[^;]*\b(?:transaction_read_only|tx_read_only)\b`)
+	// mysqlProcedureCall matches CALL at the start of a statement, including
+	// the second statement of a multi-statement text.
+	mysqlProcedureCall = regexp.MustCompile(`(?i)(?:^|;)\s*CALL\b`)
+)
+
 // validateMySQLStatement is the controls and the pattern list over one
 // already-normalised statement, with no unwrapping.
 func validateMySQLStatement(matchable string, grant *store.Grant) error {
 	if err := validateQuery(matchable, syntaxMySQL, grant); err != nil {
 		return err
+	}
+
+	if grant.IsReadOnly() {
+		// The pin (SET SESSION TRANSACTION READ ONLY, issued by the proxy at
+		// connect) is what refuses a write the text checks miss; these keep
+		// the client from lifting it, and from running code dbbat cannot read.
+		if mysqlReadOnlyBypass.MatchString(matchable) {
+			return ErrReadOnlyPinBypass
+		}
+
+		if mysqlProcedureCall.MatchString(matchable) {
+			return ErrReadOnlyProcedureCall
+		}
 	}
 
 	for _, pattern := range mysqlBlockedPatterns {
