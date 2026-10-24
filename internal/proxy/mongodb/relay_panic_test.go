@@ -57,7 +57,8 @@ func TestRelayPanicEndsTheSessionNotTheProcess(t *testing.T) {
 	go func() { done <- s.relay() }()
 
 	select {
-	case <-done:
+	case err := <-done:
+		t.Logf("relay returned: %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("relay never returned: a pump panicked without yielding a value, " +
 			"so the second <-errCh parked the session for good")
@@ -136,7 +137,8 @@ func TestRelayTeardownDoesNotRaceThePeerPump(t *testing.T) {
 		go func() { done <- s.relay() }()
 
 		select {
-		case <-done:
+		case err := <-done:
+			t.Logf("relay returned: %v", err)
 		case <-time.After(5 * time.Second):
 			t.Fatal("relay never returned: closeUpstream failed to unblock the peer pump")
 		}

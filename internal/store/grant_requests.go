@@ -380,6 +380,29 @@ func (s *Store) CancelGrantRequest(ctx context.Context, uid, byUser uuid.UUID) (
 	return s.transition(ctx, uid, GrantRequestCancelled, &byUser, "")
 }
 
+// GetGrantRequestByResultingGrant returns the request a grant was
+// materialized from, or ErrGrantRequestNotFound for a grant an admin assigned
+// directly (or one predating resulting_grant_id). Only the request row is
+// loaded: callers want its Slack coordinates, not its definition.
+func (s *Store) GetGrantRequestByResultingGrant(ctx context.Context, grantUID uuid.UUID) (*GrantRequest, error) {
+	req := new(GrantRequest)
+
+	err := s.db.NewSelect().
+		Model(req).
+		Where("resulting_grant_id = ?", grantUID).
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrGrantRequestNotFound
+		}
+
+		return nil, fmt.Errorf("get grant request by resulting grant: %w", err)
+	}
+
+	return req, nil
+}
+
 // SetGrantRequestSlackMessage records the channel/ts of the Slack post
 // that announced this request, so the notifier can chat.update on
 // status changes (Spec 04). NULL on either column means "no Slack post

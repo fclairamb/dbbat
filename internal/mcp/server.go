@@ -91,6 +91,9 @@ type Deps struct {
 	// *after* construction (Server.SetEventPlumbing), and the MCP layer must
 	// see that instance rather than the placeholder it was built with.
 	Broker func() *events.Broker
+	// RevokeGrant revokes a grant through the same path as REST (live-session
+	// signal, audit entry, Slack reply). The tool checks ownership first.
+	RevokeGrant func(ctx context.Context, grantUID uuid.UUID, actor *store.User) error
 	// Executor runs statements through the loopback proxy listeners.
 	Executor Executor
 	// StatementTimeout resolves the instance-wide per-statement limit at call

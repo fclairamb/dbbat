@@ -126,10 +126,13 @@ func (s *Server) Start(addr string) error {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	s.setListener(listener)
 	s.listenAddr = addr
 	s.logger.InfoContext(s.ctx, "Oracle proxy server listening", slog.String("addr", addr),
 		slog.String("dump_dir", s.dumpConfig.Dir))
+
+	// Publish the listener last: Addr() != nil must mean startup logging is done,
+	// so callers (and tests) that wait on it cannot race the line above.
+	s.setListener(listener)
 
 	// Start dump cleanup goroutine if dumps are enabled
 	if s.dumpConfig.Dir != "" {

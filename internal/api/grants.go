@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -206,7 +209,10 @@ func (s *Server) handleGetGrant(c *gin.Context) {
 	successResponse(c, grant)
 }
 
-// handleRevokeGrant revokes a grant
+// handleRevokeGrant revokes a grant. Admins may revoke any grant; every other
+// caller (viewer or connector, session or API key) only their own, the same
+// rule as handleRevokeAPIKey. The grant is loaded first so an unknown uid is a
+// 404 and someone else's grant a 403, before anything is written.
 func (s *Server) handleRevokeGrant(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
@@ -214,36 +220,118 @@ func (s *Server) handleRevokeGrant(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
 	currentUser := getCurrentUser(c)
-	if err := s.store.RevokeGrant(c.Request.Context(), uid, currentUser.UID); err != nil {
-		writeInternalError(c, s.logger, err, "failed to revoke grant")
+
+	grant, err := s.store.GetGrantByUID(ctx, uid)
+	if err != nil {
+		if errors.Is(err, store.ErrGrantNotFound) {
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant not found")
+			return
+		}
+
+		writeInternalError(c, s.logger, err, "failed to load grant")
+
 		return
+	}
+
+	self := grant.UserID == currentUser.UID
+	if !currentUser.IsAdmin() && !self {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "you can only revoke your own grants")
+		return
+	}
+
+	if err := s.revokeGrant(ctx, grant, currentUser, self); err != nil {
+		if errors.Is(err, store.ErrGrantAlreadyRevoked) {
+			writeError(c, http.StatusConflict, ErrCodeConflict, "grant is already revoked")
+			return
+		}
+
+		writeInternalError(c, s.logger, err, "failed to revoke grant")
+
+		return
+	}
+
+	successResponse(c, gin.H{"message": "grant revoked"})
+}
+
+// revokeGrant is the revoke path shared by REST and MCP, once the caller is
+// known to be allowed: it writes the revocation, signals live sessions, records
+// the grant.revoked audit entry and, for a self-revocation, tells the Slack
+// thread. Authorization stays with the caller.
+func (s *Server) revokeGrant(ctx context.Context, grant *store.Grant, actor *store.User, self bool) error {
+	uid := grant.UID
+
+	if err := s.store.RevokeGrant(ctx, uid, actor.UID); err != nil {
+		return err
 	}
 
 	// Signal any live proxy sessions authenticated under this grant so they
 	// stop accepting queries and disconnect, rather than staying usable until
 	// their next reconnect. Purely in-process; a no-op when nothing is live.
 	if signaled := s.store.Revocations().Revoke(uid); signaled > 0 {
-		s.logger.InfoContext(c.Request.Context(), "grant revoked: signaled live sessions",
+		s.logger.InfoContext(ctx, "grant revoked: signaled live sessions",
 			slog.String("grant_uid", uid.String()),
 			slog.Int("sessions", signaled))
 	}
 
-	// Log audit event
-	grant, _ := s.store.GetGrantByUID(c.Request.Context(), uid)
-	var userID *uuid.UUID
-	if grant != nil {
-		userID = &grant.UserID
-	}
 	details, _ := json.Marshal(map[string]interface{}{
 		"grant_uid": uid,
+		"self":      self,
 	})
-	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
+	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
 		EventType:   "grant.revoked",
-		UserID:      userID,
-		PerformedBy: &currentUser.UID,
+		UserID:      &grant.UserID,
+		PerformedBy: &actor.UID,
 		Details:     details,
 	})
 
-	successResponse(c, gin.H{"message": "grant revoked"})
+	if self {
+		s.postSelfRevocationReply(ctx, uid, actor.UID)
+	}
+
+	return nil
+}
+
+// postSelfRevocationReply closes the loop for the approver: when a grant that
+// came from a request posted to Slack is revoked by its own holder, a one-line
+// reply lands in that request's thread. Best-effort and asynchronous, like
+// every other Slack write; a grant with no request or no thread posts nothing.
+func (s *Server) postSelfRevocationReply(ctx context.Context, grantUID, userID uuid.UUID) {
+	if s.notifier == nil {
+		return
+	}
+
+	req, err := s.store.GetGrantRequestByResultingGrant(ctx, grantUID)
+	if err != nil {
+		return
+	}
+
+	channel := derefStr(req.SlackChannel)
+	ts := derefStr(req.SlackMessageTS)
+
+	if channel == "" || ts == "" {
+		return
+	}
+
+	text := selfRevocationReplyText(s.slackIDForUser(ctx, userID))
+
+	// Detached from the request on purpose: the reply outlives the response.
+	go safe.RunGuarded(context.Background(), s.logger, goroutineNameGrantNotify, func() { //nolint:contextcheck // detached by design
+		replyCtx, cancel := context.WithTimeout(context.Background(), slackNotifyTimeout)
+		defer cancel()
+
+		s.notifier.PostThreadReply(replyCtx, channel, ts, text)
+	})
+}
+
+// selfRevocationReplyText renders the thread reply for a self-revocation,
+// mentioning the holder when their Slack identity is linked.
+func selfRevocationReplyText(slackID string) string {
+	who := "The requester"
+	if slackID != "" {
+		who = "<@" + slackID + ">"
+	}
+
+	return who + " revoked this grant themselves."
 }

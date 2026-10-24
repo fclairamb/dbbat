@@ -2022,6 +2022,22 @@ func buildEventPlumbing(
 			slog.Bool("sql", cfg.SlackNotify.SQL))
 	}
 
+	// The byte soft limit's sweep runs on the heartbeat loop whether or not
+	// Slack is configured: a definition's notify_bytes_step still claims steps
+	// and writes the grant.bytes_threshold audit entry. Same typed-nil care as
+	// above. The step was validated at config load.
+	bytesStep, _ := cfg.SlackNotify.ResolveBytesStep()
+	var bytesNotifier store.GrantBytesNotifier
+	if notifier := apiServer.Notifier(); notifier != nil {
+		bytesNotifier = notifier
+	}
+
+	dataStore.SetGrantBytesNotify(bytesStep, bytesNotifier)
+
+	if bytesStep > 0 {
+		logger.InfoContext(ctx, "grant byte soft limit enabled", slog.Int64("step_bytes", bytesStep))
+	}
+
 	return apiServer, approvals, shared.ApprovalDeps{
 		Enabled:   cfg.Approval.Enabled,
 		Store:     dataStore,

@@ -106,3 +106,55 @@ func TestSlackNotifySocketModeAndInteractive(t *testing.T) {
 		})
 	}
 }
+
+// TestSlackNotifyBytesStepEnv verifies DBB_SLACK_NOTIFY_BYTES_STEP maps to
+// SlackNotify.BytesStep, accepts a plain count or a binary suffix, defaults to
+// off, and refuses to start on a negative or unparsable value.
+func TestSlackNotifyBytesStepEnv(t *testing.T) {
+	setBase := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+		t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	}
+
+	t.Run("default is off", func(t *testing.T) {
+		setBase(t)
+
+		cfg, err := Load(LoadOptions{})
+		require.NoError(t, err)
+
+		step, err := cfg.SlackNotify.ResolveBytesStep()
+		require.NoError(t, err)
+		assert.Zero(t, step)
+	})
+
+	for raw, want := range map[string]int64{
+		"1073741824": 1 << 30,
+		"1GiB":       1 << 30,
+		"1g":         1 << 30,
+		"512MiB":     512 << 20,
+		"0":          0,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			setBase(t)
+			t.Setenv("DBB_SLACK_NOTIFY_BYTES_STEP", raw)
+
+			cfg, err := Load(LoadOptions{})
+			require.NoError(t, err)
+
+			step, err := cfg.SlackNotify.ResolveBytesStep()
+			require.NoError(t, err)
+			assert.Equal(t, want, step)
+		})
+	}
+
+	for _, raw := range []string{"-1", "lots", "1.5.5GiB"} {
+		t.Run("invalid "+raw, func(t *testing.T) {
+			setBase(t)
+			t.Setenv("DBB_SLACK_NOTIFY_BYTES_STEP", raw)
+
+			_, err := Load(LoadOptions{})
+			require.ErrorIs(t, err, ErrSlackNotifyBytesStepInvalid)
+		})
+	}
+}

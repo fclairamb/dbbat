@@ -49,6 +49,15 @@ func TestQueryEventCarriesTheHoldOutcome(t *testing.T) {
 	}()
 
 	pending := waitForPending(t, st)
+
+	// The row is persisted before the hold registers; a decision delivered in
+	// that gap finds nobody parked and is dropped.
+	for deadline := time.Now().Add(3 * time.Second); len(reg.Pending()) == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("hold never registered")
+		}
+	}
+
 	approver := uuid.New()
 
 	reg.Resolve(approval.Decision{

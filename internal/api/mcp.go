@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/events"
 	"github.com/fclairamb/dbbat/internal/mcp"
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // mcpWriteDeadline is how long an MCP response may take to write.
@@ -44,6 +46,16 @@ func (s *Server) newMCPServer() *mcp.Server {
 		Logger:   s.logger,
 		Broker:   func() *events.Broker { return s.broker },
 		Executor: mcp.NewLoopbackExecutor(listeners),
+		// The same path DELETE /grants/{uid} takes. The MCP tool has already
+		// checked the grant is the caller's own.
+		RevokeGrant: func(ctx context.Context, grantUID uuid.UUID, actor *store.User) error {
+			grant, err := s.store.GetGrantByUID(ctx, grantUID)
+			if err != nil {
+				return err
+			}
+
+			return s.revokeGrant(ctx, grant, actor, grant.UserID == actor.UID)
+		},
 		// Resolved per call, not captured: an operator can change
 		// limits.statement_timeout from the Settings page while the process
 		// runs, and the store memoizes the read.

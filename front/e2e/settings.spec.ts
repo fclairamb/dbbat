@@ -101,7 +101,7 @@ test.describe("Settings — instance-wide statement timeout", () => {
     await input.fill("30s");
     await save.click();
 
-    await expect(authenticatedPage.getByText(/limits saved/i)).toBeVisible({
+    await expect(authenticatedPage.getByText(/limits saved/i).first()).toBeVisible({
       timeout: 10000,
     });
 
@@ -140,7 +140,7 @@ test.describe("Settings — instance-wide statement timeout", () => {
       .fill("0");
     await authenticatedPage.getByTestId("limits-save-button").click();
 
-    await expect(authenticatedPage.getByText(/limits saved/i)).toBeVisible({
+    await expect(authenticatedPage.getByText(/limits saved/i).first()).toBeVisible({
       timeout: 10000,
     });
     await expect(
@@ -155,7 +155,7 @@ test.describe("Settings — instance-wide statement timeout", () => {
       .fill("");
     await authenticatedPage.getByTestId("limits-save-button").click();
 
-    await expect(authenticatedPage.getByText(/limits saved/i)).toBeVisible({
+    await expect(authenticatedPage.getByText(/limits saved/i).first()).toBeVisible({
       timeout: 10000,
     });
 

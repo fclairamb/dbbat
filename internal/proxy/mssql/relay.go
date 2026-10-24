@@ -121,7 +121,10 @@ func (s *session) relay(ctx context.Context) error {
 	// died will never take.
 	close(s.done)
 
-	<-errCh
+	// The first error is the one reported; the peer's, caused by the close above, is only logged.
+	if peerErr := <-errCh; peerErr != nil {
+		s.logger.DebugContext(ctx, "relay: peer pump stopped", slog.Any("error", peerErr))
+	}
 
 	if err == nil || isExpectedDisconnect(err) {
 		return nil

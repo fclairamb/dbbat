@@ -96,13 +96,25 @@ function formatDuration(ms: number): string {
 }
 
 export const Route = createFileRoute("/_authenticated/grants/")({
+  // `?uid=` narrows the list to one grant: it is what Slack notices link to.
+  validateSearch: (search: Record<string, unknown>): { uid?: string } => ({
+    uid: typeof search.uid === "string" && search.uid ? search.uid : undefined,
+  }),
   component: GrantsPage,
 });
 
 function GrantsPage() {
   const { user } = useAuth();
   const [activeOnly, setActiveOnly] = useState(true);
-  const { data: grants, isLoading, refetch } = useGrants({ active_only: activeOnly });
+  const { uid: focusUid } = Route.useSearch();
+  // A linked grant may be expired or revoked, so the active filter is lifted.
+  const { data: allGrants, isLoading, refetch } = useGrants({
+    active_only: focusUid ? false : activeOnly,
+  });
+  const grants = useMemo(
+    () => (focusUid ? allGrants?.filter((g) => g.uid === focusUid) : allGrants),
+    [allGrants, focusUid],
+  );
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
   // Admin-only listing; non-admins simply get no group name to render.
@@ -134,7 +146,6 @@ function GrantsPage() {
   }, [refetch]);
 
   const canCreate = canCreateGrant(user?.roles);
-  const canRevoke = canRevokeGrant(user?.roles);
 
   const getUserName = (uid: string) =>
     users?.find((u) => u.uid === uid)?.username ?? uid;
@@ -316,7 +327,8 @@ function GrantsPage() {
           <PermissionButton
             variant="ghost"
             size="icon"
-            disabled={!canRevoke}
+            disabled={!canRevokeGrant(user, g)}
+            data-testid={`revoke-grant-${g.uid}`}
             disabledReason={getDisabledReason("revoke-grant", user?.roles)}
             enabledTooltip={getActionTooltip("revoke-grant")}
             onClick={(e) => {
@@ -374,11 +386,31 @@ function GrantsPage() {
         }
       />
 
+      {focusUid && (
+        <div
+          className="flex items-center gap-2 text-sm"
+          data-testid="grant-focus-banner"
+        >
+          <span>
+            Showing grant <code>{focusUid}</code> only.
+          </span>
+          <Link
+            to="/grants"
+            search={{ uid: undefined }}
+            className="underline"
+            data-testid="grant-focus-clear"
+          >
+            Show all grants
+          </Link>
+        </div>
+      )}
+
       <DataTable
         columns={columns}
         data={grants ?? []}
         isLoading={isLoading}
         rowKey={(g) => g.uid}
+        rowTestId={(g) => `grant-row-${g.uid}`}
         emptyMessage="No grants found"
       />
 
@@ -649,6 +681,7 @@ function RevokeGrantDialog({
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction
+            data-testid="revoke-grant-confirm"
             onClick={() => grant && revokeGrant.mutate(grant.uid)}
             className="bg-destructive text-white hover:bg-destructive/90"
           >

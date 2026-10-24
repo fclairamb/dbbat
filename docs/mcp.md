@@ -196,7 +196,7 @@ because adding it would change the text `/queries` records.
 
 ## Tools
 
-Four, deliberately. Everything below is expressible as "things a `psql` session
+Five, deliberately. Everything below is expressible as "things a `psql` session
 through dbbat could do".
 
 ### `list_databases`
@@ -204,7 +204,7 @@ through dbbat could do".
 No arguments; the caller's grants are the scope. Returns, per database: name,
 protocol, whether MCP can query it, the grant's expiry, its controls
 (`read_only`, `block_ddl`, `block_copy`), how many approval patterns it carries,
-and quota usage.
+and quota usage, plus the `grant_uid` to pass to `revoke_grant`.
 
 This is what an agent plans against. The expiry matters: a grant can run out
 *mid-session*, and the failure then comes from the database, not from the tool
@@ -282,6 +282,15 @@ way (`UPPER(:1)`) and `DATA_DEFAULT` is not read at all — it is a `LONG`, and 
 returning columns. MongoDB has no column catalog, so a described collection
 reports the top-level fields of **one sampled document**, and says so in
 `message`: another document in the same collection may look nothing like it.
+
+### `revoke_grant`
+
+`{grant_uid}` — drops one of the caller's own grants once the agent's work is
+done. It takes the same path as `DELETE /api/v1/grants/{uid}` (live sessions
+ended, `grant.revoked` audit entry with `self: true`, reply in the Slack
+request thread). An unknown uid and another user's grant are refused with the
+same error, and an admin key is held to its owner's own grants too. Annotated
+destructive.
 
 ### `await_approval`
 

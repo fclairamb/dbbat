@@ -146,7 +146,7 @@ func TestMCPListsTools(t *testing.T) {
 		names = append(names, tool.Name)
 	}
 
-	assert.ElementsMatch(t, []string{"list_databases", "query", "describe", "await_approval"}, names)
+	assert.ElementsMatch(t, []string{"list_databases", "query", "describe", "await_approval", "revoke_grant"}, names)
 }
 
 // TestMCPQueryWithoutGrantIsRefused drives a real tools/call through the

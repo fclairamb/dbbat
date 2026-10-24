@@ -874,6 +874,13 @@ type AccessGrant struct {
 	// grant row exists the value is always resolved.
 	Priority int16 `bun:"priority,notnull,default:0" json:"priority"`
 
+	// BytesNotifiedSteps is how many byte soft-limit steps have already been
+	// announced for this grant, BytesNotifiedAt when the last one was. Written
+	// only by the conditional claim in ClaimGrantBytesSteps, which is what
+	// dedupes the notice across restarts and replicas.
+	BytesNotifiedSteps int64      `bun:"bytes_notified_steps,notnull,default:0" json:"-"`
+	BytesNotifiedAt    *time.Time `bun:"bytes_notified_at" json:"-"`
+
 	// Definition is the grant's shape, attached by the store on every read
 	// path (see Store.attachDefinitions). It is not a bun relation: the
 	// attachment is one batched query, which keeps the auth path free of ORM
@@ -1079,6 +1086,14 @@ type GrantDefinition struct {
 	// Read through AccessGrant.StatementTimeout, never directly: the
 	// inheritance is what makes the three states mean anything.
 	StatementTimeoutSeconds *int64 `bun:"statement_timeout_seconds" json:"statement_timeout_seconds"`
+	// NotifyBytesStep is the soft limit on bytes: a Slack notice each time a
+	// grant's cumulative bytes cross another multiple of it. Never blocks.
+	// Same three states as StatementTimeoutSeconds:
+	//
+	//   nil — inherit DBB_SLACK_NOTIFY_BYTES_STEP.
+	//   0   — no notice for this definition, overriding the instance default.
+	//   > 0 — the step, in bytes.
+	NotifyBytesStep *int64 `bun:"notify_bytes_step" json:"notify_bytes_step"`
 	// Priority, when non-nil, is copied verbatim onto every grant
 	// materialized from this definition, pinning it above or below the tier
 	// its controls would otherwise earn. nil — the default — means "compute
