@@ -2071,3 +2071,24 @@ func TestHandleExecute_ReadOnlyTxEndInPipeline(t *testing.T) {
 	s.extendedState.txEnded = false // what the forwarded Sync does
 	require.NoError(t, s.handleExecute(&pgproto3.Execute{Portal: "ps"}))
 }
+
+func TestIsStatementTimeoutBypassAttempt_SetConfig(t *testing.T) {
+	for _, sql := range []string{
+		"SELECT set_config('statement_timeout', '0', false)",
+		"select SET_CONFIG ( 'statement_timeout' , '0' , true )",
+		"SELECT set_config(/**/'statement_timeout', '0', false)",
+	} {
+		if !isStatementTimeoutBypassAttempt(sql) {
+			t.Errorf("isStatementTimeoutBypassAttempt(%q) = false, want true", sql)
+		}
+	}
+
+	for _, sql := range []string{
+		"SELECT set_config('work_mem', '64MB', false)",
+		"SHOW statement_timeout",
+	} {
+		if isStatementTimeoutBypassAttempt(sql) {
+			t.Errorf("isStatementTimeoutBypassAttempt(%q) = true, want false", sql)
+		}
+	}
+}

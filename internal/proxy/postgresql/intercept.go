@@ -523,7 +523,8 @@ func isReadOnlyBypassAttempt(sql string) bool {
 // Comment-normalized like every other check here: `SET/**/statement_timeout=0`
 // reaches the server as a plain SET, so it has to reach this matcher as one.
 func isStatementTimeoutBypassAttempt(sql string) bool {
-	return shared.MatchesAnyNormalizedSQL(sql, statementTimeoutBypassPatterns)
+	return shared.MatchesAnyNormalizedSQL(sql, statementTimeoutBypassPatterns) ||
+		shared.PostgresSetConfigReaches(sql, "statement_timeout")
 }
 
 // isPasswordChangeQuery checks if a query attempts to modify user/role passwords.
