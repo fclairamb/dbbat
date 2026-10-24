@@ -2073,6 +2073,8 @@ func TestHandleExecute_ReadOnlyTxEndInPipeline(t *testing.T) {
 }
 
 func TestIsStatementTimeoutBypassAttempt_SetConfig(t *testing.T) {
+	t.Parallel()
+
 	for _, sql := range []string{
 		"SELECT set_config('statement_timeout', '0', false)",
 		"select SET_CONFIG ( 'statement_timeout' , '0' , true )",
