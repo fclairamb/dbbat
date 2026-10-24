@@ -282,7 +282,14 @@ func (s *Session) Run() error {
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
 
-	upstreamConn := s.upstreamConn
+	// The watchdog closes the upstream *socket*, not the go-mysql client: its
+	// Close also resets the packet sequence, which races the command that is
+	// mid-write when the watchdog fires.
+	var upstreamConn io.Closer
+	if s.upstreamConn != nil && s.upstreamConn.Conn != nil && s.upstreamConn.Conn.Conn != nil {
+		upstreamConn = s.upstreamConn.Conn.Conn
+	}
+
 	clientConn := s.clientConn
 
 	// Guarded because it is a goroutine of its own: the recover on
