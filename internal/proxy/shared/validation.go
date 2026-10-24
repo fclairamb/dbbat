@@ -17,6 +17,19 @@ var (
 	ErrPasswordChangeBlocked = errors.New("password modification is not allowed through the proxy")
 	ErrOraclePatternBlocked  = errors.New("blocked: this Oracle operation is not permitted through the proxy")
 	ErrMySQLPatternBlocked   = errors.New("blocked: this MySQL operation is not permitted through the proxy")
+	// ErrReadOnlyProcedureCall — a read_only grant met a statement that runs
+	// code dbbat cannot see: a stored procedure call (`CALL`), or a PostgreSQL
+	// `DO` block. What the code does is in the database, not in the statement,
+	// so "dbbat found no write" is not "this does not write". Its own error
+	// rather than ErrReadOnlyViolation, because nothing in the text was a write
+	// and the operator needs to know the fix is a grant without read_only.
+	ErrReadOnlyProcedureCall = errors.New("procedure calls and anonymous code blocks are not " +
+		"permitted with read-only access: dbbat cannot see what they would run")
+	// ErrReadOnlyPinBypass — a read_only MySQL/MariaDB session tried to take the
+	// server-side read-only pin off (`SET TRANSACTION READ WRITE`,
+	// `START TRANSACTION READ WRITE`, `SET tx_read_only = 0`, …).
+	ErrReadOnlyPinBypass = errors.New("read-only access is enforced by the server for this " +
+		"session and cannot be switched off")
 )
 
 // Dynamic-SQL refusals. Both are about a statement whose real payload is a
@@ -158,12 +171,13 @@ var mysqlBlockedPatterns = []*regexp.Regexp{
 // INSERT either way. It therefore runs against the comment-stripped scratch
 // copy (see sqlcomments.go); the caller's string is untouched.
 func IsWriteQuery(sql string) bool {
-	return isWriteQuery(matchableSQL(sql, syntaxStandard))
+	return isWriteQuery(matchableSQL(sql, syntaxStandard), syntaxStandard)
 }
 
 // isWriteQuery answers for an already-normalised scratch copy. The validators
-// normalise once per call and share it across every check.
-func isWriteQuery(sql string) bool {
+// normalise once per call and share it across every check; syntax is the
+// dialect it was normalised under, which the CTE scan needs to skip literals.
+func isWriteQuery(sql string, syntax sqlCommentSyntax) bool {
 	// The ALTER SESSION carve-out, ahead of the keyword scan because ALTER is in
 	// both keyword sets. See IsAllowedAlterSession.
 	if IsAllowedAlterSession(sql) {
@@ -177,7 +191,10 @@ func isWriteQuery(sql string) bool {
 		}
 	}
 
-	return false
+	// A statement led by WITH is whatever its CTEs and its main statement are:
+	// `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d` and
+	// `WITH c AS (SELECT 1) DELETE FROM t` both write. See isWritingCTE.
+	return isWritingCTE(sql, syntax)
 }
 
 // IsDDLQuery checks if a query is a DDL operation. Same comment normalisation
@@ -542,17 +559,17 @@ func isPasswordChangeQuery(sql string) bool {
 // sql is only ever read: the checks run against a comment-stripped scratch copy
 // and the caller relays its own bytes, untouched.
 func ValidateQuery(sql string, grant *store.Grant) error {
-	return validateQuery(matchableSQL(sql, syntaxStandard), grant)
+	return validateQuery(matchableSQL(sql, syntaxStandard), syntaxStandard, grant)
 }
 
 // validateQuery runs the grant controls against an already-normalised scratch
 // copy, so one statement is normalised exactly once per validation call.
-func validateQuery(sql string, grant *store.Grant) error {
+func validateQuery(sql string, syntax sqlCommentSyntax, grant *store.Grant) error {
 	if isPasswordChangeQuery(sql) {
 		return ErrPasswordChangeBlocked
 	}
 
-	if grant.IsReadOnly() && isWriteQuery(sql) {
+	if grant.IsReadOnly() && isWriteQuery(sql, syntax) {
 		return ErrReadOnlyViolation
 	}
 
@@ -654,8 +671,14 @@ func ValidateOracleQuery(sql string, grant *store.Grant) error {
 // already-normalised statement, with no unwrapping — applied to the statement a
 // client sent and, unchanged, to the statement that statement would execute.
 func validateOracleStatement(matchable string, grant *store.Grant) error {
-	if err := validateQuery(matchable, grant); err != nil {
+	if err := validateQuery(matchable, syntaxStandard, grant); err != nil {
 		return err
+	}
+
+	if grant.IsReadOnly() {
+		if err := validateOracleReadOnlyPLSQL(matchable); err != nil {
+			return err
+		}
 	}
 
 	for _, pattern := range oracleBlockedPatterns {
@@ -690,11 +713,38 @@ func ValidateMySQLQuery(sql string, grant *store.Grant) error {
 	})
 }
 
+var (
+	// mysqlReadOnlyBypass matches a statement that changes what a transaction
+	// starts as: `READ WRITE` anywhere (START TRANSACTION / SET [SESSION]
+	// TRANSACTION), or a SET naming the underlying variable (transaction_read_only
+	// on MySQL 5.7.20+/8, tx_read_only on older MySQL and MariaDB, with or without
+	// @@ and scope). Unanchored on purpose: a literal spelling these is refused
+	// too, which fails closed. `READ ONLY` and `SELECT @@tx_read_only` stay allowed.
+	mysqlReadOnlyBypass = regexp.MustCompile(
+		`(?i)\bREAD\s+WRITE\b|\bSET\b[^;]*\b(?:transaction_read_only|tx_read_only)\b`)
+	// mysqlProcedureCall matches CALL at the start of a statement, including
+	// the second statement of a multi-statement text.
+	mysqlProcedureCall = regexp.MustCompile(`(?i)(?:^|;)\s*CALL\b`)
+)
+
 // validateMySQLStatement is the controls and the pattern list over one
 // already-normalised statement, with no unwrapping.
 func validateMySQLStatement(matchable string, grant *store.Grant) error {
-	if err := validateQuery(matchable, grant); err != nil {
+	if err := validateQuery(matchable, syntaxMySQL, grant); err != nil {
 		return err
+	}
+
+	if grant.IsReadOnly() {
+		// The pin (SET SESSION TRANSACTION READ ONLY, issued by the proxy at
+		// connect) is what refuses a write the text checks miss; these keep
+		// the client from lifting it, and from running code dbbat cannot read.
+		if mysqlReadOnlyBypass.MatchString(matchable) {
+			return ErrReadOnlyPinBypass
+		}
+
+		if mysqlProcedureCall.MatchString(matchable) {
+			return ErrReadOnlyProcedureCall
+		}
 	}
 
 	for _, pattern := range mysqlBlockedPatterns {

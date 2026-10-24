@@ -1213,3 +1213,46 @@ func TestAlterSessionCarveOut_LeavesOtherDialectsAlone(t *testing.T) {
 		assert.False(t, IsDDLQuery(sql), "still not DDL: %s", sql)
 	}
 }
+
+func TestValidateMySQLQuery_ReadOnlyPin(t *testing.T) {
+	t.Parallel()
+
+	ro := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+	open := &store.Grant{Definition: &store.GrantDefinition{}}
+
+	bypass := []string{
+		"SET SESSION TRANSACTION READ WRITE",
+		"set transaction read write",
+		"START TRANSACTION READ WRITE",
+		"START TRANSACTION READ ONLY, READ WRITE",
+		"SET SESSION transaction_read_only = 0",
+		"SET @@session.tx_read_only=OFF",
+		"SET @@transaction_read_only = 0",
+		"SET autocommit = 1, tx_read_only = 0",
+		"SET/**/tx_read_only=0",
+		"SELECT 1; SET tx_read_only = 0",
+	}
+	for _, sql := range bypass {
+		require.ErrorIs(t, ValidateMySQLQuery(sql, ro), ErrReadOnlyPinBypass, sql)
+		require.NoError(t, ValidateMySQLQuery(sql, open), "no read_only, no refusal: %s", sql)
+	}
+
+	for _, sql := range []string{"CALL do_stuff()", "call p(1)", "SELECT 1; CALL p()", "/* x */ CALL p()"} {
+		require.ErrorIs(t, ValidateMySQLQuery(sql, ro), ErrReadOnlyProcedureCall, sql)
+		require.NoError(t, ValidateMySQLQuery(sql, open), sql)
+	}
+
+	// The pin itself, reads of the variable and ordinary connect-time SETs stay.
+	for _, sql := range []string{
+		"SET SESSION TRANSACTION READ ONLY",
+		"START TRANSACTION READ ONLY",
+		"START TRANSACTION",
+		"SELECT @@tx_read_only, @@transaction_read_only",
+		"SHOW VARIABLES LIKE 'tx_read_only'",
+		"SET NAMES utf8mb4",
+		"SET autocommit = 1",
+		"SELECT * FROM calls",
+	} {
+		require.NoError(t, ValidateMySQLQuery(sql, ro), sql)
+	}
+}

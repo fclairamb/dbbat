@@ -194,7 +194,14 @@ func setupFixtureWith(ctx context.Context, t *testing.T, mysqlImage, dbProtocol,
 	pgPort, _ := pgContainer.MappedPort(ctx, "5432")
 	pgDSN := fmt.Sprintf("postgres://test:test@%s:%s/dbbat_test?sslmode=disable", pgHost, pgPort.Port())
 
-	dataStore, err := store.New(ctx, pgDSN)
+	// The store needs the key or it writes every query unchained, and the
+	// chain assertions would have nothing to verify.
+	chainKey := make([]byte, 32)
+	for i := range chainKey {
+		chainKey[i] = byte(i + 1)
+	}
+
+	dataStore, err := store.New(ctx, pgDSN, store.Options{EncryptionKey: chainKey})
 	require.NoError(t, err)
 	t.Cleanup(func() { dataStore.Close() })
 

@@ -52,9 +52,12 @@ func TestIntegration_StatementTimeout_MySQL(t *testing.T) {
 	db := f.dialTLS()
 	defer func() { _ = db.Close() }()
 
-	var slept int
-	err := db.QueryRowContext(ctx, "SELECT SLEEP(5)").Scan(&slept)
-	require.Error(t, err, "SLEEP(5) must not survive a 1s statement limit")
+	// Not SLEEP(): the server answers an interrupted SLEEP with 1 and no error.
+	// A cross join over a system view runs for minutes, so only the limit ends it.
+	var n int
+	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.columns a, "+
+		"information_schema.columns b, information_schema.columns c").Scan(&n)
+	require.Error(t, err, "a long SELECT must not survive a 1s statement limit")
 
 	// The session itself is still usable — which is the whole point of pinning
 	// the server-side setting rather than relying on the watchdog alone.

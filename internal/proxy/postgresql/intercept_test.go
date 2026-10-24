@@ -6,11 +6,13 @@ import (
 	"log/slog"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -1908,6 +1910,187 @@ func TestCopyFormatToString(t *testing.T) {
 		result := copyFormatToString(tc.format)
 		if result != tc.expected {
 			t.Errorf("copyFormatToString(%d) = %q, expected %q", tc.format, result, tc.expected)
+		}
+	}
+}
+
+// Every spelling that takes a session out of read-only mode, beyond the ones
+// TestIsReadOnlyBypassAttempt has always covered. The pin only sets the
+// *default*, so a transaction-level override is as much a bypass as a SET.
+func TestIsReadOnlyBypassAttempt_PinEscapes(t *testing.T) {
+	t.Parallel()
+
+	bypasses := []string{
+		// Transaction-level overrides of the default.
+		"BEGIN READ WRITE",
+		"BEGIN TRANSACTION READ WRITE",
+		"BEGIN WORK ISOLATION LEVEL SERIALIZABLE, READ WRITE",
+		"START TRANSACTION READ WRITE",
+		"SET TRANSACTION READ WRITE",
+		"SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+		"begin read/**/write",
+		"SET transaction_read_only = off",
+		"SET LOCAL transaction_read_only TO false",
+		// The session default, under spellings the original list missed.
+		"SET LOCAL default_transaction_read_only = off",
+		"SET default_transaction_read_only = 'off'",
+		"SET default_transaction_read_only = no",
+		"SET default_transaction_read_only = of",
+		"SET default_transaction_read_only = f",
+		"SET default_transaction_read_only TO DEFAULT",
+		`SET "default_transaction_read_only" = off`,
+		"SET default_transaction_read_only = on, off",
+		"SET default_transaction_read_only = on; SET default_transaction_read_only = off",
+		"RESET LOCAL transaction_read_only",
+		"RESET transaction_read_only",
+		// Everything back to its connection-time value, the pin included.
+		"RESET ALL",
+		"DISCARD ALL",
+		// Role changes the original list only knew in one form.
+		"SET LOCAL ROLE postgres",
+		"SET SESSION ROLE postgres",
+		"SET LOCAL SESSION AUTHORIZATION postgres",
+		// SET as a function.
+		"SELECT set_config('default_transaction_read_only', 'off', false)",
+		"SELECT pg_catalog.set_config('role', 'postgres', false)",
+		"SELECT set_config('default_transaction_' || 'read_only', 'off', false)",
+	}
+	for _, sql := range bypasses {
+		if !isReadOnlyBypassAttempt(sql) {
+			t.Errorf("isReadOnlyBypassAttempt(%q) = false, want true", sql)
+		}
+	}
+
+	allowed := []string{
+		"BEGIN",
+		"BEGIN READ ONLY",
+		"START TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+		"SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+		"SET default_transaction_read_only = 'on'",
+		"SET LOCAL transaction_read_only = on",
+		"SET default_transaction_read_only TO yes;",
+		"SHOW transaction_read_only",
+		"RESET ROLE",
+		"SELECT pg_catalog.set_config('search_path', '', false)",
+		"DISCARD PLANS",
+		"RESET search_path",
+	}
+	for _, sql := range allowed {
+		if isReadOnlyBypassAttempt(sql) {
+			t.Errorf("isReadOnlyBypassAttempt(%q) = true, want false", sql)
+		}
+	}
+}
+
+func TestReadOnlyProcedurePattern(t *testing.T) {
+	t.Parallel()
+
+	refused := []string{
+		"DO $$ BEGIN EXECUTE 'DELETE FROM t'; END $$",
+		"do $$begin perform 1; end$$",
+		"CALL purge()",
+		"SELECT 1; CALL purge()",
+		"/* x */ DO $$ BEGIN NULL; END $$",
+	}
+	for _, sql := range refused {
+		if !shared.MatchesNormalizedSQL(sql, readOnlyProcedurePattern) {
+			t.Errorf("readOnlyProcedurePattern should match %q", sql)
+		}
+	}
+
+	allowed := []string{
+		"SELECT * FROM docs",
+		"SELECT do_something()",
+		"SELECT * FROM t WHERE caller = 1",
+	}
+	for _, sql := range allowed {
+		if shared.MatchesNormalizedSQL(sql, readOnlyProcedurePattern) {
+			t.Errorf("readOnlyProcedurePattern should not match %q", sql)
+		}
+	}
+}
+
+func TestValidateReadOnlyBatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		sql  string
+		want error
+	}{
+		{"SELECT 1", nil},
+		{"SELECT 1; SELECT 2", nil},
+		{"COMMIT", nil},
+		{"SELECT 1; COMMIT", nil},
+		{"SELECT 1; COMMIT;", nil},
+		{"SELECT 'a;COMMIT;INSERT'", nil},
+		{"SELECT f(); COMMIT; INSERT INTO t VALUES (1)", ErrReadOnlyTxEndInBatch},
+		{"SELECT f(); COMMIT; SELECT 2", ErrReadOnlyTxEndInBatch},
+		{"END; SELECT 2", ErrReadOnlyTxEndInBatch},
+		{"ROLLBACK;/*x*/SELECT 2", ErrReadOnlyTxEndInBatch},
+		{"BEGIN; SELECT 1; ROLLBACK TO SAVEPOINT a; SELECT 2", nil},
+		{"SELECT 1; INSERT INTO t VALUES (1)", ErrWriteNotPermitted},
+	}
+
+	for _, tt := range tests {
+		got := validateReadOnlyBatch(tt.sql)
+		if tt.want == nil {
+			require.NoError(t, got, tt.sql)
+		} else {
+			require.ErrorIs(t, got, tt.want, tt.sql)
+		}
+	}
+}
+
+// TestHandleExecute_ReadOnlyTxEndInPipeline checks the extended-protocol twin:
+// an Execute after a COMMIT Execute, before Sync, is refused, and Sync clears it.
+func TestHandleExecute_ReadOnlyTxEndInPipeline(t *testing.T) {
+	t.Parallel()
+
+	s := &Session{
+		logger: slog.New(slog.DiscardHandler),
+		grant: &store.Grant{
+			ExpiresAt:  time.Now().Add(time.Hour),
+			Definition: &store.GrantDefinition{Controls: []string{"read_only"}},
+		},
+		extendedState: &extendedQueryState{
+			preparedStatements: map[string]*preparedStatement{
+				"commit": {sql: "COMMIT"},
+				"sel":    {sql: "SELECT 1"},
+			},
+			portals: map[string]*portalState{
+				"pc": {stmtName: "commit"},
+				"ps": {stmtName: "sel"},
+			},
+		},
+	}
+
+	require.NoError(t, s.handleExecute(&pgproto3.Execute{Portal: "ps"}))
+	require.NoError(t, s.handleExecute(&pgproto3.Execute{Portal: "pc"}))
+	require.ErrorIs(t, s.handleExecute(&pgproto3.Execute{Portal: "ps"}), ErrReadOnlyTxEndInBatch)
+
+	s.extendedState.txEnded = false // what the forwarded Sync does
+	require.NoError(t, s.handleExecute(&pgproto3.Execute{Portal: "ps"}))
+}
+
+func TestIsStatementTimeoutBypassAttempt_SetConfig(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"SELECT set_config('statement_timeout', '0', false)",
+		"select SET_CONFIG ( 'statement_timeout' , '0' , true )",
+		"SELECT set_config(/**/'statement_timeout', '0', false)",
+	} {
+		if !isStatementTimeoutBypassAttempt(sql) {
+			t.Errorf("isStatementTimeoutBypassAttempt(%q) = false, want true", sql)
+		}
+	}
+
+	for _, sql := range []string{
+		"SELECT set_config('work_mem', '64MB', false)",
+		"SHOW statement_timeout",
+	} {
+		if isStatementTimeoutBypassAttempt(sql) {
+			t.Errorf("isStatementTimeoutBypassAttempt(%q) = true, want false", sql)
 		}
 	}
 }

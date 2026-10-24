@@ -485,6 +485,37 @@ Oracle's equivalent is a database link, and `CREATE DATABASE LINK` is already in
 `oracleBlockedPatterns`; a link that already exists is the same limitation —
 dbbat proxies one server row and cannot vouch for what another server runs.
 
+#### Static PL/SQL and procedure calls under `read_only`
+
+Dynamic SQL was not the only write hiding behind a non-write first keyword:
+`BEGIN DELETE FROM t; END;` carries its DML **statically**, so there is no
+payload to extract, and it was allowed under a read-only grant. Oracle has no
+session-level read-only switch dbbat could pin the way it pins PostgreSQL
+(`SET TRANSACTION READ ONLY` ends at the first COMMIT, and the client sends the
+COMMIT), so on this protocol the text **is** the control.
+`shared.validateOracleReadOnlyPLSQL` therefore runs, under `read_only` only:
+
+| Statement | Treatment |
+|------|-----------|
+| an anonymous block (`BEGIN …`, `DECLARE …`, behind an optional `<<label>>`) whose body contains `INSERT`, `UPDATE`, `DELETE` or `MERGE` as a bare word | refused (`shared.ErrReadOnlyViolation`) |
+| a `WITH` statement containing one of those words — including 12c's `WITH FUNCTION … PRAGMA AUTONOMOUS_TRANSACTION` | refused (`shared.ErrReadOnlyViolation`), by the shared CTE rule every protocol gets |
+| `CALL …` | refused (`shared.ErrReadOnlyProcedureCall`): what a procedure does is in the database, not in the statement |
+| a block with no such word — `BEGIN DBMS_OUTPUT.ENABLE(NULL); END;`, `SELECT … INTO` | allowed, as before |
+
+The words are matched outside literals and quoted identifiers, and not after a
+`.` (`t.delete` is a column), so `DBMS_APPLICATION_INFO.SET_MODULE('x',
+'DELETE')` stays allowed. A literal left open fails closed. `SELECT … FOR
+UPDATE` inside a block is refused: it takes row locks, which a read-only session
+has no business taking.
+
+**What this does not reach, and cannot from the text**: a block that calls a
+procedure (`BEGIN pkg.purge; END;`), and a plain `SELECT f() FROM dual` where
+`f` runs an autonomous transaction. Refusing every block that calls something
+would refuse the `DBMS_OUTPUT.ENABLE` call SQL clients send on connect, i.e.
+every read-only session. On Oracle, `read_only` is a strong filter on what the
+client *types*, not a guarantee on what the server *does*. Where the guarantee
+matters, register the server with a read-only database account.
+
 ### Cursor re-execution (what clients actually send)
 
 A client that has already parsed a statement re-runs it by naming its **cursor

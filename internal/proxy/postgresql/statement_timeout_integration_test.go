@@ -85,6 +85,9 @@ func TestIntegration_StatementTimeout_RefusesUnset(t *testing.T) {
 		"RESET ALL",
 		// Comment-normalized: this reaches the server as a plain SET.
 		"SET/**/statement_timeout = 0",
+		// The same SET as a function.
+		"SELECT set_config('statement_timeout', '0', false)",
+		"SELECT set_config('statement_timeout', '0', true)",
 	} {
 		_, err := conn.Exec(ctx, sql)
 		require.Error(t, err, "%q should be refused", sql)

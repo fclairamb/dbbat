@@ -22,6 +22,10 @@ var (
 	// limit dbbat tried to pin on the session. Fatal rather than ignored: a
 	// session that could not be pinned would look bounded and not be.
 	ErrUpstreamStatementTimeout = errors.New("upstream refused the per-statement time limit")
+	// ErrUpstreamReadOnlyMode — the upstream refused to pin the session
+	// read-only for a read_only grant. Fatal: the session would look protected
+	// and not be.
+	ErrUpstreamReadOnlyMode = errors.New("upstream refused to set the session read-only")
 	// ErrStatementTimeoutManaged — a client tried to unset or widen the
 	// per-statement limit dbbat pinned. A courtesy refusal: the watchdog is
 	// the enforcement, but without this the client would only ever meet the
