@@ -189,7 +189,15 @@ func TestIntegration_QueryTagging_PreparedStatementStillWorks(t *testing.T) {
 		assert.Equal(t, "binary", label)
 	}
 
-	prepared := lastStatement(ctx, t, conn, "%? + ?%")
+	// COM_STMT_PREPARE shows up in events_statements_history with a NULL
+	// SQL_TEXT; the text the server holds for it is in
+	// prepared_statements_instances.
+	var prepared string
+
+	require.NoError(t, conn.QueryRowContext(ctx,
+		"SELECT SQL_TEXT FROM performance_schema.prepared_statements_instances "+
+			"WHERE OWNER_THREAD_ID = PS_CURRENT_THREAD_ID() AND SQL_TEXT LIKE ?", "%? + ?%",
+	).Scan(&prepared))
 
 	assert.True(t, strings.HasPrefix(prepared, tagPrefix),
 		"COM_STMT_PREPARE must carry the tag, got %q", prepared)

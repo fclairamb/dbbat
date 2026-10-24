@@ -339,6 +339,15 @@ func (s *Session) onLimitViolation(ctx context.Context, upstreamConn, clientConn
 	// after the close there is still a server-side thread running the statement
 	// nobody is reading any more.
 	if s.statementClock.Running() {
+		// The client leg goes first: a statement KILL QUERY interrupts (SLEEP,
+		// DO SLEEP) can come back as a plain OK packet, and the relay would
+		// hand that to the client as a success for a statement dbbat just
+		// killed. The kill runs on a fresh connection, so it does not need
+		// the client socket.
+		if clientConn != nil {
+			_ = clientConn.Close()
+		}
+
 		s.killUpstreamStatement(ctx)
 	}
 
