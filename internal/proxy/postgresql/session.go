@@ -118,6 +118,11 @@ type extendedQueryState struct {
 	//
 	// Only ever touched from the client→upstream goroutine.
 	errorUntilSync bool
+
+	// txEnded is set when a read-only session has Executed a COMMIT/END/ROLLBACK
+	// since the last Sync; any further Execute in the batch is refused. Only
+	// touched from the client→upstream goroutine.
+	txEnded bool
 }
 
 // Session represents a proxy session.
@@ -750,6 +755,8 @@ func (s *Session) interceptClientMessage(msg pgproto3.FrontendMessage) error {
 		// A forwarded Sync earns exactly one upstream ReadyForQuery. A Sync
 		// from a refused batch is forwarded too (discardUntilSync), so it
 		// still counts — upstream does answer it.
+		s.extendedState.txEnded = false
+
 		return s.book(func() error {
 			s.clientSyncEpoch++
 

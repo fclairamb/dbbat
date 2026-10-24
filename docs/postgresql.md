@@ -188,12 +188,18 @@ the text scans cannot see, such as a function that calls `set_config` with a
 name built at run time. On PostgreSQL 13 and older nothing is reported and the
 tripwire never fires; the scans are then the only line.
 
-**Known limit**: the report arrives at the end of a batch, not after each
-statement in it. A simple-query string such as `SELECT f(); COMMIT; <write>`,
-where `f` is an existing function that turns the default off, runs its last
-statement before the tripwire sees anything. This needs such a function in the
-target database. The guarantee for a database that must never be written to
-through dbbat is a read-only database account, not the `read_only` control.
+**The batch window.** The report arrives at the end of a batch, not after each
+statement in it, so `SELECT f(); COMMIT; <write>` (`f` turning the default off)
+would run its last statement in a transaction the pin no longer covers. Two
+rules close it. A simple-query string is split on `;` outside comments,
+literals and dollar quotes (`shared.SplitPostgresStatements`) and every part is
+classified, not just the first. And `COMMIT`, `END`, `ABORT` or `ROLLBACK`
+followed by another statement is refused (`ErrReadOnlyTxEndInBatch`); in the
+extended protocol an `Execute` after a transaction-ending `Execute` and before
+the `Sync` is refused. With no transaction boundary inside a batch, a changed
+default reaches none of its statements, and the tripwire handles the next one.
+For a database that must never be written to through dbbat, a read-only
+database account remains the strongest guarantee.
 
 ## Testing
 

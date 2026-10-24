@@ -143,6 +143,14 @@ func (s *Session) validateStatement(sqlText string) error {
 		return ErrWriteNotPermitted
 	}
 
+	// Control: read_only, every statement of a batch (not just the first), and
+	// no transaction boundary inside it. See validateReadOnlyBatch.
+	if s.grant.IsReadOnly() {
+		if err := validateReadOnlyBatch(sqlText); err != nil {
+			return err
+		}
+	}
+
 	// Control: block_ddl (only check if not already read_only, since read_only blocks DDL at PG level)
 	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && isDDLQuery(sqlText) {
 		return ErrDDLNotPermitted
@@ -158,6 +166,33 @@ func (s *Session) validateStatement(sqlText string) error {
 	// an ordinary client setting.
 	if s.statementLimit > 0 && isStatementTimeoutBypassAttempt(sqlText) {
 		return fmt.Errorf("%w (limit %s)", ErrStatementTimeoutManaged, s.statementLimit)
+	}
+
+	return nil
+}
+
+// validateReadOnlyBatch checks every statement of a simple-query string on a
+// read-only session. The write classifier only reads the first keyword, so each
+// part is classified on its own, and a COMMIT/END/ROLLBACK followed by another
+// statement is refused: the text scans cannot see a function that turns the
+// session default off, and the tripwire only fires once the batch is over, so
+// the statement after the boundary would run in a transaction the pin no longer
+// covers. Without a boundary inside the batch the changed default reaches none
+// of its statements.
+func validateReadOnlyBatch(sqlText string) error {
+	parts := shared.SplitPostgresStatements(sqlText)
+	if len(parts) < 2 {
+		return nil
+	}
+
+	for i, part := range parts {
+		if isWriteQuery(part) {
+			return ErrWriteNotPermitted
+		}
+
+		if i < len(parts)-1 && shared.IsPostgresTxEnd(part) {
+			return ErrReadOnlyTxEndInBatch
+		}
 	}
 
 	return nil
@@ -378,6 +413,18 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 	if err := s.book(func() error {
 		if err := s.checkQuotas(); err != nil {
 			return s.refuse(sqlText, params, err)
+		}
+
+		// Read-only: nothing may run after a transaction-ending Execute before
+		// the next Sync — the extended-protocol twin of validateReadOnlyBatch.
+		if s.grant.IsReadOnly() {
+			if s.extendedState.txEnded {
+				return s.refuse(sqlText, params, ErrReadOnlyTxEndInBatch)
+			}
+
+			if shared.IsPostgresTxEnd(sqlText) {
+				s.extendedState.txEnded = true
+			}
 		}
 
 		return nil

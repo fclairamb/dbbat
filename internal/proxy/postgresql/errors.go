@@ -22,6 +22,11 @@ var (
 	// that the statement checks did not recognize. See readOnlyPinLost.
 	ErrReadOnlyPinLost = errors.New("session terminated by dbbat: your access grant is read-only " +
 		"and the session's read-only mode was turned off")
+	// ErrReadOnlyTxEndInBatch refuses a COMMIT/END/ROLLBACK that is followed by
+	// another statement in the same batch. Without a transaction boundary inside
+	// a batch, a changed session default cannot reach any statement of it.
+	ErrReadOnlyTxEndInBatch = errors.New("a transaction-ending statement cannot be followed by " +
+		"another statement in the same batch on a read-only access grant")
 	// ErrStatementTimeoutManaged refuses a client statement that would unset
 	// or widen the session's statement_timeout. It is a courtesy, not the
 	// security boundary — dbbat's own watchdog is that — but without it a

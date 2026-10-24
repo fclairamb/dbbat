@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
@@ -2007,4 +2008,66 @@ func TestReadOnlyProcedurePattern(t *testing.T) {
 			t.Errorf("readOnlyProcedurePattern should not match %q", sql)
 		}
 	}
+}
+
+func TestValidateReadOnlyBatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		sql  string
+		want error
+	}{
+		{"SELECT 1", nil},
+		{"SELECT 1; SELECT 2", nil},
+		{"COMMIT", nil},
+		{"SELECT 1; COMMIT", nil},
+		{"SELECT 1; COMMIT;", nil},
+		{"SELECT 'a;COMMIT;INSERT'", nil},
+		{"SELECT f(); COMMIT; INSERT INTO t VALUES (1)", ErrReadOnlyTxEndInBatch},
+		{"SELECT f(); COMMIT; SELECT 2", ErrReadOnlyTxEndInBatch},
+		{"END; SELECT 2", ErrReadOnlyTxEndInBatch},
+		{"ROLLBACK;/*x*/SELECT 2", ErrReadOnlyTxEndInBatch},
+		{"BEGIN; SELECT 1; ROLLBACK TO SAVEPOINT a; SELECT 2", nil},
+		{"SELECT 1; INSERT INTO t VALUES (1)", ErrWriteNotPermitted},
+	}
+
+	for _, tt := range tests {
+		got := validateReadOnlyBatch(tt.sql)
+		if tt.want == nil {
+			require.NoError(t, got, tt.sql)
+		} else {
+			require.ErrorIs(t, got, tt.want, tt.sql)
+		}
+	}
+}
+
+// TestHandleExecute_ReadOnlyTxEndInPipeline checks the extended-protocol twin:
+// an Execute after a COMMIT Execute, before Sync, is refused, and Sync clears it.
+func TestHandleExecute_ReadOnlyTxEndInPipeline(t *testing.T) {
+	t.Parallel()
+
+	s := &Session{
+		logger: slog.New(slog.DiscardHandler),
+		grant: &store.Grant{
+			ExpiresAt:  time.Now().Add(time.Hour),
+			Definition: &store.GrantDefinition{Controls: []string{"read_only"}},
+		},
+		extendedState: &extendedQueryState{
+			preparedStatements: map[string]*preparedStatement{
+				"commit": {sql: "COMMIT"},
+				"sel":    {sql: "SELECT 1"},
+			},
+			portals: map[string]*portalState{
+				"pc": {stmtName: "commit"},
+				"ps": {stmtName: "sel"},
+			},
+		},
+	}
+
+	require.NoError(t, s.handleExecute(&pgproto3.Execute{Portal: "ps"}))
+	require.NoError(t, s.handleExecute(&pgproto3.Execute{Portal: "pc"}))
+	require.ErrorIs(t, s.handleExecute(&pgproto3.Execute{Portal: "ps"}), ErrReadOnlyTxEndInBatch)
+
+	s.extendedState.txEnded = false // what the forwarded Sync does
+	require.NoError(t, s.handleExecute(&pgproto3.Execute{Portal: "ps"}))
 }

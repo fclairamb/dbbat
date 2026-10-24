@@ -1087,3 +1087,41 @@ func TestIntegration_ReadOnlyGrant_TerminatesOnLostPin(t *testing.T) {
 	require.NoError(t, check.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
 	assert.Equal(t, 0, got)
 }
+
+// TestIntegration_ReadOnlyGrant_RefusesWriteBehindTxEnd covers the window the
+// tripwire cannot: the pin is dropped by a function the text scans cannot see,
+// and a write follows a COMMIT in the same batch, simple or extended. Both
+// batches must be refused before any statement runs.
+func TestIntegration_ReadOnlyGrant_RefusesWriteBehindTxEnd(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	seed := f.mustConnect(ctx, fixturePass)
+	_, err := seed.Exec(ctx, "CREATE TABLE ro (id int)")
+	require.NoError(t, err)
+	_, err = seed.Exec(ctx, "CREATE FUNCTION unpin() RETURNS text LANGUAGE sql AS "+
+		"$$ SELECT set_config('default_transaction_' || 'read_only', 'off', false) $$")
+	require.NoError(t, err)
+	require.NoError(t, seed.Close(ctx))
+
+	f.replaceGrant(ctx, []string{"read_only"})
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	_, err = conn.Exec(ctx, "SELECT unpin(); COMMIT; INSERT INTO ro VALUES (1)", pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "simple batch with a write behind COMMIT")
+
+	batch := &pgx.Batch{}
+	batch.Queue("SELECT unpin()")
+	batch.Queue("COMMIT")
+	batch.Queue("INSERT INTO ro VALUES (1)")
+
+	res := conn.SendBatch(ctx, batch)
+	_ = res.Close()
+
+	check := f.mustConnect(ctx, fixturePass)
+
+	var got int
+	require.NoError(t, check.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
+	assert.Equal(t, 0, got, "no write may have run")
+}
