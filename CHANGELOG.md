@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.31.0](https://github.com/fclairamb/dbbat/compare/v0.30.1...v0.31.0) (2026-10-24)
+
+
+### Features
+
+* **grants:** users can revoke their own grants, and Slack posts a soft-limit notice when a grant's bytes cross a threshold ([#438](https://github.com/fclairamb/dbbat/issues/438)) ([9fff559](https://github.com/fclairamb/dbbat/commit/9fff559dc491b15ffffd38e4303b25ad28813885))
+* MCP `revoke_grant` tool and a Slack deep link to the grant ([#442](https://github.com/fclairamb/dbbat/issues/442)) ([c7ca3b2](https://github.com/fclairamb/dbbat/commit/c7ca3b2eb3026d864143bcb81b81275c205a0c0c))
+
+
+### Bug Fixes
+
+* **proxy:** close read_only bypasses on PostgreSQL and Oracle ([#446](https://github.com/fclairamb/dbbat/issues/446)) ([ad45471](https://github.com/fclairamb/dbbat/commit/ad45471009497b3e8f07036ec0fecce2accf1220))
+* make `slack_app_manifest.json` accepted by Slack ([#405](https://github.com/fclairamb/dbbat/issues/405)) ([74742dd](https://github.com/fclairamb/dbbat/commit/74742dd112d107d0782c3dcd093b2b92c042710f))
+* **deps:** update Go and frontend dependencies: gopacket 1.7.4, koanf 2.4.1, koanf env provider 2.0.2, moby api 1.56.1, slack-go 0.30.1, bun 1.3.0, urfave/cli 3.14.0, mongo-driver 2.9.2, gocloud.dev 0.47.0, x/crypto 0.58.0, x/text 0.43.0, @hookform/resolvers 6 ([#409](https://github.com/fclairamb/dbbat/issues/409), [#412](https://github.com/fclairamb/dbbat/issues/412), [#424](https://github.com/fclairamb/dbbat/issues/424), [#406](https://github.com/fclairamb/dbbat/issues/406), [#425](https://github.com/fclairamb/dbbat/issues/425), [#444](https://github.com/fclairamb/dbbat/issues/444), [#410](https://github.com/fclairamb/dbbat/issues/410), [#428](https://github.com/fclairamb/dbbat/issues/428), [#413](https://github.com/fclairamb/dbbat/issues/413), [#411](https://github.com/fclairamb/dbbat/issues/411), [#426](https://github.com/fclairamb/dbbat/issues/426), [#431](https://github.com/fclairamb/dbbat/issues/431), [#432](https://github.com/fclairamb/dbbat/issues/432), [#433](https://github.com/fclairamb/dbbat/issues/433), [#445](https://github.com/fclairamb/dbbat/issues/445))
+
 ## [0.30.1](https://github.com/fclairamb/dbbat/compare/v0.30.0...v0.30.1) (2026-09-24)
 
 
