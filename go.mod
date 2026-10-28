@@ -30,7 +30,7 @@ require (
 	github.com/moby/moby/api v1.56.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/sijms/go-ora/v3 v3.0.1
-	github.com/slack-go/slack v0.31.0
+	github.com/slack-go/slack v0.32.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/k3s v0.44.0
