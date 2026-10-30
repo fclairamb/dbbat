@@ -231,7 +231,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		}
 
 		if err := clientConn.Close(); err != nil {
-			s.logger.ErrorContext(s.ctx, "failed to close client connection", slog.Any("error", err))
+			s.logger.DebugContext(s.ctx, "client close error", slog.Any("error", err))
 		}
 	}()
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -37,9 +39,16 @@ var frontendFS embed.FS
 
 // Server represents the REST API server.
 type Server struct {
-	store              *store.Store
-	encryptionKey      []byte
-	logger             *slog.Logger
+	store         *store.Store
+	encryptionKey []byte
+	logger        *slog.Logger
+	// lifecycleMu guards httpServer, socketCancel, listenCancel and stopped:
+	// Start writes them on the goroutine main runs it on, Shutdown reads them
+	// on the signal path.
+	lifecycleMu sync.Mutex
+	// stopped records a Shutdown, so a Start that loses the race to it does
+	// not go on to serve forever.
+	stopped            bool
 	httpServer         *http.Server
 	rateLimiter        *RateLimiter
 	authFailureTracker *authFailureTracker
@@ -192,13 +201,21 @@ const (
 func (s *Server) Start(addr string) error {
 	router := s.setupRouter()
 
-	s.httpServer = &http.Server{
+	s.lifecycleMu.Lock()
+	if s.stopped {
+		s.lifecycleMu.Unlock()
+
+		return nil
+	}
+
+	httpServer := &http.Server{
 		Addr:         addr,
 		Handler:      router,
 		ReadTimeout:  httpReadTimeout,
 		WriteTimeout: httpWriteTimeout,
 		IdleTimeout:  httpIdleTimeout,
 	}
+	s.httpServer = httpServer
 
 	// Subscribe to cross-replica events so a hold on another pod reaches the
 	// admins connected here.
@@ -211,24 +228,39 @@ func (s *Server) Start(addr string) error {
 	// When interactivity rides on the inbound HTTP endpoint alone, surface
 	// the Slack-side reachability requirement in the startup logs.
 	s.logSlackInteractivityTransport()
+	s.lifecycleMu.Unlock()
 
 	s.logger.InfoContext(context.Background(), "Starting API server", slog.String("addr", addr))
 
-	return s.httpServer.ListenAndServe()
+	// ErrServerClosed is what ListenAndServe returns once Shutdown has been
+	// called, i.e. the graceful stop working as intended. Passing it up made
+	// main's "API server error" handler os.Exit(1) in the middle of every
+	// shutdown, before the proxies, the row writer, the heartbeat and the dump
+	// uploader had been drained.
+	if err := httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+
+	return nil
 }
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.socketCancel != nil {
-		s.socketCancel()
+	s.lifecycleMu.Lock()
+	s.stopped = true
+	socketCancel, listenCancel, httpServer := s.socketCancel, s.listenCancel, s.httpServer
+	s.lifecycleMu.Unlock()
+
+	if socketCancel != nil {
+		socketCancel()
 	}
 
-	if s.listenCancel != nil {
-		s.listenCancel()
+	if listenCancel != nil {
+		listenCancel()
 	}
 
-	if s.httpServer != nil {
-		return s.httpServer.Shutdown(ctx)
+	if httpServer != nil {
+		return httpServer.Shutdown(ctx)
 	}
 
 	return nil
@@ -638,6 +670,9 @@ func (s *Server) handleSwaggerUI(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 }
 
+// healthPath is the liveness probe route, logged at DEBUG when it succeeds.
+const healthPath = "/api/v1/health"
+
 // loggingMiddleware logs HTTP requests.
 func (s *Server) loggingMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -650,7 +685,14 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 		latency := time.Since(start)
 		statusCode := c.Writer.Status()
 
-		s.logger.InfoContext(c.Request.Context(), "API request",
+		// A successful health probe is the orchestrator's heartbeat, a couple
+		// per second per replica: at INFO it was ~95% of the access log.
+		level := slog.LevelInfo
+		if path == healthPath && statusCode < http.StatusBadRequest {
+			level = slog.LevelDebug
+		}
+
+		s.logger.Log(c.Request.Context(), level, "API request",
 			slog.String("method", c.Request.Method),
 			slog.String("path", path),
 			slog.String("query", query),

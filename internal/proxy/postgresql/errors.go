@@ -61,6 +61,10 @@ var (
 	// Not a failure: a CancelRequest is a one-shot out-of-band signal on its
 	// own TCP connection, and PostgreSQL closes it without a reply.
 	ErrCancelRequestHandled = errors.New("cancel request handled")
+
+	// errClientHungUp ends a session whose client closed its socket after
+	// startup. Not a failure either: handleConnection logs it at DEBUG.
+	errClientHungUp = errors.New("client disconnected")
 )
 
 // Upstream connect failures. The upstream login itself lives in

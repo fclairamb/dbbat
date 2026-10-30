@@ -702,14 +702,24 @@ func (s *Session) proxyClientToUpstream() error {
 	for {
 		msg, err := s.clientBackend.Receive()
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
+			// pgproto3 reports a FIN at a message boundary as io.ErrUnexpectedEOF
+			// (translateEOFtoErrUnexpectedEOF), so a plain io.EOF never reaches
+			// here: a client that simply closes its socket without a Terminate —
+			// most connection pools do — looks exactly like one that stopped
+			// mid-frame. Either way the client is gone and nothing on our side
+			// failed; on Stonal's deployment it was ~2000 "Session error" lines a
+			// day.
+			if errors.Is(err, io.ErrUnexpectedEOF) || shared.IsClientHangup(err) {
+				return fmt.Errorf("%w: %w", errClientHungUp, err)
 			}
 
 			return fmt.Errorf("failed to receive from client: %w", err)
 		}
 
-		s.logger.InfoContext(s.ctx, "received message from client", slog.Any("message", msg))
+		// DEBUG, never INFO: the message carries the statement text (and a Bind
+		// its parameter values), which belongs in the audited queries table, not
+		// in the process log shipped to a log aggregator.
+		s.logger.DebugContext(s.ctx, "received message from client", slog.Any("message", msg))
 
 		// A batch dbbat already failed is dead until Sync — see
 		// extendedQueryState.errorUntilSync.
