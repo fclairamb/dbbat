@@ -298,11 +298,14 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("failed to hash default admin password: %w", err)
 	}
 
-	if err := dataStore.EnsureDefaultAdmin(ctx, passwordHash); err != nil {
+	created, err := dataStore.EnsureDefaultAdmin(ctx, passwordHash)
+	if err != nil {
 		return fmt.Errorf("failed to ensure default admin: %w", err)
 	}
 
-	logger.InfoContext(ctx, "Default admin user ensured (username: admin, password: admin)")
+	if created {
+		logger.InfoContext(ctx, "Default admin user created (username: admin, password: admin)")
+	}
 
 	// Provision test data if in test mode
 	if cfg.RunMode == config.RunModeTest {

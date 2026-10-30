@@ -287,7 +287,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		}
 
 		if err := clientConn.Close(); err != nil {
-			s.logger.ErrorContext(s.ctx, "failed to close client connection", slog.Any("error", err))
+			s.logger.DebugContext(s.ctx, "client close error", slog.Any("error", err))
 		}
 	}()
 
@@ -315,6 +315,24 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		// looks for when a client cannot reach the listener at all.
 		if errors.Is(err, shared.ErrClientDisconnectedBeforeStartup) {
 			s.logger.DebugContext(s.ctx, "Client disconnected before startup",
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+			return
+		}
+
+		if errors.Is(err, errClientHungUp) {
+			s.logger.DebugContext(s.ctx, "Client disconnected",
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+			return
+		}
+
+		// Access control doing its job — no grant, an exhausted quota, a wrong
+		// password, an unknown database — is the client's problem, already
+		// reported to it. WARN, like Oracle's "client authentication failed",
+		// so ERROR stays for what an operator has to act on.
+		if isClientRefusal(err) {
+			s.logger.WarnContext(s.ctx, "Session refused", slog.Any("error", err),
 				slog.Any("remote_addr", clientConn.RemoteAddr()))
 
 			return
@@ -364,4 +382,29 @@ func (s *Server) runDumpCleanup() {
 // process wiring; nil means local-only captures, which is the default.
 func (s *Server) SetDumpUploader(uploader *dump.Uploader) {
 	s.dumpUploader = uploader
+}
+
+// clientRefusals are the authentication outcomes that are a decision, not a
+// failure: dbbat refused the client on purpose.
+var clientRefusals = []error{
+	store.ErrNoActiveGrant,
+	store.ErrServerNotFound,
+	store.ErrUserNotFound,
+	shared.ErrTargetNotFound,
+	ErrInvalidPassword,
+	ErrMissingCredentials,
+	ErrQueryLimitExceeded,
+	ErrDataLimitExceeded,
+	ErrAPIKeyOwnerMismatch,
+	ErrAPIKeyVerifyFailed,
+}
+
+func isClientRefusal(err error) bool {
+	for _, refusal := range clientRefusals {
+		if errors.Is(err, refusal) {
+			return true
+		}
+	}
+
+	return false
 }
