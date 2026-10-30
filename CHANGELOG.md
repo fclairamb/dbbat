@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.31.1](https://github.com/fclairamb/dbbat/compare/v0.31.0...v0.31.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.37.2 ([#449](https://github.com/fclairamb/dbbat/issues/449)) ([eca43f2](https://github.com/fclairamb/dbbat/commit/eca43f2a7cdd9a6bed78ed131371cc548352a2a5))
+* **deps:** update module github.com/slack-go/slack to v0.31.0 ([#447](https://github.com/fclairamb/dbbat/issues/447)) ([5aac32d](https://github.com/fclairamb/dbbat/commit/5aac32d07a91c69a6544c23ce6be57b2aace6626))
+* **deps:** update module github.com/slack-go/slack to v0.32.0 ([#450](https://github.com/fclairamb/dbbat/issues/450)) ([0b9e1cc](https://github.com/fclairamb/dbbat/commit/0b9e1ccac387ae8b2c91e22b607a04e1fea34d6f))
+* enforce read_only between pipelined PostgreSQL batches ([#452](https://github.com/fclairamb/dbbat/issues/452)) ([229908a](https://github.com/fclairamb/dbbat/commit/229908a972cdc47ca432d2d1c0e8a1f303ed893d))
+* **proxy:** stop exiting mid-shutdown and quiet expected session ends ([#454](https://github.com/fclairamb/dbbat/issues/454)) ([5e86e01](https://github.com/fclairamb/dbbat/commit/5e86e01cf2122501ccfabb25349d29a2e0a87a96))
+* require a changed password for Basic Auth ([#451](https://github.com/fclairamb/dbbat/issues/451)) ([3ac591e](https://github.com/fclairamb/dbbat/commit/3ac591e423880d0204a819dd6748e445970cb4a1))
+
+### Documentation
+
+* file the follow-up specs of the 2026-10-30 security scan (no code change) ([#453](https://github.com/fclairamb/dbbat/issues/453)) ([3883309](https://github.com/fclairamb/dbbat/commit/3883309407aca65b8d65d10cb1b56fde0e52db2b))
+
 ## [0.31.0](https://github.com/fclairamb/dbbat/compare/v0.30.1...v0.31.0) (2026-10-24)
 
 
