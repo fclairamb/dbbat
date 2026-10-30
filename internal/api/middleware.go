@@ -130,6 +130,16 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 	// Reset failure count on successful login
 	s.authFailureTracker.resetFailures(username)
 
+	// Same rule as POST /auth/login: a password that was never changed — the
+	// seeded admin/admin, or one an admin handed out — opens nothing until its
+	// owner changes it through PUT /auth/password. Basic Auth is a login on
+	// every request, so it cannot be the way around that.
+	if !user.HasChangedPassword() {
+		writeError(c, http.StatusForbidden, ErrCodePasswordChangeRequired, "You must change your password before logging in")
+		c.Abort()
+		return
+	}
+
 	// Store user in context
 	c.Set(contextKeyUser, user)
 	c.Set(contextKeyAuthMethod, authMethodBasic)
