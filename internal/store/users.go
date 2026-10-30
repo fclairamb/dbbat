@@ -241,28 +241,30 @@ func (s *Store) EnsureUserOracleSalts(ctx context.Context, userID uuid.UUID) (*O
 	return protocolData.Oracle, nil
 }
 
-// EnsureDefaultAdmin creates a default admin user if no users exist
-func (s *Store) EnsureDefaultAdmin(ctx context.Context, passwordHash string) error {
+// EnsureDefaultAdmin creates a default admin user if no users exist. It
+// reports whether it did, so the caller only announces the default credentials
+// when they are actually in force.
+func (s *Store) EnsureDefaultAdmin(ctx context.Context, passwordHash string) (bool, error) {
 	// Check if any users exist
 	count, err := s.db.NewSelect().
 		Model((*User)(nil)).
 		Count(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to count users: %w", err)
+		return false, fmt.Errorf("failed to count users: %w", err)
 	}
 
 	// If users exist, nothing to do
 	if count > 0 {
-		return nil
+		return false, nil
 	}
 
 	// Create default admin user with admin and connector roles
 	_, err = s.CreateUser(ctx, "admin", passwordHash, []string{RoleAdmin, RoleConnector})
 	if err != nil {
-		return fmt.Errorf("failed to create default admin: %w", err)
+		return false, fmt.Errorf("failed to create default admin: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // TouchUserLastLogin stamps users.last_login_at with the current instant.
