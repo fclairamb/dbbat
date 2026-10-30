@@ -208,6 +208,13 @@ type Session struct {
 	// bookMu, inside the upstream leg's message switch.
 	upstreamReadyEpoch uint64
 
+	// upstreamCaughtUp is signaled, under bookMu, each time upstreamReadyEpoch
+	// moves and when the upstream leg ends; upstreamRelayEnded records the
+	// latter. A read_only session waits on it before forwarding the next batch
+	// — see awaitUpstreamCaughtUp. Nil until proxyMessages starts the relays.
+	upstreamCaughtUp   *sync.Cond
+	upstreamRelayEnded bool
+
 	// upstreamKey is the cancellation key the *upstream server* issued for
 	// this session's backend. dbbat forwards it to the client verbatim, so it
 	// is also what a client CancelRequest carries — but this copy is what the
@@ -519,6 +526,8 @@ func (s *Session) proxyMessages() error {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
 	}, s.closeConns)
 
+	s.upstreamCaughtUp = sync.NewCond(&s.bookMu)
+
 	// Channel to receive errors from goroutines
 	errChan := make(chan error, 2)
 
@@ -721,6 +730,10 @@ func (s *Session) proxyClientToUpstream() error {
 		// in the process log shipped to a log aggregator.
 		s.logger.DebugContext(s.ctx, "received message from client", slog.Any("message", msg))
 
+		if !s.awaitUpstreamCaughtUp(msg) {
+			return nil
+		}
+
 		// A batch dbbat already failed is dead until Sync — see
 		// extendedQueryState.errorUntilSync.
 		if s.discardUntilSync(msg) {
@@ -740,6 +753,66 @@ func (s *Session) proxyClientToUpstream() error {
 			return fmt.Errorf("failed to send to upstream: %w", err)
 		}
 	}
+}
+
+// awaitUpstreamCaughtUp holds a read_only session's next message until
+// upstream has answered everything already forwarded, and reports false when
+// the upstream leg ended while it waited.
+//
+// The read-only pin is guarded after the fact by readOnlyPinLost, which reads
+// the ParameterStatus upstream sends ahead of the ReadyForQuery that ends the
+// statement that dropped it. A client that pipelines its next batch behind that
+// statement would already have it in the upstream's socket buffer by then, and
+// the backend runs it — in a transaction the pin no longer covers — whatever
+// dbbat does with the socket afterwards. Not forwarding it until the previous
+// batch is answered puts the tripwire ahead of it.
+//
+// COPY sub-protocol messages are never held: they belong to the statement in
+// flight. Neither is Terminate, which ends the session either way.
+func (s *Session) awaitUpstreamCaughtUp(msg pgproto3.FrontendMessage) bool {
+	if s.upstreamCaughtUp == nil || s.grant == nil || !s.grant.IsReadOnly() {
+		return true
+	}
+
+	switch msg.(type) {
+	case *pgproto3.CopyData, *pgproto3.CopyDone, *pgproto3.CopyFail, *pgproto3.Terminate:
+		return true
+	}
+
+	s.bookMu.Lock()
+	defer s.bookMu.Unlock()
+
+	for s.clientSyncEpoch > s.upstreamReadyEpoch && !s.upstreamRelayEnded {
+		s.upstreamCaughtUp.Wait()
+	}
+
+	return !s.upstreamRelayEnded
+}
+
+// noteUpstreamReady counts one relayed ReadyForQuery and wakes a client leg
+// waiting in awaitUpstreamCaughtUp.
+//
+// Callers hold bookMu (see proxyUpstreamToClient).
+func (s *Session) noteUpstreamReady() {
+	s.upstreamReadyEpoch++
+
+	if s.upstreamCaughtUp != nil {
+		s.upstreamCaughtUp.Broadcast()
+	}
+}
+
+// markUpstreamRelayEnded releases a client leg parked in awaitUpstreamCaughtUp
+// once no ReadyForQuery can come any more.
+func (s *Session) markUpstreamRelayEnded() {
+	if s.upstreamCaughtUp == nil {
+		return
+	}
+
+	s.bookMu.Lock()
+	defer s.bookMu.Unlock()
+
+	s.upstreamRelayEnded = true
+	s.upstreamCaughtUp.Broadcast()
 }
 
 // interceptClientMessage runs one client message through the gate for its
@@ -771,6 +844,11 @@ func (s *Session) interceptClientMessage(msg pgproto3.FrontendMessage) error {
 			s.clientSyncEpoch++
 
 			return nil
+		})
+	case *pgproto3.FunctionCall:
+		return s.book(func() error {
+			return s.refuse(fmt.Sprintf("-- fast-path function call, function OID %d", m.Function),
+				nil, ErrFunctionCallNotAllowed)
 		})
 	case *pgproto3.Parse:
 		return s.handleParse(m)
@@ -1203,6 +1281,8 @@ func (s *Session) ensureRowSink(query *pendingQuery) *shared.QuerySink {
 //
 //nolint:cyclop // Protocol handling with many message types inherently has high complexity
 func (s *Session) proxyUpstreamToClient() error {
+	defer s.markUpstreamRelayEnded()
+
 	var rowsAffected *int64
 	var queryError *string
 
@@ -1315,7 +1395,7 @@ func (s *Session) proxyUpstreamToClient() error {
 			// forwarded Sync or a forwarded simple Query. Counting it is what
 			// lets the reconcile below tell a finished batch from one still
 			// in flight.
-			s.upstreamReadyEpoch++
+			s.noteUpstreamReady()
 
 			// Query complete - log it
 			if s.currentQuery != nil {

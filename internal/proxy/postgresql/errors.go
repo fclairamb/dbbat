@@ -34,6 +34,11 @@ var (
 	// with nothing explaining why.
 	ErrStatementTimeoutManaged = errors.New("statement_timeout is managed by dbbat and cannot be " +
 		"changed for this session")
+	// ErrFunctionCallNotAllowed refuses the fast-path FunctionCall message. It
+	// names a function by OID and carries no statement text, so no control
+	// (read_only, approval holds, query logging) could read what it runs.
+	ErrFunctionCallNotAllowed = errors.New("fast-path function calls are not allowed through the proxy: " +
+		"call the function from a SQL statement instead")
 	ErrDDLNotPermitted  = errors.New("DDL operations not permitted: your access grant blocks schema modifications")
 	ErrCopyNotPermitted = errors.New("COPY not permitted: your access grant blocks COPY commands")
 
