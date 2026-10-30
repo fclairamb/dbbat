@@ -590,6 +590,29 @@ func ttcClr(data []byte) []byte {
 // 252 bytes (see longConnectString). Read in the wrong form that pair desyncs
 // the walk and the pairs after it are lost — the byte-anchored fallback below
 // is a safety net, not a reason to mis-decode.
+// parseAuthPhase2SpeedyKey returns the AUTH_PBKDF2_SPEEDY_KEY value of an AUTH
+// Phase 2 payload, or "" when the client sent none. Same scan and fallbacks as
+// parseAuthPhase2.
+func parseAuthPhase2SpeedyKey(tnsDataPayload []byte, bigChunks bool) string {
+	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
+		return ""
+	}
+
+	payload := tnsDataPayload[ttcDataFlagsSize+2:]
+
+	for _, p := range scanTTCKeyValPairs(payload, bigChunks) {
+		if strings.EqualFold(p.Key, pbkdf2SpeedyKeyLabel) {
+			return p.Value
+		}
+	}
+
+	if payloadUsesWideKVEncoding(payload) {
+		return findKVByKeyBytesWide(payload, []byte(pbkdf2SpeedyKeyLabel), bigChunks)
+	}
+
+	return findKVByKeyBytes(payload, []byte(pbkdf2SpeedyKeyLabel), bigChunks)
+}
+
 func parseAuthPhase2(tnsDataPayload []byte, bigChunks bool) (string, string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
 		return "", "", ErrAuthPhase2TooShort
