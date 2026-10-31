@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.2](https://github.com/fclairamb/dbbat/compare/v0.31.1...v0.31.2) (2026-10-31)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/jackc/pgx/v5 to v5.12.0 ([#457](https://github.com/fclairamb/dbbat/issues/457)) ([c7b1104](https://github.com/fclairamb/dbbat/commit/c7b1104fcb09beb8b16ef88969cbd5a6d640f529))
+* **deps:** update module github.com/slack-go/slack to v0.33.0 ([#455](https://github.com/fclairamb/dbbat/issues/455)) ([d40bd1c](https://github.com/fclairamb/dbbat/commit/d40bd1c5e74328acfe86e0138b85c7944ed63141))
+
 ## [0.31.1](https://github.com/fclairamb/dbbat/compare/v0.31.0...v0.31.1) (2026-10-30)
 
 
