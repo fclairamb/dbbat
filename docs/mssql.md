@@ -700,7 +700,11 @@ SQL Server has no session-level read-only mode, so there is no server-side pin
 as there is on PostgreSQL and MySQL/MariaDB. `ApplicationIntent=ReadOnly` only
 routes to a readable secondary when an availability group exists, and a plain
 instance ignores it. `read_only` is therefore the text classification alone
-(`shared.ValidateQuery`, writing CTEs included). `EXEC <proc>` is **not**
+(`shared.ValidateQuery`, writing CTEs included), applied to **every** statement
+of the batch: a batch needs no separator, so `shared.ValidateMSSQLBatch` scans
+the whole text for the reserved write and DDL keywords outside literals, quoted
+and bracketed identifiers, the way the `USE` scan does (`MERGE JOIN` /
+`MERGE UNION` hints excepted). `EXEC <proc>` is **not**
 refused under `read_only`: drivers and tools send `sp_reset_connection`,
 `sp_executesql` wrappers of plain reads and `sp_describe_first_result_set`, and
 the RPC path cannot tell those from a procedure that writes. A procedure or a
