@@ -377,6 +377,11 @@ func (s *session) checkStatement(sql string) error {
 		return err
 	}
 
+	// ValidateQuery reads the batch's first keyword; this reads the rest of it.
+	if err := shared.ValidateMSSQLBatch(sql, s.grant); err != nil {
+		return err
+	}
+
 	// Ahead of the control below rather than among them: a database switch is a
 	// scope question, not a permission one, so it is refused under a full-write
 	// grant too.
