@@ -1,9 +1,13 @@
 package api
 
 import (
+	"bytes"
+	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -102,4 +106,63 @@ func TestNotifyChannelKeys(t *testing.T) {
 
 	s := &Server{config: &config.Config{SlackNotify: config.SlackNotifyConfig{Channels: "b=#b,a=#a"}}}
 	require.Equal(t, []string{"a", "b"}, s.notifyChannelKeys())
+}
+
+// TestHandleGetInstance_NotifyChannels: GET /instance lists the configured
+// Slack channel keys (sorted, never the channel names) for any caller.
+func TestHandleGetInstance_NotifyChannels(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	server.config = &config.Config{
+		RunMode:     "test",
+		SlackNotify: config.SlackNotifyConfig{Channels: "prod=#dbbat-prod,nonprod=#dbbat-nonprod"},
+	}
+
+	createTestUser(t, dataStore, "conn-nchi", "connpass123", []string{store.RoleConnector})
+	token := loginUser(t, server, "conn-nchi", "connpass123")
+
+	resp := getInstance(t, setupInstanceRouter(server), token)
+	require.Equal(t, []any{"nonprod", "prod"}, resp["notify_channels"])
+	require.NotContains(t, bytes.NewBufferString(fmt.Sprint(resp)).String(), "#dbbat-prod")
+}
+
+// TestWarnUnknownNotifyChannels: one WARN per live definition naming a key
+// the config no longer has, none for nil, "none" or a configured key, and it
+// never fails.
+func TestWarnUnknownNotifyChannels(t *testing.T) {
+	t.Parallel()
+
+	_, dataStore := setupTestServer(t)
+	ctx := context.Background()
+
+	creator := createTestUser(t, dataStore, "admin-wnc", "adminpass123", []string{store.RoleAdmin})
+
+	create := func(slug string, channel *string) {
+		t.Helper()
+
+		_, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+			Name: "Warn " + slug, Slug: slug, DurationSeconds: 3600, NotifyChannel: channel, CreatedBy: creator.UID,
+		})
+		require.NoError(t, err)
+	}
+	str := func(s string) *string { return &s }
+
+	create("wnc-removed", str("removed"))
+	create("wnc-nil", nil)
+	create("wnc-none", str("none"))
+	create("wnc-prod", str("prod"))
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	warnUnknownNotifyChannels(ctx, dataStore, config.SlackNotifyConfig{Channels: "prod=#dbbat-prod"}, logger)
+
+	out := buf.String()
+	require.Equal(t, 1, strings.Count(out, "definition=wnc-removed"), out)
+	require.Contains(t, out, "notify_channel=removed")
+
+	for _, slug := range []string{"wnc-nil", "wnc-none", "wnc-prod"} {
+		require.NotContains(t, out, "definition="+slug, out)
+	}
 }
