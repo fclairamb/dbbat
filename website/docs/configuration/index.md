@@ -556,7 +556,8 @@ required, and the approval gets its own audit trail tagged `via: auto_approve`
 | Variable | Description |
 |----------|-------------|
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Bot user OAuth token (`xoxb-…`). Empty disables notifications. |
-| `DBB_SLACK_NOTIFY_CHANNEL` | Channel id or `#name` to post to (default `#dbbat`). Required when the bot token is set. |
+| `DBB_SLACK_NOTIFY_CHANNEL` | Default channel id or `#name` to post to (default `#dbbat`). Required when the bot token is set. |
+| `DBB_SLACK_NOTIFY_CHANNELS` | Optional named channels, as comma-separated `key=channel` pairs (`prod=#dbbat-prod,nonprod=#dbbat-nonprod`). A grant definition picks one with its Slack channel setting (`notify_channel`); `none` posts nothing for that definition. Keys match `[a-z0-9][a-z0-9_-]*`. |
 | `DBB_PUBLIC_URL` | Externally reachable base URL, used for the "Review in dbbat" deep-link. Required when the bot token is set, unless the `public.web_ui_url` parameter is set (see [Global Parameters](#global-parameters)) — that parameter takes precedence when both are present. |
 | `DBB_SLACK_SIGNING_SECRET` | App signing secret. When set, notification messages carry **✅ Approve / ❌ Deny** buttons and DBBat serves `POST /api/v1/slack/interactions` to receive clicks. Empty keeps the link-through-UI flow (no buttons, no inbound endpoint). Requires the bot token — setting it without one fails at startup. The legacy name `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted as an alias; if both are set, the canonical `DBB_SLACK_SIGNING_SECRET` wins. |
 | `DBB_SLACK_NOTIFY_APP_TOKEN` | App-level token (`xapp-…`, scope `connections:write`). When set, DBBat opens an outbound **Socket Mode** connection and receives Approve/Deny clicks over it — no inbound reachability or signing secret needed. Renders the buttons on its own. Requires the bot token — setting it without one fails at startup. |
@@ -619,6 +620,24 @@ tagging, in-place message update, thread reply) is identical to the HTTP path �
 only the transport differs. Socket Mode and the HTTP endpoint can both be
 configured; at the Slack app level, enabling Socket Mode makes Slack deliver over
 the socket and ignore the request URL.
+
+#### Routing notifications per grant definition (optional)
+
+By default every notification goes to `DBB_SLACK_NOTIFY_CHANNEL`. To keep
+auto-approved, low-risk grants from burying the requests a human has to approve,
+name more channels and pick one per grant definition:
+
+```
+DBB_SLACK_NOTIFY_CHANNELS=prod=#dbbat-prod,nonprod=#dbbat-nonprod
+```
+
+A definition's Slack channel (`notify_channel` in the API) is then empty (the
+default channel), `none` (post nothing) or one of those keys. Grant requests,
+terminations, byte notices and approval holds all follow it. An approval hold on a
+`none` definition still goes to the default channel, so a held statement is never
+parked unseen. Follow-ups on a request stay in the channel it was first posted
+in. If a key is removed from the configuration, definitions that still name it
+use the default channel and a warning is logged at startup.
 
 #### Session termination notifications (optional)
 

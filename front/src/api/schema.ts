@@ -3021,6 +3021,8 @@ export interface components {
              *     the notice off for this definition; a positive value is the step
              *     in bytes.
              */
+            /** @description Slack channel key for this definition's notifications: `null` = default channel, `none` = post nothing, else a key of `DBB_SLACK_NOTIFY_CHANNELS`. */
+            notify_channel?: string | null;
             notify_bytes_step?: number | null;
             /**
              * Format: int32
@@ -3162,6 +3164,8 @@ export interface components {
              *     the notice off for this definition; a positive value is the step
              *     in bytes.
              */
+            /** @description Slack channel key for this definition's notifications: `null` = default channel, `none` = post nothing, else a key of `DBB_SLACK_NOTIFY_CHANNELS`. */
+            notify_channel?: string | null;
             notify_bytes_step?: number | null;
             /**
              * Format: int32
@@ -3278,9 +3282,13 @@ export interface components {
              *     the notice off for this definition; a positive value is the step
              *     in bytes.
              */
+            /** @description Slack channel key for this definition's notifications: `null` = default channel, `none` = post nothing, else a key of `DBB_SLACK_NOTIFY_CHANNELS`. */
+            notify_channel?: string | null;
             notify_bytes_step?: number | null;
             /** @description When true, resets notify_bytes_step to null, i.e. back to inheriting `DBB_SLACK_NOTIFY_BYTES_STEP`. */
             clear_notify_bytes_step?: boolean;
+            /** @description When true, resets notify_channel to null, i.e. back to the default channel. */
+            clear_notify_channel?: boolean;
             /** Format: int32 */
             priority?: number | null;
             /** @description When true, resets priority to auto (tier derived from controls). */
@@ -4323,6 +4331,8 @@ export interface components {
             resolved: components["schemas"]["ResolvedEndpoints"];
             resolved_limits: components["schemas"]["ResolvedInstanceLimits"];
             resolved_tagging: components["schemas"]["ResolvedInstanceTagging"];
+            /** @description Keys of `DBB_SLACK_NOTIFY_CHANNELS` a definition's `notify_channel` may name, besides `none`. */
+            notify_channels?: string[];
             /** @description Only present for admin callers */
             tagging?: components["schemas"]["InstanceTagging"];
         };
