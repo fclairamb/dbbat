@@ -3013,6 +3013,16 @@ export interface components {
              */
             statement_timeout_seconds?: number | null;
             /**
+             * @description Slack channel for this definition's notifications (grant requests,
+             *     terminations, byte notices, approval holds). `null`/omitted uses
+             *     the default channel (`DBB_SLACK_NOTIFY_CHANNEL`); `none` posts
+             *     nothing (approval holds still go to the default channel, so a held
+             *     statement is never parked unseen); any other value must be a key
+             *     of `DBB_SLACK_NOTIFY_CHANNELS` (listed in `GET /instance`
+             *     `notify_channels`), else 400.
+             */
+            notify_channel?: string | null;
+            /**
              * Format: int64
              * @description Byte soft limit for grants issued from this definition: a Slack
              *     notice each time a grant's cumulative bytes cross another multiple
@@ -3021,8 +3031,6 @@ export interface components {
              *     the notice off for this definition; a positive value is the step
              *     in bytes.
              */
-            /** @description Slack channel key for this definition's notifications: `null` = default channel, `none` = post nothing, else a key of `DBB_SLACK_NOTIFY_CHANNELS`. */
-            notify_channel?: string | null;
             notify_bytes_step?: number | null;
             /**
              * Format: int32
@@ -3156,6 +3164,16 @@ export interface components {
              */
             statement_timeout_seconds?: number | null;
             /**
+             * @description Slack channel for this definition's notifications (grant requests,
+             *     terminations, byte notices, approval holds). `null`/omitted uses
+             *     the default channel (`DBB_SLACK_NOTIFY_CHANNEL`); `none` posts
+             *     nothing (approval holds still go to the default channel, so a held
+             *     statement is never parked unseen); any other value must be a key
+             *     of `DBB_SLACK_NOTIFY_CHANNELS` (listed in `GET /instance`
+             *     `notify_channels`), else 400.
+             */
+            notify_channel?: string | null;
+            /**
              * Format: int64
              * @description Byte soft limit for grants issued from this definition: a Slack
              *     notice each time a grant's cumulative bytes cross another multiple
@@ -3164,8 +3182,6 @@ export interface components {
              *     the notice off for this definition; a positive value is the step
              *     in bytes.
              */
-            /** @description Slack channel key for this definition's notifications: `null` = default channel, `none` = post nothing, else a key of `DBB_SLACK_NOTIFY_CHANNELS`. */
-            notify_channel?: string | null;
             notify_bytes_step?: number | null;
             /**
              * Format: int32
@@ -3274,6 +3290,16 @@ export interface components {
             /** @description When true, resets statement_timeout_seconds to null, i.e. back to inheriting the instance-wide default. Needed because `null` and `0` mean different things here, so sending `null` cannot express it. */
             clear_statement_timeout_seconds?: boolean;
             /**
+             * @description Slack channel for this definition's notifications (grant requests,
+             *     terminations, byte notices, approval holds). `null`/omitted uses
+             *     the default channel (`DBB_SLACK_NOTIFY_CHANNEL`); `none` posts
+             *     nothing (approval holds still go to the default channel, so a held
+             *     statement is never parked unseen); any other value must be a key
+             *     of `DBB_SLACK_NOTIFY_CHANNELS` (listed in `GET /instance`
+             *     `notify_channels`), else 400.
+             */
+            notify_channel?: string | null;
+            /**
              * Format: int64
              * @description Byte soft limit for grants issued from this definition: a Slack
              *     notice each time a grant's cumulative bytes cross another multiple
@@ -3282,8 +3308,6 @@ export interface components {
              *     the notice off for this definition; a positive value is the step
              *     in bytes.
              */
-            /** @description Slack channel key for this definition's notifications: `null` = default channel, `none` = post nothing, else a key of `DBB_SLACK_NOTIFY_CHANNELS`. */
-            notify_channel?: string | null;
             notify_bytes_step?: number | null;
             /** @description When true, resets notify_bytes_step to null, i.e. back to inheriting `DBB_SLACK_NOTIFY_BYTES_STEP`. */
             clear_notify_bytes_step?: boolean;
@@ -4331,7 +4355,7 @@ export interface components {
             resolved: components["schemas"]["ResolvedEndpoints"];
             resolved_limits: components["schemas"]["ResolvedInstanceLimits"];
             resolved_tagging: components["schemas"]["ResolvedInstanceTagging"];
-            /** @description Keys of `DBB_SLACK_NOTIFY_CHANNELS` a definition's `notify_channel` may name, besides `none`. */
+            /** @description Keys of `DBB_SLACK_NOTIFY_CHANNELS` a grant definition's `notify_channel` may name, besides the reserved `none`. */
             notify_channels?: string[];
             /** @description Only present for admin callers */
             tagging?: components["schemas"]["InstanceTagging"];
