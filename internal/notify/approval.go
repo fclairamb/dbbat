@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/slack-go/slack"
+
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // Slack interaction action IDs carried by the approval Approve / Deny buttons.
@@ -25,11 +27,14 @@ const (
 type ApprovalHold struct {
 	QueryUID      uuid.UUID
 	ConnectionUID uuid.UUID
-	Username      string
-	DatabaseName  string
-	SQL           string
-	Pattern       string
-	StartedAt     time.Time
+	// Definition is the grant definition the held statement runs under; it
+	// picks the channel. Nil uses the default channel.
+	Definition   *store.GrantDefinition
+	Username     string
+	DatabaseName string
+	SQL          string
+	Pattern      string
+	StartedAt    time.Time
 }
 
 // slackPoster is the escalator's entire outbound surface. It takes rendered
@@ -72,8 +77,11 @@ func (c clientPoster) updateBlocks(ctx context.Context, channel, ts string, bloc
 // replica running the parked session — the session is pinned to one pod
 // anyway, so no election is needed.
 type ApprovalEscalator struct {
-	poster      slackPoster
-	channel     string
+	poster  slackPoster
+	channel string
+	// channelFor, when set, picks the channel from a hold's definition. Nil
+	// means every hold goes to channel.
+	channelFor  func(context.Context, *store.GrantDefinition) string
 	publicURL   string
 	interactive bool
 	delay       time.Duration
@@ -120,10 +128,13 @@ func NewApprovalEscalator(notifier *SlackNotifier, delay time.Duration, includeS
 		return nil
 	}
 
-	return newApprovalEscalator(
+	e := newApprovalEscalator(
 		clientPoster{notifier.client}, notifier.channel, notifier.publicURL, notifier.Interactive(),
 		delay, includeSQL, log,
 	)
+	e.channelFor = notifier.holdChannelFor
+
+	return e
 }
 
 // newApprovalEscalator is the injectable constructor behind
@@ -173,6 +184,15 @@ func (e *ApprovalEscalator) Schedule(ctx context.Context, hold ApprovalHold) {
 	esc.timer = time.AfterFunc(e.delay, func() { e.fire(postCtx, hold.QueryUID) })
 }
 
+// holdChannel is the channel a hold is posted to.
+func (e *ApprovalEscalator) holdChannel(ctx context.Context, hold ApprovalHold) string {
+	if e.channelFor == nil {
+		return e.channel
+	}
+
+	return e.channelFor(ctx, hold.Definition)
+}
+
 // fire posts the escalation message once the delay elapses without a decision.
 func (e *ApprovalEscalator) fire(ctx context.Context, queryUID uuid.UUID) {
 	e.mu.Lock()
@@ -189,7 +209,7 @@ func (e *ApprovalEscalator) fire(ctx context.Context, queryUID uuid.UUID) {
 
 	blocks := e.buildHoldBlocks(esc.hold, "", "", "")
 
-	channel, ts, err := e.poster.postBlocks(ctx, e.channel, blocks)
+	channel, ts, err := e.poster.postBlocks(ctx, e.holdChannel(ctx, esc.hold), blocks)
 	if err != nil {
 		e.mu.Lock()
 		esc.inFlight = false

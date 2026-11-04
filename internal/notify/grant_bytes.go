@@ -31,7 +31,12 @@ func (n *SlackNotifier) NotifyGrantBytes(ctx context.Context, ev store.GrantByte
 		return
 	}
 
-	if _, _, err := n.client.PostMessageContext(ctx, n.channel, slack.MsgOptionText(text, false)); err != nil {
+	channel, post := n.channelFor(ctx, ev.Grant.Definition)
+	if !post {
+		return
+	}
+
+	if _, _, err := n.client.PostMessageContext(ctx, channel, slack.MsgOptionText(text, false)); err != nil {
 		n.log.WarnContext(ctx, "slack grant bytes post failed", slog.Any("error", err))
 	}
 }

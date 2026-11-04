@@ -195,6 +195,10 @@ type instanceInfoResponse struct {
 	Resolved        instanceResolvedInfo    `json:"resolved"`
 	ResolvedLimits  instanceResolvedLimits  `json:"resolved_limits"`
 	ResolvedTagging instanceResolvedTagging `json:"resolved_tagging"`
+	// NotifyChannels are the keys of DBB_SLACK_NOTIFY_CHANNELS (never the
+	// channel ids) a grant definition's notify_channel can name, besides the
+	// reserved "none".
+	NotifyChannels []string `json:"notify_channels"`
 }
 
 // resolveInstanceLimits turns the stored parameter plus the environment
@@ -328,6 +332,7 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 		},
 		ResolvedLimits:  resolveInstanceLimits(limits, s.config),
 		ResolvedTagging: resolveInstanceTagging(tagging, s.config),
+		NotifyChannels:  s.notifyChannelKeys(),
 	}
 
 	if isAdmin {

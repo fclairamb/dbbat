@@ -79,6 +79,7 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		MaxBytesTransferred:     def.MaxBytesTransferred,
 		StatementTimeoutSeconds: def.StatementTimeoutSeconds,
 		NotifyBytesStep:         def.NotifyBytesStep,
+		NotifyChannel:           def.NotifyChannel,
 		Priority:                def.Priority,
 		AutoApprove:             def.AutoApprove,
 		UserGroupUIDs:           groupUIDs,
@@ -377,6 +378,7 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 			MaxBytesTransferred:     def.MaxBytesTransferred,
 			StatementTimeoutSeconds: def.StatementTimeoutSeconds,
 			NotifyBytesStep:         def.NotifyBytesStep,
+			NotifyChannel:           def.NotifyChannel,
 			Priority:                def.Priority,
 			AutoApprove:             def.AutoApprove,
 			UserGroupUIDs:           def.UserGroupUIDs,
@@ -417,12 +419,21 @@ func sameGrantDefinitionShape(a, b *GrantDefinition) bool {
 		equalInt64Ptr(a.MaxBytesTransferred, b.MaxBytesTransferred) &&
 		equalInt64Ptr(a.StatementTimeoutSeconds, b.StatementTimeoutSeconds) &&
 		equalInt64Ptr(a.NotifyBytesStep, b.NotifyBytesStep) &&
+		equalStringPtr(a.NotifyChannel, b.NotifyChannel) &&
 		equalInt16Ptr(a.Priority, b.Priority) &&
 		slices.Equal(a.UserGroupUIDs, b.UserGroupUIDs) &&
 		slices.Equal(a.ServerGroupUIDs, b.ServerGroupUIDs) &&
 		slices.Equal(a.ApprovalPatterns, b.ApprovalPatterns) &&
 		slices.Equal(a.SampleQueries, b.SampleQueries) &&
 		slices.Equal(a.ApproverUserGroupUIDs, b.ApproverUserGroupUIDs)
+}
+
+func equalStringPtr(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return *a == *b
 }
 
 func equalInt64Ptr(a, b *int64) bool {

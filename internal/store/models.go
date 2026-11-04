@@ -1094,6 +1094,10 @@ type GrantDefinition struct {
 	//   0   — no notice for this definition, overriding the instance default.
 	//   > 0 — the step, in bytes.
 	NotifyBytesStep *int64 `bun:"notify_bytes_step" json:"notify_bytes_step"`
+	// NotifyChannel picks the Slack channel this definition's notifications
+	// go to: nil — the instance default channel, "none" — post nothing,
+	// anything else — a key of DBB_SLACK_NOTIFY_CHANNELS.
+	NotifyChannel *string `bun:"notify_channel" json:"notify_channel"`
 	// Priority, when non-nil, is copied verbatim onto every grant
 	// materialized from this definition, pinning it above or below the tier
 	// its controls would otherwise earn. nil — the default — means "compute

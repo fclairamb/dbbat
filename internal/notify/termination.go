@@ -38,8 +38,9 @@ type terminationCoalesceKey struct {
 // the timer that closes the window and posts the follow-up. Per-replica —
 // like ApprovalEscalator, that is an accepted trade for a signal this cheap.
 type terminationCoalesce struct {
-	timer *time.Timer
-	extra int
+	timer   *time.Timer
+	extra   int
+	channel string
 }
 
 // NotifyTermination posts a Slack message for a dbbat-initiated termination.
@@ -54,6 +55,16 @@ type terminationCoalesce struct {
 // never the session teardown that triggered it.
 func (n *SlackNotifier) NotifyTermination(ctx context.Context, ev store.TerminationEvent) {
 	if n == nil {
+		return
+	}
+
+	var def *store.GrantDefinition
+	if ev.Grant != nil {
+		def = ev.Grant.Definition
+	}
+
+	channel, post := n.channelFor(ctx, def)
+	if !post {
 		return
 	}
 
@@ -78,12 +89,12 @@ func (n *SlackNotifier) NotifyTermination(ctx context.Context, ev store.Terminat
 	// Claimed before the post goes out (and before we hold the lock again):
 	// a termination arriving while chat.postMessage is on the wire must land
 	// as a coalesced "+1", not a second top-level post.
-	n.terminationPending[key] = &terminationCoalesce{}
+	n.terminationPending[key] = &terminationCoalesce{channel: channel}
 	n.terminationMu.Unlock()
 
 	blocks := buildTerminationBlocks(ev, n.publicURL, n.terminationSQL)
 
-	if _, _, err := n.client.PostMessageContext(ctx, n.channel, slack.MsgOptionBlocks(blocks...)); err != nil {
+	if _, _, err := n.client.PostMessageContext(ctx, channel, slack.MsgOptionBlocks(blocks...)); err != nil {
 		n.log.WarnContext(ctx, "slack termination post failed", slog.Any("error", err))
 	}
 
@@ -121,7 +132,7 @@ func (n *SlackNotifier) flushTerminationCoalesce(ctx context.Context, key termin
 
 	text := fmt.Sprintf("+%d more in the last %s", pending.extra, terminationCoalesceWindow)
 
-	if _, _, err := n.client.PostMessageContext(ctx, n.channel, slack.MsgOptionText(text, false)); err != nil {
+	if _, _, err := n.client.PostMessageContext(ctx, pending.channel, slack.MsgOptionText(text, false)); err != nil {
 		n.log.WarnContext(ctx, "slack termination coalesce post failed", slog.Any("error", err))
 	}
 }

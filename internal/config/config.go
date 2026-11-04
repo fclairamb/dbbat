@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -62,6 +63,10 @@ var (
 	// their issuer would get no override, no error, and auto-provisioning still
 	// on for everyone.
 	ErrAuthProviderUnknown = errors.New("unknown OAuth provider in a per-provider auto-provisioning override")
+
+	// ErrSlackNotifyChannelsInvalid is returned when DBB_SLACK_NOTIFY_CHANNELS
+	// cannot be parsed into a key -> channel map.
+	ErrSlackNotifyChannelsInvalid = errors.New("DBB_SLACK_NOTIFY_CHANNELS is malformed")
 
 	// ErrSlackNotifyBytesStepInvalid is returned when DBB_SLACK_NOTIFY_BYTES_STEP
 	// is not a byte count (or is negative). Silently reading it as 0 would turn
@@ -655,6 +660,48 @@ func splitList(s string) []string {
 	return out
 }
 
+// SlackNotifyChannelNone is the reserved notify_channel value that makes a
+// grant definition post nothing to Slack.
+const SlackNotifyChannelNone = "none"
+
+var slackChannelKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// ParseChannels turns "prod=#dbbat-prod,nonprod=#dbbat-nonprod" into
+// {"prod": "#dbbat-prod", "nonprod": "#dbbat-nonprod"}. Keys must match
+// ^[a-z0-9][a-z0-9_-]*$, values must be non-empty and the key "none" is
+// reserved. An empty setting yields an empty map; anything malformed is an
+// error so a typo stops the process instead of silently misrouting.
+func (c SlackNotifyConfig) ParseChannels() (map[string]string, error) {
+	channels := make(map[string]string)
+
+	for _, pair := range strings.Split(c.Channels, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		key, channel, found := strings.Cut(pair, "=")
+		key = strings.TrimSpace(key)
+		channel = strings.TrimSpace(channel)
+
+		switch {
+		case !found:
+			return nil, fmt.Errorf("%w: %q is not a key=channel pair", ErrSlackNotifyChannelsInvalid, pair)
+		case !slackChannelKeyPattern.MatchString(key):
+			return nil, fmt.Errorf("%w: key %q must match %s",
+				ErrSlackNotifyChannelsInvalid, key, slackChannelKeyPattern)
+		case key == SlackNotifyChannelNone:
+			return nil, fmt.Errorf("%w: key %q is reserved", ErrSlackNotifyChannelsInvalid, key)
+		case channel == "":
+			return nil, fmt.Errorf("%w: key %q has an empty channel", ErrSlackNotifyChannelsInvalid, key)
+		}
+
+		channels[key] = channel
+	}
+
+	return channels, nil
+}
+
 // SlackNotifyConfig configures outbound Slack notifications for grant
 // request events. Distinct from SlackAuthConfig (login OIDC) so deployments
 // can enable one without the other.
@@ -665,6 +712,11 @@ type SlackNotifyConfig struct {
 	// Channel is the Slack channel id or name (e.g. "#dbbat") where
 	// notifications are posted. Defaults to "#dbbat".
 	Channel string `koanf:"channel"`
+	// Channels names additional channels a grant definition can route its
+	// notifications to, as comma-separated key=channel pairs, e.g.
+	// "prod=#dbbat-prod,nonprod=#dbbat-nonprod". Channel stays the default
+	// for a definition that names none. See ParseChannels.
+	Channels string `koanf:"channels"`
 	// SigningSecret is the Slack app signing secret used to verify inbound
 	// interaction callbacks (Approve/Deny button clicks). Empty disables
 	// interactivity: messages carry no buttons and the inbound endpoint is
@@ -1548,6 +1600,10 @@ func validate(cfg *Config) error {
 	// Fail here rather than in the proxy: a typo'd TLS ceiling must stop the
 	// process, not silently leave the listener on the default.
 	if _, err := cfg.MSSQL.ResolveTLSMaxVersion(); err != nil {
+		return err
+	}
+
+	if _, err := cfg.SlackNotify.ParseChannels(); err != nil {
 		return err
 	}
 

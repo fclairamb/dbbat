@@ -5557,6 +5557,17 @@ components:
             (`limits.statement_timeout`, else `DBB_STATEMENT_TIMEOUT`); `0`
             means explicitly no limit, overriding that default; a positive
             value is the limit in seconds.
+        notify_channel:
+          type: string
+          nullable: true
+          description: |
+            Slack channel for this definition's notifications (grant requests,
+            terminations, byte notices, approval holds). `null`/omitted uses
+            the default channel (`DBB_SLACK_NOTIFY_CHANNEL`); `none` posts
+            nothing (approval holds still go to the default channel, so a held
+            statement is never parked unseen); any other value must be a key
+            of `DBB_SLACK_NOTIFY_CHANNELS` (listed in `GET /instance`
+            `notify_channels`), else 400.
         notify_bytes_step:
           type: integer
           format: int64
@@ -5756,6 +5767,17 @@ components:
             (`limits.statement_timeout`, else `DBB_STATEMENT_TIMEOUT`); `0`
             means explicitly no limit, overriding that default; a positive
             value is the limit in seconds.
+        notify_channel:
+          type: string
+          nullable: true
+          description: |
+            Slack channel for this definition's notifications (grant requests,
+            terminations, byte notices, approval holds). `null`/omitted uses
+            the default channel (`DBB_SLACK_NOTIFY_CHANNEL`); `none` posts
+            nothing (approval holds still go to the default channel, so a held
+            statement is never parked unseen); any other value must be a key
+            of `DBB_SLACK_NOTIFY_CHANNELS` (listed in `GET /instance`
+            `notify_channels`), else 400.
         notify_bytes_step:
           type: integer
           format: int64
@@ -5928,6 +5950,17 @@ components:
             When true, resets statement_timeout_seconds to null, i.e. back to
             inheriting the instance-wide default. Needed because `null` and `0`
             mean different things here, so sending `null` cannot express it.
+        notify_channel:
+          type: string
+          nullable: true
+          description: |
+            Slack channel for this definition's notifications (grant requests,
+            terminations, byte notices, approval holds). `null`/omitted uses
+            the default channel (`DBB_SLACK_NOTIFY_CHANNEL`); `none` posts
+            nothing (approval holds still go to the default channel, so a held
+            statement is never parked unseen); any other value must be a key
+            of `DBB_SLACK_NOTIFY_CHANNELS` (listed in `GET /instance`
+            `notify_channels`), else 400.
         notify_bytes_step:
           type: integer
           format: int64
@@ -5945,6 +5978,11 @@ components:
           description: >-
             When true, resets notify_bytes_step to null, i.e. back to
             inheriting `DBB_SLACK_NOTIFY_BYTES_STEP`.
+        clear_notify_channel:
+          type: boolean
+          description: >-
+            When true, resets notify_channel to null, i.e. back to the default
+            channel.
         priority:
           type: integer
           format: int32
@@ -7539,6 +7577,13 @@ components:
           $ref: '#/components/schemas/ResolvedInstanceLimits'
         resolved_tagging:
           $ref: '#/components/schemas/ResolvedInstanceTagging'
+        notify_channels:
+          type: array
+          items:
+            type: string
+          description: >-
+            Keys of `DBB_SLACK_NOTIFY_CHANNELS` a grant definition's
+            `notify_channel` may name, besides the reserved `none`.
         tagging:
           $ref: '#/components/schemas/InstanceTagging'
           nullable: true
