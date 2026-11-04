@@ -93,6 +93,11 @@ The report is right: there is no routing at all today.
    approval hold on that definition would post nothing; holds need a human, so for holds `none`
    should fall back to the default channel rather than silently park a statement nobody sees.
 
+## Resolved open questions
+
+1. Use the reserved key `none` to post nothing for a definition. An empty string is not a valid value. (autopilot: recommended answer)
+2. Terminations, bytes-step notices and approval holds all follow the definition's channel. With `none`, approval holds fall back to the default channel, so a held statement is never parked unseen; terminations and bytes-step notices post nothing. (autopilot: recommended answer)
+
 ## Closing the issue
 
 This spec closes #464. The implementing PR body **must** carry a `Closes #464` line so the
