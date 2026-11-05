@@ -679,6 +679,25 @@ func (s *session) recordDisconnect(ctx context.Context) {
 		return
 	}
 
+	termination := s.recordedTermination()
+
+	// The statement that was in flight never got a response, so nothing else
+	// will ever complete its row: say why here, before the session record
+	// closes. A client that sends a statement and hangs up straight away still
+	// had it forwarded and executed upstream, so dropping it would leave a
+	// statement that may have changed data out of the query history and the
+	// per-connection chain. First, so the bytes streamed for it are charged to
+	// it rather than to the bytes-only flush below. Synchronous, so the row is
+	// in the chain before CloseConnectionWithReason seals it.
+	if pending := s.takePending(); pending != nil {
+		errText := errClientDisconnectedMidResponse
+		if termination.Set() {
+			errText = termination.Message()
+		}
+
+		s.recordQuerySync(ctx, pending, queryOutcome{queryError: &errText})
+	}
+
 	// Flush any client-side bytes not yet attributed to a statement, so a
 	// session's connection total is honest even when it ends mid-response.
 	if delta := s.takeByteDelta(); delta > 0 {
@@ -689,16 +708,7 @@ func (s *session) recordDisconnect(ctx context.Context) {
 		}
 	}
 
-	termination := s.recordedTermination()
 	if termination.Set() {
-		// The statement that was in flight never got a response, so nothing
-		// else will ever complete its row. Say why here, before the session
-		// record closes.
-		if pending := s.takePending(); pending != nil {
-			errText := termination.Message()
-			s.recordQuery(ctx, pending, queryOutcome{queryError: &errText})
-		}
-
 		// "terminated" before "closed": why, then that.
 		s.publisher.ConnectionWithReason(ctx, shared.ConnectionTerminated, termination.Reason)
 	}

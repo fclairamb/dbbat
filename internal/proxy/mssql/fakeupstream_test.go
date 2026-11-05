@@ -33,6 +33,9 @@ type fakeUpstream struct {
 	rejectLogin bool
 	// batchResponse is what it answers every post-login message with.
 	batchResponse []byte
+	// silent makes it record every post-login message and answer none, so a
+	// statement stays in flight for as long as the test wants.
+	silent bool
 
 	mu     sync.Mutex
 	logins []*Login7
@@ -202,7 +205,12 @@ func (f *fakeUpstream) serve(conn net.Conn) {
 			payload: payload,
 		})
 		response := f.batchResponse
+		silent := f.silent
 		f.mu.Unlock()
+
+		if silent {
+			continue
+		}
 
 		if err := pkt.WriteMessage(packetTypeReply, response); err != nil {
 			return
