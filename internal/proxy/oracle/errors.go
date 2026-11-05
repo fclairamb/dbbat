@@ -10,6 +10,7 @@ import (
 const (
 	ORA00028 uint16 = 28    // ORA-00028: your session has been killed (used for mid-stream grant-limit termination)
 	ORA01017 uint16 = 1017  // ORA-01017: invalid username/password; logon denied
+	ORA01031 uint16 = 1031  // ORA-01031: insufficient privileges (used for a refused logon AUTH_ALTER_SESSION)
 	ORA01045 uint16 = 1045  // ORA-01045: user lacks privilege; logon denied (used for "no active grant")
 	ORA12505 uint16 = 12505 // TNS:listener does not currently know of SID
 	ORA12514 uint16 = 12514 // TNS:listener does not currently know of service

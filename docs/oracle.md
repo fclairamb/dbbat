@@ -207,9 +207,10 @@ values out of the statement's own text.
 >   shape itself — `upstream_auth_client_wide.go`; the key is in the known set in
 >   `ttc_auth.go`). AUTH is not a statement-carrying op: it is func `0x03` with
 >   sub-ops `0x76` and `0x73`, the two rows the op table above lists as AUTH
->   Phase 1 and Phase 2. Those occurrences are an authentication attribute the
->   statement gate never sees — they were never gated and are not part of this
->   count.
+>   Phase 1 and Phase 2. Those occurrences are an authentication attribute, not
+>   part of this count — but the server runs that value as a statement while it
+>   establishes the session, so it is gated on its own path: see "Logon
+>   `AUTH_ALTER_SESSION`" below.
 > - go-ora's `UPDATE … SET name = …` read as `SET name = 'updated' WHERE id <=`.
 >   Same bypass, on an ordinary DML statement with no adversary involved.
 > - `SELECT 'YES' FROM USER_ROLE_PRIVS WHERE GRANTED_ROLE='DBA'` read as a
@@ -411,6 +412,32 @@ CONTAINER=PDB2` performs the same switch with `CONTAINER` in second position.
 `CURRENT_SCHEMA` stays allowed and is deliberately *not* caught: it moves
 unqualified name resolution, Oracle still evaluates privileges as the connected
 user, and a dbbat grant is scoped to a database rather than a schema.
+
+### Logon `AUTH_ALTER_SESSION`
+
+Every client sends an `ALTER SESSION` as a key/value of its AUTH Phase 2
+(`AUTH_ALTER_SESSION`: time zone and NLS settings in every recording — one
+statement, NUL-terminated, short or `0xFE`-chunked on thin clients, 4-byte
+declared length on OCI). dbbat forwards the client's Phase 2 with only the
+credentials swapped, and Oracle runs that value while it establishes the
+session, so it is a statement that never reaches the mid-session gate. It used
+to be forwarded unchecked, which let a client choose at logon what dbbat refuses
+mid-session — `CONTAINER` included.
+
+`gateLogonAlterSession` (`logon_alter_session.go`) now runs it, right before the
+Phase 2 is rewritten and sent upstream, through
+`shared.ValidateOracleLogonAlterSession`: the same `ValidateOracleQuery` a
+mid-session statement gets (the outright blocks on every grant, the parameter
+allowlist under `read_only`/`block_ddl`), plus a shape rule — one `ALTER
+SESSION` statement, no `;`, no embedded NUL. A statement an approval pattern
+would hold is refused too: a login cannot be parked on a human. The scan is
+fail-closed: every occurrence of the key name in any letter case is checked, each
+must sit on a key boundary, and its declared length must agree with the decoded
+value. A refusal ends the login with ORA-01031 naming the reason, and the
+client's Phase 2 never leaves dbbat. What was applied is written as the
+connection's first `queries` rows, so the session's starting state is on file.
+When dbbat falls back to its own synthetic Phase 2, the client's value is not
+sent and nothing is recorded.
 
 An allowed `ALTER SESSION` is **still recorded** in `/queries` like any other
 statement; this changes classification, not visibility. The five statements the

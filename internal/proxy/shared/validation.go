@@ -16,7 +16,11 @@ var (
 	ErrDDLBlocked            = errors.New("DDL operations not permitted: your access grant blocks schema modifications")
 	ErrPasswordChangeBlocked = errors.New("password modification is not allowed through the proxy")
 	ErrOraclePatternBlocked  = errors.New("blocked: this Oracle operation is not permitted through the proxy")
-	ErrMySQLPatternBlocked   = errors.New("blocked: this MySQL operation is not permitted through the proxy")
+	// ErrOracleLogonAlterSessionShape — the session settings an Oracle client
+	// sends at logon (AUTH_ALTER_SESSION) are not one plain ALTER SESSION
+	// statement. See ValidateOracleLogonAlterSession.
+	ErrOracleLogonAlterSessionShape = errors.New("only a single ALTER SESSION statement is accepted at logon")
+	ErrMySQLPatternBlocked          = errors.New("blocked: this MySQL operation is not permitted through the proxy")
 	// ErrReadOnlyProcedureCall — a read_only grant met a statement that runs
 	// code dbbat cannot see: a stored procedure call (`CALL`), or a PostgreSQL
 	// `DO` block. What the code does is in the database, not in the statement,
@@ -687,6 +691,31 @@ func ValidateOracleQuery(sql string, grant *store.Grant) error {
 	return ValidateDynamicSQL(dyn, readable, grant, func(text string) error {
 		return validateOracleStatement(matchableSQL(text, syntaxStandard), grant)
 	})
+}
+
+// oracleLogonAlterSessionPrefix is what a logon AUTH_ALTER_SESSION value must
+// open with, matched on the comment-stripped scratch copy.
+var oracleLogonAlterSessionPrefix = regexp.MustCompile(`(?i)^\s*ALTER\s+SESSION\b`)
+
+// ValidateOracleLogonAlterSession gates the statement an Oracle client asks the
+// server to run while its session is being established — the AUTH_ALTER_SESSION
+// value of the AUTH Phase 2 message, which Oracle executes as part of the logon
+// and which therefore never reaches the mid-session gate.
+//
+// It gets exactly what a mid-session statement gets (ValidateOracleQuery: the
+// outright blocks, `ALTER SESSION SET CONTAINER` included, on every grant, and
+// the ALTER SESSION parameter allowlist under read_only/block_ddl), plus one
+// rule of its own: the value must be a single `ALTER SESSION` statement. Every
+// recorded client sends exactly that; anything else (another statement kind, a
+// `;`-separated list) is refused rather than guessed at, since dbbat cannot know
+// how the server would split it.
+func ValidateOracleLogonAlterSession(sql string, grant *store.Grant) error {
+	if strings.Contains(sql, ";") ||
+		!oracleLogonAlterSessionPrefix.MatchString(matchableSQL(sql, syntaxStandard)) {
+		return ErrOracleLogonAlterSessionShape
+	}
+
+	return ValidateOracleQuery(sql, grant)
 }
 
 // validateOracleStatement is the controls and the pattern list over one

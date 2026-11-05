@@ -327,7 +327,9 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 // AUTH_PASSWORD / AUTH_PBKDF2_SPEEDY_KEY values replaced with the upstream-
 // derived ones (rewriteAuthPhase2). All other KV pairs — AUTH_CONNECT_STRING,
 // AUTH_COPYRIGHT, AUTH_ACL, AUTH_ALTER_SESSION, the SESSION_CLIENT_DRIVER_*
-// triplet — pass through verbatim.
+// triplet — pass through verbatim. AUTH_ALTER_SESSION is checked first
+// (gateLogonAlterSession): the server runs it as a statement, so a value the
+// mid-session gate would refuse refuses the login instead.
 //
 // This matters because the upstream's AUTH OK is conditioned on the client's
 // Phase 2 KV-pair set: JDBC thin sends a richer set than go-ora, and a
@@ -344,6 +346,10 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 // existing rewrite.
 func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentity, sec *upstreamAuthSecrets, mode uint32) error {
 	synthetic := func() error {
+		// dbbat's own Phase 2 carries dbbat's own AUTH_ALTER_SESSION, never the
+		// client's: nothing of the client's is applied at logon.
+		s.logonAlterSession = nil
+
 		if s.clientWideEncoding {
 			// Phase 2's own captured packet, not Phase 1's: the two carry
 			// different lead bytes and different logon-mode bits.
@@ -367,6 +373,13 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 	clientPayload := s.clientAuthPhase2Pkt.Payload
 	dataFlags := clientPayload[:ttcDataFlagsSize]
 	clientBody := clientPayload[ttcDataFlagsSize:]
+
+	// The client's AUTH_ALTER_SESSION is forwarded verbatim, and Oracle runs it
+	// while it establishes the session — so it goes through the same gate a
+	// mid-session ALTER SESSION does, here, before a byte of it leaves.
+	if err := s.gateLogonAlterSession(clientBody); err != nil {
+		return err
+	}
 
 	rewritten, err := rewriteAuthPhase2(clientBody, username, sec, s.clientBigClrChunks)
 	if err != nil {

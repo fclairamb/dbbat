@@ -2,9 +2,18 @@ package oracle
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // TestRewriteAuthPhase2_BasicSwap_CLR confirms the three load-bearing AUTH_*
@@ -318,4 +327,297 @@ func buildPhase2Body(t *testing.T, username string, pairs []phase2KVForTest, clr
 	}
 
 	return buf
+}
+
+// --- AUTH_ALTER_SESSION gate ------------------------------------------------
+
+// logonGrants is every grant shape the gate has to answer for: a full-write
+// grant, each control on its own, and a grant with no definition (which reports
+// every control).
+func logonGrants() map[string]*store.Grant {
+	return map[string]*store.Grant{
+		"full write":    {Definition: &store.GrantDefinition{}},
+		"read_only":     {Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}},
+		"block_ddl":     {Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}},
+		"block_copy":    {Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockCopy}}},
+		"no definition": {},
+	}
+}
+
+// phase2WithAlterSession is a thin Phase 2 body carrying one AUTH_ALTER_SESSION.
+func phase2WithAlterSession(t *testing.T, alter string) []byte {
+	t.Helper()
+
+	return buildPhase2Body(t, "CONNECTOR", []phase2KVForTest{
+		{"AUTH_SESSKEY", "OLDSESS_HEX", 1},
+		{"AUTH_PASSWORD", "OLDPWD_HEX", 0},
+		{"AUTH_PROGRAM_NM", "SourceLauncher", 0},
+		{"AUTH_ALTER_SESSION", alter, 1},
+	}, true, 0x00)
+}
+
+// gatePhase2 runs the gate the way sendUpstreamAuthPhase2 does.
+func gatePhase2(body []byte, grant *store.Grant, bigChunks bool) ([]string, error) {
+	values, err := logonAlterSessionValues(body, payloadUsesWideKVEncoding(body), bigChunks)
+	if err != nil {
+		return nil, refuseLogonAlterSession(err)
+	}
+
+	return checkLogonAlterSession(values, grant, nil)
+}
+
+// TestLogonAlterSession_ContainerRefusedUnderEveryGrant is the escape the
+// CONTAINER block exists for, attempted at logon instead of mid-session: before
+// the gate, the value was forwarded verbatim and Oracle switched the pluggable
+// database while every queries row still named the granted one.
+func TestLogonAlterSession_ContainerRefusedUnderEveryGrant(t *testing.T) {
+	t.Parallel()
+
+	for _, alter := range []string{
+		"ALTER SESSION SET CONTAINER=PDB2\x00",
+		"alter session set container = pdb2",
+		"ALTER SESSION SET TIME_ZONE='+02:00' CONTAINER=PDB2\x00",
+		`ALTER SESSION SET "CONTAINER"=PDB2`,
+	} {
+		for name, grant := range logonGrants() {
+			_, err := gatePhase2(phase2WithAlterSession(t, alter), grant, false)
+			require.ErrorIs(t, err, ErrLogonAlterSessionRefused, "%s: %q", name, alter)
+
+			// A grant with read_only or block_ddl refuses on the control first;
+			// one with neither is where the outright block is the only thing
+			// standing, and it has to.
+			if !grant.IsReadOnly() && !grant.ShouldBlockDDL() {
+				require.ErrorIs(t, err, shared.ErrOraclePatternBlocked, "%s: %q", name, alter)
+			}
+		}
+	}
+}
+
+// TestLogonAlterSession_UnlistedParameterRefusedUnderControls: the parameter
+// allowlist read_only and block_ddl apply mid-session applies at logon too, and
+// a full-write grant, which has neither control, still accepts it.
+func TestLogonAlterSession_UnlistedParameterRefusedUnderControls(t *testing.T) {
+	t.Parallel()
+
+	body := phase2WithAlterSession(t, "ALTER SESSION SET SQL_TRACE=TRUE\x00")
+	grants := logonGrants()
+
+	_, err := gatePhase2(body, grants["read_only"], false)
+	require.ErrorIs(t, err, ErrLogonAlterSessionRefused)
+	require.ErrorIs(t, err, shared.ErrReadOnlyViolation)
+
+	_, err = gatePhase2(body, grants["block_ddl"], false)
+	require.ErrorIs(t, err, shared.ErrDDLBlocked)
+
+	applied, err := gatePhase2(body, grants["full write"], false)
+	require.NoError(t, err)
+	require.Equal(t, []string{"ALTER SESSION SET SQL_TRACE=TRUE"}, applied)
+}
+
+// TestLogonAlterSession_UnreadableOrMisshapenRefused: what the gate cannot read
+// to the byte, or that is not one ALTER SESSION statement, refuses the login —
+// forwarding it would forward a statement nobody checked.
+func TestLogonAlterSession_UnreadableOrMisshapenRefused(t *testing.T) {
+	t.Parallel()
+
+	full := logonGrants()["full write"]
+
+	for _, alter := range []string{
+		"BEGIN NULL; END;",
+		"ALTER SESSION SET TIME_ZONE='+02:00'; ALTER SESSION SET CONTAINER=PDB2",
+		"ALTER SESSION SET TIME_ZONE='+02:00'\x00ALTER SESSION SET CONTAINER=PDB2",
+		"ALTER SYSTEM SET X=1",
+	} {
+		_, err := gatePhase2(phase2WithAlterSession(t, alter), full, false)
+		require.ErrorIs(t, err, ErrLogonAlterSessionRefused, "%q", alter)
+	}
+
+	// The key name somewhere that is not a key boundary (inside another value):
+	// fail closed rather than guess which occurrence the server reads.
+	decoy := buildPhase2Body(t, "CONNECTOR", []phase2KVForTest{
+		{"AUTH_SESSKEY", "OLDSESS_HEX", 1},
+		{"AUTH_PROGRAM_NM", "x AUTH_ALTER_SESSION", 0},
+	}, true, 0x00)
+	_, err := gatePhase2(decoy, full, false)
+	require.ErrorIs(t, err, ErrLogonAlterSessionRefused)
+
+	// Every occurrence is checked, not just the first: a harmless pair ahead of
+	// a CONTAINER switch does not shield it.
+	twice := buildPhase2Body(t, "CONNECTOR", []phase2KVForTest{
+		{"AUTH_SESSKEY", "OLDSESS_HEX", 1},
+		{"AUTH_ALTER_SESSION", "ALTER SESSION SET TIME_ZONE='+02:00'\x00", 1},
+		{"auth_alter_session", "ALTER SESSION SET CONTAINER=PDB2\x00", 1},
+	}, true, 0x00)
+	_, err = gatePhase2(twice, full, false)
+	require.ErrorIs(t, err, shared.ErrOraclePatternBlocked)
+
+	// A declared length that disagrees with the value it frames.
+	body := phase2WithAlterSession(t, "ALTER SESSION SET TIME_ZONE='+02:00'")
+	idx := bytes.Index(body, []byte("AUTH_ALTER_SESSION")) + len("AUTH_ALTER_SESSION")
+	require.Equal(t, byte(0x01), body[idx], "compressed-int width byte")
+	body[idx+1]++
+	_, err = gatePhase2(body, full, false)
+	require.ErrorIs(t, err, ErrLogonAlterSessionRefused)
+}
+
+// TestLogonAlterSession_ApprovalPatternRefused: a login cannot be parked on a
+// human, so a logon statement an approval pattern would hold is refused.
+func TestLogonAlterSession_ApprovalPatternRefused(t *testing.T) {
+	t.Parallel()
+
+	patterns := shared.CompileApprovalPatterns([]string{`(?i)NLS_SORT`})
+	_, err := checkLogonAlterSession([]string{"ALTER SESSION SET NLS_SORT=BINARY\x00"},
+		logonGrants()["full write"], patterns)
+	require.ErrorIs(t, err, ErrLogonAlterSessionRefused)
+
+	applied, err := checkLogonAlterSession([]string{"ALTER SESSION SET TIME_ZONE='+02:00'\x00"},
+		logonGrants()["full write"], patterns)
+	require.NoError(t, err)
+	require.Len(t, applied, 1)
+}
+
+// TestLogonAlterSession_WideAndChunkedForms covers the two encodings beyond the
+// thin short form: OCI's 4-byte declared length (plain and 3x) and a value long
+// enough for the negotiated CLR long form.
+func TestLogonAlterSession_WideAndChunkedForms(t *testing.T) {
+	t.Parallel()
+
+	wideBody := buildWideAuthBody(wideAuthFraming{}, "CONNECTOR", []authKV{
+		{"AUTH_SESSKEY", "OLDSESS_HEX", 1},
+		{"AUTH_ALTER_SESSION", "ALTER SESSION SET CONTAINER=PDB2\x00", 1},
+	}, false)
+	require.True(t, payloadUsesWideKVEncoding(wideBody))
+
+	_, err := gatePhase2(wideBody, logonGrants()["full write"], false)
+	require.ErrorIs(t, err, shared.ErrOraclePatternBlocked)
+
+	long := "ALTER SESSION SET NLS_DATE_FORMAT='" + strings.Repeat("YYYY", 80) + "'\x00"
+	chunked := buildPhase2Body(t, "CONNECTOR", nil, true, 0x00)
+	chunked = append(chunked, ttcKeyValChunked("AUTH_ALTER_SESSION", long, 1, true)...)
+
+	applied, err := gatePhase2(chunked, logonGrants()["read_only"], true)
+	require.NoError(t, err)
+	require.Equal(t, []string{strings.TrimRight(long, "\x00")}, applied)
+}
+
+// TestLogonAlterSession_RecordedClientsForwardedUnchanged is the positive
+// control: the AUTH_ALTER_SESSION every recorded client sends (time zone and
+// NLS settings, one statement, NUL-terminated) passes under every grant, and
+// the rewrite still forwards its bytes verbatim.
+func TestLogonAlterSession_RecordedClientsForwardedUnchanged(t *testing.T) {
+	t.Parallel()
+
+	seen := 0
+
+	for _, name := range surveyCorpus(t) {
+		td := loadTestDump(t, name)
+
+		for _, dpkt := range td.Packets {
+			if dpkt.Direction != dump.DirClientToServer {
+				continue
+			}
+
+			pkt, err := parseTNSFromDumpPacket(dpkt.Data)
+			if err != nil || pkt == nil || pkt.Type != TNSPacketTypeData || len(pkt.Payload) < ttcDataFlagsSize+2 {
+				continue
+			}
+
+			body := pkt.Payload[ttcDataFlagsSize:]
+			if body[0] != byte(TTCFuncPiggyback) || body[1] != PiggybackSubAuth2 {
+				continue
+			}
+
+			seen++
+
+			for grantName, grant := range logonGrants() {
+				applied, err := gatePhase2(body, grant, false)
+				require.NoError(t, err, "%s under %s", name, grantName)
+				require.Len(t, applied, 1, "%s: one statement", name)
+				require.True(t, strings.HasPrefix(applied[0], "ALTER SESSION SET "), "%s: %q", name, applied[0])
+			}
+
+			keyAt := bytes.Index(body, []byte("AUTH_ALTER_SESSION"))
+			require.Positive(t, keyAt, name)
+
+			end := keyAt + 120
+			if end > len(body) {
+				end = len(body)
+			}
+
+			original := body[keyAt:end]
+
+			out, err := rewriteAuthPhase2(body, "UPSTREAM_USER", &upstreamAuthSecrets{
+				encClientSessKey: "NEWSESS", encPassword: "NEWPWD",
+			}, false)
+			require.NoError(t, err, name)
+			require.True(t, bytes.Contains(out, original), "%s: AUTH_ALTER_SESSION forwarded verbatim", name)
+		}
+	}
+
+	require.Positive(t, seen, "the corpus carries recorded Phase 2 logins")
+}
+
+// TestSendUpstreamAuthPhase2_RefusedAlterSessionNeverLeaves drives the real
+// forwarding path: a refused value returns the refusal, nothing is written
+// upstream, and the client gets ORA-01031 naming the reason.
+func TestSendUpstreamAuthPhase2_RefusedAlterSessionNeverLeaves(t *testing.T) {
+	t.Parallel()
+
+	upstream := &recordingConn{}
+	body := phase2WithAlterSession(t, "ALTER SESSION SET CONTAINER=PDB2\x00")
+
+	s := &session{
+		ctx:                 context.Background(),
+		logger:              testLogger(),
+		upstreamConn:        upstream,
+		grant:               logonGrants()["full write"],
+		clientAuthPhase2Pkt: &TNSPacket{Payload: append([]byte{0x00, 0x00}, body...)},
+	}
+
+	err := s.sendUpstreamAuthPhase2("UPSTREAM_USER", driverIdentity{ProgramName: "dbbat"},
+		&upstreamAuthSecrets{encClientSessKey: "S", encPassword: "P"}, logonModeNoNewPass|logonModeUserAndPass)
+	require.ErrorIs(t, err, ErrLogonAlterSessionRefused)
+	require.Zero(t, upstream.written, "the client's Phase 2 must not reach the upstream")
+
+	code, message := upstreamAuthRejectFor(fmt.Errorf("upstream auth failed: %w",
+		fmt.Errorf("write upstream AUTH Phase 2: %w", err)))
+	require.Equal(t, ORA01031, code)
+	require.Contains(t, message, "AUTH_ALTER_SESSION")
+	require.Contains(t, message, shared.ErrOraclePatternBlocked.Error())
+}
+
+// TestRecordLogonAlterSession puts what the logon applied on file as the
+// connection's first queries rows.
+func TestRecordLogonAlterSession(t *testing.T) {
+	t.Parallel()
+
+	rec := newRecordingCompletionStore()
+	s := newTestSession(logonGrants()["read_only"])
+	s.completionStore = rec
+
+	body := phase2WithAlterSession(t, "ALTER SESSION SET TIME_ZONE='+02:00'\x00")
+	s.clientAuthPhase2Pkt = &TNSPacket{Payload: append([]byte{0x00, 0x00}, body...)}
+	require.NoError(t, s.gateLogonAlterSession(body))
+
+	s.recordLogonAlterSession()
+
+	select {
+	case q := <-rec.created:
+		require.Equal(t, "ALTER SESSION SET TIME_ZONE='+02:00'", q.SQLText)
+		require.Equal(t, s.connectionUID, q.ConnectionID)
+	default:
+		t.Fatal("no queries row for the logon AUTH_ALTER_SESSION")
+	}
+}
+
+// recordingConn is an upstream that counts what is written to it.
+type recordingConn struct {
+	net.Conn
+	written int
+}
+
+func (c *recordingConn) Write(b []byte) (int, error) {
+	c.written += len(b)
+
+	return len(b), nil
 }

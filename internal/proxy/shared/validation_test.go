@@ -1420,3 +1420,36 @@ func TestValidateOracleQuery_RefusesRenamePurgeFlashbackComment(t *testing.T) {
 	// PostgreSQL's COMMENT ON is DDL too.
 	assert.True(t, IsDDLQuery("COMMENT ON TABLE t IS 'x'"))
 }
+
+// TestValidateOracleLogonAlterSession: the logon statement gets the mid-session
+// gate plus the one-ALTER-SESSION shape rule.
+func TestValidateOracleLogonAlterSession(t *testing.T) {
+	t.Parallel()
+
+	full := &store.Grant{Definition: &store.GrantDefinition{}}
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+
+	for _, sql := range []string{
+		"ALTER SESSION SET TIME_ZONE='+02:00'",
+		"ALTER SESSION SET NLS_LANGUAGE='AMERICAN' NLS_TERRITORY='AMERICA'  TIME_ZONE='+02:00'",
+		"/* driver */ alter session set time_zone='Europe/Paris'",
+	} {
+		require.NoError(t, ValidateOracleLogonAlterSession(sql, readOnly), sql)
+		require.NoError(t, ValidateOracleLogonAlterSession(sql, full), sql)
+	}
+
+	require.ErrorIs(t, ValidateOracleLogonAlterSession("ALTER SESSION SET CONTAINER=PDB2", full),
+		ErrOraclePatternBlocked)
+	require.ErrorIs(t, ValidateOracleLogonAlterSession("ALTER SESSION SET SQL_TRACE=TRUE", readOnly),
+		ErrReadOnlyViolation)
+	require.NoError(t, ValidateOracleLogonAlterSession("ALTER SESSION SET SQL_TRACE=TRUE", full))
+
+	for _, sql := range []string{
+		"SELECT 1 FROM DUAL",
+		"BEGIN NULL; END;",
+		"ALTER SESSION SET TIME_ZONE='+02:00'; DROP TABLE t",
+		"ALTER SYSTEM SET X=1",
+	} {
+		require.ErrorIs(t, ValidateOracleLogonAlterSession(sql, full), ErrOracleLogonAlterSessionShape, sql)
+	}
+}

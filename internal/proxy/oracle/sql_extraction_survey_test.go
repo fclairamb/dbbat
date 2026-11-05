@@ -270,7 +270,8 @@ func TestSurveyAlterSessionMisreadAsSet(t *testing.T) {
 		"every one of them is DBeaver's connection setup; no other client in the corpus sends an "+
 			"ALTER SESSION *as an execute op* — the string is in every recording as the "+
 			"AUTH_ALTER_SESSION key/value of the phase-2 AUTH message (func 0x03 sub-op 0x73), "+
-			"which is not a statement-carrying op and never reaches the gate")
+			"which is not a statement-carrying op and never reaches this gate (it is gated at logon by "+
+			"gateLogonAlterSession)")
 
 	// The five, spelled out, and each one checked against the very allowlist the
 	// gate consults. This is the floor of shared.IsAllowedAlterSession: if a

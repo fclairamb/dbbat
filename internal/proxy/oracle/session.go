@@ -171,6 +171,11 @@ type session struct {
 	// and JDBC trips ORA-17401 in T4CTTIfun.receive.
 	clientAuthPhase2Pkt *TNSPacket
 
+	// logonAlterSession is what the client's AUTH_ALTER_SESSION applies at
+	// logon, as checked by gateLogonAlterSession and forwarded verbatim; empty
+	// when dbbat built its own Phase 2. Recorded once the connection row exists.
+	logonAlterSession []string
+
 	// Query tracking.
 	//
 	// trackerMu guards every piece of per-session query bookkeeping: the
@@ -652,6 +657,10 @@ func (s *session) run() error {
 		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
 	} else {
 		s.connectionUID = conn.UID
+
+		// What the client's AUTH_ALTER_SESSION applied at logon, on file as the
+		// first statements of the session.
+		s.recordLogonAlterSession()
 	}
 
 	// The per-user statement tag needs the user and the grant, both settled by
@@ -932,6 +941,12 @@ func authRejectFor(err error) (uint16, string) {
 // text stays in the logs: it can name hosts and accounts. The client learns
 // which side failed, so it stops suspecting its API key, and who can fix it.
 func upstreamAuthRejectFor(err error) (uint16, string) {
+	// Refused by dbbat itself, before the client's Phase 2 went upstream: the
+	// client's own logon settings failed the statement gate.
+	if code, message, ok := logonAlterSessionRefusal(err); ok {
+		return code, message
+	}
+
 	if errors.Is(err, ErrUpstreamAuthPhase1Rejected) || errors.Is(err, ErrUpstreamAuthPhase2Rejected) {
 		return ORA01017, "dbbat accepted your API key, but the database refused the credentials " +
 			"dbbat stores for it; ask a dbbat administrator to update them and run the connectivity check"
