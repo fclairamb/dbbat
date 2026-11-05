@@ -16,7 +16,8 @@ client-side SCRAM toward the upstream uses `github.com/xdg-go/scram`.
 The framing lives in `internal/proxy/mongodb/wire.go`: the 16-byte message
 header, `OP_MSG` (2013) with kind-0 command bodies and kind-1 document
 sequences, the legacy `OP_QUERY` (2004) / `OP_REPLY` (1) used for the first
-`hello`, and rejection of `OP_COMPRESSED` (2012). A trailing CRC-32C checksum
+`hello`, and `OP_COMPRESSED` (2012), inflated on the way in (see "Wire
+compression" below). A trailing CRC-32C checksum
 is tolerated on parse and never emitted on our own replies.
 
 ## Auth Strategy: `PLAIN`-over-TLS or `SCRAM-SHA-256` (client) → SCRAM-SHA-256 (upstream)
