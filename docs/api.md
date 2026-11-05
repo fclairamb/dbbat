@@ -266,6 +266,17 @@ Failed login attempts trigger exponential backoff:
 | 7-9 | 2 minutes |
 | 10+ | 5 minutes |
 
+The backoff is counted per **username and source address** together, so failures from one address
+back off that address only: a stranger who knows a username (`admin` always exists) cannot keep the
+account locked out for its owner. Two more limits sit on top:
+
+- `POST /auth/login` and `PUT /auth/password` are rate limited per address before any credential is
+  checked (the anonymous limit, `DBB_RATE_LIMIT_*`), against spraying many usernames from one source.
+- A coarse ceiling of **100 failures per hour per username**, from all addresses together, blocks
+  password login for that username everywhere until the hour is over. It is a backstop against
+  guessing spread over many addresses, and reaching it is logged at WARN and written to the audit
+  log as `auth.failure_ceiling`.
+
 ## Error Responses
 
 All errors follow a consistent format:

@@ -331,8 +331,16 @@ func (s *Server) setupRouter() *gin.Engine {
 
 		// Auth endpoints (login and pre-login password change are unauthenticated)
 		auth := v1.Group("/auth")
-		auth.POST("/login", s.handleLogin)
-		auth.PUT("/password", s.handlePreLoginPasswordChange)
+		// Both check a password, so besides the per-(username, IP) backoff
+		// of authFailureTracker they are IP rate limited against spraying
+		// across many usernames from one source.
+		if s.rateLimiter != nil {
+			auth.POST("/login", s.rateLimiter.PreAuthMiddleware(), s.handleLogin)
+			auth.PUT("/password", s.rateLimiter.PreAuthMiddleware(), s.handlePreLoginPasswordChange)
+		} else {
+			auth.POST("/login", s.handleLogin)
+			auth.PUT("/password", s.handlePreLoginPasswordChange)
+		}
 		auth.GET("/providers", s.handleAuthProviders)
 
 		// OAuth provider routes (unauthenticated). The authorize route writes

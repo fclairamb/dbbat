@@ -46,7 +46,7 @@ info:
 
     ## Authentication Rate Limiting
 
-    Failed login attempts are rate-limited per username with exponential backoff:
+    Failed login attempts are rate-limited per (username, source address) with exponential backoff:
 
     - 1-2 failures: no delay
     - 3-4 failures: 5 seconds
@@ -54,7 +54,12 @@ info:
     - 7-9 failures: 2 minutes
     - 10+ failures: 5 minutes
 
-    Rate-limited authentication attempts receive a `429 Too Many Requests` response with error code `auth_rate_limited`.
+    Failures from one address never back off another, so nobody can keep an account locked out for its owner.
+    `POST /auth/login` and `PUT /auth/password` are also rate limited per address before any credential is checked.
+    A ceiling of 100 failures per hour per username, summed over all addresses, blocks that username
+    everywhere until the hour is over; reaching it is audited as `auth.failure_ceiling`.
+
+    Rate-limited authentication attempts receive a `429 Too Many Requests` response with error code `RATE_LIMITED` and a `Retry-After` header.
   version: 1.0.0
   contact:
     name: DBBat
