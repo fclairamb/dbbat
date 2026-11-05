@@ -543,7 +543,8 @@ func (s *Store) VerifyQueryChain(
 // chained positions only, so without this such a row was neither verified nor
 // counted, while the UI listed it among the session's genuine statements.
 //
-// A keyed store chains every statement it writes, and a session is owned by
+// A keyed store chains every statement it writes (held ones included, from
+// CreatePendingQuery), and a session is owned by
 // one process from open to close, so a chained session has no legitimate
 // unchained statement — not even across the chain migration, which runs at
 // startup, after every session of the previous process has ended. A session
@@ -557,6 +558,11 @@ func (s *Store) checkUnchainedStatements(ctx context.Context, result *QueryChain
 		Column("uid").
 		Where("connection_id = ?", result.ConnectionUID).
 		Where("chain_seq IS NULL").
+		// A statement held for approval by a build that predates chaining
+		// held statements was written unchained, legitimately. It stays
+		// exempt: telling it from a forged row carrying an approval status
+		// would need a sealed date for that release, which nothing records.
+		Where("approval_status IS NULL").
 		Order("executed_at ASC", "uid ASC").
 		Limit(1).
 		Scan(ctx)

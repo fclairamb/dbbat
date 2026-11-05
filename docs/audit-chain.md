@@ -758,7 +758,11 @@ keyed store chains every audit write — so it is a **break** ("inserted outside
 the chain"), not one more pre-anchor row. The same holds one level down: a
 `queries` row with a `NULL` `chain_seq` in a session that has chained statements
 or a stamp breaks that session's walk. A session with neither predates chaining
-and is not judged. What remains open: a forged row *backdated* before
+and is not judged. Statements held for approval are chained when they are held
+(`CreatePendingQuery`); one written unchained by an older build carries an
+`approval_status`, and that alone exempts it — nothing sealed records when held
+statements started being chained, so a forged row that sets an approval status
+is the other residual here. What remains open: a forged row *backdated* before
 `chain_seq 1` still reads as pre-anchor, so the count is worth recording next to
 the head — it should never grow.
 

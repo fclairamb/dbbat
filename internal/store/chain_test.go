@@ -3323,3 +3323,59 @@ func TestQueryChainPreChainSessionIsNotABreak(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, all.OK(), "%v", all.Break)
 }
+
+// TestQueryChainSealsHeldStatements: a statement parked on an approval hold is
+// chained when it is held, and resolving it leaves the chain intact.
+func TestQueryChainSealsHeldStatements(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "held", 1)
+
+	held, err := store.CreatePendingQuery(ctx, &Query{ConnectionID: conn.UID, SQLText: "DELETE FROM t"}, "delete")
+	require.NoError(t, err)
+	require.NotNil(t, held.ChainSeq, "a held statement is sealed like any other")
+	require.Equal(t, int64(2), *held.ChainSeq)
+
+	require.NoError(t, store.ResolveQueryApproval(ctx, held.UID, ApprovalApproved, nil, "ok"))
+
+	_, err = store.CreateQuery(ctx, &Query{ConnectionID: conn.UID, SQLText: "SELECT 2"})
+	require.NoError(t, err)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, one.Break, "%v", one.Break)
+	require.Equal(t, int64(3), one.Verified)
+}
+
+// TestQueryChainLegacyUnchainedHeldStatementIsNotABreak: held statements
+// written before they were chained carry an approval status and no chain
+// position; they must not turn every such session into a break on upgrade.
+func TestQueryChainLegacyUnchainedHeldStatementIsNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "legacy_held", 2)
+
+	status := ApprovalDenied
+	pattern := "drop"
+
+	_, err := store.db.NewInsert().Model(&Query{
+		UID:             newUIDv7(),
+		ConnectionID:    conn.UID,
+		SQLText:         "DROP TABLE t",
+		ExecutedAt:      time.Now(),
+		ApprovalStatus:  &status,
+		ApprovalPattern: &pattern,
+	}).Exec(ctx)
+	require.NoError(t, err)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, one.Break, "%v", one.Break)
+	require.Equal(t, int64(2), one.Verified)
+}
