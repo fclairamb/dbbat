@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -44,6 +48,10 @@ func (s *Server) resolveGrantDefinition(ctx context.Context, idOrSlug string) (*
 // uid actually exists, so an admin can't silently create a definition that is
 // scoped to nothing (which would fail closed and look like a bug).
 func (s *Server) validateDefinitionScope(ctx context.Context, req *CreateGrantDefinitionRequest) string {
+	if msg := s.validateNotifyChannel(req.NotifyChannel); msg != "" {
+		return msg
+	}
+
 	for _, groupUID := range req.UserGroupUIDs {
 		if _, err := s.store.GetUserGroup(ctx, groupUID); err != nil {
 			return "user group does not exist: " + groupUID.String()
@@ -90,6 +98,10 @@ type CreateGrantDefinitionRequest struct {
 	// null/omitted inherits DBB_SLACK_NOTIFY_BYTES_STEP, 0 turns the notice
 	// off for this definition, a positive value is the step in bytes.
 	NotifyBytesStep *int64 `json:"notify_bytes_step"`
+	// NotifyChannel routes this definition's Slack notifications: null or
+	// omitted uses the default channel, "none" posts nothing, anything else
+	// must be a key of DBB_SLACK_NOTIFY_CHANNELS.
+	NotifyChannel *string `json:"notify_channel"`
 	// Priority, when supplied, is stamped verbatim on every grant
 	// materialized from this definition instead of the tier its controls
 	// would earn. null/omitted — the normal case — leaves it auto.
@@ -177,6 +189,8 @@ type UpdateGrantDefinitionRequest struct {
 	// inheritance.
 	NotifyBytesStep       *int64      `json:"notify_bytes_step"`
 	ClearNotifyBytesStep  bool        `json:"clear_notify_bytes_step"`
+	NotifyChannel         *string     `json:"notify_channel"`
+	ClearNotifyChannel    bool        `json:"clear_notify_channel"`
 	Priority              *int16      `json:"priority"`
 	ClearPriority         bool        `json:"clear_priority"`
 	AutoApprove           *bool       `json:"auto_approve"`
@@ -276,6 +290,13 @@ func applyGrantDefinitionLimitsUpdate(def *store.GrantDefinition, req *UpdateGra
 		def.NotifyBytesStep = nil
 	case req.NotifyBytesStep != nil:
 		def.NotifyBytesStep = req.NotifyBytesStep
+	}
+
+	switch {
+	case req.ClearNotifyChannel:
+		def.NotifyChannel = nil
+	case req.NotifyChannel != nil:
+		def.NotifyChannel = req.NotifyChannel
 	}
 
 	switch {
@@ -465,6 +486,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		MaxBytesTransferred:     req.MaxBytesTransferred,
 		StatementTimeoutSeconds: req.StatementTimeoutSeconds,
 		NotifyBytesStep:         req.NotifyBytesStep,
+		NotifyChannel:           req.NotifyChannel,
 		Priority:                req.Priority,
 		AutoApprove:             req.AutoApprove,
 		UserGroupUIDs:           req.UserGroupUIDs,
@@ -716,6 +738,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		MaxBytesTransferred:     def.MaxBytesTransferred,
 		StatementTimeoutSeconds: def.StatementTimeoutSeconds,
 		NotifyBytesStep:         def.NotifyBytesStep,
+		NotifyChannel:           def.NotifyChannel,
 		Priority:                def.Priority,
 		AutoApprove:             def.AutoApprove,
 		UserGroupUIDs:           def.UserGroupUIDs,
@@ -978,4 +1001,72 @@ func normalizeUUIDs(in []uuid.UUID) []uuid.UUID {
 	}
 
 	return in
+}
+
+// notifyChannelKeys returns the sorted keys of DBB_SLACK_NOTIFY_CHANNELS.
+// A config that fails to parse yields none: startup validation already
+// refused it, so this only matters for a hand-built test config.
+func (s *Server) notifyChannelKeys() []string {
+	if s.config == nil {
+		return []string{}
+	}
+
+	channels, err := s.config.SlackNotify.ParseChannels()
+	if err != nil {
+		return []string{}
+	}
+
+	keys := make([]string, 0, len(channels))
+	for key := range channels {
+		keys = append(keys, key)
+	}
+
+	slices.Sort(keys)
+
+	return keys
+}
+
+// validateNotifyChannel accepts nil, "none" or a configured channel key and
+// answers a message naming the known keys otherwise.
+func (s *Server) validateNotifyChannel(channel *string) string {
+	if channel == nil || *channel == config.SlackNotifyChannelNone {
+		return ""
+	}
+
+	keys := s.notifyChannelKeys()
+	if slices.Contains(keys, *channel) {
+		return ""
+	}
+
+	return fmt.Sprintf("notify_channel %q is not a configured channel (known: %s)",
+		*channel, strings.Join(append([]string{config.SlackNotifyChannelNone}, keys...), ", "))
+}
+
+// warnUnknownNotifyChannels logs a WARN for every live definition whose
+// notify_channel names a key the config no longer has. It never fails
+// startup: the notifier falls back to the default channel for those.
+func warnUnknownNotifyChannels(ctx context.Context, st *store.Store, cfg config.SlackNotifyConfig, logger *slog.Logger) {
+	channels, err := cfg.ParseChannels()
+	if err != nil {
+		return
+	}
+
+	defs, err := st.ListGrantDefinitions(ctx, store.GrantDefinitionFilter{ActiveOnly: true})
+	if err != nil {
+		logger.WarnContext(ctx, "could not check definitions' notify channels", slog.Any("error", err))
+
+		return
+	}
+
+	for i := range defs {
+		def := &defs[i]
+		if def.NotifyChannel == nil || *def.NotifyChannel == config.SlackNotifyChannelNone {
+			continue
+		}
+
+		if _, ok := channels[*def.NotifyChannel]; !ok {
+			logger.WarnContext(ctx, "grant definition names a Slack channel key missing from DBB_SLACK_NOTIFY_CHANNELS, using the default channel",
+				slog.String("definition", def.Slug), slog.String("notify_channel", *def.NotifyChannel))
+		}
+	}
 }

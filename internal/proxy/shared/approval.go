@@ -87,6 +87,9 @@ type ApprovalEscalator interface {
 
 // ApprovalHoldInfo describes a parked statement to the escalator.
 type ApprovalHoldInfo struct {
+	// Definition is the grant definition the statement runs under, nil when
+	// unknown. It only picks the Slack channel.
+	Definition    *store.GrantDefinition
 	QueryUID      uuid.UUID
 	ConnectionUID uuid.UUID
 	UserUID       uuid.UUID
@@ -128,8 +131,9 @@ type ApprovalDeps struct {
 // here and reused for every statement, so the per-statement cost of the common
 // (no-pattern) case is a nil check.
 type ApprovalGate struct {
-	deps     ApprovalDeps
-	compiled *CompiledApprovalPatterns
+	deps       ApprovalDeps
+	compiled   *CompiledApprovalPatterns
+	definition *store.GrantDefinition
 
 	connectionUID uuid.UUID
 	userUID       uuid.UUID
@@ -200,6 +204,7 @@ func NewApprovalGate(deps ApprovalDeps, grant *store.Grant, connectionUID uuid.U
 		return g
 	}
 
+	g.definition = grant.Definition
 	g.compiled = CompileApprovalPatterns(grant.ApprovalPatterns())
 
 	for _, ce := range g.compiled.CompileErrors() {
@@ -442,6 +447,7 @@ func (g *ApprovalGate) Hold(ctx context.Context, req HoldRequest) (uuid.UUID, er
 
 	if g.deps.Escalator != nil {
 		g.deps.Escalator.Schedule(ctx, ApprovalHoldInfo{
+			Definition:    g.definition,
 			QueryUID:      pending.UID,
 			ConnectionUID: g.connectionUID,
 			UserUID:       g.userUID,

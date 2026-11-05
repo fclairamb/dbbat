@@ -591,6 +591,11 @@ function DefinitionDialog({
       ? String(editing.notify_bytes_step / GIB)
       : ""
   );
+  // Slack channel key: "default" (stored as null), "none", or a configured key.
+  const [notifyChannel, setNotifyChannel] = useState<string>(
+    editing?.notify_channel ?? "default"
+  );
+  const notifyChannelKeys = instance?.notify_channels ?? [];
   const [bytesUnit, setBytesUnit] = useState<"KB" | "MB" | "GB">(() => {
     if (editing?.max_bytes_transferred == null) return "MB";
     const v = editing.max_bytes_transferred;
@@ -765,6 +770,8 @@ function DefinitionDialog({
         // Same tri-state as the statement timeout.
         notify_bytes_step: notifyBytesStepValue ?? undefined,
         clear_notify_bytes_step: notifyBytesStepValue === null,
+        notify_channel: notifyChannel === "default" ? undefined : notifyChannel,
+        clear_notify_channel: notifyChannel === "default",
         priority: priorityValue ?? undefined,
         clear_priority: priorityValue === null,
         auto_approve: autoApprove,
@@ -786,6 +793,7 @@ function DefinitionDialog({
         max_bytes_transferred: maxBytesTransferred,
         statement_timeout_seconds: statementTimeoutValue,
         notify_bytes_step: notifyBytesStepValue,
+        notify_channel: notifyChannel === "default" ? null : notifyChannel,
         priority: priorityValue,
         auto_approve: autoApprove,
         user_group_uids: userGroupUids,
@@ -1187,6 +1195,39 @@ function DefinitionDialog({
                 </Select>
               </div>
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="def-notify-channel">Slack channel</Label>
+            <Select value={notifyChannel} onValueChange={setNotifyChannel}>
+              <SelectTrigger
+                id="def-notify-channel"
+                data-testid="grant-definition-notify-channel"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">Default channel</SelectItem>
+                <SelectItem value="none">None (post nothing)</SelectItem>
+                {notifyChannelKeys.map((key) => (
+                  <SelectItem key={key} value={key}>
+                    {key}
+                  </SelectItem>
+                ))}
+                {notifyChannel !== "default" &&
+                  notifyChannel !== "none" &&
+                  !notifyChannelKeys.includes(notifyChannel) && (
+                    <SelectItem value={notifyChannel}>
+                      {notifyChannel} (no longer configured)
+                    </SelectItem>
+                  )}
+              </SelectContent>
+            </Select>
+            <p className="text-sm text-muted-foreground">
+              Where this definition's Slack notifications go. Channels are
+              named in <code className="text-xs">DBB_SLACK_NOTIFY_CHANNELS</code>.
+              Approval holds on a "none" definition still use the default
+              channel.
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="def-notify-bytes">Slack notice every (GiB)</Label>

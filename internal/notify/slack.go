@@ -112,6 +112,7 @@ type SlackPersister interface {
 type SlackNotifier struct {
 	client        *slack.Client
 	channel       string
+	channels      map[string]string
 	publicURL     string
 	signingSecret string
 	interactive   bool
@@ -164,9 +165,15 @@ func NewSlackNotifier(cfg config.SlackNotifyConfig, publicURL string, persister 
 		return nil, ErrPublicURLMissing
 	}
 
+	channels, err := cfg.ParseChannels()
+	if err != nil {
+		return nil, fmt.Errorf("parse slack notify channels: %w", err)
+	}
+
 	return &SlackNotifier{
 		client:        slack.New(cfg.BotToken),
 		channel:       cfg.Channel,
+		channels:      channels,
 		publicURL:     strings.TrimRight(publicURL, "/"),
 		signingSecret: cfg.SigningSecret,
 		interactive:   cfg.Interactive(),
@@ -177,6 +184,42 @@ func NewSlackNotifier(cfg config.SlackNotifyConfig, publicURL string, persister 
 		terminationWindow:  terminationCoalesceWindow,
 		terminationPending: make(map[terminationCoalesceKey]*terminationCoalesce),
 	}, nil
+}
+
+// channelFor picks the channel a grant definition's notifications go to.
+// post is false when the definition opted out with the reserved "none" key.
+// A nil definition or one without a notify_channel uses the default channel,
+// and so does a key the operator has since removed from the config (with a
+// WARN), because dropping the notification would be worse than misrouting it.
+func (n *SlackNotifier) channelFor(ctx context.Context, def *store.GrantDefinition) (string, bool) {
+	if def == nil || def.NotifyChannel == nil {
+		return n.channel, true
+	}
+
+	key := *def.NotifyChannel
+	if key == config.SlackNotifyChannelNone {
+		return "", false
+	}
+
+	if ch, ok := n.channels[key]; ok {
+		return ch, true
+	}
+
+	n.log.WarnContext(ctx, "slack notify channel not configured, using the default channel",
+		slog.String("definition", def.Slug), slog.String("notify_channel", key))
+
+	return n.channel, true
+}
+
+// holdChannelFor is channelFor for approval holds: a hold parks a statement
+// until a human decides, so "none" falls back to the default channel rather
+// than leaving a statement nobody is told about.
+func (n *SlackNotifier) holdChannelFor(ctx context.Context, def *store.GrantDefinition) string {
+	if channel, post := n.channelFor(ctx, def); post {
+		return channel
+	}
+
+	return n.channel
 }
 
 // Interactive reports whether Approve / Deny buttons are rendered and the
@@ -216,13 +259,19 @@ func (n *SlackNotifier) NotifyGrantRequest(ctx context.Context, ev GrantRequestE
 		return
 	}
 
+	target, post := n.channelFor(ctx, ev.Definition)
+
 	blocks := buildBlocks(ev, n.publicURL)
 
 	switch ev.Action { //nolint:exhaustive // non-Created actions all share the update branch in the default case
 	case GrantActionCreated:
+		if !post {
+			return
+		}
+
 		channel, ts, err := n.client.PostMessageContext(
 			ctx,
-			n.channel,
+			target,
 			slack.MsgOptionBlocks(blocks...),
 			slack.MsgOptionAsUser(true),
 		)
@@ -239,6 +288,11 @@ func (n *SlackNotifier) NotifyGrantRequest(ctx context.Context, ev GrantRequestE
 		}
 
 	default:
+		// "none" silences the whole lifecycle, updates included.
+		if !post {
+			return
+		}
+
 		channel := derefString(ev.Request.SlackChannel)
 		ts := derefString(ev.Request.SlackMessageTS)
 
@@ -246,7 +300,7 @@ func (n *SlackNotifier) NotifyGrantRequest(ctx context.Context, ev GrantRequestE
 			// No prior post (notifier was disabled when the request was
 			// created, or the post failed). Send a fresh message instead
 			// of dropping the update silently.
-			if _, _, err := n.client.PostMessageContext(ctx, n.channel, slack.MsgOptionBlocks(blocks...)); err != nil {
+			if _, _, err := n.client.PostMessageContext(ctx, target, slack.MsgOptionBlocks(blocks...)); err != nil {
 				n.log.WarnContext(ctx, "slack post (fallback) failed", slog.Any("error", err))
 			}
 

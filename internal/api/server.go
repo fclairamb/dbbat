@@ -171,6 +171,10 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 			// The deployer can fix the env vars without losing the service.
 			logger.ErrorContext(context.Background(), "slack notifications misconfigured", slog.Any("error", err))
 		}
+
+		if notifier != nil {
+			warnUnknownNotifyChannels(context.Background(), dataStore, cfg.SlackNotify, logger)
+		}
 	}
 
 	return &Server{

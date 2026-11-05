@@ -1949,6 +1949,7 @@ type escalatorAdapter struct {
 
 func (a escalatorAdapter) Schedule(ctx context.Context, hold shared.ApprovalHoldInfo) {
 	a.inner.Schedule(ctx, notify.ApprovalHold{
+		Definition:    hold.Definition,
 		QueryUID:      hold.QueryUID,
 		ConnectionUID: hold.ConnectionUID,
 		Username:      hold.Username,
