@@ -1160,3 +1160,135 @@ func TestIntegration_ReadOnlyGrant_RefusesWriteBehindTxEnd(t *testing.T) {
 	require.NoError(t, check.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
 	assert.Equal(t, 0, got, "no write may have run")
 }
+
+// awaitCompletedQueriesBySQL polls until every given statement text has a
+// completed queries row (one carrying a duration) and returns them by text.
+func (f *fixture) awaitCompletedQueriesBySQL(ctx context.Context, sqls ...string) map[string]store.Query {
+	f.t.Helper()
+
+	found := map[string]store.Query{}
+
+	require.Eventually(f.t, func() bool {
+		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 500})
+		if err != nil {
+			return false
+		}
+
+		for _, sql := range sqls {
+			for i := range queries {
+				if queries[i].SQLText == sql && queries[i].DurationMs != nil {
+					found[sql] = queries[i]
+				}
+			}
+		}
+
+		return len(found) == len(sqls)
+	}, 10*time.Second, 100*time.Millisecond, "every statement of the batch must be logged and completed")
+
+	return found
+}
+
+// capturedRowText returns the concatenated captured rows of one query.
+func (f *fixture) capturedRowText(ctx context.Context, queryUID uuid.UUID) string {
+	f.t.Helper()
+
+	result, err := f.store.GetQueryRows(ctx, queryUID, "", 100)
+	require.NoError(f.t, err)
+
+	var sb strings.Builder
+	for _, row := range result.Rows {
+		sb.Write(row.RowData)
+	}
+
+	return sb.String()
+}
+
+// TestIntegration_PipelinedBatch_RowsStayWithTheirStatement pins finding M4
+// against a real server: a pgx Batch sends two Executes before one Sync, and
+// each queries row must carry its own SQL, its own captured rows, a duration
+// and no error. Before the fix the rows were stored under the other
+// statement's text and the first statement was never completed.
+func TestIntegration_PipelinedBatch_RowsStayWithTheirStatement(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	const (
+		first  = "SELECT 'pipelined-alpha' AS v"
+		second = "SELECT 'pipelined-bravo' AS v"
+	)
+
+	batch := &pgx.Batch{}
+	batch.Queue(first)
+	batch.Queue(second)
+
+	res := conn.SendBatch(ctx, batch)
+
+	var a, b string
+	require.NoError(t, res.QueryRow().Scan(&a))
+	require.NoError(t, res.QueryRow().Scan(&b))
+	require.NoError(t, res.Close())
+	assert.Equal(t, "pipelined-alpha", a)
+	assert.Equal(t, "pipelined-bravo", b)
+
+	rows := f.awaitCompletedQueriesBySQL(ctx, first, second)
+
+	for sql, want := range map[string]string{first: "pipelined-alpha", second: "pipelined-bravo"} {
+		row := rows[sql]
+		assert.Nilf(t, row.Error, "%q must complete without an error", sql)
+		require.NotNilf(t, row.DurationMs, "%q must log a duration", sql)
+
+		captured := f.capturedRowText(ctx, row.UID)
+		assert.Containsf(t, captured, want, "%q must keep its own rows", sql)
+	}
+
+	assert.NotContains(t, f.capturedRowText(ctx, rows[first].UID), "pipelined-bravo")
+	assert.NotContains(t, f.capturedRowText(ctx, rows[second].UID), "pipelined-alpha")
+}
+
+// TestIntegration_PipelinedBatch_MiddleStatementFails: three statements, the
+// middle one failing at execution. The server discards the third until Sync,
+// so the reconcile backstop completes it with its usual message; the first
+// keeps its own rows.
+func TestIntegration_PipelinedBatch_MiddleStatementFails(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	const (
+		first = "SELECT 'pipelined-first' AS v"
+		// random() is volatile, so the division is not folded at plan time:
+		// it fails at execution, inside the batch.
+		middle = "SELECT 1 / (random() * 0)::int AS v"
+		last   = "SELECT 'pipelined-last' AS v"
+	)
+
+	batch := &pgx.Batch{}
+	batch.Queue(first)
+	batch.Queue(middle)
+	batch.Queue(last)
+
+	res := conn.SendBatch(ctx, batch)
+
+	var a string
+	require.NoError(t, res.QueryRow().Scan(&a))
+	assert.Equal(t, "pipelined-first", a)
+
+	var n int
+	require.Error(t, res.QueryRow().Scan(&n), "the middle statement fails")
+	_ = res.Close()
+
+	rows := f.awaitCompletedQueriesBySQL(ctx, first, middle, last)
+
+	assert.Nil(t, rows[first].Error)
+	assert.Contains(t, f.capturedRowText(ctx, rows[first].UID), "pipelined-first")
+
+	require.NotNil(t, rows[middle].Error)
+	assert.Contains(t, *rows[middle].Error, "division by zero")
+
+	require.NotNil(t, rows[last].Error)
+	assert.Equal(t, "no completion message from upstream", *rows[last].Error)
+	assert.Empty(t, f.capturedRowText(ctx, rows[last].UID))
+}

@@ -1,9 +1,12 @@
 package postgresql
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -668,4 +671,256 @@ func insertRow(t *testing.T, s *Session, sql string, age time.Duration) uuid.UUI
 	require.NoError(t, err)
 
 	return created.UID
+}
+
+// capturedValues returns the captured rows of a persisted query, as their raw
+// JSON, in row order.
+func (h *loopback) capturedValues(t *testing.T, queryUID uuid.UUID) []string {
+	t.Helper()
+
+	result, err := h.s.store.GetQueryRows(context.Background(), queryUID, "", 100)
+	require.NoError(t, err)
+
+	values := make([]string, 0, len(result.Rows))
+	for _, row := range result.Rows {
+		// jsonb hands the document back normalized; compact it so the
+		// assertions read as the row the session captured.
+		var compact bytes.Buffer
+		require.NoError(t, json.Compact(&compact, row.RowData))
+		values = append(values, compact.String())
+	}
+
+	return values
+}
+
+// queueExecute forwards the Parse/Bind/Execute of one statement, so several can
+// be queued before a single Sync, the way a pgx Batch or a JDBC batch does.
+func (h *loopback) queueExecute(t *testing.T, name, sql string) {
+	t.Helper()
+
+	h.sendForwarded(t, &pgproto3.Parse{Name: "st" + name, Query: sql})
+	h.sendForwarded(t, &pgproto3.Bind{DestinationPortal: "p" + name, PreparedStatement: "st" + name})
+	h.sendForwarded(t, &pgproto3.Execute{Portal: "p" + name})
+}
+
+func oneColumn(name string) *pgproto3.RowDescription {
+	return &pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte(name)}}}
+}
+
+func textRow(v string) *pgproto3.DataRow {
+	return &pgproto3.DataRow{Values: [][]byte{[]byte(v)}}
+}
+
+// TestLoopback_PipelinedExecutesKeepTheirOwnRows pins finding M4: with two
+// Executes before one Sync, each statement's RowDescription, rows, rows
+// affected and duration must land on its own entry. Before the fix the rows
+// went to the *last* queued entry, CommandComplete promoted the first one to
+// currentQuery where the second statement's rows landed, and the second
+// CommandComplete overwrote it uncompleted: rows swapped, first row unfinished.
+func TestLoopback_PipelinedExecutesKeepTheirOwnRows(t *testing.T) {
+	t.Parallel()
+
+	h := newLoopback(t)
+
+	const (
+		first  = "SELECT 'alpha' AS v"
+		second = "SELECT 'bravo', 'bravo2' AS w"
+		pause  = 80 * time.Millisecond
+	)
+
+	h.queueExecute(t, "1", first)
+	h.queueExecute(t, "2", second)
+	h.awaitPending(t, 2)
+	h.sendForwarded(t, &pgproto3.Sync{})
+	h.awaitSyncEpoch(t, 1)
+
+	h.answer(t, oneColumn("v"), textRow("alpha"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
+
+	// The first statement is complete the moment its terminator is relayed,
+	// not parked until the ReadyForQuery.
+	h.s.bookMu.Lock()
+	queued := len(h.s.extendedState.pendingQueries)
+	h.s.bookMu.Unlock()
+	assert.Equal(t, 1, queued, "the answered Execute leaves the queue at its own terminator")
+
+	time.Sleep(pause)
+
+	h.answer(t,
+		oneColumn("w"), textRow("bravo"), textRow("bravo2"),
+		&pgproto3.CommandComplete{CommandTag: []byte("SELECT 2")},
+		&pgproto3.ReadyForQuery{},
+	)
+
+	assert.Empty(t, h.s.extendedState.pendingQueries)
+	assert.False(t, h.s.statementClock.Running())
+
+	rows := h.awaitConnectionQueries(t, 2)
+
+	a := findRow(t, rows, first)
+	b := findRow(t, rows, second)
+
+	assertCompletedOwnDuration(t, rows, first)
+	assertCompletedOwnDuration(t, rows, second)
+
+	require.NotNil(t, a.RowsAffected)
+	assert.Equal(t, int64(1), *a.RowsAffected, "the first statement carries its own command tag")
+	require.NotNil(t, b.RowsAffected)
+	assert.Equal(t, int64(2), *b.RowsAffected, "the second statement carries its own command tag")
+
+	assert.Less(t, *a.DurationMs, *b.DurationMs-float64(pause/time.Millisecond)/2,
+		"the first statement ends at its own terminator, before the pause the second one waited")
+
+	assert.Equal(t, []string{`{"v":"alpha"}`}, h.capturedValues(t, a.UID), "the first statement's rows stay under its SQL")
+	assert.Equal(t, []string{`{"w":"bravo"}`, `{"w":"bravo2"}`}, h.capturedValues(t, b.UID),
+		"the second statement's rows stay under its SQL")
+
+	assert.Empty(t, h.logs.warnings(""), "a pipelined batch is a normal flow: the backstop must not fire")
+}
+
+// TestLoopback_PipelinedBatchMiddleFails: three Executes, the middle one fails.
+// The server discards the third until Sync, so the reconcile backstop finishes
+// it with its usual message; the first keeps its rows and the error lands on
+// the middle one.
+func TestLoopback_PipelinedBatchMiddleFails(t *testing.T) {
+	t.Parallel()
+
+	h := newLoopback(t)
+
+	const (
+		first  = "SELECT 'alpha' AS v"
+		middle = "SELECT 1/0"
+		last   = "SELECT 'charlie' AS v"
+	)
+
+	h.queueExecute(t, "1", first)
+	h.queueExecute(t, "2", middle)
+	h.queueExecute(t, "3", last)
+	h.awaitPending(t, 3)
+	h.sendForwarded(t, &pgproto3.Sync{})
+	h.awaitSyncEpoch(t, 1)
+
+	h.answer(t,
+		oneColumn("v"), textRow("alpha"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")},
+		&pgproto3.ErrorResponse{Severity: "ERROR", Code: "22012", Message: "division by zero"},
+		&pgproto3.ReadyForQuery{},
+	)
+
+	assert.Empty(t, h.s.extendedState.pendingQueries)
+	assert.False(t, h.s.statementClock.Running())
+
+	rows := h.awaitConnectionQueries(t, 3)
+
+	assertCompletedOwnDuration(t, rows, first)
+	assert.Equal(t, []string{`{"v":"alpha"}`}, h.capturedValues(t, findRow(t, rows, first).UID))
+
+	failed := findRow(t, rows, middle)
+	require.NotNil(t, failed.Error)
+	assert.Equal(t, "division by zero", *failed.Error)
+
+	discarded := findRow(t, rows, last)
+	require.NotNil(t, discarded.Error)
+	assert.Equal(t, "no completion message from upstream", *discarded.Error)
+	assert.Empty(t, h.capturedValues(t, discarded.UID))
+
+	require.Len(t, h.logs.warnings("terminator never completed"), 1, "only the discarded Execute is backstopped")
+	require.Len(t, h.logs.warnings(""), 1)
+}
+
+// TestLoopback_PipelinedPortalPages: one portal paged three times in one
+// batch. Each page is its own Execute and must log its own row, holding that
+// page's rows only, each with a duration.
+func TestLoopback_PipelinedPortalPages(t *testing.T) {
+	t.Parallel()
+
+	h := newLoopback(t)
+
+	const sql = "SELECT id FROM widgets"
+
+	h.sendForwarded(t, &pgproto3.Parse{Name: "st", Query: sql})
+	h.sendForwarded(t, &pgproto3.Bind{DestinationPortal: "p", PreparedStatement: "st"})
+
+	for range 3 {
+		h.sendForwarded(t, &pgproto3.Execute{Portal: "p", MaxRows: 2})
+	}
+
+	h.awaitPending(t, 3)
+	h.sendForwarded(t, &pgproto3.Sync{})
+	h.awaitSyncEpoch(t, 1)
+
+	h.answer(t,
+		oneColumn("id"), textRow("1"), textRow("2"), &pgproto3.PortalSuspended{},
+		textRow("3"), textRow("4"), &pgproto3.PortalSuspended{},
+		textRow("5"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 5")},
+		&pgproto3.ReadyForQuery{},
+	)
+
+	assert.Empty(t, h.s.extendedState.pendingQueries)
+
+	rows := h.awaitConnectionQueries(t, 3)
+
+	// One row per page, in execution order.
+	sortByExecutedAt(rows)
+
+	pages := make([]int, 0, len(rows))
+
+	for _, row := range rows {
+		require.NotNil(t, row.DurationMs, "every page logs its own duration")
+		assert.Nil(t, row.Error)
+		pages = append(pages, len(h.capturedValues(t, row.UID)))
+	}
+
+	assert.Equal(t, []int{2, 2, 1}, pages, "each page keeps its own rows")
+	assert.Nil(t, rows[0].RowsAffected, "a suspended page carries no command tag")
+	require.NotNil(t, rows[2].RowsAffected)
+	assert.Equal(t, int64(5), *rows[2].RowsAffected)
+
+	assert.Empty(t, h.logs.warnings(""))
+}
+
+// TestLoopback_SimpleQueryBehindPipelinedBatch: a simple Query sent before the
+// previous batch's ReadyForQuery must not absorb that batch's rows, nor be
+// completed at that batch's ReadyForQuery.
+func TestLoopback_SimpleQueryBehindPipelinedBatch(t *testing.T) {
+	t.Parallel()
+
+	h := newLoopback(t)
+
+	const (
+		extended = "SELECT 'alpha' AS v"
+		simple   = "SELECT 'zulu' AS z"
+	)
+
+	h.queueExecute(t, "1", extended)
+	h.awaitPending(t, 1)
+	h.sendForwarded(t, &pgproto3.Sync{})
+	h.sendForwarded(t, &pgproto3.Query{String: simple})
+	h.awaitSyncEpoch(t, 2)
+
+	h.answer(t,
+		oneColumn("v"), textRow("alpha"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")},
+		&pgproto3.ReadyForQuery{},
+	)
+
+	h.s.bookMu.Lock()
+	staged := h.s.currentQuery
+	h.s.bookMu.Unlock()
+	require.NotNil(t, staged, "the simple Query is still waiting for its own ReadyForQuery")
+	assert.Equal(t, simple, staged.sql)
+
+	h.answer(t,
+		oneColumn("z"), textRow("zulu"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")},
+		&pgproto3.ReadyForQuery{},
+	)
+
+	rows := h.awaitConnectionQueries(t, 2)
+	assertCompletedOwnDuration(t, rows, extended)
+	assertCompletedOwnDuration(t, rows, simple)
+	assert.Equal(t, []string{`{"v":"alpha"}`}, h.capturedValues(t, findRow(t, rows, extended).UID))
+	assert.Equal(t, []string{`{"z":"zulu"}`}, h.capturedValues(t, findRow(t, rows, simple).UID))
+
+	assert.Empty(t, h.logs.warnings(""))
+}
+
+func sortByExecutedAt(rows []store.Query) {
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].ExecutedAt.Before(rows[j].ExecutedAt) })
 }

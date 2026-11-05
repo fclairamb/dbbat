@@ -287,6 +287,20 @@ the wrong item, the last statements of the session were never completed, and
 the clock stayed armed on an idle backend — an idle session got killed
 `limit + 2s` after its *last* statement.
 
+Each terminator completes its statement **on the spot**, with its own rows
+affected, error and duration, and drops it from the queue. The upstream answers
+`Execute`s strictly in order, so the statement receiving a `RowDescription` or
+`DataRow` is always the **head** of the queue. A pipelined batch (a pgx `Batch`,
+a JDBC batch: several `Execute`s before one `Sync`) used to attribute rows to
+the *tail* and park each terminated entry until the `ReadyForQuery`, which
+stored every statement's captured rows under another statement's SQL and left
+the first one uncompleted. Bytes are attributed per terminator, as the
+wire-level diff since the previous completion: a batch's client bytes all
+arrive before its first answer, so they count against its first statement, and
+the trailing `ReadyForQuery` rides on the next one, as on the simple-query path.
+A simple `Query` sent behind a pipelined batch waits for its own
+`ReadyForQuery`, the one its epoch names.
+
 Behind the four terminators there is a protocol backstop: upstream sends one
 `ReadyForQuery` per message that earns one (a forwarded `Sync` or a forwarded
 simple `Query`), and the protocol guarantees nothing from before that message
