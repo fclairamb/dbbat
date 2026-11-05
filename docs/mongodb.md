@@ -343,6 +343,12 @@ a supported server never send them — dbbat advertises `maxWireVersion` 21. The
   each subsequent `getMore` for that cursor is stamped with the same `cursor_id`
   plus `cursor_origin=<command> <namespace>`, so a whole paged result set reads as
   one logical query. The link is dropped when the cursor drains (`cursor.id == 0`).
+- **Commands with no reply at teardown:** a command's row is written when its
+  reply arrives. Every command still awaiting one when the session ends (a
+  driver can pipeline several) is completed, oldest first, with `client
+  disconnected before the response completed`, or with the termination message
+  when dbbat ended the session. Written before the connection row closes, so
+  the rows are inside the sealed query chain.
 
 ## Session Packet Dumps
 

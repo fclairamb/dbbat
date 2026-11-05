@@ -703,6 +703,15 @@ optimistically instead used to leave a session that kept running with a
 `DONE_ATTN` owed to nobody, which the next refused statement would take: the
 client saw "cancelled" where it should have seen the real error.
 
+A statement's `queries` row is written when its response's end-of-message
+packet is relayed. When the session ends first — a client that sends a
+statement and closes its socket straight away, which still has it forwarded and
+executed upstream — the teardown completes the statement still in flight with
+`client disconnected before the response completed`, or with the termination
+message when dbbat is what ended the session. The write happens before the
+connection row is closed, so the row is inside the sealed query chain, and the
+bytes since the last completion are charged to it.
+
 ## `read_only` is a text control on SQL Server
 
 SQL Server has no session-level read-only mode, so there is no server-side pin

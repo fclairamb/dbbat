@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -733,6 +734,22 @@ func (s *Session) recordDisconnect() {
 		return
 	}
 
+	termination := s.recordedTermination()
+
+	// The commands still awaiting a reply never get one, so nothing else will
+	// complete their rows: say why here, before the session record closes.
+	// Plural: a driver can pipeline several on one connection. Whether dbbat
+	// ended the session or the client simply hung up, each was forwarded and
+	// may have run upstream, so dropping it would leave it out of the query
+	// history and the per-connection chain. First, so the bytes streamed for
+	// them are charged to them rather than to the bytes-only flush below.
+	message := errClientDisconnectedMidResponse
+	if termination.Set() {
+		message = termination.Message()
+	}
+
+	s.flushPending(message)
+
 	// Flush any client-side bytes not yet attributed to a query.
 	total := s.cumulativeClientBytes()
 	if delta := total - s.lastBytesSnapshot; delta > 0 {
@@ -745,13 +762,7 @@ func (s *Session) recordDisconnect() {
 		}
 	}
 
-	termination := s.recordedTermination()
 	if termination.Set() {
-		// The commands still awaiting a reply never get one, so nothing else
-		// will complete their rows. Say why here, before the session record
-		// closes. Plural: a driver can pipeline several on one connection.
-		s.flushPendingOnTermination(termination)
-
 		// "terminated" before "closed": why, then that.
 		s.stream.ConnectionWithReason(s.ctx, shared.ConnectionTerminated, termination.Reason)
 	}
@@ -856,9 +867,11 @@ func (p *prefixConn) Read(b []byte) (int, error) {
 	return p.Conn.Read(b)
 }
 
-// flushPendingOnTermination records every command that was still awaiting an
-// upstream reply when dbbat ended the session, with the reason it ended.
-func (s *Session) flushPendingOnTermination(t store.Termination) {
+// flushPending records every command that was still awaiting an upstream reply
+// when the session ended, with message as its error. Oldest first, so the
+// query history keeps the order they were sent in. Synchronous, so the rows
+// are in the chain before the connection close seals it.
+func (s *Session) flushPending(message string) {
 	s.pendingMu.Lock()
 
 	pending := make([]*pendingQuery, 0, len(s.pending))
@@ -874,9 +887,10 @@ func (s *Session) flushPendingOnTermination(t store.Termination) {
 	s.statementClock.Stop()
 	s.pendingMu.Unlock()
 
-	message := t.Message()
+	sort.SliceStable(pending, func(i, j int) bool { return pending[i].start.Before(pending[j].start) })
 
 	for _, pq := range pending {
-		s.recordQuery(pq, nil, nil, &message)
+		errText := message
+		s.recordQuerySync(pq, &errText)
 	}
 }
