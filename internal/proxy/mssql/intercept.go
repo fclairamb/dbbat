@@ -147,6 +147,18 @@ func (s *session) describeRPCRequest(req rpcRequest, st *statement) string {
 	case handleOnly(req):
 		return s.describeHandleRequest(req, st)
 
+	case req.isWellKnown() && req.procID == spCursor:
+		// Positioned operations on an open cursor. REFRESH, LOCK, SETPOSITION
+		// and ABSOLUTE are bookkeeping; UPDATE, DELETE and INSERT write to the
+		// cursor's base table with values the cursor's SELECT never showed, so
+		// under a restrictive grant they fail closed — as does an optype dbbat
+		// cannot read.
+		if grantRestricts(s.grant) && st.refusal == nil && req.cursorWrites() {
+			st.refusal = ErrCursorWriteBlocked
+		}
+
+		return req.logText()
+
 	case req.isWellKnown() && harmlessProcs[req.procID]:
 		// Cursor bookkeeping: no statement, nothing a control is about.
 		return req.logText()
