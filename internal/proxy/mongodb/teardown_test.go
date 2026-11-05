@@ -147,7 +147,7 @@ func TestCommandsAwaitingAReplyAtClientDisconnectAreLogged(t *testing.T) {
 }
 
 // TestCommandAwaitingAReplyAtTerminationCarriesTheReason keeps the earlier
-// behaviour: when dbbat ended the session, the reason is the error.
+// behavior: when dbbat ended the session, the reason is the error.
 func TestCommandAwaitingAReplyAtTerminationCarriesTheReason(t *testing.T) {
 	t.Parallel()
 
