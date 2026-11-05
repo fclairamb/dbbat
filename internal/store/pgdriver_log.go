@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/uptrace/bun/driver/pgdriver"
 )
@@ -16,10 +17,18 @@ import (
 type slogPgdriver struct{ logger *slog.Logger }
 
 func (l slogPgdriver) Printf(ctx context.Context, format string, v ...any) {
-	l.logger.DebugContext(ctx, fmt.Sprintf(format, v...), slog.String("component", "pgdriver"))
+	logger := l.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.DebugContext(ctx, fmt.Sprintf(format, v...), slog.String("component", "pgdriver"))
 }
 
-// routePgdriverLogsToSlog replaces pgdriver's package-level logger.
+var routePgdriverOnce sync.Once
+
+// routePgdriverLogsToSlog replaces pgdriver's package-level logger, once:
+// store.New runs concurrently in tests and the assignment is a global write.
+// The logger resolves slog.Default() at log time.
 func routePgdriverLogsToSlog() {
-	pgdriver.Logger = slogPgdriver{logger: slog.Default()}
+	routePgdriverOnce.Do(func() { pgdriver.Logger = slogPgdriver{} })
 }
