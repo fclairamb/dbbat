@@ -1,6 +1,7 @@
 package postgresql
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -1237,6 +1238,79 @@ func TestHandleExecute_QuotaCheck(t *testing.T) {
 	err := s.handleExecute(&pgproto3.Execute{Portal: ""})
 	if !errors.Is(err, ErrQueryLimitExceeded) {
 		t.Errorf("handleExecute() error = %v, want %v", err, ErrQueryLimitExceeded)
+	}
+}
+
+// newQuotaTestSession is a full-write session whose grant caps the query count.
+func newQuotaTestSession(maxQueries int64) *Session {
+	s := newTestSession("write")
+	s.ctx = context.Background()
+	s.grant.Definition.MaxQueryCounts = &maxQueries
+	s.extendedState.preparedStatements[""] = &preparedStatement{sql: "SELECT 1"}
+	s.extendedState.portals[""] = &portalState{stmtName: ""}
+
+	return s
+}
+
+// A client that pipelines Executes before one Sync must not slip past
+// max_query_counts: none of them has completed when the next is checked, so the
+// quota has to be charged at admission, not at ReadyForQuery.
+func TestHandleExecute_PipelinedExecutesHonorQueryQuota(t *testing.T) {
+	t.Parallel()
+
+	s := newQuotaTestSession(2)
+
+	for i := range 2 {
+		if err := s.handleExecute(&pgproto3.Execute{Portal: ""}); err != nil {
+			t.Fatalf("Execute #%d under the cap: error = %v, want nil", i+1, err)
+		}
+	}
+
+	// Third Execute in the same batch, before any completion.
+	err := s.handleExecute(&pgproto3.Execute{Portal: ""})
+	if !errors.Is(err, ErrQueryLimitExceeded) {
+		t.Fatalf("third pipelined Execute: error = %v, want %v", err, ErrQueryLimitExceeded)
+	}
+
+	if got := len(s.extendedState.pendingQueries); got != 2 {
+		t.Errorf("pending queries = %d, want 2 (the refused Execute is not queued)", got)
+	}
+
+	// Two admitted + one refusal, which recordBlockedQuery charges.
+	if s.grant.QueryCount != 3 {
+		t.Errorf("grant.QueryCount = %d, want 3", s.grant.QueryCount)
+	}
+}
+
+// Positive control for the sequential path: each simple Query completes before
+// the next is sent. Completion must not charge the quota a second time, or the
+// second query under a cap of 2 would already be refused.
+func TestHandleQuery_SequentialQueriesHonorQueryQuota(t *testing.T) {
+	t.Parallel()
+
+	s := newQuotaTestSession(2)
+
+	for i := range 2 {
+		if err := s.handleQuery(&pgproto3.Query{String: "SELECT 1"}); err != nil {
+			t.Fatalf("query #%d under the cap: error = %v, want nil", i+1, err)
+		}
+
+		if s.grant.QueryCount != int64(i+1) {
+			t.Fatalf("after admitting query #%d: grant.QueryCount = %d, want %d", i+1, s.grant.QueryCount, i+1)
+		}
+
+		// Upstream answers: the query completes at ReadyForQuery.
+		s.logQuery(nil, nil, 0)
+		s.currentQuery = nil
+
+		if s.grant.QueryCount != int64(i+1) {
+			t.Fatalf("after completing query #%d: grant.QueryCount = %d, want %d", i+1, s.grant.QueryCount, i+1)
+		}
+	}
+
+	err := s.handleQuery(&pgproto3.Query{String: "SELECT 1"})
+	if !errors.Is(err, ErrQueryLimitExceeded) {
+		t.Fatalf("third query: error = %v, want %v", err, ErrQueryLimitExceeded)
 	}
 }
 

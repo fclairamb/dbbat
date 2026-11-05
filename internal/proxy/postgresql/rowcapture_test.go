@@ -251,24 +251,33 @@ func TestPersistAbortedQuery_CompletesARecordItAlreadyCreated(t *testing.T) {
 		s.currentQuery = &pendingQuery{sql: "SELECT 1", startTime: time.Now()}
 
 		if withSink {
-			s.currentQuery.rowSink = writer.NewSinkFor(uuid.New())
+			// Unresolved, as a capture whose record insert is still in
+			// flight: the abort's persist step is what resolves it.
+			s.currentQuery.rowSink = writer.NewSink()
 		}
 
 		return s
 	}
 
 	// No new bytes and a capture already in flight: the abort must be logged.
+	// Without a store, logQuery's persist step resolves the sink by failing it,
+	// which marks it dropped: that is the observable trace of the abort being
+	// logged. (The query count is charged at admission, not here.)
 	withRecord := newAbortSession(true)
+	sink := withRecord.currentQuery.rowSink
 	withRecord.persistAbortedQuery("aborted: " + errAbortedForTest.Error())
 
-	assert.Equal(t, int64(1), withRecord.grant.QueryCount,
+	assert.True(t, sink.Dropped(),
 		"an abort on a query whose record already exists must still be completed")
 
 	// No new bytes and nothing captured: nothing was ever inserted, so there
 	// is still nothing to log.
 	withoutRecord := newAbortSession(false)
+	staged := withoutRecord.currentQuery
 	withoutRecord.persistAbortedQuery("aborted: " + errAbortedForTest.Error())
 
-	assert.Equal(t, int64(0), withoutRecord.grant.QueryCount,
+	assert.Same(t, staged, withoutRecord.currentQuery,
 		"an abort with no record and no bytes stays unlogged")
+	assert.Equal(t, int64(0), withoutRecord.grant.QueryCount,
+		"completing an abort never charges the query quota")
 }
