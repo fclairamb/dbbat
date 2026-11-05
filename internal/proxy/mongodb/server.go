@@ -59,6 +59,10 @@ type Server struct {
 	// startup — designed exactly for an L4 proxy like dbbat.
 	serviceID bson.ObjectID
 
+	// preAuth is the window an unauthenticated client gets to finish its
+	// handshake and login (shared.PreAuthTimeout unless a test shortens it).
+	preAuth shared.PreAuthTimer
+
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
 	// in a goroutine).

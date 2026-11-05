@@ -267,6 +267,12 @@ type session struct {
 	statementLimit    time.Duration
 	statementClock    shared.StatementClock
 
+	// preAuthTimeout bounds everything from the accept to the AUTH OK. Zero
+	// means shared.PreAuthTimeout.
+	preAuthTimeout time.Duration
+	// preAuthRelays is the server's pre-auth relay semaphore (nil = unbounded).
+	preAuthRelays chan struct{}
+
 	// termination records why dbbat ended this session, when dbbat is what
 	// ended it.
 	terminationMu sync.Mutex
@@ -399,6 +405,25 @@ func newSession(
 	return s
 }
 
+// acquirePreAuthRelay takes a pre-auth relay slot without waiting. The
+// returned release is idempotent, so it can be both deferred and called on
+// success.
+func (s *session) acquirePreAuthRelay() (func(), bool) {
+	if s.preAuthRelays == nil {
+		return func() {}, true
+	}
+
+	select {
+	case s.preAuthRelays <- struct{}{}:
+	default:
+		return nil, false
+	}
+
+	var once sync.Once
+
+	return func() { once.Do(func() { <-s.preAuthRelays }) }, true
+}
+
 // readConnectPacket reads the client's first TNS packet and classifies the two
 // ways that read can fail. A TCP health check opens the socket and closes it
 // without a byte, so this is where every probe lands: that exact case — zero
@@ -424,6 +449,14 @@ func (s *session) readConnectPacket() (*TNSPacket, error) {
 func (s *session) run() error {
 	defer s.cleanup()
 
+	// Everything up to the AUTH OK runs under the pre-auth window — the client
+	// reads, and the pre-auth relay and its upstream socket with them: a socket
+	// that says nothing would otherwise hold this goroutine, and once past the
+	// Connect an upstream connection, forever.
+	if err := shared.ArmPreAuthDeadline(s.clientConn, s.preAuthTimeout); err != nil {
+		return fmt.Errorf("set pre-auth deadline: %w", err)
+	}
+
 	// Step 1: Receive TNS Connect from client
 	connectPkt, err := s.readConnectPacket()
 	if err != nil {
@@ -435,6 +468,16 @@ func (s *session) run() error {
 
 		return fmt.Errorf("%w: got %s", ErrExpectedConnectPacket, connectPkt.Type)
 	}
+
+	// Take a pre-auth relay slot before anything dials upstream; released on
+	// the AUTH OK below, or on the way out if the login never gets there.
+	releaseRelay, ok := s.acquirePreAuthRelay()
+	if !ok {
+		s.sendRefuse(ORA12520, "too many logins in progress, retry later")
+
+		return ErrPreAuthRelaysExhausted
+	}
+	defer releaseRelay()
 
 	// Step 2: Parse service name and resolve database
 	if err := s.resolveDatabase(connectPkt.Payload); err != nil {
@@ -572,6 +615,14 @@ func (s *session) run() error {
 
 	if _, err := s.clientConn.Write(authOK); err != nil {
 		return fmt.Errorf("failed to send AUTH OK: %w", err)
+	}
+
+	// Logged in: the slot goes back and the session may sit idle for as long
+	// as the client keeps it open.
+	releaseRelay()
+
+	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
+		return fmt.Errorf("clear pre-auth deadline: %w", err)
 	}
 
 	// Step 7: Record connection

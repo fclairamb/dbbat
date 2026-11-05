@@ -71,6 +71,10 @@ type Server struct {
 	// leaves the decision to the atomic above.
 	queryTaggingResolver *shared.QueryTaggingResolver
 
+	// preAuth is the window an unauthenticated client gets to finish its
+	// startup and login (shared.PreAuthTimeout unless a test shortens it).
+	preAuth shared.PreAuthTimer
+
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
 	// in a goroutine).
@@ -298,6 +302,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.cancels = s.cancels
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
+	session.preAuthTimeout = s.preAuth.Timeout()
 	session.queryTagging = s.queryTagging.Load()
 	session.queryTaggingResolver = s.queryTaggingResolver
 

@@ -56,6 +56,10 @@ type Server struct {
 
 	logger *slog.Logger
 
+	// preAuth is the window an unauthenticated client gets to finish
+	// PRELOGIN → TLS → LOGIN7 (shared.PreAuthTimeout unless a test shortens it).
+	preAuth shared.PreAuthTimer
+
 	// spidCounter feeds the synthetic SPID stamped on outbound packets, so a
 	// client that displays @@SPID-ish diagnostics sees a stable per-connection
 	// number rather than a constant zero.

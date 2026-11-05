@@ -23,10 +23,6 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// handshakeTimeout bounds the whole PRELOGIN → TLS → LOGIN7 exchange. A client
-// that opens a socket and says nothing must not hold a goroutine forever.
-const handshakeTimeout = 30 * time.Second
-
 // Session-level errors.
 var (
 	// ErrUnexpectedFirstMessage — the connection did not start with PRELOGIN.
@@ -340,7 +336,10 @@ func newSession(conn net.Conn, server *Server) *session {
 // The returned error describes why the session ended. A refusal the client was
 // properly told about returns nil: it is an outcome, not a fault.
 func (s *session) Run(ctx context.Context) error {
-	if err := s.conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+	// The whole PRELOGIN → TLS → LOGIN7 exchange runs under the shared pre-auth
+	// window: a client that opens a socket and says nothing must not hold a
+	// goroutine forever.
+	if err := shared.ArmPreAuthDeadline(s.conn, s.server.preAuth.Timeout()); err != nil {
 		return fmt.Errorf("mssql: set handshake deadline: %w", err)
 	}
 
@@ -435,7 +434,7 @@ func (s *session) serve(ctx context.Context) error {
 
 	// The handshake deadline must go before the relay starts: a session is
 	// allowed to sit idle for as long as the client keeps it open.
-	if err := s.conn.SetDeadline(time.Time{}); err != nil {
+	if err := shared.ClearPreAuthDeadline(s.conn); err != nil {
 		return fmt.Errorf("mssql: clear handshake deadline: %w", err)
 	}
 

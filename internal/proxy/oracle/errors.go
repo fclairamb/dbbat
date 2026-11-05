@@ -84,6 +84,9 @@ var (
 
 	// ErrExpectedConnectPacket indicates a non-Connect packet was received at session start.
 	ErrExpectedConnectPacket = errors.New("expected TNS Connect packet")
+	// ErrPreAuthRelaysExhausted indicates every pre-auth relay slot was taken,
+	// so the connection was refused before dbbat dialed the upstream for it.
+	ErrPreAuthRelaysExhausted = errors.New("too many Oracle logins in progress")
 	// ErrNoServiceName indicates the connect descriptor lacks a SERVICE_NAME.
 	ErrNoServiceName = errors.New("no SERVICE_NAME in connect descriptor")
 	// ErrUpstreamRefused indicates the upstream Oracle server refused the connection.

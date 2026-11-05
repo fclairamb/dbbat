@@ -192,6 +192,10 @@ type Session struct {
 	statementLimit    time.Duration
 	statementClock    shared.StatementClock
 
+	// preAuthTimeout bounds SSL negotiation, startup and authentication
+	// together. Zero means shared.PreAuthTimeout.
+	preAuthTimeout time.Duration
+
 	// clientSyncEpoch counts the client messages that each earn exactly one
 	// upstream ReadyForQuery: every forwarded Sync and every forwarded simple
 	// Query. Each pendingQuery stamps it when queued, so the RFQ answering
@@ -363,6 +367,13 @@ func NewSession(
 func (s *Session) Run() error {
 	defer s.cleanup()
 
+	// Nothing below may wait on an unauthenticated client for longer than the
+	// pre-auth window: a socket that says nothing would otherwise hold this
+	// goroutine and its descriptor forever. Lifted once authenticate succeeds.
+	if err := shared.ArmPreAuthDeadline(s.clientConn, s.preAuthTimeout); err != nil {
+		return fmt.Errorf("set pre-auth deadline: %w", err)
+	}
+
 	// Negotiate TLS before constructing the backend — wrapping clientConn
 	// after the backend is built would leave the backend reading from the
 	// plaintext side.
@@ -378,6 +389,12 @@ func (s *Session) Run() error {
 	// Authenticate
 	if err := s.authenticate(); err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
+	}
+
+	// The client is authenticated: an established session may sit idle for as
+	// long as it likes. The upstream dial below carries its own timeout.
+	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
+		return fmt.Errorf("clear pre-auth deadline: %w", err)
 	}
 
 	// Connect to upstream (this creates s.upstreamFrontend)
