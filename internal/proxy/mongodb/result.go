@@ -390,12 +390,9 @@ func buildSQLText(cmd string, body bson.Raw) string {
 		return cmd
 	}
 
-	text := cmd + " " + string(extJSON)
-	if len(text) > maxSQLTextLen {
-		text = text[:maxSQLTextLen]
-	}
-
-	return text
+	// Relaxed Extended JSON writes non-ASCII as raw UTF-8, so the cut must
+	// land on a rune boundary or the query insert fails.
+	return shared.TruncateOnRune(cmd+" "+string(extJSON), maxSQLTextLen)
 }
 
 // extractParams pulls session/transaction metadata (lsid, txnNumber) into the

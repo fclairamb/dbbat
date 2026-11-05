@@ -6,7 +6,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -766,16 +765,7 @@ func appendParams(params *store.QueryParameters, values []string) *store.QueryPa
 // the query insert outright. Losing the audit row for an oversize statement is
 // exactly the wrong failure.
 func truncateSQL(sql string) string {
-	if len(sql) <= maxSQLTextLen {
-		return sql
-	}
-
-	cut := maxSQLTextLen
-	for cut > 0 && !utf8.RuneStart(sql[cut]) {
-		cut--
-	}
-
-	return sql[:cut]
+	return shared.TruncateOnRune(sql, maxSQLTextLen)
 }
 
 // usernameOf renders a user for logs without dereferencing a nil.
