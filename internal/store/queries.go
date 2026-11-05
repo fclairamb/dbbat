@@ -39,12 +39,28 @@ type QueryRowsCursor struct {
 	Offset int64 `json:"offset"`
 }
 
+// storableSQLText repairs statement text so the insert cannot fail on it:
+// `sql_text` is a Postgres `text` column, which refuses invalid UTF-8 and the
+// NUL byte. Both reach here from client-chosen bytes, and a refused insert
+// would drop a statement that has already run from the query history. Every
+// proxy and the MCP path insert through CreateQuery or CreatePendingQuery, so
+// this is the one place no protocol can forget. The repaired text is what the
+// chain MAC covers, so verification reads back exactly what was sealed.
+func storableSQLText(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if strings.IndexByte(s, 0) >= 0 {
+		s = strings.ReplaceAll(s, "\x00", "\uFFFD")
+	}
+
+	return s
+}
+
 // CreateQuery creates a new query record
 func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 	result := &Query{
 		UID:          newUIDv7(), // Generate UUIDv7 for time-ordered inserts
 		ConnectionID: query.ConnectionID,
-		SQLText:      query.SQLText,
+		SQLText:      storableSQLText(query.SQLText),
 		Parameters:   query.Parameters,
 		ExecutedAt:   query.ExecutedAt,
 		DurationMs:   query.DurationMs,
