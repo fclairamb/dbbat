@@ -3803,6 +3803,14 @@ that simplified builder does not emit, and a 23ai listener drops the connection 
 
 ### Pre-auth relay (Oracle 23ai)
 
+Because the relay dials the upstream on the client's TNS Connect, *before* the
+client has authenticated, every unauthenticated client also holds an upstream
+connection. Two bounds keep that from being a lever: the shared pre-auth window
+(`shared.PreAuthTimeout`, 30 s from the accept to the AUTH OK dbbat writes —
+past it the client read fails, the pump is stopped and the upstream socket
+closed), and a cap of `maxConcurrentPreAuthRelays` (512) logins in flight per
+listener, refused with ORA-12520 right after the Connect, before any dial.
+
 The pre-auth negotiation is **not** strict request/response: a single client packet can
 elicit several upstream packets, and 23ai injects Control/Marker (OOB break/reset) packets
 mid-negotiation. The relay (`relayPreAuthNegotiation`) therefore runs a **concurrent

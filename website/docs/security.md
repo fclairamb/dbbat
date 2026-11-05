@@ -295,6 +295,13 @@ TLS termination is built into the PostgreSQL, MySQL, MongoDB and SQL Server list
 - **SQL Server listener**: `DBB_MSSQL_TLS_*`. Disabling TLS answers `ENCRYPT_NOT_SUP`, which also refuses clients that require encryption. `DBB_MSSQL_TLS_MAX_VERSION` caps the client-leg handshake at `1.2` (the default) or `1.3`; 1.3 is opt-in and verified against `go-mssqldb` only.
 - **Oracle listener**: plain TNS only — no TLS termination. Deploy it behind a TLS-terminating load balancer, a VPN, or a private network.
 
+### Unauthenticated Connections
+
+Every listener gives a client **30 seconds** from the accept to finish its handshake and log in; past that, dbbat closes the socket. A client that opens connections and sends nothing therefore cannot pile up goroutines and file descriptors until the process runs out of them. The limit is lifted the moment the login succeeds, so an authenticated session may stay idle for as long as the client keeps it open.
+
+- **MongoDB**: the 30 seconds are an *idle* bound, re-armed on every message, because a driver's monitoring connection never authenticates and polls `hello` for its whole life (every 10 s by default). A `heartbeatFrequencyMS` above 30 s would see its monitoring connection closed between polls. Before authentication an `OP_COMPRESSED` frame may inflate to at most 64 KiB; the 48 MB message limit applies once the session is authenticated.
+- **Oracle**: dbbat opens the upstream connection before it authenticates the client (the pre-auth relay), so at most **512** logins may be in flight at once. A login past that is refused with `ORA-12520` and may simply retry.
+
 ### SSH Bastions
 
 A server can set `via_uid` pointing at another server whose `protocol` is `ssh`. Its upstream connection is then dialled through that SSH bastion. This works for all five proxied protocols (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server).
