@@ -301,6 +301,16 @@ the trailing `ReadyForQuery` rides on the next one, as on the simple-query path.
 A simple `Query` sent behind a pipelined batch waits for its own
 `ReadyForQuery`, the one its epoch names.
 
+When the session ends — most often a client that closes its socket in the
+middle of a result — the teardown completes every statement still in flight
+with `client disconnected before the response completed` (or `aborted: session
+ended before the response completed` when the upstream side went first), and
+the bytes since the last completion go to the statement being answered. With
+nothing in flight, the trailing bytes (the last `ReadyForQuery`, the client's
+`Terminate`) are flushed to the connection without counting a query. Before
+this, a client could stream just under `max_bytes_transferred`, hang up, and
+reconnect to a budget that had never seen those bytes.
+
 Behind the four terminators there is a protocol backstop: upstream sends one
 `ReadyForQuery` per message that earns one (a forwarded `Sync` or a forwarded
 simple `Query`), and the protocol guarantees nothing from before that message

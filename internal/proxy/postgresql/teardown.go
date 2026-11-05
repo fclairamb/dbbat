@@ -106,7 +106,10 @@ func (s *Session) finishRelays(err error, errChan <-chan error) {
 	defer timer.Stop()
 
 	select {
-	case <-errChan:
+	case second := <-errChan:
+		// The second leg ends on the sockets the teardown just closed; its
+		// error says nothing the first one did not.
+		_ = second
 	case <-timer.C:
 		s.logger.WarnContext(s.ctx, "relay leg did not end after both sockets closed")
 	}
