@@ -186,7 +186,7 @@ func (s *Server) Start(addr string) error {
 
 	// Start dump cleanup goroutine if dumps are enabled
 	if s.dumpConfig.Dir != "" {
-		if err := os.MkdirAll(s.dumpConfig.Dir, 0o755); err != nil {
+		if err := os.MkdirAll(s.dumpConfig.Dir, dump.DirPerm); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to create dump directory", slog.String("dir", s.dumpConfig.Dir), slog.Any("error", err))
 		} else {
 			go s.runDumpCleanup()
