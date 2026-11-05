@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.32.0](https://github.com/fclairamb/dbbat/compare/v0.31.1...v0.32.0) (2026-11-05)
+
+
+### Features
+
+* **config:** route Slack notifications to a channel chosen per grant definition ([#465](https://github.com/fclairamb/dbbat/issues/465)) ([52e4a4c](https://github.com/fclairamb/dbbat/commit/52e4a4c96fdd42052520307c205b1dda944fec0a))
+* **config:** thread auto-approved Slack renewals under their first request ([#470](https://github.com/fclairamb/dbbat/issues/470)) ([ed05f88](https://github.com/fclairamb/dbbat/commit/ed05f88854760148ac4269bb3234d0fb12fa89ab))
+
+
+### Bug Fixes
+
+* apply read_only and block_ddl to every statement of a SQL Server batch ([#459](https://github.com/fclairamb/dbbat/issues/459)) ([d4da3df](https://github.com/fclairamb/dbbat/commit/d4da3df28af930bdb839282d4e471bcee6e087d7))
+* **deps:** update dependency @hookform/resolvers to v7 ([#458](https://github.com/fclairamb/dbbat/issues/458)) ([7a4ab7d](https://github.com/fclairamb/dbbat/commit/7a4ab7d2b7d19328810df6d89c9f57a12b24dba0))
+* **deps:** update module github.com/gopacket/gopacket to v1.7.5 ([#460](https://github.com/fclairamb/dbbat/issues/460)) ([2c5e665](https://github.com/fclairamb/dbbat/commit/2c5e665263902a9421c989b1d7637e9066afbbf6))
+* **deps:** update module github.com/gopacket/gopacket to v1.7.6 ([#468](https://github.com/fclairamb/dbbat/issues/468)) ([e9f01e5](https://github.com/fclairamb/dbbat/commit/e9f01e57f67a0c7c4db6092a1dd866fb0361d83c))
+* **deps:** update module github.com/gopacket/gopacket to v1.7.7 ([#469](https://github.com/fclairamb/dbbat/issues/469)) ([c93244c](https://github.com/fclairamb/dbbat/commit/c93244cc9f8e99ec2f326563be9217312078c1dd))
+* **deps:** update module github.com/jackc/pgx/v5 to v5.12.0 ([#457](https://github.com/fclairamb/dbbat/issues/457)) ([c7b1104](https://github.com/fclairamb/dbbat/commit/c7b1104fcb09beb8b16ef88969cbd5a6d640f529))
+* **deps:** update module github.com/slack-go/slack to v0.33.0 ([#455](https://github.com/fclairamb/dbbat/issues/455)) ([d40bd1c](https://github.com/fclairamb/dbbat/commit/d40bd1c5e74328acfe86e0138b85c7944ed63141))
+* **deps:** update module github.com/slack-go/slack to v0.34.0 ([#462](https://github.com/fclairamb/dbbat/issues/462)) ([a5da1f8](https://github.com/fclairamb/dbbat/commit/a5da1f8e2d1f9ec0b655ee5ba25c69a0a8adbf4c))
+* **deps:** update module github.com/xdg-go/scram to v1.3.0 ([#463](https://github.com/fclairamb/dbbat/issues/463)) ([d4da029](https://github.com/fclairamb/dbbat/commit/d4da02944b152fde04dc3e45d96e73ed2a95d199))
+* **deps:** update module github.com/xdg-go/scram to v1.4.0 ([#475](https://github.com/fclairamb/dbbat/issues/475)) ([6676be0](https://github.com/fclairamb/dbbat/commit/6676be00a7bc6eb3cae8f7022f47915dfa4a0a70))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.9.3 ([#461](https://github.com/fclairamb/dbbat/issues/461)) ([110d9ca](https://github.com/fclairamb/dbbat/commit/110d9ca21e9c0fbc650a2a1142c8ee6d748f4dd6))
+* **proxy:** harden grant controls, auth and audit verification (batch 2026-10-30 specs) ([#472](https://github.com/fclairamb/dbbat/issues/472)) ([23516c0](https://github.com/fclairamb/dbbat/commit/23516c0b547d98cef1c29a602f53bdedd0d4aa40))
+* **store:** let a deleted server's name be reused ([#474](https://github.com/fclairamb/dbbat/issues/474)) ([f98b76d](https://github.com/fclairamb/dbbat/commit/f98b76d3ef08a6635c7e89096b40583dfeef558e))
+
 ## [0.31.1](https://github.com/fclairamb/dbbat/compare/v0.31.0...v0.31.1) (2026-10-30)
 
 
