@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -50,4 +51,30 @@ func TestPreAuthDeadlineClosesSilentClient(t *testing.T) {
 
 	require.NoError(t, srv.Shutdown(ctx))
 	require.NoError(t, <-errCh)
+}
+
+// TestPreAuthDeadlineSparesAuthenticatedIdleSession is the positive control:
+// a session that logged in and then sits idle for longer than the window is
+// not closed, because the deadline is lifted before the relay starts. The
+// proof is the client's own short read timing out on a live socket rather
+// than seeing the proxy's EOF.
+func TestPreAuthDeadlineSparesAuthenticatedIdleSession(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAuthFixture(t, encryptNotSup, "disable")
+
+	const window = 300 * time.Millisecond
+
+	fixture.proxy.preAuth.Set(window)
+
+	client, outcome := fixture.login(t, fixtureUser, fixturePassword, fixtureDBEntry)
+	require.Nil(t, outcome.Failure)
+	require.True(t, outcome.Acked)
+
+	time.Sleep(3 * window)
+
+	require.NoError(t, client.conn.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
+
+	_, err := client.conn.Read(make([]byte, 1))
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded, "the authenticated session must still be open")
 }
