@@ -305,9 +305,16 @@ func (s *Server) setupRouter() *gin.Engine {
 		auth.PUT("/password", s.handlePreLoginPasswordChange)
 		auth.GET("/providers", s.handleAuthProviders)
 
-		// OAuth provider routes (unauthenticated)
+		// OAuth provider routes (unauthenticated). The authorize route writes
+		// an oauth_states row on every request, so it is IP rate limited like
+		// the other pre-auth endpoints that create rows; the callback only
+		// consumes one.
 		for name := range s.oauthProviders {
-			auth.GET("/"+name, s.handleOAuthAuthorize(name))
+			if s.rateLimiter != nil {
+				auth.GET("/"+name, s.rateLimiter.PreAuthMiddleware(), s.handleOAuthAuthorize(name))
+			} else {
+				auth.GET("/"+name, s.handleOAuthAuthorize(name))
+			}
 			auth.GET("/"+name+"/callback", s.handleOAuthCallback(name))
 		}
 

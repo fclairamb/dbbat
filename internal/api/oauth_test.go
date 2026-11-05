@@ -1057,3 +1057,50 @@ func TestCanonicalizeUsername(t *testing.T) {
 		})
 	}
 }
+
+// TestOAuthAuthorizeIsRateLimitedPerIP pins that the authorize route sits behind
+// the anonymous per-IP limiter. Every request to it writes an oauth_states row,
+// so before this a client looping on it grew the table without bound.
+func TestOAuthAuthorizeIsRateLimitedPerIP(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+
+	const anonLimit = 3
+
+	server.rateLimiter = NewRateLimiter(config.RateLimitConfig{
+		Enabled:               true,
+		RequestsPerMinute:     60,
+		RequestsPerMinuteAnon: anonLimit,
+	})
+
+	providerName := "acme-" + uuid.NewString()[:8]
+	server.oauthProviders[providerName] = &mockProvider{name: providerName}
+
+	router := server.setupRouter()
+
+	authorize := func(remoteAddr string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/"+providerName, nil)
+		req.RemoteAddr = remoteAddr
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		return w.Code
+	}
+
+	for i := range anonLimit {
+		require.Equal(t, http.StatusFound, authorize("192.0.2.10:1234"), "request %d", i)
+	}
+
+	assert.Equal(t, http.StatusTooManyRequests, authorize("192.0.2.10:1234"),
+		"the authorize route must answer 429 past the anonymous per-IP limit")
+	assert.Equal(t, http.StatusFound, authorize("192.0.2.11:1234"),
+		"the limit is per IP")
+
+	count, err := dataStore.DB().NewSelect().
+		Table("oauth_states").
+		Where("provider = ?", providerName).
+		Count(context.Background())
+	require.NoError(t, err)
+	assert.EqualValues(t, anonLimit+1, count, "a rate-limited request must not write a state row")
+}
