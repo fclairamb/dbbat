@@ -325,10 +325,9 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 			return
 		}
 
-		if errors.Is(err, errClientHungUp) {
-			s.logger.DebugContext(s.ctx, "Client disconnected",
-				slog.Any("remote_addr", clientConn.RemoteAddr()))
-
+		// The target ended the session under us: worth recording, but not a
+		// failure of dbbat.
+		if s.logHangup(session, err, clientConn) {
 			return
 		}
 
@@ -412,4 +411,25 @@ func isClientRefusal(err error) bool {
 	}
 
 	return false
+}
+
+// logHangup reports a session one side ended on its own and returns true: the
+// client at DEBUG, the target at WARN. session.logger carries connection_uid
+// once the row exists.
+func (s *Server) logHangup(session *Session, err error, clientConn net.Conn) bool {
+	if errors.Is(err, errClientHungUp) {
+		s.logger.DebugContext(s.ctx, "Client disconnected",
+			slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+		return true
+	}
+
+	if !errors.Is(err, errUpstreamClosed) {
+		return false
+	}
+
+	session.logger.WarnContext(s.ctx, "Upstream closed the session", slog.Any("error", err),
+		slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+	return true
 }

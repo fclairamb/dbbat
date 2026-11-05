@@ -1604,6 +1604,12 @@ func (s *Session) completeSimpleQuery(res *simpleQueryResult) {
 func (s *Session) receiveFromUpstream() (pgproto3.BackendMessage, error) {
 	msg, err := s.upstreamFrontend.Receive()
 	if err != nil {
+		// pgproto3 reports a FIN as io.ErrUnexpectedEOF: the target ended the
+		// session, which is not a relay bug.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, fmt.Errorf("%w: %w", errUpstreamClosed, err)
+		}
+
 		return nil, fmt.Errorf("failed to receive from upstream: %w", err)
 	}
 

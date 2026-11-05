@@ -78,6 +78,11 @@ var (
 	// errClientHungUp ends a session whose client closed its socket after
 	// startup. Not a failure either: handleConnection logs it at DEBUG.
 	errClientHungUp = errors.New("client disconnected")
+
+	// errUpstreamClosed ends a session whose target closed the socket under it
+	// (pg_terminate_backend, a failover, the target's idle timeout). Not a
+	// dbbat failure: handleConnection logs it at WARN.
+	errUpstreamClosed = errors.New("upstream closed the session")
 )
 
 // Upstream connect failures. The upstream login itself lives in

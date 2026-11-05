@@ -37,3 +37,18 @@ func TestIsClientRefusal(t *testing.T) {
 	assert.True(t, isClientRefusal(fmt.Errorf("authentication failed: %w", ErrQueryLimitExceeded)))
 	assert.False(t, isClientRefusal(fmt.Errorf("authentication failed: %w", store.ErrTargetMatchesStorage)))
 }
+
+// TestUpstreamHangupIsClassified closes the upstream side and asserts the
+// relay reports errUpstreamClosed rather than a generic receive failure.
+func TestUpstreamHangupIsClassified(t *testing.T) {
+	t.Parallel()
+
+	proxySide, upstreamSide := net.Pipe()
+	require.NoError(t, upstreamSide.Close())
+
+	s := &Session{upstreamFrontend: pgproto3.NewFrontend(proxySide, proxySide)}
+
+	_, err := s.receiveFromUpstream()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errUpstreamClosed)
+}

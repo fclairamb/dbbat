@@ -127,6 +127,8 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		options = opts[0]
 	}
 
+	routePgdriverLogsToSlog()
+
 	// Create connection using pgdriver
 	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
 
