@@ -47,7 +47,11 @@ type pendingQuery struct {
 
 // statement is what one client message turned out to be asking for.
 type statement struct {
-	// text is what is logged and shown, and what approval patterns match.
+	// text is what approval patterns match, and — truncated to maxSQLTextLen
+	// at each use — what is logged and shown. It is held untruncated: a
+	// pattern matching past the first 8 KB of an RPC must still hold it, since
+	// the statement forwarded upstream is the full one. Every storage, log and
+	// display site calls truncateSQL itself.
 	text string
 	// enforce holds every statement the grant controls run against. Usually
 	// one; an RPC batch has several, and an sp_execute contributes the SQL its
@@ -129,7 +133,9 @@ func (s *session) describeRPC(requests []rpcRequest) statement {
 		texts = append(texts, s.describeRPCRequest(req, &st))
 	}
 
-	st.text = truncateSQL(strings.Join(texts, "; "))
+	// Untruncated on purpose: holdIfNeeded matches approval patterns against
+	// it. Storage and display truncate at their own call sites.
+	st.text = strings.Join(texts, "; ")
 
 	return st
 }

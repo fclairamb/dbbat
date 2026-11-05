@@ -1511,3 +1511,63 @@ func TestCursorPositionedWritesAreEnforced(t *testing.T) {
 		})
 	}
 }
+
+// approvalSession builds a session whose approval gate holds on DELETE. The gate
+// has no store, so a match surfaces as ErrApprovalUnavailable from Hold: enough
+// to tell "would have been held" from "ran straight through".
+func approvalSession(t *testing.T) *session {
+	t.Helper()
+
+	grant := &store.Grant{
+		Definition: &store.GrantDefinition{ApprovalPatterns: []string{`(?i)\bDELETE\b`}},
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}
+
+	sess := sessionWithGrant(t, grant)
+	sess.approvalGate = shared.NewApprovalGate(shared.ApprovalDeps{Enabled: true}, grant, uuid.New(), nil, "prod")
+
+	return sess
+}
+
+// TestApprovalMatchesRPCTextPastTheStorageLimit is the regression test for
+// approval patterns being matched against the RPC text after its truncation to
+// maxSQLTextLen: a DELETE sitting past the first 8 KB of an sp_executesql was
+// forwarded without the four-eyes hold, although it is what actually runs.
+func TestApprovalMatchesRPCTextPastTheStorageLimit(t *testing.T) {
+	t.Parallel()
+
+	sess := approvalSession(t)
+
+	sql := "/*" + strings.Repeat("x", 2*maxSQLTextLen) + "*/ DELETE FROM employés"
+
+	requests, err := parseRPC(rpcByID(spExecuteSQL, nvarcharMaxParam("", sql)))
+	require.NoError(t, err)
+
+	st := sess.describeRPC(requests)
+	require.NoError(t, st.refusal)
+	assert.Equal(t, sql, st.text, "the matched text must be the full statement")
+	assert.LessOrEqual(t, len(truncateSQL(st.text)), maxSQLTextLen, "what is stored stays bounded")
+
+	_, err = sess.holdIfNeeded(context.Background(), st)
+	require.ErrorIs(t, err, shared.ErrApprovalUnavailable, "the DELETE past 8 KB must be held")
+}
+
+// TestApprovalHoldPositiveControls: a short RPC that does not match is not
+// held, and a SQLBatch match keeps holding.
+func TestApprovalHoldPositiveControls(t *testing.T) {
+	t.Parallel()
+
+	sess := approvalSession(t)
+
+	requests, err := parseRPC(rpcByID(spExecuteSQL, nvarcharMaxParam("", "SELECT 1")))
+	require.NoError(t, err)
+
+	uid, err := sess.holdIfNeeded(context.Background(), sess.describeRPC(requests))
+	require.NoError(t, err)
+	assert.Equal(t, uuid.Nil, uid)
+
+	const batch = "DELETE FROM employés"
+
+	_, err = sess.holdIfNeeded(context.Background(), statement{text: batch, enforce: []string{batch}})
+	require.ErrorIs(t, err, shared.ErrApprovalUnavailable, "a SQLBatch DELETE must still be held")
+}
