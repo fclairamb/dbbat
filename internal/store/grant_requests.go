@@ -421,6 +421,103 @@ func (s *Store) SetGrantRequestSlackMessage(ctx context.Context, uid uuid.UUID, 
 	return nil
 }
 
+// SetGrantRequestSlackThread records that a request was posted as a reply in
+// rootUID's thread: its slack_channel / slack_message_ts are the ROOT's
+// coordinates (so bytes and revocation replies land in the thread) and
+// slack_thread_root_uid says they are not a message of its own.
+func (s *Store) SetGrantRequestSlackThread(ctx context.Context, uid, rootUID uuid.UUID, channel, ts string) error {
+	_, err := s.db.NewUpdate().
+		Model((*GrantRequest)(nil)).
+		Set("slack_channel = ?", channel).
+		Set("slack_message_ts = ?", ts).
+		Set("slack_thread_root_uid = ?", rootUID).
+		Where("uid = ?", uid).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("set slack thread: %w", err)
+	}
+
+	return nil
+}
+
+// FindRenewalRoot returns the most recent Slack thread root a new
+// auto-approved request of (userID, databaseID, definition lineage) can reply
+// under, or nil when it should post top-level.
+//
+// A root is an approved request with a Slack message of its own
+// (slack_thread_root_uid IS NULL) that was filed at or after since, and whose
+// resulting grant is still active or ended (expired or revoked) at or after
+// since. Only the single most recent such request is considered: when its
+// grant's controls differ from controls (read_only / block_ddl / block_copy)
+// the chain is broken and nil is returned, so a renewal under a widened
+// definition is never hidden in a thread.
+func (s *Store) FindRenewalRoot(
+	ctx context.Context, userID, databaseID, lineageUID uuid.UUID, controls []string, since time.Time,
+) (*GrantRequest, error) {
+	root := new(GrantRequest)
+
+	err := s.db.NewSelect().
+		Model(root).
+		Join("JOIN grant_definitions AS gd ON gd.uid = gr.grant_definition_id").
+		Join("JOIN access_grants AS ag ON ag.uid = gr.resulting_grant_id").
+		Where("gr.user_id = ?", userID).
+		Where("gr.database_id = ?", databaseID).
+		Where("gd.lineage_uid = ?", lineageUID).
+		Where("gr.status = ?", GrantRequestApproved).
+		Where("gr.slack_message_ts IS NOT NULL").
+		Where("gr.slack_channel IS NOT NULL").
+		Where("gr.slack_thread_root_uid IS NULL").
+		Where("gr.requested_at >= ?", since).
+		Where("LEAST(ag.expires_at, COALESCE(ag.revoked_at, ag.expires_at)) >= ?", since).
+		OrderExpr("gr.requested_at DESC").
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil //nolint:nilnil // no root is the documented "post top-level" answer
+		}
+
+		return nil, fmt.Errorf("find renewal root: %w", err)
+	}
+
+	grant, err := s.GetGrantByUID(ctx, *root.ResultingGrantID)
+	if err != nil {
+		return nil, fmt.Errorf("find renewal root: load grant: %w", err)
+	}
+
+	if !sameRenewalControls(grant.Controls(), controls) {
+		return nil, nil //nolint:nilnil // chain broken: the controls changed
+	}
+
+	return root, nil
+}
+
+// sameRenewalControls compares the controls that decide what a session may do
+// as sets.
+func sameRenewalControls(a, b []string) bool {
+	set := func(list []string) map[string]bool {
+		m := make(map[string]bool, len(list))
+		for _, c := range list {
+			m[c] = true
+		}
+
+		return m
+	}
+
+	sa, sb := set(a), set(b)
+	if len(sa) != len(sb) {
+		return false
+	}
+
+	for c := range sa {
+		if !sb[c] {
+			return false
+		}
+	}
+
+	return true
+}
+
 // transition is the shared impl for deny/cancel — both flip pending →
 // terminal-state and capture a decider + reason.
 func (s *Store) transition(

@@ -3,7 +3,9 @@ package notify
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -162,4 +164,142 @@ func TestApprovalEscalator_HoldChannel(t *testing.T) {
 		e.holdChannel(context.Background(), ApprovalHold{Definition: &store.GrantDefinition{NotifyChannel: strPtr("prod")}}))
 	assert.Equal(t, "#dbbat",
 		e.holdChannel(context.Background(), ApprovalHold{Definition: &store.GrantDefinition{NotifyChannel: strPtr("none")}}))
+}
+
+func autoApprovedEvent() GrantRequestEvent {
+	ev := sampleEvent(GrantActionApproved)
+	ev.Request.SlackChannel = nil
+	ev.Request.SlackMessageTS = nil
+	ev.Request.UserID = uuid.New()
+	ev.Request.DatabaseID = uuid.New()
+	ev.Definition.LineageUID = uuid.New()
+	ev.Decider = nil
+
+	return ev
+}
+
+func TestNotifyGrantRequest_FallbackPostPersistsCoordinates(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSlack(t)
+	per := &fakePersister{}
+	ev := autoApprovedEvent()
+
+	newRoutingNotifier(fake, per).NotifyGrantRequest(context.Background(), ev)
+
+	require.Equal(t, 1, fake.postCount())
+	assert.True(t, per.called)
+	assert.Equal(t, ev.Request.UID, per.uid)
+	assert.Equal(t, "C123", per.channel)
+	assert.Equal(t, "1.2", per.ts)
+}
+
+func TestNotifyGrantRequest_RenewalThreading(t *testing.T) {
+	t.Parallel()
+
+	rootUID := uuid.New()
+	root := &store.GrantRequest{UID: rootUID, SlackChannel: strPtr("C123"), SlackMessageTS: strPtr("9.9")}
+
+	t.Run("first request is top-level", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeSlack(t)
+		per := &fakePersister{}
+		n := newRoutingNotifier(fake, per)
+		n.renewalWindow = time.Hour
+		n.NotifyGrantRequest(context.Background(), autoApprovedEvent())
+
+		require.Equal(t, 1, fake.postCount())
+		assert.Empty(t, fake.postCalls[0].Get("thread_ts"))
+		assert.Equal(t, uuid.Nil, per.threadRoot)
+	})
+
+	t.Run("renewal is a threaded reply with root coordinates", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeSlack(t)
+		per := &fakePersister{root: root}
+		n := newRoutingNotifier(fake, per)
+		n.renewalWindow = time.Hour
+		n.channelIDs.Store("#dbbat", "C123") // learned from an earlier post
+		ev := autoApprovedEvent()
+		n.NotifyGrantRequest(context.Background(), ev)
+
+		require.Equal(t, 1, fake.postCount())
+		assert.Equal(t, "9.9", fake.postCalls[0].Get("thread_ts"))
+		assert.Contains(t, fake.postCalls[0].Get("text"), "renewed by alice")
+		assert.Equal(t, ev.Request.UID, per.threadUID)
+		assert.Equal(t, rootUID, per.threadRoot)
+		assert.Equal(t, "C123", per.channel)
+		assert.Equal(t, "9.9", per.ts)
+		assert.False(t, per.called, "a reply must not be stored as the request's own message")
+	})
+
+	t.Run("window 0 is always top-level", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeSlack(t)
+		per := &fakePersister{root: root}
+		newRoutingNotifier(fake, per).NotifyGrantRequest(context.Background(), autoApprovedEvent())
+
+		require.Equal(t, 1, fake.postCount())
+		assert.Empty(t, fake.postCalls[0].Get("thread_ts"))
+		assert.True(t, per.called)
+	})
+
+	t.Run("manual approval is never threaded", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeSlack(t)
+		per := &fakePersister{root: root}
+		n := newRoutingNotifier(fake, per)
+		n.renewalWindow = time.Hour
+		ev := autoApprovedEvent()
+		ev.Decider = &store.User{UID: uuid.New(), Username: "bob"}
+		n.NotifyGrantRequest(context.Background(), ev)
+
+		require.Equal(t, 1, fake.postCount())
+		assert.Empty(t, fake.postCalls[0].Get("thread_ts"))
+	})
+
+	t.Run("lookup error falls back to top-level", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeSlack(t)
+		per := &fakePersister{rootErr: assert.AnError}
+		n := newRoutingNotifier(fake, per)
+		n.renewalWindow = time.Hour
+		n.NotifyGrantRequest(context.Background(), autoApprovedEvent())
+
+		require.Equal(t, 1, fake.postCount())
+		assert.Empty(t, fake.postCalls[0].Get("thread_ts"))
+	})
+
+	t.Run("root in another channel is not used", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeSlack(t)
+		per := &fakePersister{root: &store.GrantRequest{
+			UID: rootUID, SlackChannel: strPtr("C999"), SlackMessageTS: strPtr("9.9"),
+		}}
+		n := newRoutingNotifier(fake, per)
+		n.renewalWindow = time.Hour
+		n.NotifyGrantRequest(context.Background(), autoApprovedEvent())
+
+		require.Equal(t, 1, fake.postCount())
+		assert.Empty(t, fake.postCalls[0].Get("thread_ts"))
+	})
+
+	t.Run("a threaded row is never chat.updated", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeSlack(t)
+		n := newRoutingNotifier(fake, &fakePersister{})
+		ev := sampleEvent(GrantActionDenied)
+		ev.Request.SlackThreadRootUID = &rootUID
+		n.NotifyGrantRequest(context.Background(), ev)
+
+		assert.Equal(t, 0, fake.updateCount())
+		assert.Equal(t, 0, fake.postCount())
+	})
 }

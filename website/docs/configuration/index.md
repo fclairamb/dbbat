@@ -686,6 +686,20 @@ in 12 min). The traffic is not blocked."
 See [the soft limit on bytes](/docs/features/access-control#byte-soft-limit) for
 how the bytes are counted.
 
+### Auto-approved renewals
+
+Automated clients often re-request the same auto-approved grant many times a
+day. With a renewal window, a request that renews an earlier auto-approved one
+(same user, database and definition, with the same `read_only` / `block_ddl` /
+`block_copy` controls, the earlier grant still active or ended within the
+window) is posted as a one-line reply in the thread of the first request, rather
+than as a new channel message. Requests that need a human decision always stay
+top-level, and the thread root rolls over once it is older than the window.
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_SLACK_NOTIFY_RENEWAL_WINDOW` | A Go duration. Default `24h`; `0` turns threading off. A negative or malformed value is a startup failure. |
+
 ## Configuration File
 
 DBBat supports YAML, JSON, and TOML configuration files.

@@ -1373,6 +1373,11 @@ type GrantRequest struct {
 	// because the API has no need to expose Slack message coordinates.
 	SlackChannel   *string `bun:"slack_channel" json:"-"`
 	SlackMessageTS *string `bun:"slack_message_ts" json:"-"`
+	// SlackThreadRootUID is set when this request was posted as a reply in
+	// another request's thread (an auto-approved renewal). SlackChannel /
+	// SlackMessageTS then hold the ROOT's coordinates, not a message of this
+	// request's own, so the notifier must never chat.update them.
+	SlackThreadRootUID *uuid.UUID `bun:"slack_thread_root_uid,type:uuid" json:"-"`
 
 	// Definition is the **live** version of the lineage GrantDefinitionID
 	// points into, attached by the store on every read path (see
