@@ -363,9 +363,10 @@ func TestFindOrCreateOAuthUserPerProviderAutoCreate(t *testing.T) {
 	require.NoError(t, server.config.Auth.Validate())
 
 	slackUser := &auth.OAuthUser{
-		ProviderID:  "USLACKGATED-" + suffix,
-		Email:       "slack-" + suffix + "@example.com",
-		DisplayName: "Slack User " + suffix,
+		ProviderID:    "USLACKGATED-" + suffix,
+		Email:         "slack-" + suffix + "@example.com",
+		EmailVerified: true,
+		DisplayName:   "Slack User " + suffix,
 	}
 
 	_, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: store.IdentityTypeSlack}, slackUser)
@@ -391,6 +392,133 @@ func TestFindOrCreateOAuthUserPerProviderAutoCreate(t *testing.T) {
 	linked, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: store.IdentityTypeSlack}, slackUser)
 	require.NoError(t, err, "an existing account must still sign in through the gated provider")
 	assert.Equal(t, manual.UID, linked.UID)
+}
+
+// emailMatchServer is a test server whose OIDC provider auto-creates accounts
+// (or not), for the email-match link cases.
+func emailMatchServer(t *testing.T, autoCreate bool) (*Server, *store.Store) {
+	t.Helper()
+
+	server, dataStore := setupTestServer(t)
+	server.config = &config.Config{
+		Auth: config.OAuthUsersConfig{
+			AutoCreateUsers: autoCreate,
+			DefaultRole:     store.RoleConnector,
+		},
+	}
+
+	return server, dataStore
+}
+
+// TestFindOrCreateOAuthUserEmailMatchNeedsVerifiedEmail is the account
+// takeover: an issuer that omits email_verified (or lets users edit their
+// email) must not hand over the account whose username is that email.
+func TestFindOrCreateOAuthUserEmailMatchNeedsVerifiedEmail(t *testing.T) {
+	t.Parallel()
+
+	for _, autoCreate := range []bool{true, false} {
+		t.Run(fmt.Sprintf("auto_create=%t", autoCreate), func(t *testing.T) {
+			t.Parallel()
+
+			server, dataStore := emailMatchServer(t, autoCreate)
+			ctx := context.Background()
+			suffix := uuid.NewString()[:8]
+			email := "victim-" + suffix + "@example.com"
+
+			victim := createTestUser(t, dataStore, email, "password", []string{store.RoleConnector})
+
+			attacker := &auth.OAuthUser{
+				ProviderID:  "OIDC-ATTACKER-" + suffix,
+				Email:       email,
+				DisplayName: "Attacker " + suffix,
+			}
+
+			resolved, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: oidc.ProviderName}, attacker)
+			if autoCreate {
+				require.NoError(t, err)
+				assert.NotEqual(t, victim.UID, resolved.UID,
+					"an unverified email must yield a new account, never the matching one")
+			} else {
+				require.ErrorIs(t, err, errOAuthUserNotLinked)
+			}
+
+			_, err = dataStore.GetUserByIdentity(ctx, oidc.ProviderName, attacker.ProviderID)
+			if !autoCreate {
+				require.ErrorIs(t, err, store.ErrIdentityNotFound, "nothing may be linked")
+			}
+
+			identities, err := dataStore.GetUserIdentities(ctx, victim.UID)
+			require.NoError(t, err)
+			assert.Empty(t, identities, "the victim's account must not gain the identity")
+			assert.Empty(t, auditEventsFor(t, dataStore, AuditEventUserIdentityLinked, victim.UID))
+		})
+	}
+}
+
+// TestFindOrCreateOAuthUserEmailMatchLinksVerifiedEmail is the positive
+// control: a verified email still links, audited, and the link then signs in
+// regardless of what later tokens say about the email.
+func TestFindOrCreateOAuthUserEmailMatchLinksVerifiedEmail(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := emailMatchServer(t, false)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+	email := "owner-" + suffix + "@example.com"
+	provider := &mockProvider{name: oidc.ProviderName}
+
+	owner := createTestUser(t, dataStore, email, "password", []string{store.RoleConnector})
+
+	identity := &auth.OAuthUser{
+		ProviderID:    "OIDC-OWNER-" + suffix,
+		Email:         email,
+		EmailVerified: true,
+	}
+
+	resolved, err := server.findOrCreateOAuthUser(ctx, provider, identity)
+	require.NoError(t, err)
+	assert.Equal(t, owner.UID, resolved.UID)
+
+	events := auditEventsFor(t, dataStore, AuditEventUserIdentityLinked, owner.UID)
+	require.Len(t, events, 1)
+
+	var details map[string]any
+	require.NoError(t, json.Unmarshal(events[0].Details, &details))
+	assert.Equal(t, oidc.ProviderName, details["provider"])
+	assert.Equal(t, email, details["email"])
+
+	// An existing link signs in whatever the claim says.
+	identity.EmailVerified = false
+
+	again, err := server.findOrCreateOAuthUser(ctx, provider, identity)
+	require.NoError(t, err)
+	assert.Equal(t, owner.UID, again.UID)
+	assert.Len(t, auditEventsFor(t, dataStore, AuditEventUserIdentityLinked, owner.UID), 1,
+		"a login through an existing link is not a new link")
+}
+
+// TestFindOrCreateOAuthUserEmailMatchNeverLinksAdmin: even a verified email
+// is not enough to bind an identity onto an admin account.
+func TestFindOrCreateOAuthUserEmailMatchNeverLinksAdmin(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := emailMatchServer(t, false)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+	email := "admin-" + suffix + "@example.com"
+
+	admin := createTestUser(t, dataStore, email, "password", []string{store.RoleAdmin})
+
+	_, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: oidc.ProviderName}, &auth.OAuthUser{
+		ProviderID:    "OIDC-ADMIN-" + suffix,
+		Email:         email,
+		EmailVerified: true,
+	})
+	require.ErrorIs(t, err, errOAuthUserNotLinked)
+
+	identities, err := dataStore.GetUserIdentities(ctx, admin.UID)
+	require.NoError(t, err)
+	assert.Empty(t, identities)
 }
 
 // errTestExchangeFailed stands in for a provider token endpoint refusing the
