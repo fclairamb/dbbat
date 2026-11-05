@@ -224,6 +224,28 @@ func TestSQLBatchEnforcement(t *testing.T) {
 			sql: "BULK INSERT t FROM 'données.csv'", wantErr: ErrBulkCopyBlocked,
 		},
 		{
+			// A bulk load writes rows: read_only refuses it without block_copy.
+			name: "a bulk insert is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "BULK INSERT t FROM 'données.csv'", wantErr: shared.ErrReadOnlyViolation,
+		},
+		{
+			name: "a bulk insert split by a comment is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "BULK/**/INSERT t FROM 'f.csv'", wantErr: shared.ErrReadOnlyViolation,
+		},
+		{
+			name: "an insert bulk is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "INSERT BULK t (a int)", wantErr: shared.ErrReadOnlyViolation,
+		},
+		{name: "a bulk insert is allowed under a full-write grant", sql: "BULK INSERT t FROM 'données.csv'"},
+		{
+			name: "select into is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "SELECT a INTO t2 FROM t", wantErr: shared.ErrReadOnlyViolation,
+		},
+		{
+			name: "select into is blocked by block_ddl", controls: []string{store.ControlBlockDDL},
+			sql: "SELECT a INTO /* x */ #t2 FROM t", wantErr: shared.ErrDDLBlocked,
+		},
+		{
 			name: "a password change is always blocked",
 			sql:  "ALTER USER [bob] WITH PASSWORD = 'x'", wantErr: shared.ErrPasswordChangeBlocked,
 		},

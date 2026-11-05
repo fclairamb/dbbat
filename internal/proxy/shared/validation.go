@@ -112,13 +112,26 @@ var (
 // Write keywords that should be blocked for read-only grants.
 // REPLACE is MySQL's upsert and writes data; included so MySQL read-only grants
 // catch it. PG/Oracle never start a statement with REPLACE so it's a no-op there.
+//
+// RENAME, PURGE, FLASHBACK and COMMENT are Oracle's: `RENAME t TO u` (a schema
+// change), `PURGE TABLE t` / `PURGE RECYCLEBIN` (dropped tables removed for
+// good), `FLASHBACK TABLE t TO …` (a table's rows rewound, or a dropped table
+// restored) and `COMMENT ON` (a data-dictionary write). Oracle has no session
+// pin, so the text is the control. No dialect starts a read with any of them:
+// `COMMENT ON` is also PostgreSQL's (DDL there too), `RENAME TABLE` and
+// `PURGE BINARY LOGS` MySQL's, and T-SQL has none of the four as a statement.
 var writeKeywords = []string{
 	"INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE",
 	"CREATE", "ALTER", "GRANT", "REVOKE", "MERGE", "REPLACE",
+	"RENAME", "PURGE", "FLASHBACK", "COMMENT",
 }
 
-// DDL keywords.
-var ddlKeywords = []string{"CREATE", "ALTER", "DROP", "TRUNCATE"}
+// DDL keywords. The last four: see writeKeywords. Oracle documents all four as
+// DDL statements, and PostgreSQL's COMMENT ON is one as well.
+var ddlKeywords = []string{
+	"CREATE", "ALTER", "DROP", "TRUNCATE",
+	"RENAME", "PURGE", "FLASHBACK", "COMMENT",
+}
 
 // Oracle-specific blocked patterns (always blocked regardless of grant controls).
 var oracleBlockedPatterns = []*regexp.Regexp{
@@ -170,8 +183,14 @@ var mysqlBlockedPatterns = []*regexp.Regexp{
 // statement looks like to dbbat but not to the database: `/*x*/INSERT …` is an
 // INSERT either way. It therefore runs against the comment-stripped scratch
 // copy (see sqlcomments.go); the caller's string is untouched.
+//
+// Its caller is the PostgreSQL proxy, so it also reads PostgreSQL's
+// `SELECT … INTO <table>` as the write it is (see selectsIntoTable). The
+// lowercase isWriteQuery, shared with Oracle and MySQL, does not.
 func IsWriteQuery(sql string) bool {
-	return isWriteQuery(matchableSQL(sql, syntaxStandard), syntaxStandard)
+	matchable := matchableSQL(sql, syntaxStandard)
+
+	return isWriteQuery(matchable, syntaxStandard) || selectsIntoTable(matchable, false)
 }
 
 // isWriteQuery answers for an already-normalised scratch copy. The validators
@@ -197,10 +216,13 @@ func isWriteQuery(sql string, syntax sqlCommentSyntax) bool {
 	return isWritingCTE(sql, syntax)
 }
 
-// IsDDLQuery checks if a query is a DDL operation. Same comment normalisation
-// as IsWriteQuery.
+// IsDDLQuery checks if a query is a DDL operation. Same comment normalisation,
+// and same PostgreSQL `SELECT … INTO <table>` reading, as IsWriteQuery: it
+// creates a table.
 func IsDDLQuery(sql string) bool {
-	return isDDLQuery(matchableSQL(sql, syntaxStandard))
+	matchable := matchableSQL(sql, syntaxStandard)
+
+	return isDDLQuery(matchable) || selectsIntoTable(matchable, false)
 }
 
 // isDDLQuery answers for an already-normalised scratch copy.

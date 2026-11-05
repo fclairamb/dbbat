@@ -205,7 +205,12 @@ database account remains the strongest guarantee.
 
 `block_ddl` has no server-side pin: it is dbbat's own check on the statement
 text, which refuses a statement whose first keyword is `CREATE`, `ALTER`,
-`DROP` or `TRUNCATE` (`ErrDDLNotPermitted`).
+`DROP`, `TRUNCATE` or `COMMENT` (`ErrDDLNotPermitted`), and a
+`SELECT … INTO <table>` anywhere in the text — it creates a table, and its
+first keyword is `SELECT`. The INTO is read outside literals, quoted
+identifiers and dollar-quoted bodies, after any comment, and only when it
+belongs to a SELECT (not to `INSERT INTO`). The same reading makes it a write
+for the `read_only` text check, which the pin already backed.
 
 A `DO` block or a `CALL` carries none of those keywords, yet its body can run
 any DDL, directly or built at run time with `EXECUTE`. Both are therefore

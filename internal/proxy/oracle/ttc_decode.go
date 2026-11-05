@@ -1146,7 +1146,8 @@ func decodeExecSQL(ttcPayload []byte, wide64 bool) (*OALL8Result, error) {
 // set of verbs the controls in internal/proxy/shared/validation.go refuse
 // (writeKeywords, ddlKeywords) plus the read and block verbs — because a verb
 // the gate would refuse but the scan cannot see is a statement that reaches the
-// upstream unexamined. TRUNCATE, GRANT and REVOKE were the three missing ones.
+// upstream unexamined. TRUNCATE, GRANT and REVOKE were the three missing ones;
+// RENAME, PURGE, FLASHBACK and COMMENT joined when the classifiers learned them.
 //
 // Widening a keyword scan is normally how a binary frame comes to be read as a
 // statement, which on the unnameable path costs a session. It does not here,
@@ -1159,6 +1160,7 @@ var findSQLKeywords = [][]byte{
 	[]byte("CREATE"), []byte("DROP"), []byte("ALTER"), []byte("BEGIN"),
 	[]byte("DECLARE"), []byte("WITH"), []byte("MERGE"), []byte("CALL"),
 	[]byte("TRUNCATE"), []byte("GRANT"), []byte("REVOKE"),
+	[]byte("RENAME"), []byte("PURGE"), []byte("FLASHBACK"), []byte("COMMENT"),
 }
 
 // findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.

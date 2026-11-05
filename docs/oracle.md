@@ -512,7 +512,16 @@ has no business taking.
 procedure (`BEGIN pkg.purge; END;`), and a plain `SELECT f() FROM dual` where
 `f` runs an autonomous transaction. Refusing every block that calls something
 would refuse the `DBMS_OUTPUT.ENABLE` call SQL clients send on connect, i.e.
-every read-only session. On Oracle, `read_only` is a strong filter on what the
+every read-only session.
+
+Oracle's own DDL verbs that start with none of the classic keywords are in the
+shared write and DDL keyword lists too, so `read_only` and `block_ddl` both
+refuse them: `RENAME t TO u`, `PURGE TABLE t` / `PURGE RECYCLEBIN`,
+`FLASHBACK TABLE t TO …` and `COMMENT ON …`. A leading comment does not hide
+them (the lists match the comment-normalized text), and the binary last-resort
+scan (`findSQLKeywords`) looks for them as well.
+
+On Oracle, `read_only` is a strong filter on what the
 client *types*, not a guarantee on what the server *does*. Where the guarantee
 matters, register the server with a read-only database account.
 

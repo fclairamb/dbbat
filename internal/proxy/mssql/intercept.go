@@ -25,6 +25,12 @@ const maxSQLTextLen = 8 * 1024
 // `BULK INSERT` and `OPENROWSET(BULK …)` are the server-side file forms.
 var bulkCopyPattern = regexp.MustCompile(`(?i)\b(?:BULK\s+INSERT|INSERT\s+BULK|OPENROWSET\s*\(\s*BULK)\b`)
 
+// bulkWritePattern is the part of bulkCopyPattern that writes rows into a
+// table, which read_only refuses whatever block_copy says. `OPENROWSET(BULK …)`
+// is left out: on its own it reads a file as a rowset, and the INSERT that would
+// make it a write is refused as one.
+var bulkWritePattern = regexp.MustCompile(`(?i)\b(?:BULK\s+INSERT|INSERT\s+BULK)\b`)
+
 // pendingQuery is the statement whose response is currently in flight.
 type pendingQuery struct {
 	sqlText string
@@ -406,6 +412,11 @@ func (s *session) checkStatement(sql string) error {
 	// grant while SQL Server read the statement unchanged.
 	if s.grant.ShouldBlockCopy() && shared.MatchesNormalizedSQL(sql, bulkCopyPattern) {
 		return ErrBulkCopyBlocked
+	}
+
+	// A bulk load writes rows, so read_only refuses it too, not only block_copy.
+	if s.grant.IsReadOnly() && shared.MatchesNormalizedSQL(sql, bulkWritePattern) {
+		return shared.ErrReadOnlyViolation
 	}
 
 	return nil

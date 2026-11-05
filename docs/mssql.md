@@ -713,7 +713,13 @@ instance ignores it. `read_only` is therefore the text classification alone
 of the batch: a batch needs no separator, so `shared.ValidateMSSQLBatch` scans
 the whole text for the reserved write and DDL keywords outside literals, quoted
 and bracketed identifiers, the way the `USE` scan does (`MERGE JOIN` /
-`MERGE UNION` hints excepted). `EXEC <proc>` is **not**
+`MERGE UNION` hints excepted). The same scan refuses `SELECT … INTO <table>`
+(`#temp` included) under both controls, since it creates and fills a table: an
+INTO counts when the statement owning it at its parenthesis depth is a SELECT
+and its target is not a variable, so `INSERT INTO`, `MERGE INTO`, a DML's
+`OUTPUT … INTO` and `FETCH … INTO @v` keep their classification. `BULK INSERT`
+and `INSERT BULK` load rows, so `read_only` refuses them without `block_copy`
+too. `EXEC <proc>` is **not**
 refused under `read_only`: drivers and tools send `sp_reset_connection`,
 `sp_executesql` wrappers of plain reads and `sp_describe_first_result_set`, and
 the RPC path cannot tell those from a procedure that writes. A procedure or a

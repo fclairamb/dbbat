@@ -10,6 +10,12 @@ var mssqlBatchWriteKeywords = []string{
 	"CREATE", "ALTER", "GRANT", "REVOKE", "MERGE",
 }
 
+// mssqlBatchDDLKeywords are the ddlKeywords that are reserved words in T-SQL.
+// RENAME, PURGE, FLASHBACK and COMMENT are left out: they are not T-SQL
+// statements and not reserved, so `SELECT comment, rename FROM t` must stay a
+// read.
+var mssqlBatchDDLKeywords = []string{"CREATE", "ALTER", "DROP", "TRUNCATE"}
+
 // ValidateMSSQLBatch applies read_only and block_ddl to every statement of a
 // T-SQL batch, not only to its first one.
 //
@@ -29,11 +35,15 @@ func ValidateMSSQLBatch(sql string, grant *store.Grant) error {
 
 	matchable := matchableSQL(sql, syntaxStandard)
 
-	if grant.IsReadOnly() && mssqlBatchHasKeyword(matchable, mssqlBatchWriteKeywords) {
+	// SELECT … INTO <table> creates a table and fills it, with no keyword above
+	// in it. See selectsIntoTable.
+	selectInto := selectsIntoTable(matchable, true)
+
+	if grant.IsReadOnly() && (selectInto || mssqlBatchHasKeyword(matchable, mssqlBatchWriteKeywords)) {
 		return ErrReadOnlyViolation
 	}
 
-	if grant.ShouldBlockDDL() && mssqlBatchHasKeyword(matchable, ddlKeywords) {
+	if grant.ShouldBlockDDL() && (selectInto || mssqlBatchHasKeyword(matchable, mssqlBatchDDLKeywords)) {
 		return ErrDDLBlocked
 	}
 
