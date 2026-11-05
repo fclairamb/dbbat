@@ -2787,7 +2787,7 @@ export interface components {
             test_connection?: boolean;
         };
         UpdateDatabaseRequest: {
-            /** @description Renames the server. Same slug rule as creation (lowercase letters, digits, underscores or hyphens, capped at 63 bytes; a hyphen may not lead or trail); a name outside it is rejected with a 400. The name is the client-facing selector on every protocol — the "database name" a client types in its connection string, and the Oracle SERVICE_NAME — so a rename breaks every saved connection string and client config still using the old one. Sessions already authenticated are unaffected; new connects must use the new name. Names are globally unique across live *and* soft-deleted rows, so reusing the name of a deleted server is a 409. Omit to leave the name unchanged. */
+            /** @description Renames the server. Same slug rule as creation (lowercase letters, digits, underscores or hyphens, capped at 63 bytes; a hyphen may not lead or trail); a name outside it is rejected with a 400. The name is the client-facing selector on every protocol — the "database name" a client types in its connection string, and the Oracle SERVICE_NAME — so a rename breaks every saved connection string and client config still using the old one. Sessions already authenticated are unaffected; new connects must use the new name. Names are unique among live servers: a name already taken is a 409, while the name of a deleted server can be reused. Omit to leave the name unchanged. */
             name?: string;
             /** @description Description */
             description?: string;
