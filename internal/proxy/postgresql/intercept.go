@@ -84,6 +84,7 @@ var readOnlySetConfigNames = []string{
 // procedure may COMMIT and start a fresh transaction after changing the session
 // default, which no reading of the text can rule out. Anchored at the start of
 // a statement, including the second statement of a simple-query batch.
+// block_ddl refuses the same two, since either body can run DDL.
 var readOnlyProcedurePattern = regexp.MustCompile(`(?i)(?:^|;)\s*(?:DO|CALL)\b`)
 
 // statementTimeoutBypassPatterns detect a client trying to unset or widen the
@@ -154,6 +155,14 @@ func (s *Session) validateStatement(sqlText string) error {
 	// Control: block_ddl (only check if not already read_only, since read_only blocks DDL at PG level)
 	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && isDDLQuery(sqlText) {
 		return ErrDDLNotPermitted
+	}
+
+	// Control: block_ddl, code dbbat cannot see. A DO block or a CALL carries
+	// no DDL keyword up front, yet its body can run any DDL (directly or via
+	// EXECUTE). Same fail-closed rule as the other dialects
+	// (shared.RefusesOpaqueDynamicSQL).
+	if s.grant.ShouldBlockDDL() && shared.MatchesNormalizedSQL(sqlText, readOnlyProcedurePattern) {
+		return ErrDDLProcedureCall
 	}
 
 	// Control: block_copy

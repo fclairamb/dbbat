@@ -201,6 +201,22 @@ default reaches none of its statements, and the tripwire handles the next one.
 For a database that must never be written to through dbbat, a read-only
 database account remains the strongest guarantee.
 
+## Block-DDL grants
+
+`block_ddl` has no server-side pin: it is dbbat's own check on the statement
+text, which refuses a statement whose first keyword is `CREATE`, `ALTER`,
+`DROP` or `TRUNCATE` (`ErrDDLNotPermitted`).
+
+A `DO` block or a `CALL` carries none of those keywords, yet its body can run
+any DDL, directly or built at run time with `EXECUTE`. Both are therefore
+refused under `block_ddl` too (`ErrDDLProcedureCall`, whose text names the
+control), through `validateStatement`, so the simple and extended paths cannot
+drift. This is the PostgreSQL side of the fail-closed rule the other dialects
+apply to opaque dynamic SQL (`shared.RefusesOpaqueDynamicSQL`). `block_copy`
+alone does not refuse them: COPY to or from the client cannot run inside
+PL/pgSQL. A grant with `read_only` refuses them first, with
+`shared.ErrReadOnlyProcedureCall`.
+
 ## Testing
 
 ### Integration tests

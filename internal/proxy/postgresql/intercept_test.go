@@ -765,6 +765,67 @@ func TestHandleQuery_BlocksDDL(t *testing.T) {
 	}
 }
 
+// TestBlockDDL_RefusesDoAndCall checks that block_ddl, a keyword check on the
+// statement text, does not let a DO block or a CALL through: either body can
+// run any DDL. Through both the simple (handleQuery) and the extended
+// (handleParse) path, so the two cannot drift.
+func TestBlockDDL_RefusesDoAndCall(t *testing.T) {
+	t.Parallel()
+
+	blockDDL := []string{store.ControlBlockDDL}
+
+	tests := []struct {
+		name      string
+		controls  []string
+		sql       string
+		expectErr error
+	}{
+		{"DO block with DDL", blockDDL, "DO $$ BEGIN DROP TABLE t; END $$", ErrDDLProcedureCall},
+		{
+			"DO block with dynamic EXECUTE", blockDDL,
+			"do language plpgsql $$ begin execute format('drop table %I', 't'); end $$", ErrDDLProcedureCall,
+		},
+		{"CALL", blockDDL, "CALL purge_schema()", ErrDDLProcedureCall},
+		{"CALL after a comment", blockDDL, "/* hi */ call purge_schema()", ErrDDLProcedureCall},
+		{"DO as second statement of a batch", blockDDL, "SELECT 1; DO $$ BEGIN DROP TABLE t; END $$", ErrDDLProcedureCall},
+		{"block_ddl allows SELECT", blockDDL, "SELECT * FROM t", nil},
+		{"block_ddl allows INSERT", blockDDL, "INSERT INTO t (id) VALUES (1)", nil},
+		{"block_ddl allows UPDATE", blockDDL, "UPDATE t SET id = 2", nil},
+		{"block_ddl allows a column named do", blockDDL, "SELECT do FROM t", nil},
+		{"full write allows DO", []string{}, "DO $$ BEGIN DROP TABLE t; END $$", nil},
+		{"full write allows CALL", []string{}, "CALL purge_schema()", nil},
+		{"block_copy alone allows DO", []string{store.ControlBlockCopy}, "DO $$ BEGIN NULL; END $$", nil},
+		{
+			"read_only and block_ddl keeps the read-only error",
+			[]string{store.ControlReadOnly, store.ControlBlockDDL},
+			"CALL purge_schema()", shared.ErrReadOnlyProcedureCall,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			paths := map[string]func(*Session) error{
+				"simple": func(s *Session) error { return s.handleQuery(&pgproto3.Query{String: tt.sql}) },
+				"extended": func(s *Session) error {
+					return s.handleParse(&pgproto3.Parse{Query: tt.sql})
+				},
+			}
+			for path, run := range paths {
+				err := run(newTestSessionWithControls(tt.controls))
+				if tt.expectErr != nil {
+					if !errors.Is(err, tt.expectErr) {
+						t.Errorf("%s path: error = %v, want %v", path, err, tt.expectErr)
+					}
+				} else if err != nil {
+					t.Errorf("%s path: unexpected error: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestHandleQuery_BlocksCopy(t *testing.T) {
 	t.Parallel()
 

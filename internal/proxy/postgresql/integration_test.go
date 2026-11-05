@@ -867,6 +867,41 @@ func TestIntegration_BlockDDL_BlocksCreateTable(t *testing.T) {
 	f.assertBlockedQueryLogged(ctx, simpleSQL)
 }
 
+// TestIntegration_BlockDDL_RefusesDoBlock verifies block_ddl refuses a DO
+// block (and a CALL) whose body would drop a table, and that the table is
+// still there afterwards.
+func TestIntegration_BlockDDL_RefusesDoBlock(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	seed := f.mustConnect(ctx, fixturePass)
+	_, err := seed.Exec(ctx, "CREATE TABLE keep_me (id int)")
+	require.NoError(t, err)
+	_, err = seed.Exec(ctx, "CREATE PROCEDURE drop_keep_me() LANGUAGE plpgsql AS $$ BEGIN DROP TABLE keep_me; END $$")
+	require.NoError(t, err)
+	require.NoError(t, seed.Close(ctx))
+
+	f.replaceGrant(ctx, []string{"block_ddl"})
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	const doSQL = "DO $$ BEGIN EXECUTE 'DROP TABLE keep_me'; END $$"
+
+	_, err = conn.Exec(ctx, doSQL, pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "a DO block must be refused under a block_ddl grant")
+
+	const callSQL = "CALL drop_keep_me()"
+
+	_, err = conn.Exec(ctx, callSQL)
+	require.Error(t, err, "a CALL must be refused under a block_ddl grant")
+
+	_, err = conn.Exec(ctx, "INSERT INTO keep_me (id) VALUES (1)")
+	require.NoError(t, err, "the table must still exist, and the session must survive the refusals")
+
+	f.assertBlockedQueryLogged(ctx, doSQL)
+	f.assertBlockedQueryLogged(ctx, callSQL)
+}
+
 // TestIntegration_BlockCopy_BlocksCopy verifies block_copy rejects COPY.
 func TestIntegration_BlockCopy_BlocksCopy(t *testing.T) {
 	ctx := context.Background()

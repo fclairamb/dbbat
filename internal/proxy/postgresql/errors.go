@@ -41,6 +41,14 @@ var (
 		"call the function from a SQL statement instead")
 	ErrDDLNotPermitted  = errors.New("DDL operations not permitted: your access grant blocks schema modifications")
 	ErrCopyNotPermitted = errors.New("COPY not permitted: your access grant blocks COPY commands")
+	// ErrDDLProcedureCall refuses a `DO` block or a `CALL` on a block_ddl
+	// session. block_ddl is a keyword check on the statement text, and either
+	// one runs code dbbat cannot see: a DO body can issue DDL directly or build
+	// it at run time with EXECUTE, and a procedure's body lives in the
+	// database. Its own error, naming the control, so the refusal row says why
+	// a statement with no DDL keyword up front was stopped.
+	ErrDDLProcedureCall = errors.New("DO blocks and procedure calls (CALL) are not permitted: " +
+		"your access grant blocks schema modifications, and dbbat cannot see what they would run")
 
 	ErrAPIKeyOwnerMismatch = errors.New("API key does not belong to user")
 	ErrAPIKeyVerifyFailed  = errors.New("API key verification failed")
