@@ -270,6 +270,29 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// configureTrustedProxies tells gin which peers may set the client IP through
+// X-Forwarded-For / X-Real-IP. gin.New() trusts every peer, which let any
+// client choose the IP that keys the anonymous rate limits and the access log;
+// without DBB_TRUSTED_PROXIES nobody is trusted and ClientIP() is the socket
+// peer.
+func configureTrustedProxies(router *gin.Engine, cfg *config.Config) error {
+	var proxies []string
+
+	if cfg != nil {
+		var err error
+
+		if proxies, err = cfg.ParseTrustedProxies(); err != nil {
+			return err
+		}
+	}
+
+	if err := router.SetTrustedProxies(proxies); err != nil {
+		return fmt.Errorf("set trusted proxies: %w", err)
+	}
+
+	return nil
+}
+
 // setupRouter configures the Gin router.
 //
 //nolint:funlen // route registration is intentionally sequential and grouped by resource
@@ -279,6 +302,13 @@ func (s *Server) setupRouter() *gin.Engine {
 
 	// Disable automatic trailing slash redirect to avoid loops with SPA routing
 	router.RedirectTrailingSlash = false
+
+	// Validated at startup (config.validate), so an error here means a
+	// Config built by hand; fail closed rather than leave gin trusting all.
+	if err := configureTrustedProxies(router, s.config); err != nil {
+		s.logger.ErrorContext(context.Background(), "Invalid trusted proxies, trusting none", slog.Any("error", err))
+		_ = router.SetTrustedProxies(nil)
+	}
 
 	// Middleware
 	router.Use(gin.Recovery())

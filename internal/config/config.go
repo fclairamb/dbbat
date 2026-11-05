@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/docker/go-units"
 	"github.com/knadh/koanf/parsers/json"
@@ -67,6 +69,12 @@ var (
 	// ErrSlackNotifyChannelsInvalid is returned when DBB_SLACK_NOTIFY_CHANNELS
 	// cannot be parsed into a key -> channel map.
 	ErrSlackNotifyChannelsInvalid = errors.New("DBB_SLACK_NOTIFY_CHANNELS is malformed")
+
+	// ErrTrustedProxiesInvalid is returned when DBB_TRUSTED_PROXIES holds an
+	// entry that is neither an IP address nor a CIDR. Dropping it would leave
+	// the operator's reverse proxy untrusted (every client sharing its
+	// rate-limit bucket) without saying why.
+	ErrTrustedProxiesInvalid = errors.New("DBB_TRUSTED_PROXIES must be a comma-separated list of IP addresses or CIDRs")
 
 	// ErrSlackNotifyBytesStepInvalid is returned when DBB_SLACK_NOTIFY_BYTES_STEP
 	// is not a byte count (or is negative). Silently reading it as 0 would turn
@@ -1111,6 +1119,15 @@ type Config struct {
 	// only if SlackNotify is enabled.
 	PublicURL string `koanf:"public_url"`
 
+	// TrustedProxies lists the reverse proxies (IPs or CIDRs, comma- or
+	// space-separated) whose X-Forwarded-For / X-Real-IP headers the API
+	// believes. Empty — the default — trusts nobody: the client IP is the
+	// socket peer, whatever headers it sends. That IP keys the anonymous rate
+	// limits and the access log, so trusting every peer let any client pick a
+	// fresh rate-limit bucket per request. A deployment behind an ingress sets
+	// the ingress's CIDR here. See ParseTrustedProxies.
+	TrustedProxies string `koanf:"trusted_proxies"`
+
 	// StatementTimeout is the deployment's default per-statement time limit,
 	// as a Go duration ("30s", "5m"). Empty or "0" — the default — means no
 	// instance-wide limit, so an upgrade never starts canceling statements
@@ -1665,7 +1682,37 @@ func validate(cfg *Config) error {
 		return err
 	}
 
+	if _, err := cfg.ParseTrustedProxies(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// ParseTrustedProxies splits TrustedProxies into the list gin's
+// SetTrustedProxies takes. Entries are separated by commas and/or whitespace;
+// each must be an IP address or a CIDR, anything else is an error validate
+// turns into a startup failure. Empty means trust nobody (nil).
+func (c *Config) ParseTrustedProxies() ([]string, error) {
+	fields := strings.FieldsFunc(c.TrustedProxies, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+
+	var out []string
+
+	for _, f := range fields {
+		if strings.Contains(f, "/") {
+			if _, err := netip.ParsePrefix(f); err != nil {
+				return nil, fmt.Errorf("%w: %q is not a valid CIDR", ErrTrustedProxiesInvalid, f)
+			}
+		} else if _, err := netip.ParseAddr(f); err != nil {
+			return nil, fmt.Errorf("%w: %q is not a valid IP address", ErrTrustedProxiesInvalid, f)
+		}
+
+		out = append(out, f)
+	}
+
+	return out, nil
 }
 
 // Load reads configuration from environment variables and optional config file.
