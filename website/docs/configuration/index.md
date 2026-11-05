@@ -418,6 +418,25 @@ and the slow logs are exact.
 | `DBB_RATE_LIMIT_REQUESTS_PER_MINUTE` | Requests per minute per authenticated user | `60` |
 | `DBB_RATE_LIMIT_REQUESTS_PER_MINUTE_ANON` | Requests per minute per source IP (unauthenticated) | `10` |
 | `DBB_RATE_LIMIT_BURST` | Short-burst tolerance | `10` |
+| `DBB_TRUSTED_PROXIES` | Reverse proxies (IPs or CIDRs, comma-separated) allowed to set the client IP through `X-Forwarded-For` / `X-Real-IP`. A malformed entry fails startup | empty (trust nobody) |
+
+The anonymous limit is keyed on the client IP, which is also the `client_ip` of
+the access log. By default dbbat trusts **no** proxy: the client IP is the
+address of the TCP peer, and forwarded headers are ignored, so a client cannot
+pick a fresh rate-limit bucket by rewriting `X-Forwarded-For`.
+
+Behind a reverse proxy or a Kubernetes ingress, that peer is the proxy, so every
+client would share one bucket. Declare the proxy's address range instead — for
+the Helm chart, `config.trustedProxies` set to the ingress controller's pod CIDR
+(for example `10.42.0.0/16` on k3s):
+
+```yaml
+config:
+  trustedProxies: "10.42.0.0/16"
+```
+
+Only list addresses that are really your proxies: any peer in the list can
+claim to be any client.
 
 ### Password Hashing (Argon2id)
 
