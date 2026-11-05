@@ -83,7 +83,11 @@ never are (see Problem).
    top-level, second one threaded with root coordinates stored, window `0` always top-level,
    a pending (manual) request always top-level even with a root present.
 
-## Open questions
+## Resolved open questions (autopilot: recommended answers)
+
+Directives: (1) match on definition lineage, and break the chain when read_only/block_ddl/block_copy differ between root and renewal; (2) accept concurrent-burst duplicates, no lock; (3) roll over to a new top-level message once the root is older than the window.
+
+## Original questions
 
 1. **Definition versions**: does a renewal match on the definition *lineage* or on the exact
    version? Recommended: lineage. An admin edit (archive + successor) would otherwise restart
