@@ -73,6 +73,12 @@ var (
 	// off the one signal the operator just asked for.
 	ErrSlackNotifyBytesStepInvalid = errors.New(
 		"DBB_SLACK_NOTIFY_BYTES_STEP must be a non-negative byte count such as 1073741824 or 1GiB")
+
+	// ErrSlackNotifyRenewalWindowInvalid is returned when
+	// DBB_SLACK_NOTIFY_RENEWAL_WINDOW is not a non-negative Go duration.
+	// Reading it as 0 would silently turn threading off.
+	ErrSlackNotifyRenewalWindowInvalid = errors.New(
+		"DBB_SLACK_NOTIFY_RENEWAL_WINDOW must be a non-negative Go duration such as 24h, or 0 to disable")
 )
 
 // DefaultOAuthRole is the role an auto-provisioned OAuth user starts with when
@@ -744,6 +750,32 @@ type SlackNotifyConfig struct {
 	// off, the default. A grant definition's notify_bytes_step overrides it.
 	// Read through ResolveBytesStep.
 	BytesStep string `koanf:"bytes_step"`
+	// RenewalWindow is how long an auto-approved grant request stays the
+	// thread root that later auto-approved requests (same user, database and
+	// definition lineage) reply under, instead of each posting a top-level
+	// message. A Go duration; "0" = off. Default 24h. Read through
+	// ResolveRenewalWindow.
+	RenewalWindow string `koanf:"renewal_window"`
+}
+
+// DefaultSlackNotifyRenewalWindow is the default for RenewalWindow.
+const DefaultSlackNotifyRenewalWindow = "24h"
+
+// ResolveRenewalWindow parses RenewalWindow. "" means the default; anything
+// that is not a non-negative duration is an error, which validate turns into
+// a startup failure.
+func (c SlackNotifyConfig) ResolveRenewalWindow() (time.Duration, error) {
+	raw := strings.TrimSpace(c.RenewalWindow)
+	if raw == "" {
+		raw = DefaultSlackNotifyRenewalWindow
+	}
+
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%w: got %q", ErrSlackNotifyRenewalWindowInvalid, c.RenewalWindow)
+	}
+
+	return d, nil
 }
 
 // ResolveBytesStep parses BytesStep. Suffixes are binary (1g = 1GiB), so
@@ -1329,9 +1361,10 @@ func defaultConfig() Config {
 			GroupsClaim: DefaultOIDCGroupsClaim,
 		},
 		SlackNotify: SlackNotifyConfig{
-			Channel:      "#dbbat",
-			Terminations: true,
-			SQL:          true,
+			Channel:       "#dbbat",
+			Terminations:  true,
+			SQL:           true,
+			RenewalWindow: DefaultSlackNotifyRenewalWindow,
 		},
 		Dump: DumpConfig{
 			MaxSize:   DefaultDumpMaxSize,
@@ -1625,6 +1658,10 @@ func validate(cfg *Config) error {
 	}
 
 	if _, err := cfg.SlackNotify.ResolveBytesStep(); err != nil {
+		return err
+	}
+
+	if _, err := cfg.SlackNotify.ResolveRenewalWindow(); err != nil {
 		return err
 	}
 
