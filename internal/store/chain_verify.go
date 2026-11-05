@@ -78,7 +78,8 @@ type AuditChainResult struct {
 	Verified int64
 	// Unchained is how many audit rows predate the anchor. Those rows cannot
 	// be verified — nothing sealed them — and are reported so the number is
-	// visible rather than implied.
+	// visible rather than implied. An unchained row written *after* chaining
+	// began is not counted here: it is a Break (see checkUnchainedAuditRows).
 	Unchained int64
 	// HeadSeq and HeadMAC are the head the chain ends on. An operator notes
 	// the head down outside the database: comparing it against the next run is
@@ -184,18 +185,12 @@ func (s *Store) VerifyAuditChain(ctx context.Context) (AuditChainResult, error) 
 		return result, ErrChainKeyUnavailable
 	}
 
-	unchained, err := s.db.NewSelect().
-		Model((*AuditLog)(nil)).
-		Where("chain_seq IS NULL").
-		Count(ctx)
-	if err != nil {
-		return result, fmt.Errorf("failed to count unchained audit rows: %w", err)
-	}
-
-	result.Unchained = unchained
-
 	expectedSeq := int64(1)
 	prevMAC := s.auditGenesisMAC()
+
+	// When chaining began, as sealed by the first entry. See
+	// checkUnchainedAuditRows.
+	var chainStart time.Time
 
 	for {
 		var rows []AuditLog
@@ -220,7 +215,12 @@ func (s *Store) VerifyAuditChain(ctx context.Context) (AuditChainResult, error) 
 			if brk := s.verifyAuditRow(row, expectedSeq, prevMAC); brk != nil {
 				result.Break = brk
 
-				return result, nil
+				// Still counted, so the report reads the same either way.
+				return result, s.checkUnchainedAuditRows(ctx, &result, chainStart)
+			}
+
+			if result.Verified == 0 {
+				chainStart = row.CreatedAt
 			}
 
 			result.Verified++
@@ -231,7 +231,93 @@ func (s *Store) VerifyAuditChain(ctx context.Context) (AuditChainResult, error) 
 		}
 	}
 
+	if err := s.checkUnchainedAuditRows(ctx, &result, chainStart); err != nil {
+		return result, err
+	}
+
 	return result, nil
+}
+
+// checkUnchainedAuditRows sorts the audit rows that carry no chain position
+// into the two things they can be.
+//
+// A row written before the chain migration has a NULL chain_seq by design:
+// nothing sealed it, and it is counted as Unchained. A row with a NULL
+// chain_seq written *after* chaining began cannot exist — every audit write
+// of a keyed store goes through appendAuditChain — so one is an entry inserted
+// straight into the table, around the chain, and it is a break. Without this
+// the walk, which only reads chained positions, never saw it, while the UI and
+// GET /audit showed it as genuine.
+//
+// "After chaining began" is the created_at of chain_seq 1, which the walk has
+// just verified: that timestamp is inside the entry's MAC, so moving it to
+// hide a forgery breaks the chain. The anchor's own created_at is only the
+// fallback for a chain with no entry yet, since nothing seals it.
+//
+// What this cannot catch: a forged row backdated before chain_seq 1. It then
+// reads as one more pre-anchor row, and the count — which an operator notes
+// down along with the head — is the only thing that moves.
+func (s *Store) checkUnchainedAuditRows(
+	ctx context.Context, result *AuditChainResult, chainStart time.Time,
+) error {
+	if chainStart.IsZero() {
+		var anchor AuditLog
+
+		err := s.db.NewSelect().
+			Model(&anchor).
+			Column("created_at").
+			Where("uid = ?", uuid.MustParse(AuditChainAnchorUID)).
+			Scan(ctx)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("failed to read the audit chain anchor: %w", err)
+		}
+
+		chainStart = anchor.CreatedAt
+	}
+
+	preAnchor := s.db.NewSelect().
+		Model((*AuditLog)(nil)).
+		Where("chain_seq IS NULL")
+	if !chainStart.IsZero() {
+		preAnchor = preAnchor.Where("created_at < ?", chainStart)
+	}
+
+	unchained, err := preAnchor.Count(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to count unchained audit rows: %w", err)
+	}
+
+	result.Unchained = unchained
+
+	if chainStart.IsZero() || result.Break != nil {
+		return nil
+	}
+
+	var forged []AuditLog
+
+	err = s.db.NewSelect().
+		Model(&forged).
+		Column("uid", "created_at").
+		Where("chain_seq IS NULL").
+		Where("created_at >= ?", chainStart).
+		Order("created_at ASC", "uid ASC").
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to look for unchained audit rows after the anchor: %w", err)
+	}
+
+	if len(forged) > 0 {
+		result.Break = &ChainBreak{
+			UID: forged[0].UID,
+			Reason: fmt.Sprintf(
+				"entry has no chain position but was written at %s, after chaining began at %s: "+
+					"it was inserted outside the chain",
+				forged[0].CreatedAt.UTC().Format(time.RFC3339Nano), chainStart.UTC().Format(time.RFC3339Nano)),
+		}
+	}
+
+	return nil
 }
 
 // verifyAuditRow checks one link. expectedSeq is the position the walk is at,
@@ -443,7 +529,73 @@ func (s *Store) VerifyQueryChain(
 		}
 	}
 
+	if result.Break == nil {
+		if err := s.checkUnchainedStatements(ctx, &result); err != nil {
+			return result, err
+		}
+	}
+
 	return result, nil
+}
+
+// checkUnchainedStatements catches a statement inserted into a chained session
+// around the chain: a queries row with a NULL chain_seq. The walk above reads
+// chained positions only, so without this such a row was neither verified nor
+// counted, while the UI listed it among the session's genuine statements.
+//
+// A keyed store chains every statement it writes, and a session is owned by
+// one process from open to close, so a chained session has no legitimate
+// unchained statement — not even across the chain migration, which runs at
+// startup, after every session of the previous process has ended. A session
+// with no chained statement and no stamp predates chaining; it is not judged,
+// the same way it is not enumerated by chainedConnectionUIDs.
+func (s *Store) checkUnchainedStatements(ctx context.Context, result *QueryChainResult) error {
+	var stray []Query
+
+	err := s.db.NewSelect().
+		Model(&stray).
+		Column("uid").
+		Where("connection_id = ?", result.ConnectionUID).
+		Where("chain_seq IS NULL").
+		Order("executed_at ASC", "uid ASC").
+		Limit(1).
+		Scan(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to look for unchained statements: %w", err)
+	}
+
+	if len(stray) == 0 {
+		return nil
+	}
+
+	chained := result.Verified > 0 || result.EmptiedByRetention
+
+	if !chained {
+		stamped, err := s.db.NewSelect().
+			Model((*Connection)(nil)).
+			Where("uid = ?", result.ConnectionUID).
+			WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+				return q.Where("query_chain_mac IS NOT NULL").WhereOr("query_chain_len > 0")
+			}).
+			Exists(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read the connection's chain stamp: %w", err)
+		}
+
+		chained = stamped
+	}
+
+	if !chained {
+		return nil
+	}
+
+	connectionUID := result.ConnectionUID
+	result.Break = &ChainBreak{
+		UID: stray[0].UID, ConnectionUID: &connectionUID,
+		Reason: "statement has no chain position in a chained session: it was inserted outside the chain",
+	}
+
+	return nil
 }
 
 func (s *Store) verifyQueryRow(row *Query, connectionUID uuid.UUID, expectedSeq int64, prevMAC []byte) *ChainBreak {

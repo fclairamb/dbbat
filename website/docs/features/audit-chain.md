@@ -212,7 +212,11 @@ Be precise about this in a control narrative:
   inserts an anchor row marking where chaining begins. Rows older than the
   anchor have no MAC and none can be created after the fact, so verification
   reports them separately as `unverifiable_pre_anchor_entries` instead of
-  counting them as verified.
+  counting them as verified. A row with no chain position dated *after* the
+  first chained entry is not counted there: it was inserted around the chain,
+  and verification reports it as a break. One backdated before that entry still
+  reads as pre-anchor, so note the count down with the head; it should never
+  grow.
 - **It does not seal the connection row.** `connections` is not chained. A whole
   session can be deleted, or its row edited in place, without breaking anything
   a chain walk checks. The `connection.opened` / `connection.closed` audit

@@ -3120,3 +3120,206 @@ func TestRowChainUnsealedCaptureIsNotABreak(t *testing.T) {
 	require.Equal(t, int64(1), all.Captures)
 	require.Equal(t, 0, countRowSealEntries(t, ctx, store, query.UID))
 }
+
+// insertUnchainedAuditRow writes an audit row straight into the table, with no
+// chain position — what someone with write access to the store, but not the
+// key, can do.
+func insertUnchainedAuditRow(t *testing.T, ctx context.Context, store *Store, createdAt time.Time) uuid.UUID {
+	t.Helper()
+
+	uid, err := uuid.NewV7()
+	require.NoError(t, err)
+
+	_, err = store.db.NewInsert().Model(&AuditLog{
+		UID:       uid,
+		EventType: "grant.approved",
+		Details:   json.RawMessage(`{"forged":true}`),
+		CreatedAt: createdAt,
+	}).Exec(ctx)
+	require.NoError(t, err, "inserting an unchained audit row")
+
+	return uid
+}
+
+func auditAnchorCreatedAt(t *testing.T, ctx context.Context, store *Store) time.Time {
+	t.Helper()
+
+	var anchor AuditLog
+
+	err := store.db.NewSelect().
+		Model(&anchor).
+		Where("uid = ?", uuid.MustParse(AuditChainAnchorUID)).
+		Scan(ctx)
+	require.NoError(t, err)
+
+	return anchor.CreatedAt
+}
+
+// TestAuditChainDetectsUnchainedRowAfterTheAnchor: an entry inserted around the
+// chain, with a NULL chain_seq and a current timestamp, used to be counted as a
+// pre-anchor row and the chain reported intact.
+func TestAuditChainDetectsUnchainedRowAfterTheAnchor(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	logTestAuditEvents(t, ctx, store, 3)
+	forged := insertUnchainedAuditRow(t, ctx, store, time.Now())
+	logTestAuditEvents(t, ctx, store, 1)
+
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.False(t, result.OK(), "an unchained row after the anchor must break the chain")
+	require.Equal(t, forged, result.Break.UID)
+	require.Contains(t, result.Break.Reason, "inserted outside the chain")
+	require.Equal(t, int64(0), result.Unchained, "a forged row is not a pre-anchor row")
+	require.Equal(t, int64(4), result.Verified, "the chain itself still walks to its head")
+}
+
+// TestAuditChainDetectsUnchainedRowOnAnEmptyChain: with no chained entry yet,
+// the anchor's own timestamp is where chaining began.
+func TestAuditChainDetectsUnchainedRowOnAnEmptyChain(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM audit_log WHERE chain_seq >= 1`)
+	require.NoError(t, err)
+
+	forged := insertUnchainedAuditRow(t, ctx, store, time.Now())
+
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.False(t, result.OK())
+	require.Equal(t, forged, result.Break.UID)
+}
+
+// TestAuditChainCountsGenuinePreAnchorRows is the positive control: rows
+// written before the chain migration still verify, counted as Unchained.
+func TestAuditChainCountsGenuinePreAnchorRows(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	before := auditAnchorCreatedAt(t, ctx, store).Add(-time.Hour)
+	insertUnchainedAuditRow(t, ctx, store, before)
+	insertUnchainedAuditRow(t, ctx, store, before.Add(time.Minute))
+
+	logTestAuditEvents(t, ctx, store, 2)
+
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.True(t, result.OK(), "pre-anchor rows are not a break: %v", result.Break)
+	require.Equal(t, int64(2), result.Unchained)
+	require.Equal(t, int64(2), result.Verified)
+}
+
+// TestAuditChainBreakStillCountsPreAnchorRows: a break elsewhere does not zero
+// the pre-anchor count the report carries.
+func TestAuditChainBreakStillCountsPreAnchorRows(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	insertUnchainedAuditRow(t, ctx, store, auditAnchorCreatedAt(t, ctx, store).Add(-time.Hour))
+
+	rows := logTestAuditEvents(t, ctx, store, 3)
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM audit_log WHERE uid = ?`, rows[1].UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.False(t, result.OK())
+	require.Contains(t, result.Break.Reason, "missing or reordered")
+	require.Equal(t, int64(1), result.Unchained)
+}
+
+func insertUnchainedStatement(t *testing.T, ctx context.Context, store *Store, connectionUID uuid.UUID) uuid.UUID {
+	t.Helper()
+
+	uid, err := uuid.NewV7()
+	require.NoError(t, err)
+
+	_, err = store.db.NewInsert().Model(&Query{
+		UID:          uid,
+		ConnectionID: connectionUID,
+		SQLText:      "DROP TABLE forged",
+		ExecutedAt:   time.Now(),
+	}).Exec(ctx)
+	require.NoError(t, err, "inserting an unchained statement")
+
+	return uid
+}
+
+// TestQueryChainDetectsUnchainedStatement: a statement inserted into a chained
+// session with a NULL chain_seq was neither verified nor counted by the walk.
+func TestQueryChainDetectsUnchainedStatement(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "unchained_stmt", 3)
+	forged := insertUnchainedStatement(t, ctx, store, conn.UID)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, one.Break, "an unchained statement in a chained session must break it")
+	require.Equal(t, forged, one.Break.UID)
+	require.Contains(t, one.Break.Reason, "inserted outside the chain")
+
+	all, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, all.OK())
+	require.Equal(t, forged, all.Break.UID)
+}
+
+// TestQueryChainDetectsUnchainedStatementInAClosedSession: same, once the
+// session is closed and stamped.
+func TestQueryChainDetectsUnchainedStatementInAClosedSession(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "unchained_closed", 2)
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	forged := insertUnchainedStatement(t, ctx, store, conn.UID)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, one.Break)
+	require.Equal(t, forged, one.Break.UID)
+}
+
+// TestQueryChainPreChainSessionIsNotABreak is the positive control: a session
+// whose statements were all written unchained (before the chain migration) is
+// not judged.
+func TestQueryChainPreChainSessionIsNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "chain_prechain")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+	require.NoError(t, err)
+
+	insertUnchainedStatement(t, ctx, store, conn.UID)
+	insertUnchainedStatement(t, ctx, store, conn.UID)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, one.Break, "a pre-chain session is not tampering")
+
+	all, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, all.OK(), "%v", all.Break)
+}

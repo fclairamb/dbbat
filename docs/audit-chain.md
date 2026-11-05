@@ -750,6 +750,18 @@ ever grow, and the previously recorded head must still appear in the chain.
 introduced. They are reported rather than folded into the verified count: no
 MAC exists for them and none can be created after the fact.
 
+"Before chaining was introduced" is judged against the `created_at` of
+`chain_seq 1`, which is inside that entry's MAC (the anchor's own timestamp is
+unsealed and only stands in while the chain has no entry yet). An audit row with
+a `NULL` `chain_seq` written at or after that point cannot come from dbbat — a
+keyed store chains every audit write — so it is a **break** ("inserted outside
+the chain"), not one more pre-anchor row. The same holds one level down: a
+`queries` row with a `NULL` `chain_seq` in a session that has chained statements
+or a stamp breaks that session's walk. A session with neither predates chaining
+and is not judged. What remains open: a forged row *backdated* before
+`chain_seq 1` still reads as pre-anchor, so the count is worth recording next to
+the head — it should never grow.
+
 A `--queries` run reports the same way, plus a count that is *not* a failure:
 
 ```json
