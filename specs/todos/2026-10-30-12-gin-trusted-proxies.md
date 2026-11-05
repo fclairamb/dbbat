@@ -26,6 +26,10 @@ A client that sends a different `X-Forwarded-For` on each request gets a fresh r
 - Positive control: with the peer's CIDR trusted, `X-Forwarded-For` is honored.
 - Config test: a malformed CIDR is a startup error.
 
-## Open questions
+## Resolved open questions
+
+(autopilot: recommended answer) Trust nobody by default; say so in the release notes/docs.
+
+## Original questions
 
 - Default when unset: trust nobody (secure, but behind an ingress every client then shares the ingress's bucket until configured), or keep today's behavior with a startup WARN? Recommended: trust nobody, and say it in the release notes.

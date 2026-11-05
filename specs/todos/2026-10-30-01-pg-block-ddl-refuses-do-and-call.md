@@ -27,6 +27,10 @@ A `DO` block or a `CALL` starts with neither keyword, so it is forwarded, and it
 - Positive control: under `block_ddl`, `SELECT`, `INSERT` and `UPDATE` still pass. Under a full-write grant, `DO` and `CALL` still pass.
 - Integration (`internal/proxy/postgresql/integration_test.go`): a `block_ddl` session sending a `DO` block that drops a table gets an error and the table still exists.
 
-## Open questions
+## Resolved open questions
+
+(autopilot: recommended answer) `block_copy` does not refuse DO/CALL; keep the change to `block_ddl`.
+
+## Original questions
 
 - Should `block_copy` also refuse `DO`/`CALL`? COPY to or from the client cannot run inside PL/pgSQL, so the residual is server-side COPY, which needs privileged roles. Recommended: no, keep the change to `block_ddl`.
