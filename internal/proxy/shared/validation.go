@@ -171,13 +171,28 @@ var oracleBlockedPatterns = []*regexp.Regexp{
 //     LOCAL is a client-side data exfiltration vector — the upstream server
 //     can ask the client to upload arbitrary local files.
 //   - SELECT ... INTO OUTFILE / DUMPFILE: writes files to the MySQL server FS.
-//   - SET GLOBAL: server-wide variable changes (privilege escalation).
+//   - LOAD XML [LOCAL] INFILE: the same file read into a table. Both LOAD forms
+//     take `LOW_PRIORITY` / `CONCURRENT` ahead of LOCAL, so INFILE is matched
+//     anywhere in the statement rather than right after the keyword.
+//   - SET GLOBAL / PERSIST / PERSIST_ONLY, and their `@@global.`,
+//     `@@persist.`, `@@persist_only.` prefix spellings: server-wide (and, for
+//     PERSIST, restart-surviving) variable changes. A SET list mixes scopes
+//     (`SET @@session.x=1, @@global.y=2`), so the scope is matched as the first
+//     item or after any comma of the SET. Reading `@@global.x` on the right of
+//     an assignment stays allowed unless it follows a comma (fails closed).
+//   - SHUTDOWN / RESTART as SQL statements; the COM_SHUTDOWN protocol command
+//     is refused by the proxy itself.
 //   - SET PASSWORD: covered separately by IsPasswordChangeQuery for ALTER USER,
 //     but the SET PASSWORD syntax also exists.
+//
+// None of these starts with a write or DDL keyword, so the grant controls
+// would not catch them: they are blocked whatever the grant says.
 var mysqlBlockedPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\bLOAD\s+DATA\s+(?:LOCAL\s+)?INFILE\b`),
+	regexp.MustCompile(`(?i)\bLOAD\s+(?:DATA|XML)\b[^;]*?\bINFILE\b`),
 	regexp.MustCompile(`(?i)\bINTO\s+(?:OUT|DUMP)FILE\b`),
-	regexp.MustCompile(`(?i)\bSET\s+GLOBAL\b`),
+	regexp.MustCompile(`(?i)\bSET\s+(?:[^;]*,\s*)?(?:GLOBAL|PERSIST|PERSIST_ONLY)\b`),
+	regexp.MustCompile(`(?i)\bSET\s+(?:[^;]*,\s*)?@\s*@\s*(?:GLOBAL|PERSIST|PERSIST_ONLY)\s*\.`),
+	regexp.MustCompile(`(?i)(?:^|;)\s*(?:SHUTDOWN|RESTART)\b`),
 	regexp.MustCompile(`(?i)\bSET\s+PASSWORD\b`),
 }
 
