@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -297,6 +298,11 @@ type Session struct {
 	// Only mutated from the upstream→client goroutine where logQuery runs,
 	// so no atomic needed.
 	lastBytesSnapshot int64
+
+	// persists counts the query records still being written in the
+	// background (persistQueryAsync), so cleanup can let them land before it
+	// closes the connection row. See teardown.go.
+	persists persistTracker
 }
 
 // NewSession creates a new session.
@@ -547,6 +553,11 @@ func (s *Session) proxyMessages() error {
 
 	// Wait for either direction to close or error
 	err := <-errChan
+
+	// One leg is gone; end the other one, and give it a bounded moment to
+	// get out of the bookkeeping before the teardown completes whatever is
+	// still in flight. See teardown.go.
+	s.finishRelays(err, errChan)
 
 	return err
 }
@@ -1460,6 +1471,14 @@ func (s *Session) proxyUpstreamToClient() error {
 		s.clientBackend.Send(msg)
 
 		if err := s.clientBackend.Flush(); err != nil {
+			// A client that closed its socket mid-result surfaces here, on
+			// the write, as often as on the client leg's read. Classify it
+			// the same way, so the teardown names the hangup and the server
+			// logs it as one rather than as a session failure.
+			if shared.IsClientHangup(err) || errors.Is(err, syscall.EPIPE) {
+				return fmt.Errorf("%w: failed to send to client: %w", errClientHungUp, err)
+			}
+
 			return fmt.Errorf("failed to send to client: %w", err)
 		}
 
@@ -1768,61 +1787,11 @@ func (s *Session) persistTerminatedQuery(t store.Termination) {
 		return
 	}
 
-	// Wire-level diff, computed once: the streamed-so-far bytes belong to the
-	// answered entry — that is what persistAbortedQuery attributes them to on
-	// the abort path, and the terminated path keeps the same rule.
-	total := s.bytesFromClient.Load() + s.bytesToClient.Load()
-
-	bytesTransferred := total - s.lastBytesSnapshot
-	if bytesTransferred > 0 {
-		s.lastBytesSnapshot = total
-	} else {
-		// Nothing new to attribute. The entries still get completed below —
-		// a row a result capture already inserted must not read as still
-		// running — they just carry no byte count.
-		bytesTransferred = 0
-	}
-
-	answered := s.getCurrentPendingQuery()
-
-	// Every pending entry except the oldest completes as aborted, without the
-	// limit text, so the teardown leaves no row that reads as still running.
-	// The oldest goes last, with the limit text.
-	aborted := "aborted: session terminated by dbbat"
-
-	if s.extendedState != nil {
-		for _, q := range s.extendedState.pendingQueries {
-			if q == nil || q == oldest {
-				continue
-			}
-
-			bytes := int64(0)
-			if q == answered {
-				bytes = bytesTransferred
-			}
-
-			s.currentQuery = q
-			s.logQuery(nil, &aborted, bytes)
-		}
-	}
-
-	oldestBytes := int64(0)
-	if oldest == answered {
-		oldestBytes = bytesTransferred
-	}
-
-	s.currentQuery = oldest
-	s.logQuery(nil, &message, oldestBytes)
-
-	// The teardown has now completed everything that was in flight; drop the
-	// bookkeeping rather than leaving rows that could read as still running.
-	s.currentQuery = nil
-	s.copyState = nil
-	if s.extendedState != nil {
-		s.extendedState.pendingQueries = nil
-	}
-
-	s.refreshStatementClock()
+	// The streamed-so-far bytes belong to the answered entry — that is what
+	// persistAbortedQuery attributes them to on the abort path, and the
+	// terminated path keeps the same rule. Every entry but the oldest
+	// completes as aborted, without the limit text.
+	s.completeInFlightLocked(oldest, message, "aborted: session terminated by dbbat")
 }
 
 // cleanup closes connections and updates records.
@@ -1854,6 +1823,11 @@ func (s *Session) cleanup() {
 		// uploads are not configured, and it never blocks on the network.
 		s.dumpUploader.Finish(s.ctx, s.connectionUID)
 	}
+
+	// The in-flight statements the teardown just completed, and their bytes,
+	// are written in the background; let them land first, so a reconnect —
+	// whose grant recomputes its byte budget from the store — sees them.
+	s.persists.wait(persistDrainTimeout)
 
 	if s.connectionUID != uuid.Nil {
 		if err := s.store.CloseConnectionWithReason(s.ctx, s.connectionUID, termination); err != nil {

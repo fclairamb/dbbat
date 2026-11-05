@@ -720,7 +720,11 @@ func (s *Session) persistQueryAsync(
 		return
 	}
 
+	s.persists.start()
+
 	go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
+		defer s.persists.done()
+
 		// A panic here must not leave the sink unresolved: the shared row writer
 		// waits on it before inserting anything this query queued. Fail is a
 		// no-op once Resolve has run, so this only bites on the panic path.

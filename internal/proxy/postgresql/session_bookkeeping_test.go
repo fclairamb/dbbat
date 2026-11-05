@@ -85,6 +85,14 @@ type loopback struct {
 	upstream *pgproto3.Backend
 
 	logs *capturingHandler
+
+	// relayErrs receives each relay leg's exit error, the way proxyMessages'
+	// errChan does, so a test can run the session's real teardown.
+	relayErrs chan error
+
+	// clientEnd is the test's side of the client socket, closed to play a
+	// client that hangs up.
+	clientEnd net.Conn
 }
 
 func newLoopback(t *testing.T) *loopback {
@@ -122,16 +130,22 @@ func newLoopback(t *testing.T) *loopback {
 	s.queryStorage.MaxResultBytes = 10 << 20
 
 	h := &loopback{
-		s:        s,
-		client:   pgproto3.NewFrontend(clientTestEnd, clientTestEnd),
-		upstream: pgproto3.NewBackend(upstreamTestEnd, upstreamTestEnd),
-		logs:     logs,
+		s:         s,
+		client:    pgproto3.NewFrontend(clientTestEnd, clientTestEnd),
+		upstream:  pgproto3.NewBackend(upstreamTestEnd, upstreamTestEnd),
+		logs:      logs,
+		relayErrs: make(chan error, 2),
+		clientEnd: clientTestEnd,
 	}
 
 	// Both legs, wired as proxyMessages wires them. Their exit errors are the
 	// pipes closing, which pgproto3 surfaces as io.ErrUnexpectedEOF.
-	go func() { _ = safe.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.proxyClientToUpstream) }()
-	go func() { _ = safe.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.proxyUpstreamToClient) }()
+	go func() {
+		h.relayErrs <- safe.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.proxyClientToUpstream)
+	}()
+	go func() {
+		h.relayErrs <- safe.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.proxyUpstreamToClient)
+	}()
 
 	t.Cleanup(func() {
 		_ = clientTestEnd.Close()
