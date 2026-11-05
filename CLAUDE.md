@@ -611,7 +611,12 @@ sentinel, which is what keeps the two apart.
   outruns the survivors is — and it goes back to exact the moment the session
   closes. So a live session's tail is protected up to the last sweep (bounded by
   `InstanceReclaimInterval`, not by how long the session lasts); statements
-  newer than that sweep are still not. **Both stamps are keyed MACs over the head**, not copies of
+  newer than that sweep are still not. **Each stamp also has a sealed copy in
+  `audit_log`** — the session's `connection.closed` entry for
+  `query_chain_mac`, a batched `query.rows_sealed` entry (≤1s, ≤500 seals) for
+  `row_chain_mac` — and verification compares the two, so clearing a stamp
+  *together with* every record it protects is a break rather than a session
+  that logged nothing (`internal/store/chain_sealed.go`). **Both stamps are keyed MACs over the head**, not copies of
   it: a verbatim head is readable out of the table it came from, so copying it
   after a trailing deletion would need no key. `query_chain_mac` additionally
   carries a format version (`query_chain_stamp_version`) *inside* its MAC —
