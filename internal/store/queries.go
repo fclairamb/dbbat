@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -594,7 +595,9 @@ func readRowChainHeads(ctx context.Context, db bun.IDB, queryUIDs []uuid.UUID) (
 //
 // The gap it shares with connections.query_chain_mac: a process that dies
 // mid-capture never reaches the barrier, so that capture keeps a NULL stamp and
-// only its prefix and interior are protected. A missing stamp is never a break.
+// only its prefix and interior are protected. A missing stamp is a break only
+// when the stamp's sealed copy (a query.rows_sealed audit entry) says one was
+// written.
 func (s *Store) SealQueryRowChain(ctx context.Context, queryUID uuid.UUID) error {
 	if !s.ChainEnabled() {
 		return nil
@@ -619,14 +622,31 @@ func (s *Store) SealQueryRowChain(ctx context.Context, queryUID uuid.UUID) error
 	// The stamp is a MAC over the head, not the head itself: a verbatim copy
 	// could be recomputed by anyone who can read query_rows, which is exactly
 	// the attacker this is meant to catch. See rowChainStampMAC.
-	_, err := s.db.NewUpdate().
+	stamp := s.rowChainStampMAC(queryUID, head.count, head.mac)
+
+	var connectionIDs []uuid.UUID
+
+	err := s.db.NewUpdate().
 		Model((*Query)(nil)).
 		Where("uid = ?", queryUID).
-		Set("row_chain_mac = ?", s.rowChainStampMAC(queryUID, head.count, head.mac)).
+		Set("row_chain_mac = ?", stamp).
 		Set("row_chain_len = ?", head.count).
-		Exec(ctx)
+		Returning("connection_id").
+		Scan(ctx, &connectionIDs)
 	if err != nil {
 		return fmt.Errorf("failed to stamp the row chain head: %w", err)
+	}
+
+	// The stamp sits on a plain row: clearing it together with the rows it
+	// protects would read as a query that captured nothing. A sealed copy in
+	// the audit chain is what keeps that a break — see chain_sealed.go.
+	for _, connectionID := range connectionIDs {
+		s.queueRowSeal(ctx, rowSealRecord{
+			ConnectionUID: connectionID.String(),
+			QueryUID:      queryUID.String(),
+			RowChainLen:   head.count,
+			RowChainMAC:   hex.EncodeToString(stamp),
+		})
 	}
 
 	return nil

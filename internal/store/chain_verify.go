@@ -352,7 +352,9 @@ func (s *Store) chainedConnectionUIDs(ctx context.Context, only *uuid.UUID) ([]u
 		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
 			return q.
 				Where("c.query_chain_mac IS NOT NULL").
-				WhereOr("EXISTS (SELECT 1 FROM queries q WHERE q.connection_id = c.uid AND q.chain_seq IS NOT NULL)")
+				WhereOr("EXISTS (SELECT 1 FROM queries q WHERE q.connection_id = c.uid AND q.chain_seq IS NOT NULL)").
+				WhereOr("c.uid IN (SELECT (a.details->>'connection_uid')::uuid FROM audit_log a "+
+					"WHERE a.event_type = ? AND a.details->>'query_chain_mac' IS NOT NULL)", AuditEventConnectionClosed)
 		}).
 		Order("c.uid ASC").
 		Scan(ctx, &uids)
@@ -430,6 +432,15 @@ func (s *Store) VerifyQueryChain(
 
 	if err := s.checkStampedHead(ctx, &result); err != nil {
 		return result, err
+	}
+
+	// Last, so a break the rules above can name keeps their wording: this is
+	// the rule that still holds when the stamp and everything it protects were
+	// removed together.
+	if result.Break == nil {
+		if err := s.checkSealedQueryStamp(ctx, &result); err != nil {
+			return result, err
+		}
 	}
 
 	return result, nil
@@ -934,6 +945,10 @@ func (s *Store) VerifyRowChains(ctx context.Context, connectionUID *uuid.UUID) (
 		return result, ErrChainKeyUnavailable
 	}
 
+	// Before enumerating: a capture named only by a seal this process has not
+	// written yet would otherwise be skipped.
+	s.FlushRowSeals(ctx)
+
 	unchained, err := s.countUnchainedRows(ctx, connectionUID)
 	if err != nil {
 		return result, err
@@ -1017,7 +1032,10 @@ func (s *Store) capturedQueryUIDs(ctx context.Context, connectionUID *uuid.UUID)
 		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
 			return q.
 				Where("q.row_chain_mac IS NOT NULL").
-				WhereOr("EXISTS (SELECT 1 FROM query_rows r WHERE r.query_id = q.uid AND r.mac IS NOT NULL)")
+				WhereOr("EXISTS (SELECT 1 FROM query_rows r WHERE r.query_id = q.uid AND r.mac IS NOT NULL)").
+				WhereOr("q.uid IN (SELECT (e->>'query_uid')::uuid FROM audit_log a "+
+					"CROSS JOIN LATERAL jsonb_array_elements(a.details->'seals') e WHERE a.event_type = ?)",
+					AuditEventQueryRowsSealed)
 		}).
 		Order("q.uid ASC")
 
@@ -1045,6 +1063,9 @@ func (s *Store) VerifyRowChain(ctx context.Context, queryUID uuid.UUID) (RowChai
 	if !s.ChainEnabled() {
 		return result, ErrChainKeyUnavailable
 	}
+
+	// What this process sealed but has not written yet is evidence too.
+	s.FlushRowSeals(ctx)
 
 	prevMAC := s.rowGenesisMAC(queryUID)
 
@@ -1097,6 +1118,14 @@ func (s *Store) VerifyRowChain(ctx context.Context, queryUID uuid.UUID) (RowChai
 
 	if err := s.checkStampedRowHead(ctx, &result); err != nil {
 		return result, err
+	}
+
+	// Last, for the same reason as the query chain's: a stamp cleared together
+	// with the rows it covers otherwise reads as a capture that never happened.
+	if result.Break == nil {
+		if err := s.checkSealedRowStamp(ctx, &result); err != nil {
+			return result, err
+		}
 	}
 
 	return result, nil
@@ -1176,7 +1205,8 @@ func (s *Store) checkStampedRowHead(ctx context.Context, result *RowChainResult)
 	}
 
 	// Never stamped: the capture is still running, it captured nothing, or the
-	// process died before the flush barrier.
+	// process died before the flush barrier. checkSealedRowStamp, which runs
+	// next, is what tells those apart from a stamp that was cleared.
 	if query.RowChainMAC == nil {
 		return nil
 	}

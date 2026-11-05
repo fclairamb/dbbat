@@ -130,6 +130,9 @@ var SessionAuditEventTypes = []string{
 	AuditEventConnectionOpened,
 	AuditEventConnectionClosed,
 	AuditEventConnectionTerminated,
+	// Not one session's lifecycle, but the same kind of volume: one entry per
+	// second of captures at most, carrying their sealed row stamps.
+	AuditEventQueryRowsSealed,
 }
 
 // Who wrote a connection.closed entry. It is part of the record because the two
