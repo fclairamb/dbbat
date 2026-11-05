@@ -372,7 +372,7 @@ type ServerUpdate struct {
 	// which is exactly why it has to be doable through the API rather than by
 	// hand against the storage database. Validated against IsValidServerName,
 	// the same check CreateServer applies, and a collision with an existing
-	// name — soft-deleted rows included, since servers_name_key is global —
+	// live name — servers_name_active_uq ignores soft-deleted rows —
 	// comes back as ErrServerNameConflict.
 	Name              *string
 	Description       *string

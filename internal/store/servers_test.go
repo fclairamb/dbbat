@@ -1138,10 +1138,10 @@ func TestUpdateServer_RenameHyphenatedName(t *testing.T) {
 	}
 }
 
-// TestUpdateServer_RenameConflict verifies a rename onto a taken name surfaces
-// the typed ErrServerNameConflict (a 409) rather than an opaque database error
-// (a 500) — including the case that makes this non-obvious: servers_name_key is
-// a *global* unique constraint, so a soft-deleted row still holds its name.
+// TestUpdateServer_RenameConflict verifies a rename onto a name held by a live
+// server surfaces the typed ErrServerNameConflict (a 409) rather than an opaque
+// database error (a 500), while the name of a soft-deleted server is free: the
+// unique index (servers_name_active_uq) covers live rows only.
 func TestUpdateServer_RenameConflict(t *testing.T) {
 	t.Parallel()
 
@@ -1178,13 +1178,9 @@ func TestUpdateServer_RenameConflict(t *testing.T) {
 		t.Fatalf("DeleteServer() error = %v", err)
 	}
 
-	// Sequential rather than subtests: the row is asserted unchanged afterwards,
-	// which only holds if every attempt has already been made.
-	for _, taken := range []string{"rename_taken_live", "rename_taken_deleted"} {
-		name := taken
-		if err := store.UpdateServer(ctx, subject.UID, ServerUpdate{Name: &name}, key); !errors.Is(err, ErrServerNameConflict) {
-			t.Fatalf("UpdateServer(rename to %q) error = %v, want ErrServerNameConflict", name, err)
-		}
+	live := "rename_taken_live"
+	if err := store.UpdateServer(ctx, subject.UID, ServerUpdate{Name: &live}, key); !errors.Is(err, ErrServerNameConflict) {
+		t.Fatalf("UpdateServer(rename to %q) error = %v, want ErrServerNameConflict", live, err)
 	}
 
 	reloaded, err := store.GetServerByUID(ctx, subject.UID)
@@ -1193,5 +1189,60 @@ func TestUpdateServer_RenameConflict(t *testing.T) {
 	}
 	if reloaded.Name != "rename_subject" {
 		t.Errorf("Name = %q, want it unchanged (%q)", reloaded.Name, "rename_subject")
+	}
+
+	freed := "rename_taken_deleted"
+	if err := store.UpdateServer(ctx, subject.UID, ServerUpdate{Name: &freed}, key); err != nil {
+		t.Fatalf("UpdateServer(rename to the deleted server's name %q) error = %v, want nil", freed, err)
+	}
+}
+
+// TestCreateServer_ReusesDeletedName: deleting a server frees its name. A
+// re-provisioning run (declare, delete, declare again) used to hit a 409
+// forever, since a soft-deleted row kept its name and nothing purges it. The
+// lookup by name, which is how every proxy resolves its target, must return
+// the live row and never the deleted one.
+func TestCreateServer_ReusesDeletedName(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	newServer := func(host string) *Server {
+		return &Server{
+			Name:         "reused_name",
+			Host:         host,
+			Port:         5432,
+			DatabaseName: "mydb",
+			Username:     "dbuser",
+			Password:     "secret",
+			SSLMode:      "prefer",
+		}
+	}
+
+	first, err := store.CreateServer(ctx, newServer("old-host"), key)
+	if err != nil {
+		t.Fatalf("CreateServer(first) error = %v", err)
+	}
+	if err := store.DeleteServer(ctx, first.UID); err != nil {
+		t.Fatalf("DeleteServer() error = %v", err)
+	}
+
+	second, err := store.CreateServer(ctx, newServer("new-host"), key)
+	if err != nil {
+		t.Fatalf("CreateServer(same name after delete) error = %v, want nil", err)
+	}
+
+	if _, err := store.CreateServer(ctx, newServer("third-host"), key); !errors.Is(err, ErrServerNameConflict) {
+		t.Fatalf("CreateServer(name held by a live server) error = %v, want ErrServerNameConflict", err)
+	}
+
+	got, err := store.GetServerByName(ctx, "reused_name")
+	if err != nil {
+		t.Fatalf("GetServerByName() error = %v", err)
+	}
+	if got.UID != second.UID || got.Host != "new-host" {
+		t.Errorf("GetServerByName() = %s on %q, want the live row %s on %q", got.UID, got.Host, second.UID, "new-host")
 	}
 }
