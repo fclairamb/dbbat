@@ -130,7 +130,7 @@ func (s *Store) CreateServer(ctx context.Context, db *Server, encryptionKey []by
 		Returning("*").
 		Exec(ctx)
 	if err != nil {
-		if isUniqueViolation(err, "servers_name_key") {
+		if isUniqueViolation(err, "servers_name_active_uq") {
 			return nil, ErrServerNameConflict
 		}
 		return nil, fmt.Errorf("failed to create database: %w", err)
@@ -526,7 +526,7 @@ func valueOrDefaultInt(ptr *int, def int) int {
 // UpdateServer updates a database.
 // Returns ErrTargetMatchesStorage if the update would cause the target to match the DBBat storage database,
 // ErrServerNameInvalid if a rename does not match the slug format, and ErrServerNameConflict if the new
-// name is already taken (by a live *or* soft-deleted row — servers_name_key is global).
+// name is already taken by a live row (servers_name_active_uq ignores soft-deleted ones).
 func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerUpdate, encryptionKey []byte) error {
 	// A rename goes through the exact check CreateServer applies — enforced
 	// here rather than only in the handler so every caller of the store is
@@ -576,10 +576,10 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 
 	result, err := q.Exec(ctx)
 	if err != nil {
-		// servers_name_key is a *global* unique constraint: it covers
-		// soft-deleted rows too, so a name freed by a delete is still taken.
-		// Typed rather than wrapped so the API answers 409 instead of 500.
-		if isUniqueViolation(err, "servers_name_key") {
+		// servers_name_active_uq covers live rows only: a name freed by a
+		// delete can be taken again. Typed rather than wrapped so the API
+		// answers 409 instead of 500.
+		if isUniqueViolation(err, "servers_name_active_uq") {
 			return ErrServerNameConflict
 		}
 

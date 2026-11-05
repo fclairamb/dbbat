@@ -64,7 +64,8 @@ type UpdateDatabaseRequest struct {
 	// the PostgreSQL/MySQL/MongoDB database name, the Oracle SERVICE_NAME — so
 	// a rename breaks every saved connection string using the old one, while
 	// leaving already-authenticated sessions alone. Omitted (null) leaves it
-	// unchanged; a name already taken, soft-deleted rows included, is a 409.
+	// unchanged; a name already taken by a live server is a 409, while the name of
+	// a deleted server is free again.
 	Name              *string    `json:"name"`
 	Description       *string    `json:"description"`
 	Host              *string    `json:"host"`
@@ -321,8 +322,8 @@ func (s *Server) writeUpdateServerError(c *gin.Context, err error) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
 	case errors.Is(err, store.ErrServerNameInvalid):
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
-	// servers_name_key spans soft-deleted rows, so the name of a deleted server
-	// is still taken — a 409 naming the reason, never a 500.
+	// A name held by another live server is a 409 naming the reason, never a
+	// 500. The name of a deleted server is free (servers_name_active_uq).
 	case errors.Is(err, store.ErrServerNameConflict):
 		writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
 	default:
