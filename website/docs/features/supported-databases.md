@@ -103,7 +103,7 @@ Implemented in `internal/proxy/mysql` on top of `go-mysql-org/go-mysql`. See the
 
 Implemented as a hand-rolled MongoDB wire proxy in `internal/proxy/mongodb`. See the full [MongoDB notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md) for protocol-level details.
 
-- **Wire framing**: `OP_MSG` (2013) with kind-0 command bodies and kind-1 document sequences, plus the legacy `OP_QUERY`/`OP_REPLY` used for the first `hello`. BSON encode/decode via `go.mongodb.org/mongo-driver/v2/bson`. `OP_COMPRESSED` is rejected.
+- **Wire framing**: `OP_MSG` (2013) with kind-0 command bodies and kind-1 document sequences, plus the legacy `OP_QUERY`/`OP_REPLY` used for the first `hello`. BSON encode/decode via `go.mongodb.org/mongo-driver/v2/bson`. `OP_COMPRESSED` is accepted with `zlib` (capped at 64 KiB inflated before authentication); `snappy`/`zstd` are declined.
 - **Auth termination**: two client mechanisms are terminated at the proxy:
   - **`SCRAM-SHA-256`** (driver default) — DBBat runs the server side of SCRAM against a stored verifier in `users.protocol_data.mongodb`, so the cleartext password never crosses the wire (TLS optional). Verifiers exist only for passwords set after this shipped.
   - **`PLAIN`-over-TLS** (`authMechanism=PLAIN`) — the driver sends the cleartext password (hence the TLS requirement), verified via the same Argon2id path as the other proxies. `dbb_` API keys work as the password.

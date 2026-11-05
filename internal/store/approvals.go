@@ -152,7 +152,7 @@ func (s *Store) CreatePendingQuery(ctx context.Context, query *Query, pattern st
 	result := &Query{
 		UID:             newUIDv7(),
 		ConnectionID:    query.ConnectionID,
-		SQLText:         query.SQLText,
+		SQLText:         storableSQLText(query.SQLText),
 		Parameters:      query.Parameters,
 		ExecutedAt:      query.ExecutedAt,
 		ApprovalStatus:  &status,
@@ -163,7 +163,22 @@ func (s *Store) CreatePendingQuery(ctx context.Context, query *Query, pattern st
 		result.ExecutedAt = time.Now()
 	}
 
-	if _, err := s.db.NewInsert().Model(result).Exec(ctx); err != nil {
+	// Sealed like any other statement, at the moment it is held: the chain
+	// covers only the immutable identity, which a hold never changes, and the
+	// approval resolution is an outcome column written afterwards. Before this,
+	// held statements sat in their session unchained — indistinguishable from a
+	// statement inserted around the chain (see checkUnchainedStatements).
+	result.ExecutedAt = normalizeStoredTime(result.ExecutedAt)
+
+	if !s.ChainEnabled() {
+		if _, err := s.db.NewInsert().Model(result).Exec(ctx); err != nil {
+			return nil, fmt.Errorf("failed to create pending query: %w", err)
+		}
+
+		return result, nil
+	}
+
+	if err := s.appendQueryChain(ctx, result); err != nil {
 		return nil, fmt.Errorf("failed to create pending query: %w", err)
 	}
 

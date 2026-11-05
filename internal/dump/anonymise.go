@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 )
 
@@ -40,7 +41,7 @@ func Anonymise(inputPath, outputPath string, rewriteAddresses bool) error {
 		ep = newEndpoints(stripped, true)
 	}
 
-	writer, err := newWriter(outputPath, stripped, 0, ep)
+	writer, err := newWriter(outputPath, stripped, 0, ep, os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("create output: %w", err)
 	}

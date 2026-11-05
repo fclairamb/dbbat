@@ -39,6 +39,16 @@ type Server struct {
 	// storage. nil — the default — keeps them on local disk only.
 	dumpUploader *dump.Uploader
 	logger       *slog.Logger
+	// preAuth is the window an unauthenticated client gets to finish its
+	// handshake and login (shared.PreAuthTimeout unless a test shortens it).
+	preAuth shared.PreAuthTimer
+	// preAuthRelays holds one token per session between its TNS Connect and
+	// the AUTH OK dbbat hands back. Unlike the other protocols, Oracle dials
+	// the upstream *before* authenticating the client (the pre-auth relay), so
+	// every unauthenticated client also holds an upstream connection; the cap
+	// keeps a flood of them from exhausting the target's sessions/processes.
+	preAuthRelays chan struct{}
+
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
 	// in a goroutine).
@@ -111,8 +121,16 @@ func NewServer(
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
 		cancel:        cancel,
+		preAuthRelays: make(chan struct{}, maxConcurrentPreAuthRelays),
 	}
 }
+
+// maxConcurrentPreAuthRelays bounds how many Oracle logins may be in flight —
+// past the TNS Connect, short of AUTH OK — at once. A real login finishes in
+// well under a second, so 512 only binds on a flood (or on a pool ramp-up far
+// larger than any seen), and each slot is held for at most the pre-auth
+// window. A refused client gets ORA-12520 and may retry.
+const maxConcurrentPreAuthRelays = 512
 
 // Start starts the Oracle proxy server.
 func (s *Server) Start(addr string) error {
@@ -136,7 +154,7 @@ func (s *Server) Start(addr string) error {
 
 	// Start dump cleanup goroutine if dumps are enabled
 	if s.dumpConfig.Dir != "" {
-		if err := os.MkdirAll(s.dumpConfig.Dir, 0o755); err != nil {
+		if err := os.MkdirAll(s.dumpConfig.Dir, dump.DirPerm); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to create dump directory", slog.String("dir", s.dumpConfig.Dir), slog.Any("error", err))
 		} else {
 			go s.runDumpCleanup()
@@ -241,6 +259,8 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.approvalDeps = s.approvalDeps
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
+	session.preAuthTimeout = s.preAuth.Timeout()
+	session.preAuthRelays = s.preAuthRelays
 	session.statementTaggingEnabled = s.statementTagging
 	if s.queryTaggingResolver != nil {
 		// The tagging.* store parameter over the DBB_QUERY_TAGGING_ORACLE

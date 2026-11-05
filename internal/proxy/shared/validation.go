@@ -16,7 +16,11 @@ var (
 	ErrDDLBlocked            = errors.New("DDL operations not permitted: your access grant blocks schema modifications")
 	ErrPasswordChangeBlocked = errors.New("password modification is not allowed through the proxy")
 	ErrOraclePatternBlocked  = errors.New("blocked: this Oracle operation is not permitted through the proxy")
-	ErrMySQLPatternBlocked   = errors.New("blocked: this MySQL operation is not permitted through the proxy")
+	// ErrOracleLogonAlterSessionShape — the session settings an Oracle client
+	// sends at logon (AUTH_ALTER_SESSION) are not one plain ALTER SESSION
+	// statement. See ValidateOracleLogonAlterSession.
+	ErrOracleLogonAlterSessionShape = errors.New("only a single ALTER SESSION statement is accepted at logon")
+	ErrMySQLPatternBlocked          = errors.New("blocked: this MySQL operation is not permitted through the proxy")
 	// ErrReadOnlyProcedureCall — a read_only grant met a statement that runs
 	// code dbbat cannot see: a stored procedure call (`CALL`), or a PostgreSQL
 	// `DO` block. What the code does is in the database, not in the statement,
@@ -112,13 +116,26 @@ var (
 // Write keywords that should be blocked for read-only grants.
 // REPLACE is MySQL's upsert and writes data; included so MySQL read-only grants
 // catch it. PG/Oracle never start a statement with REPLACE so it's a no-op there.
+//
+// RENAME, PURGE, FLASHBACK and COMMENT are Oracle's: `RENAME t TO u` (a schema
+// change), `PURGE TABLE t` / `PURGE RECYCLEBIN` (dropped tables removed for
+// good), `FLASHBACK TABLE t TO …` (a table's rows rewound, or a dropped table
+// restored) and `COMMENT ON` (a data-dictionary write). Oracle has no session
+// pin, so the text is the control. No dialect starts a read with any of them:
+// `COMMENT ON` is also PostgreSQL's (DDL there too), `RENAME TABLE` and
+// `PURGE BINARY LOGS` MySQL's, and T-SQL has none of the four as a statement.
 var writeKeywords = []string{
 	"INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE",
 	"CREATE", "ALTER", "GRANT", "REVOKE", "MERGE", "REPLACE",
+	"RENAME", "PURGE", "FLASHBACK", "COMMENT",
 }
 
-// DDL keywords.
-var ddlKeywords = []string{"CREATE", "ALTER", "DROP", "TRUNCATE"}
+// DDL keywords. The last four: see writeKeywords. Oracle documents all four as
+// DDL statements, and PostgreSQL's COMMENT ON is one as well.
+var ddlKeywords = []string{
+	"CREATE", "ALTER", "DROP", "TRUNCATE",
+	"RENAME", "PURGE", "FLASHBACK", "COMMENT",
+}
 
 // Oracle-specific blocked patterns (always blocked regardless of grant controls).
 var oracleBlockedPatterns = []*regexp.Regexp{
@@ -154,13 +171,28 @@ var oracleBlockedPatterns = []*regexp.Regexp{
 //     LOCAL is a client-side data exfiltration vector — the upstream server
 //     can ask the client to upload arbitrary local files.
 //   - SELECT ... INTO OUTFILE / DUMPFILE: writes files to the MySQL server FS.
-//   - SET GLOBAL: server-wide variable changes (privilege escalation).
+//   - LOAD XML [LOCAL] INFILE: the same file read into a table. Both LOAD forms
+//     take `LOW_PRIORITY` / `CONCURRENT` ahead of LOCAL, so INFILE is matched
+//     anywhere in the statement rather than right after the keyword.
+//   - SET GLOBAL / PERSIST / PERSIST_ONLY, and their `@@global.`,
+//     `@@persist.`, `@@persist_only.` prefix spellings: server-wide (and, for
+//     PERSIST, restart-surviving) variable changes. A SET list mixes scopes
+//     (`SET @@session.x=1, @@global.y=2`), so the scope is matched as the first
+//     item or after any comma of the SET. Reading `@@global.x` on the right of
+//     an assignment stays allowed unless it follows a comma (fails closed).
+//   - SHUTDOWN / RESTART as SQL statements; the COM_SHUTDOWN protocol command
+//     is refused by the proxy itself.
 //   - SET PASSWORD: covered separately by IsPasswordChangeQuery for ALTER USER,
 //     but the SET PASSWORD syntax also exists.
+//
+// None of these starts with a write or DDL keyword, so the grant controls
+// would not catch them: they are blocked whatever the grant says.
 var mysqlBlockedPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\bLOAD\s+DATA\s+(?:LOCAL\s+)?INFILE\b`),
+	regexp.MustCompile(`(?i)\bLOAD\s+(?:DATA|XML)\b[^;]*?\bINFILE\b`),
 	regexp.MustCompile(`(?i)\bINTO\s+(?:OUT|DUMP)FILE\b`),
-	regexp.MustCompile(`(?i)\bSET\s+GLOBAL\b`),
+	regexp.MustCompile(`(?i)\bSET\s+(?:[^;]*,\s*)?(?:GLOBAL|PERSIST|PERSIST_ONLY)\b`),
+	regexp.MustCompile(`(?i)\bSET\s+(?:[^;]*,\s*)?@\s*@\s*(?:GLOBAL|PERSIST|PERSIST_ONLY)\s*\.`),
+	regexp.MustCompile(`(?i)(?:^|;)\s*(?:SHUTDOWN|RESTART)\b`),
 	regexp.MustCompile(`(?i)\bSET\s+PASSWORD\b`),
 }
 
@@ -170,8 +202,14 @@ var mysqlBlockedPatterns = []*regexp.Regexp{
 // statement looks like to dbbat but not to the database: `/*x*/INSERT …` is an
 // INSERT either way. It therefore runs against the comment-stripped scratch
 // copy (see sqlcomments.go); the caller's string is untouched.
+//
+// Its caller is the PostgreSQL proxy, so it also reads PostgreSQL's
+// `SELECT … INTO <table>` as the write it is (see selectsIntoTable). The
+// lowercase isWriteQuery, shared with Oracle and MySQL, does not.
 func IsWriteQuery(sql string) bool {
-	return isWriteQuery(matchableSQL(sql, syntaxStandard), syntaxStandard)
+	matchable := matchableSQL(sql, syntaxStandard)
+
+	return isWriteQuery(matchable, syntaxStandard) || selectsIntoTable(matchable, false)
 }
 
 // isWriteQuery answers for an already-normalised scratch copy. The validators
@@ -197,10 +235,13 @@ func isWriteQuery(sql string, syntax sqlCommentSyntax) bool {
 	return isWritingCTE(sql, syntax)
 }
 
-// IsDDLQuery checks if a query is a DDL operation. Same comment normalisation
-// as IsWriteQuery.
+// IsDDLQuery checks if a query is a DDL operation. Same comment normalisation,
+// and same PostgreSQL `SELECT … INTO <table>` reading, as IsWriteQuery: it
+// creates a table.
 func IsDDLQuery(sql string) bool {
-	return isDDLQuery(matchableSQL(sql, syntaxStandard))
+	matchable := matchableSQL(sql, syntaxStandard)
+
+	return isDDLQuery(matchable) || selectsIntoTable(matchable, false)
 }
 
 // isDDLQuery answers for an already-normalised scratch copy.
@@ -665,6 +706,31 @@ func ValidateOracleQuery(sql string, grant *store.Grant) error {
 	return ValidateDynamicSQL(dyn, readable, grant, func(text string) error {
 		return validateOracleStatement(matchableSQL(text, syntaxStandard), grant)
 	})
+}
+
+// oracleLogonAlterSessionPrefix is what a logon AUTH_ALTER_SESSION value must
+// open with, matched on the comment-stripped scratch copy.
+var oracleLogonAlterSessionPrefix = regexp.MustCompile(`(?i)^\s*ALTER\s+SESSION\b`)
+
+// ValidateOracleLogonAlterSession gates the statement an Oracle client asks the
+// server to run while its session is being established — the AUTH_ALTER_SESSION
+// value of the AUTH Phase 2 message, which Oracle executes as part of the logon
+// and which therefore never reaches the mid-session gate.
+//
+// It gets exactly what a mid-session statement gets (ValidateOracleQuery: the
+// outright blocks, `ALTER SESSION SET CONTAINER` included, on every grant, and
+// the ALTER SESSION parameter allowlist under read_only/block_ddl), plus one
+// rule of its own: the value must be a single `ALTER SESSION` statement. Every
+// recorded client sends exactly that; anything else (another statement kind, a
+// `;`-separated list) is refused rather than guessed at, since dbbat cannot know
+// how the server would split it.
+func ValidateOracleLogonAlterSession(sql string, grant *store.Grant) error {
+	if strings.Contains(sql, ";") ||
+		!oracleLogonAlterSessionPrefix.MatchString(matchableSQL(sql, syntaxStandard)) {
+		return ErrOracleLogonAlterSessionShape
+	}
+
+	return ValidateOracleQuery(sql, grant)
 }
 
 // validateOracleStatement is the controls and the pattern list over one

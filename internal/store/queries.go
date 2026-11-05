@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,12 +39,28 @@ type QueryRowsCursor struct {
 	Offset int64 `json:"offset"`
 }
 
+// storableSQLText repairs statement text so the insert cannot fail on it:
+// `sql_text` is a Postgres `text` column, which refuses invalid UTF-8 and the
+// NUL byte. Both reach here from client-chosen bytes, and a refused insert
+// would drop a statement that has already run from the query history. Every
+// proxy and the MCP path insert through CreateQuery or CreatePendingQuery, so
+// this is the one place no protocol can forget. The repaired text is what the
+// chain MAC covers, so verification reads back exactly what was sealed.
+func storableSQLText(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if strings.IndexByte(s, 0) >= 0 {
+		s = strings.ReplaceAll(s, "\x00", "\uFFFD")
+	}
+
+	return s
+}
+
 // CreateQuery creates a new query record
 func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 	result := &Query{
 		UID:          newUIDv7(), // Generate UUIDv7 for time-ordered inserts
 		ConnectionID: query.ConnectionID,
-		SQLText:      query.SQLText,
+		SQLText:      storableSQLText(query.SQLText),
 		Parameters:   query.Parameters,
 		ExecutedAt:   query.ExecutedAt,
 		DurationMs:   query.DurationMs,
@@ -594,7 +611,9 @@ func readRowChainHeads(ctx context.Context, db bun.IDB, queryUIDs []uuid.UUID) (
 //
 // The gap it shares with connections.query_chain_mac: a process that dies
 // mid-capture never reaches the barrier, so that capture keeps a NULL stamp and
-// only its prefix and interior are protected. A missing stamp is never a break.
+// only its prefix and interior are protected. A missing stamp is a break only
+// when the stamp's sealed copy (a query.rows_sealed audit entry) says one was
+// written.
 func (s *Store) SealQueryRowChain(ctx context.Context, queryUID uuid.UUID) error {
 	if !s.ChainEnabled() {
 		return nil
@@ -619,14 +638,31 @@ func (s *Store) SealQueryRowChain(ctx context.Context, queryUID uuid.UUID) error
 	// The stamp is a MAC over the head, not the head itself: a verbatim copy
 	// could be recomputed by anyone who can read query_rows, which is exactly
 	// the attacker this is meant to catch. See rowChainStampMAC.
-	_, err := s.db.NewUpdate().
+	stamp := s.rowChainStampMAC(queryUID, head.count, head.mac)
+
+	var connectionIDs []uuid.UUID
+
+	err := s.db.NewUpdate().
 		Model((*Query)(nil)).
 		Where("uid = ?", queryUID).
-		Set("row_chain_mac = ?", s.rowChainStampMAC(queryUID, head.count, head.mac)).
+		Set("row_chain_mac = ?", stamp).
 		Set("row_chain_len = ?", head.count).
-		Exec(ctx)
+		Returning("connection_id").
+		Scan(ctx, &connectionIDs)
 	if err != nil {
 		return fmt.Errorf("failed to stamp the row chain head: %w", err)
+	}
+
+	// The stamp sits on a plain row: clearing it together with the rows it
+	// protects would read as a query that captured nothing. A sealed copy in
+	// the audit chain is what keeps that a break — see chain_sealed.go.
+	for _, connectionID := range connectionIDs {
+		s.queueRowSeal(ctx, rowSealRecord{
+			ConnectionUID: connectionID.String(),
+			QueryUID:      queryUID.String(),
+			RowChainLen:   head.count,
+			RowChainMAC:   hex.EncodeToString(stamp),
+		})
 	}
 
 	return nil

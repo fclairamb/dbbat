@@ -2867,3 +2867,515 @@ func TestQueryChainCloseDoesNotLowerASweptStamp(t *testing.T) {
 	require.NotNil(t, result.Break)
 	require.Contains(t, result.Break.Reason, "removed from the end")
 }
+
+// TestQueryChainClearedStampOverAnEmptiedSessionIsABreak is the combination the
+// rules on the connection row alone cannot see: every statement deleted *and*
+// the stamp cleared leaves exactly the state of a session that logged nothing.
+// The connection.closed entry sealed the stamp, so it is a break — on a scoped
+// walk and on the sweep, which must enumerate the session from that entry.
+func TestQueryChainClearedStampOverAnEmptiedSessionIsABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "cleared_emptied", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM queries WHERE connection_id = ?`, conn.UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE connections SET query_chain_mac = NULL, query_chain_len = 0 WHERE uid = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a cleared stamp over a deleted history must not read as a silent session")
+	require.Contains(t, result.Break.Reason, "sealed a chain of 3 statements")
+	require.NotNil(t, result.Break.ConnectionUID)
+	require.Equal(t, conn.UID, *result.Break.ConnectionUID)
+
+	all, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, all.OK(), "the sweep must walk the session from its sealed entry")
+	require.Equal(t, int64(1), all.Connections)
+}
+
+// TestQueryChainStampRewrittenAfterCloseIsABreak: a stamp that disagrees with
+// its sealed copy is a break, even where the stamp rules on the row would
+// accept it. Here the stamp is swapped for a valid one from a shorter point of
+// the same chain — what a prior refresh sweep wrote — after the tail is gone.
+func TestQueryChainStampRewrittenAfterCloseIsABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "rewritten_after_close", 3)
+
+	// What the attacker reuses: a genuine keyed stamp over the first two.
+	early := store.queryChainStampMAC(conn.UID, queryChainStampKeyed, 2, queries[1].MAC)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM queries WHERE uid = ?`, queries[2].UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE connections SET query_chain_mac = ?, query_chain_len = 2 WHERE uid = ?`, early, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a stamp that is not the sealed one must be a break")
+	require.Contains(t, result.Break.Reason, "differs from the one its connection.closed entry")
+}
+
+// TestQueryChainEditedSealedEntryIsABreak: the sealed copy is only evidence
+// because editing it breaks its own MAC. One edited to agree with a cleared
+// stamp is reported, not believed.
+func TestQueryChainEditedSealedEntryIsABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "edited_sealed_entry", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE audit_log SET details = jsonb_set(details, '{query_chain_len}', '2')
+		 WHERE event_type = ? AND details->>'connection_uid' = ?`,
+		AuditEventConnectionClosed, conn.UID.String())
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break)
+	require.Contains(t, result.Break.Reason, "does not verify")
+}
+
+// The positive controls of the sealed-copy rule are the tests that already pin
+// the legitimate NULL and emptied states, and still pass with it in place:
+// TestQueryChainClosedSilentSessionIsNotABreak and
+// TestQueryChainSilentSessionIsNotWalked (a session that logged nothing seals
+// no stamp), TestQueryChainOpenSessionWithoutAStampIsNotABreak (an open session
+// has no connection.closed entry yet) and
+// TestQueryChainRetentionEmptyingASessionIsNotABreak (retention keeps the stamp,
+// which then matches its sealed copy). This one pins a clean close agreeing
+// with its copy.
+func TestQueryChainClosedSessionMatchesItsSealedStamp(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "sealed_clean_close", 2)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "%v", result.Break)
+
+	sealed, unreadable, err := store.sealedQueryStamp(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Empty(t, unreadable)
+	require.NotNil(t, sealed)
+	require.Equal(t, int64(2), sealed.length)
+}
+
+// countRowSealEntries counts the query.rows_sealed entries naming a query.
+func countRowSealEntries(t *testing.T, ctx context.Context, store *Store, queryUID uuid.UUID) int {
+	t.Helper()
+
+	count, err := store.db.NewSelect().
+		Model((*AuditLog)(nil)).
+		Where("event_type = ?", AuditEventQueryRowsSealed).
+		Where("details @> jsonb_build_object('seals', jsonb_build_array(jsonb_build_object('query_uid', ?::text)))",
+			queryUID.String()).
+		Count(ctx)
+	require.NoError(t, err)
+
+	return int(count)
+}
+
+// TestRowChainSealWritesASealedCopy: the seal is copied into the audit chain on
+// its own, within rowSealFlushDelay, without anyone flushing — and the entry is
+// an ordinary chained row, left out of the unfiltered listing like the session
+// entries.
+func TestRowChainSealWritesASealedCopy(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows_sealed_copy")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	require.Eventually(t, func() bool {
+		return countRowSealEntries(t, ctx, store, query.UID) == 1
+	}, 10*rowSealFlushDelay, 50*time.Millisecond, "the seal is written without an explicit flush")
+
+	sealed, unreadable, err := store.sealedRowStamp(ctx, query.UID)
+	require.NoError(t, err)
+	require.Empty(t, unreadable)
+	require.NotNil(t, sealed)
+	require.Equal(t, int64(3), sealed.length)
+
+	audit, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.True(t, audit.OK(), "%v", audit.Break)
+
+	listed, err := store.ListAuditEvents(ctx, AuditFilter{})
+	require.NoError(t, err)
+
+	for _, event := range listed {
+		require.NotEqual(t, AuditEventQueryRowsSealed, event.EventType, "kept out of the default listing")
+	}
+}
+
+// TestRowChainClearedStampOverATruncatedCaptureIsABreak is the row-chain half
+// of the finding: the tail rows deleted and the stamp cleared used to read as a
+// capture whose process died before the flush barrier.
+func TestRowChainClearedStampOverATruncatedCaptureIsABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows_cleared_tail")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+	store.FlushRowSeals(ctx)
+
+	rows := readChainedRows(t, ctx, store, query.UID)
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM query_rows WHERE uid = ?`, rows[2].UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE queries SET row_chain_mac = NULL, row_chain_len = 0 WHERE uid = ?`, query.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a cleared stamp over a truncated capture must be a break")
+	require.Contains(t, result.Break.Reason, "sealed 3 rows, but the query carries no head stamp")
+	require.NotNil(t, result.Break.QueryUID)
+	require.Equal(t, query.UID, *result.Break.QueryUID)
+
+	all, err := store.VerifyRowChains(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, all.OK())
+}
+
+// TestRowChainClearedStampOverAWipedCaptureIsABreak: every row deleted and the
+// stamp cleared leaves nothing in query_rows or on the query to enumerate from,
+// so the sweep has to reach the capture through its sealed copy. The seal is
+// still pending in memory here, which VerifyRowChains must flush first.
+func TestRowChainClearedStampOverAWipedCaptureIsABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows_cleared_wiped")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM query_rows WHERE query_id = ?`, query.UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE queries SET row_chain_mac = NULL, row_chain_len = 0 WHERE uid = ?`, query.UID)
+	require.NoError(t, err)
+
+	all, err := store.VerifyRowChains(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, all.OK(), "a wiped capture must not vanish with its stamp")
+	require.Equal(t, int64(1), all.Captures)
+	require.Contains(t, all.Break.Reason, "carries no head stamp")
+}
+
+// TestRowChainUnsealedCaptureIsNotABreak is the positive control: a capture the
+// process died in before its flush barrier never sealed, so it has neither a
+// stamp nor a sealed copy, and its surviving rows verify as before.
+func TestRowChainUnsealedCaptureIsNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows_unsealed")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+
+	all, err := store.VerifyRowChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, all.OK(), "%v", all.Break)
+	require.Equal(t, int64(1), all.Captures)
+	require.Equal(t, 0, countRowSealEntries(t, ctx, store, query.UID))
+}
+
+// insertUnchainedAuditRow writes an audit row straight into the table, with no
+// chain position — what someone with write access to the store, but not the
+// key, can do.
+func insertUnchainedAuditRow(t *testing.T, ctx context.Context, store *Store, createdAt time.Time) uuid.UUID {
+	t.Helper()
+
+	uid, err := uuid.NewV7()
+	require.NoError(t, err)
+
+	_, err = store.db.NewInsert().Model(&AuditLog{
+		UID:       uid,
+		EventType: "grant.approved",
+		Details:   json.RawMessage(`{"forged":true}`),
+		CreatedAt: createdAt,
+	}).Exec(ctx)
+	require.NoError(t, err, "inserting an unchained audit row")
+
+	return uid
+}
+
+func auditAnchorCreatedAt(t *testing.T, ctx context.Context, store *Store) time.Time {
+	t.Helper()
+
+	var anchor AuditLog
+
+	err := store.db.NewSelect().
+		Model(&anchor).
+		Where("uid = ?", uuid.MustParse(AuditChainAnchorUID)).
+		Scan(ctx)
+	require.NoError(t, err)
+
+	return anchor.CreatedAt
+}
+
+// TestAuditChainDetectsUnchainedRowAfterTheAnchor: an entry inserted around the
+// chain, with a NULL chain_seq and a current timestamp, used to be counted as a
+// pre-anchor row and the chain reported intact.
+func TestAuditChainDetectsUnchainedRowAfterTheAnchor(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	logTestAuditEvents(t, ctx, store, 3)
+	forged := insertUnchainedAuditRow(t, ctx, store, time.Now())
+	logTestAuditEvents(t, ctx, store, 1)
+
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.False(t, result.OK(), "an unchained row after the anchor must break the chain")
+	require.Equal(t, forged, result.Break.UID)
+	require.Contains(t, result.Break.Reason, "inserted outside the chain")
+	require.Equal(t, int64(0), result.Unchained, "a forged row is not a pre-anchor row")
+	require.Equal(t, int64(4), result.Verified, "the chain itself still walks to its head")
+}
+
+// TestAuditChainDetectsUnchainedRowOnAnEmptyChain: with no chained entry yet,
+// the anchor's own timestamp is where chaining began.
+func TestAuditChainDetectsUnchainedRowOnAnEmptyChain(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM audit_log WHERE chain_seq >= 1`)
+	require.NoError(t, err)
+
+	forged := insertUnchainedAuditRow(t, ctx, store, time.Now())
+
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.False(t, result.OK())
+	require.Equal(t, forged, result.Break.UID)
+}
+
+// TestAuditChainCountsGenuinePreAnchorRows is the positive control: rows
+// written before the chain migration still verify, counted as Unchained.
+func TestAuditChainCountsGenuinePreAnchorRows(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	before := auditAnchorCreatedAt(t, ctx, store).Add(-time.Hour)
+	insertUnchainedAuditRow(t, ctx, store, before)
+	insertUnchainedAuditRow(t, ctx, store, before.Add(time.Minute))
+
+	logTestAuditEvents(t, ctx, store, 2)
+
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.True(t, result.OK(), "pre-anchor rows are not a break: %v", result.Break)
+	require.Equal(t, int64(2), result.Unchained)
+	require.Equal(t, int64(2), result.Verified)
+}
+
+// TestAuditChainBreakStillCountsPreAnchorRows: a break elsewhere does not zero
+// the pre-anchor count the report carries.
+func TestAuditChainBreakStillCountsPreAnchorRows(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	insertUnchainedAuditRow(t, ctx, store, auditAnchorCreatedAt(t, ctx, store).Add(-time.Hour))
+
+	rows := logTestAuditEvents(t, ctx, store, 3)
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM audit_log WHERE uid = ?`, rows[1].UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.False(t, result.OK())
+	require.Contains(t, result.Break.Reason, "missing or reordered")
+	require.Equal(t, int64(1), result.Unchained)
+}
+
+func insertUnchainedStatement(t *testing.T, ctx context.Context, store *Store, connectionUID uuid.UUID) uuid.UUID {
+	t.Helper()
+
+	uid, err := uuid.NewV7()
+	require.NoError(t, err)
+
+	_, err = store.db.NewInsert().Model(&Query{
+		UID:          uid,
+		ConnectionID: connectionUID,
+		SQLText:      "DROP TABLE forged",
+		ExecutedAt:   time.Now(),
+	}).Exec(ctx)
+	require.NoError(t, err, "inserting an unchained statement")
+
+	return uid
+}
+
+// TestQueryChainDetectsUnchainedStatement: a statement inserted into a chained
+// session with a NULL chain_seq was neither verified nor counted by the walk.
+func TestQueryChainDetectsUnchainedStatement(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "unchained_stmt", 3)
+	forged := insertUnchainedStatement(t, ctx, store, conn.UID)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, one.Break, "an unchained statement in a chained session must break it")
+	require.Equal(t, forged, one.Break.UID)
+	require.Contains(t, one.Break.Reason, "inserted outside the chain")
+
+	all, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, all.OK())
+	require.Equal(t, forged, all.Break.UID)
+}
+
+// TestQueryChainDetectsUnchainedStatementInAClosedSession: same, once the
+// session is closed and stamped.
+func TestQueryChainDetectsUnchainedStatementInAClosedSession(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "unchained_closed", 2)
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	forged := insertUnchainedStatement(t, ctx, store, conn.UID)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, one.Break)
+	require.Equal(t, forged, one.Break.UID)
+}
+
+// TestQueryChainPreChainSessionIsNotABreak is the positive control: a session
+// whose statements were all written unchained (before the chain migration) is
+// not judged.
+func TestQueryChainPreChainSessionIsNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "chain_prechain")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+	require.NoError(t, err)
+
+	insertUnchainedStatement(t, ctx, store, conn.UID)
+	insertUnchainedStatement(t, ctx, store, conn.UID)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, one.Break, "a pre-chain session is not tampering")
+
+	all, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, all.OK(), "%v", all.Break)
+}
+
+// TestQueryChainSealsHeldStatements: a statement parked on an approval hold is
+// chained when it is held, and resolving it leaves the chain intact.
+func TestQueryChainSealsHeldStatements(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "held", 1)
+
+	held, err := store.CreatePendingQuery(ctx, &Query{ConnectionID: conn.UID, SQLText: "DELETE FROM t"}, "delete")
+	require.NoError(t, err)
+	require.NotNil(t, held.ChainSeq, "a held statement is sealed like any other")
+	require.Equal(t, int64(2), *held.ChainSeq)
+
+	require.NoError(t, store.ResolveQueryApproval(ctx, held.UID, ApprovalApproved, nil, "ok"))
+
+	_, err = store.CreateQuery(ctx, &Query{ConnectionID: conn.UID, SQLText: "SELECT 2"})
+	require.NoError(t, err)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, one.Break, "%v", one.Break)
+	require.Equal(t, int64(3), one.Verified)
+}
+
+// TestQueryChainLegacyUnchainedHeldStatementIsNotABreak: held statements
+// written before they were chained carry an approval status and no chain
+// position; they must not turn every such session into a break on upgrade.
+func TestQueryChainLegacyUnchainedHeldStatementIsNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "legacy_held", 2)
+
+	status := ApprovalDenied
+	pattern := "drop"
+
+	_, err := store.db.NewInsert().Model(&Query{
+		UID:             newUIDv7(),
+		ConnectionID:    conn.UID,
+		SQLText:         "DROP TABLE t",
+		ExecutedAt:      time.Now(),
+		ApprovalStatus:  &status,
+		ApprovalPattern: &pattern,
+	}).Exec(ctx)
+	require.NoError(t, err)
+
+	one, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, one.Break, "%v", one.Break)
+	require.Equal(t, int64(2), one.Verified)
+}

@@ -270,6 +270,29 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// configureTrustedProxies tells gin which peers may set the client IP through
+// X-Forwarded-For / X-Real-IP. gin.New() trusts every peer, which let any
+// client choose the IP that keys the anonymous rate limits and the access log;
+// without DBB_TRUSTED_PROXIES nobody is trusted and ClientIP() is the socket
+// peer.
+func configureTrustedProxies(router *gin.Engine, cfg *config.Config) error {
+	var proxies []string
+
+	if cfg != nil {
+		var err error
+
+		if proxies, err = cfg.ParseTrustedProxies(); err != nil {
+			return err
+		}
+	}
+
+	if err := router.SetTrustedProxies(proxies); err != nil {
+		return fmt.Errorf("set trusted proxies: %w", err)
+	}
+
+	return nil
+}
+
 // setupRouter configures the Gin router.
 //
 //nolint:funlen // route registration is intentionally sequential and grouped by resource
@@ -279,6 +302,13 @@ func (s *Server) setupRouter() *gin.Engine {
 
 	// Disable automatic trailing slash redirect to avoid loops with SPA routing
 	router.RedirectTrailingSlash = false
+
+	// Validated at startup (config.validate), so an error here means a
+	// Config built by hand; fail closed rather than leave gin trusting all.
+	if err := configureTrustedProxies(router, s.config); err != nil {
+		s.logger.ErrorContext(context.Background(), "Invalid trusted proxies, trusting none", slog.Any("error", err))
+		_ = router.SetTrustedProxies(nil)
+	}
 
 	// Middleware
 	router.Use(gin.Recovery())
@@ -301,13 +331,28 @@ func (s *Server) setupRouter() *gin.Engine {
 
 		// Auth endpoints (login and pre-login password change are unauthenticated)
 		auth := v1.Group("/auth")
-		auth.POST("/login", s.handleLogin)
-		auth.PUT("/password", s.handlePreLoginPasswordChange)
+		// Both check a password, so besides the per-(username, IP) backoff
+		// of authFailureTracker they are IP rate limited against spraying
+		// across many usernames from one source.
+		if s.rateLimiter != nil {
+			auth.POST("/login", s.rateLimiter.PreAuthMiddleware(), s.handleLogin)
+			auth.PUT("/password", s.rateLimiter.PreAuthMiddleware(), s.handlePreLoginPasswordChange)
+		} else {
+			auth.POST("/login", s.handleLogin)
+			auth.PUT("/password", s.handlePreLoginPasswordChange)
+		}
 		auth.GET("/providers", s.handleAuthProviders)
 
-		// OAuth provider routes (unauthenticated)
+		// OAuth provider routes (unauthenticated). The authorize route writes
+		// an oauth_states row on every request, so it is IP rate limited like
+		// the other pre-auth endpoints that create rows; the callback only
+		// consumes one.
 		for name := range s.oauthProviders {
-			auth.GET("/"+name, s.handleOAuthAuthorize(name))
+			if s.rateLimiter != nil {
+				auth.GET("/"+name, s.rateLimiter.PreAuthMiddleware(), s.handleOAuthAuthorize(name))
+			} else {
+				auth.GET("/"+name, s.handleOAuthAuthorize(name))
+			}
 			auth.GET("/"+name+"/callback", s.handleOAuthCallback(name))
 		}
 
@@ -641,37 +686,6 @@ func (s *Server) handleLLMsTxt(c *gin.Context) {
 // handleOpenAPISpec serves the OpenAPI specification.
 func (s *Server) handleOpenAPISpec(c *gin.Context) {
 	c.Data(http.StatusOK, "application/x-yaml", openapiSpec)
-}
-
-// handleSwaggerUI serves the Swagger UI HTML page.
-func (s *Server) handleSwaggerUI(c *gin.Context) {
-	html := `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DBBat API Documentation</title>
-    <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
-</head>
-<body>
-    <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-    <script>
-        window.onload = function() {
-            SwaggerUIBundle({
-                url: "/api/openapi.yml",
-                dom_id: '#swagger-ui',
-                presets: [
-                    SwaggerUIBundle.presets.apis,
-                    SwaggerUIBundle.SwaggerUIStandalonePreset
-                ],
-                layout: "BaseLayout"
-            });
-        };
-    </script>
-</body>
-</html>`
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 }
 
 // healthPath is the liveness probe route, logged at DEBUG when it succeeds.

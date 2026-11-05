@@ -377,10 +377,14 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// One retention sweep for the whole process (nil when disabled, the default).
 	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
 
+	// Expired OAuth/device/login-exchange states are purged whatever the
+	// retention settings: unauthenticated endpoints create them.
+	oauthPurger := startOAuthStatePurge(ctx, dataStore, logger)
+
 	// Draining releases parked queries first, then stops the servers.
 	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxies.postgres,
 		proxies.oracle, proxies.mysql, proxies.mongo, proxies.mssql,
-		rowWriter, sweeper, heartbeat, dumpUploader)
+		rowWriter, sweeper, oauthPurger, heartbeat, dumpUploader)
 
 	return awaitShutdown(ctx, logger, servers...)
 }
@@ -2077,6 +2081,7 @@ func collectServers(
 	mssqlServer *mssql.Server,
 	rowWriter *shared.RowWriter,
 	sweeper *queryRetentionSweeper,
+	oauthPurger *oauthStatePurger,
 	heartbeat *instanceHeartbeat,
 	dumpUploader *dump.Uploader,
 ) []shutdownable {
@@ -2106,6 +2111,10 @@ func collectServers(
 
 	if sweeper != nil {
 		servers = append(servers, sweeper)
+	}
+
+	if oauthPurger != nil {
+		servers = append(servers, oauthPurger)
 	}
 
 	// After the proxies, before the heartbeat: the queue can only be drained

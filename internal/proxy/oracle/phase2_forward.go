@@ -183,7 +183,8 @@ func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAut
 //
 // All other KV pairs (AUTH_TERMINAL, AUTH_PROGRAM_NM, SESSION_CLIENT_DRIVER_NAME,
 // AUTH_CONNECT_STRING, AUTH_COPYRIGHT, AUTH_ACL, AUTH_ALTER_SESSION, …) are
-// passed through verbatim. This preserves the client's TTC capability surface
+// passed through verbatim — AUTH_ALTER_SESSION only once the caller has run it
+// through gateLogonAlterSession (sendUpstreamAuthPhase2 does). This preserves the client's TTC capability surface
 // so the upstream's AUTH OK is conditioned on the client's actual identity
 // (notably: the AUTH_CONNECT_STRING / AUTH_ACL / driver-version triplet that
 // JDBC thin sends and which standard go-ora does not).

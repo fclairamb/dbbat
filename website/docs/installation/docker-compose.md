@@ -6,6 +6,26 @@ sidebar_position: 2
 
 For development and testing, Docker Compose provides an easy way to run DBBat with all dependencies.
 
+## Generate an encryption key first
+
+`DBB_KEY` encrypts every stored upstream credential and seeds the HMAC key of the
+audit trail. The compose file below has **no default**: `docker compose` refuses
+to start until you set one. Generate a fresh key and keep it next to your other
+secrets (a `.env` file next to `docker-compose.yml` works, as long as it stays
+out of git):
+
+```bash
+echo "DBB_KEY=$(openssl rand -base64 32)" >> .env
+```
+
+:::warning
+Back the key up. Without it, the stored credentials cannot be decrypted and the
+audit chain cannot be verified, and a new key does not bring them back. Never use
+a key copied from documentation or an example: anyone holding a copy of the store
+(a backup, a dump) could then decrypt its credentials and re-seal forged audit
+records.
+:::
+
 ## docker-compose.yml
 
 ```yaml
@@ -28,7 +48,7 @@ services:
       - postgres
     environment:
       DBB_DSN: postgres://dbbat:dbbat@postgres:5432/dbbat?sslmode=disable
-      DBB_KEY: ${DBB_KEY:-YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=}
+      DBB_KEY: ${DBB_KEY:?set DBB_KEY, e.g. export DBB_KEY=$$(openssl rand -base64 32)}
       DBB_LISTEN_PG: ":5433"
       DBB_LISTEN_ORA: ":1522"
       DBB_LISTEN_MYSQL: ":3307"

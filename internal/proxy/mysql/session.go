@@ -226,6 +226,15 @@ func (s *Session) Run() error {
 	// bytes. It is disarmed the moment the handshake is over.
 	limited := newPreAuthLimitedConn(s.clientConn)
 
+	// The handshake also runs under the pre-auth window. go-mysql reads and
+	// writes the greeting, the optional TLS upgrade and the auth exchange
+	// inside NewCustomizedConn with no deadline of its own, so it is set on
+	// the conn underneath before the call and lifted once it returns: a socket
+	// that says nothing would otherwise hold this goroutine forever.
+	if err := shared.ArmPreAuthDeadline(s.clientConn, s.server.preAuth.Timeout()); err != nil {
+		return fmt.Errorf("set pre-auth deadline: %w", err)
+	}
+
 	conn, err := s.server.gomysqlServer.NewCustomizedConn(limited, authHandler, commandHandler)
 
 	limited.disarm()
@@ -245,6 +254,12 @@ func (s *Session) Run() error {
 		}
 
 		return fmt.Errorf("MySQL handshake: %w", err)
+	}
+
+	// Authenticated: an established session may sit idle for as long as the
+	// client keeps it open. The upstream dial below carries its own timeout.
+	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
+		return fmt.Errorf("clear pre-auth deadline: %w", err)
 	}
 
 	s.serverConn = conn

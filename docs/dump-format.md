@@ -320,6 +320,13 @@ A capture is always **written to local disk first**, at
 what makes a capture readable even when the process dies mid-session: the file
 on disk is a valid, if truncated, pcapng.
 
+Captures hold plaintext statements, bind parameters and result rows, so they are
+private to the dbbat process owner whatever the umask: each file is created
+`0600` (exclusively — a capture never writes over an existing file), and the
+directory `0700` when dbbat creates it. A directory that already exists keeps
+its mode; tighten it by hand if an older release created it `0755`.
+`dbbat dump anonymise` writes its output `0600` too.
+
 With `DBB_DUMP_UPLOAD_URL` set, the local directory becomes a **spool**. When
 the session closes, the finished file is uploaded to the configured bucket and
 the local copy is removed:

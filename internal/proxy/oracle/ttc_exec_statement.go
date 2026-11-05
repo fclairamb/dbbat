@@ -25,9 +25,10 @@ import (
 //     (9 ops, five distinct statements, all DBeaver connection setup —
 //     TestSurveyAlterSessionMisreadAsSet computes it; the `ALTER SESSION` in
 //     every other recording is the AUTH_ALTER_SESSION key/value of the phase-2
-//     AUTH message — func 0x03 sub-op 0x73, not a statement-carrying op, so the
-//     gate never sees it). `ALTER` is in writeKeywords and ddlKeywords; `SET` is
-//     in neither, so read_only and block_ddl did not fire.
+//     AUTH message — func 0x03 sub-op 0x73, not a statement-carrying op, so this
+//     gate never sees it; gateLogonAlterSession checks it on the logon path).
+//     `ALTER` is in writeKeywords and ddlKeywords; `SET` is in neither, so
+//     read_only and block_ddl did not fire.
 //   - go-ora's `UPDATE … SET name = …` read as `SET name = …`. Same bypass.
 //   - `… WHERE GRANTED_ROLE='DBA'` read as a `GRANT` statement.
 //

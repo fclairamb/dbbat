@@ -161,6 +161,7 @@ number, not a fresh timestamp.
 | The stamp itself is **cleared** rather than rewritten, to remove the check instead of defeating it | Yes | A session that closed with statements in its history always carries a stamp, so a closed session whose statements survive without one is a break. And because the stamp's MAC, length and version are only ever written together, a length left behind by a cleared MAC is a break on its own — open sessions included |
 | The **last** rows of a captured result set are deleted | Yes | The capture's final head is sealed onto the query row with a keyed MAC when the capture finishes, so correcting it needs the key |
 | A captured result set is deleted **outright** | Yes | The sealed stamp on the query still attests to rows no longer there |
+| A stamp is cleared **together with** everything it protects — every statement of a closed session, or the rows of a finished capture | Yes | Each stamp also has a chained copy in the audit log: the session's `connection.closed` entry, or a `query.rows_sealed` entry written within a second of the capture finishing. A stamp missing or different from its copy is a break |
 | A **whole session** is deleted — the connection row, and with it every statement and captured row it cascades to | By comparison only — see the note below | Every session writes a chained `connection.opened` and `connection.closed` entry into the audit log, which the delete does not touch and retention never reaps |
 | A connection row is **edited in place** — `connected_at` backdated, for instance | By comparison only — see the note below | The same two entries record the row's immutable identity when it was written |
 | The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
@@ -211,7 +212,11 @@ Be precise about this in a control narrative:
   inserts an anchor row marking where chaining begins. Rows older than the
   anchor have no MAC and none can be created after the fact, so verification
   reports them separately as `unverifiable_pre_anchor_entries` instead of
-  counting them as verified.
+  counting them as verified. A row with no chain position dated *after* the
+  first chained entry is not counted there: it was inserted around the chain,
+  and verification reports it as a break. One backdated before that entry still
+  reads as pre-anchor, so note the count down with the head; it should never
+  grow.
 - **It does not seal the connection row.** `connections` is not chained. A whole
   session can be deleted, or its row edited in place, without breaking anything
   a chain walk checks. The `connection.opened` / `connection.closed` audit
@@ -230,7 +235,9 @@ Be precise about this in a control narrative:
   after the result set has been read — like the outcome columns above — so they
   are not sealed either. A capture whose DBBat process died before its rows were
   finalised also carries no head stamp, so only its beginning and middle are
-  protected.
+  protected — and so does one whose process crashed within a second of
+  finishing it, before the stamp's audit-log copy was written: that stamp still
+  catches a rewrite, but no longer a clearing.
 - **A live session is sealed up to the last sweep, not up to its last
   statement.** DBBat re-stamps the chain head of the sessions it still has open
   every few minutes, so a session that never ends — a `psql` window left open

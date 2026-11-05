@@ -75,13 +75,14 @@ func TestProvider_ExchangeCode(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(userInfoResponse{
-			OK:       true,
-			Sub:      "U013ZGBT0SJ",
-			Name:     "Jane Doe",
-			Email:    "jane@example.com",
-			Picture:  "https://avatars.slack.com/jane.png",
-			TeamID:   "T0123TEAM",
-			TeamName: "My Workspace",
+			OK:            true,
+			Sub:           "U013ZGBT0SJ",
+			Name:          "Jane Doe",
+			Email:         "jane@example.com",
+			EmailVerified: true,
+			Picture:       "https://avatars.slack.com/jane.png",
+			TeamID:        "T0123TEAM",
+			TeamName:      "My Workspace",
 		})
 	})
 
@@ -97,6 +98,7 @@ func TestProvider_ExchangeCode(t *testing.T) {
 
 	assert.Equal(t, "U013ZGBT0SJ", user.ProviderID)
 	assert.Equal(t, "jane@example.com", user.Email)
+	assert.True(t, user.EmailVerified)
 	assert.Equal(t, "Jane Doe", user.DisplayName)
 	assert.Equal(t, "T0123TEAM", user.TeamID)
 	assert.Equal(t, "My Workspace", user.TeamName)
@@ -192,4 +194,32 @@ func TestProvider_ExchangeCode_WrongTeam(t *testing.T) {
 	assert.Contains(t, err.Error(), "wrong workspace")
 	assert.Contains(t, err.Error(), "T9999OTHER")
 	assert.Contains(t, err.Error(), "T0123EXPECTED")
+}
+
+// TestProvider_ExchangeCode_EmailNotVerified: a userinfo without
+// email_verified: true must not mark the email as verified.
+func TestProvider_ExchangeCode_EmailNotVerified(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(tokenResponse{OK: true, AccessToken: "xoxp-test-token"})
+	})
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"sub":"U1","email":"jane@example.com"}`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	p := NewProvider("my-id", "my-secret", "")
+	p.TokenURL = server.URL + "/token"
+	p.UserInfoURL = server.URL + "/userinfo"
+
+	user, err := p.ExchangeCode(context.Background(), "code", "http://localhost/callback")
+	require.NoError(t, err)
+	assert.Equal(t, "jane@example.com", user.Email)
+	assert.False(t, user.EmailVerified)
 }

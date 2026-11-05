@@ -63,6 +63,10 @@ type Store struct {
 	queryChains *queryChains
 	rowChains   *queryChains
 
+	// rowSeals batches the sealed copies of finished captures' row stamps
+	// into query.rows_sealed audit entries. See chain_sealed.go.
+	rowSeals rowSealBatcher
+
 	// limitsCache memoizes the limits.* and tagging.* parameter groups for a
 	// few seconds. The per-statement timeout and the tagging decision are
 	// each read once per *connection* on five protocols; without this every
@@ -122,6 +126,8 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 	if len(opts) > 0 {
 		options = opts[0]
 	}
+
+	routePgdriverLogsToSlog()
 
 	// Create connection using pgdriver
 	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
@@ -195,6 +201,8 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 
 // Close closes the database connection pool
 func (s *Store) Close() {
+	s.closeRowSeals()
+
 	if err := s.db.Close(); err != nil {
 		slog.ErrorContext(context.Background(), "failed to close database", slog.Any("error", err))
 	}

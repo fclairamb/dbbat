@@ -16,7 +16,8 @@ client-side SCRAM toward the upstream uses `github.com/xdg-go/scram`.
 The framing lives in `internal/proxy/mongodb/wire.go`: the 16-byte message
 header, `OP_MSG` (2013) with kind-0 command bodies and kind-1 document
 sequences, the legacy `OP_QUERY` (2004) / `OP_REPLY` (1) used for the first
-`hello`, and rejection of `OP_COMPRESSED` (2012). A trailing CRC-32C checksum
+`hello`, and `OP_COMPRESSED` (2012), inflated on the way in (see "Wire
+compression" below). A trailing CRC-32C checksum
 is tolerated on parse and never emitted on our own replies.
 
 ## Auth Strategy: `PLAIN`-over-TLS or `SCRAM-SHA-256` (client) → SCRAM-SHA-256 (upstream)
@@ -155,12 +156,27 @@ frame, which keeps the first `hello` reply plain and guarantees the client will
 decompress ours. Only `zlib` (stdlib) is negotiated; `snappy`/`zstd` are
 declined.
 
+Before authentication an `OP_COMPRESSED` frame may declare at most 64 KiB
+uncompressed (`preAuthMaxUncompressedSize`) — hello and the SASL exchange are a
+few hundred bytes, and the compression spec forbids compressing the auth
+commands anyway — and a larger declaration is refused on the header alone. After
+authentication the 48 MB wire limit applies. Either way the declared size is
+never trusted for the allocation: inflation grows the frame buffer with the
+bytes actually produced and stops one byte past the declaration.
+
 ### Monitoring connections
 
 Drivers open separate connections that send `hello`/`ping` periodically and
 never authenticate. The proxy answers these indefinitely and **does not** create
 a `store.Connection` or dial the upstream for them — the connection record is
 created only on a successful `saslStart`, mirroring the MySQL proxy.
+
+"Indefinitely" means *as long as they keep talking*: the shared pre-auth window
+(`shared.PreAuthTimeout`, 30 s) is re-armed before every pre-auth message, so a
+connection that falls silent for 30 s before authenticating is closed. Drivers
+poll every `heartbeatFrequencyMS` (10 s by default) — dbbat advertises no
+`topologyVersion`, so there is no awaitable hello to hold a reply open. The
+window is lifted on a successful `saslStart`.
 
 ## Connection Flow
 
@@ -343,6 +359,12 @@ a supported server never send them — dbbat advertises `maxWireVersion` 21. The
   each subsequent `getMore` for that cursor is stamped with the same `cursor_id`
   plus `cursor_origin=<command> <namespace>`, so a whole paged result set reads as
   one logical query. The link is dropped when the cursor drains (`cursor.id == 0`).
+- **Commands with no reply at teardown:** a command's row is written when its
+  reply arrives. Every command still awaiting one when the session ends (a
+  driver can pipeline several) is completed, oldest first, with `client
+  disconnected before the response completed`, or with the termination message
+  when dbbat ended the session. Written before the connection row closes, so
+  the rows are inside the sealed query chain.
 
 ## Session Packet Dumps
 

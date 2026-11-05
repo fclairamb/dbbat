@@ -171,6 +171,11 @@ type session struct {
 	// and JDBC trips ORA-17401 in T4CTTIfun.receive.
 	clientAuthPhase2Pkt *TNSPacket
 
+	// logonAlterSession is what the client's AUTH_ALTER_SESSION applies at
+	// logon, as checked by gateLogonAlterSession and forwarded verbatim; empty
+	// when dbbat built its own Phase 2. Recorded once the connection row exists.
+	logonAlterSession []string
+
 	// Query tracking.
 	//
 	// trackerMu guards every piece of per-session query bookkeeping: the
@@ -266,6 +271,12 @@ type session struct {
 	statementTimeouts *shared.StatementTimeoutResolver
 	statementLimit    time.Duration
 	statementClock    shared.StatementClock
+
+	// preAuthTimeout bounds everything from the accept to the AUTH OK. Zero
+	// means shared.PreAuthTimeout.
+	preAuthTimeout time.Duration
+	// preAuthRelays is the server's pre-auth relay semaphore (nil = unbounded).
+	preAuthRelays chan struct{}
 
 	// termination records why dbbat ended this session, when dbbat is what
 	// ended it.
@@ -399,6 +410,42 @@ func newSession(
 	return s
 }
 
+// completeLogin hands the client its AUTH OK and leaves the pre-auth phase:
+// the relay slot goes back and the deadline is lifted, so the session may sit
+// idle for as long as the client keeps it open.
+func (s *session) completeLogin(authOK []byte, releaseRelay func()) error {
+	if _, err := s.clientConn.Write(authOK); err != nil {
+		return fmt.Errorf("failed to send AUTH OK: %w", err)
+	}
+
+	releaseRelay()
+
+	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
+		return fmt.Errorf("clear pre-auth deadline: %w", err)
+	}
+
+	return nil
+}
+
+// acquirePreAuthRelay takes a pre-auth relay slot without waiting. The
+// returned release is idempotent, so it can be both deferred and called on
+// success.
+func (s *session) acquirePreAuthRelay() (func(), bool) {
+	if s.preAuthRelays == nil {
+		return func() {}, true
+	}
+
+	select {
+	case s.preAuthRelays <- struct{}{}:
+	default:
+		return nil, false
+	}
+
+	var once sync.Once
+
+	return func() { once.Do(func() { <-s.preAuthRelays }) }, true
+}
+
 // readConnectPacket reads the client's first TNS packet and classifies the two
 // ways that read can fail. A TCP health check opens the socket and closes it
 // without a byte, so this is where every probe lands: that exact case — zero
@@ -424,6 +471,14 @@ func (s *session) readConnectPacket() (*TNSPacket, error) {
 func (s *session) run() error {
 	defer s.cleanup()
 
+	// Everything up to the AUTH OK runs under the pre-auth window — the client
+	// reads, and the pre-auth relay and its upstream socket with them: a socket
+	// that says nothing would otherwise hold this goroutine, and once past the
+	// Connect an upstream connection, forever.
+	if err := shared.ArmPreAuthDeadline(s.clientConn, s.preAuthTimeout); err != nil {
+		return fmt.Errorf("set pre-auth deadline: %w", err)
+	}
+
 	// Step 1: Receive TNS Connect from client
 	connectPkt, err := s.readConnectPacket()
 	if err != nil {
@@ -435,6 +490,16 @@ func (s *session) run() error {
 
 		return fmt.Errorf("%w: got %s", ErrExpectedConnectPacket, connectPkt.Type)
 	}
+
+	// Take a pre-auth relay slot before anything dials upstream; released on
+	// the AUTH OK below, or on the way out if the login never gets there.
+	releaseRelay, ok := s.acquirePreAuthRelay()
+	if !ok {
+		s.sendRefuse(ORA12520, "too many logins in progress, retry later")
+
+		return ErrPreAuthRelaysExhausted
+	}
+	defer releaseRelay()
 
 	// Step 2: Parse service name and resolve database
 	if err := s.resolveDatabase(connectPkt.Payload); err != nil {
@@ -570,8 +635,8 @@ func (s *session) run() error {
 		authOK = reframeAuthOK(authOK, s.upstreamAuthOKFlags, s.upstreamAuthOKFragLens, s.tnsLegacyLength)
 	}
 
-	if _, err := s.clientConn.Write(authOK); err != nil {
-		return fmt.Errorf("failed to send AUTH OK: %w", err)
+	if err := s.completeLogin(authOK, releaseRelay); err != nil {
+		return err
 	}
 
 	// Step 7: Record connection
@@ -592,6 +657,10 @@ func (s *session) run() error {
 		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
 	} else {
 		s.connectionUID = conn.UID
+
+		// What the client's AUTH_ALTER_SESSION applied at logon, on file as the
+		// first statements of the session.
+		s.recordLogonAlterSession()
 	}
 
 	// The per-user statement tag needs the user and the grant, both settled by
@@ -872,6 +941,12 @@ func authRejectFor(err error) (uint16, string) {
 // text stays in the logs: it can name hosts and accounts. The client learns
 // which side failed, so it stops suspecting its API key, and who can fix it.
 func upstreamAuthRejectFor(err error) (uint16, string) {
+	// Refused by dbbat itself, before the client's Phase 2 went upstream: the
+	// client's own logon settings failed the statement gate.
+	if code, message, ok := logonAlterSessionRefusal(err); ok {
+		return code, message
+	}
+
 	if errors.Is(err, ErrUpstreamAuthPhase1Rejected) || errors.Is(err, ErrUpstreamAuthPhase2Rejected) {
 		return ORA01017, "dbbat accepted your API key, but the database refused the credentials " +
 			"dbbat stores for it; ask a dbbat administrator to update them and run the connectivity check"

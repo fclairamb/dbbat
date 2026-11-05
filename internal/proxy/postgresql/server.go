@@ -71,6 +71,10 @@ type Server struct {
 	// leaves the decision to the atomic above.
 	queryTaggingResolver *shared.QueryTaggingResolver
 
+	// preAuth is the window an unauthenticated client gets to finish its
+	// startup and login (shared.PreAuthTimeout unless a test shortens it).
+	preAuth shared.PreAuthTimer
+
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
 	// in a goroutine).
@@ -182,7 +186,7 @@ func (s *Server) Start(addr string) error {
 
 	// Start dump cleanup goroutine if dumps are enabled
 	if s.dumpConfig.Dir != "" {
-		if err := os.MkdirAll(s.dumpConfig.Dir, 0o755); err != nil {
+		if err := os.MkdirAll(s.dumpConfig.Dir, dump.DirPerm); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to create dump directory", slog.String("dir", s.dumpConfig.Dir), slog.Any("error", err))
 		} else {
 			go s.runDumpCleanup()
@@ -298,6 +302,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.cancels = s.cancels
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
+	session.preAuthTimeout = s.preAuth.Timeout()
 	session.queryTagging = s.queryTagging.Load()
 	session.queryTaggingResolver = s.queryTaggingResolver
 
@@ -320,10 +325,9 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 			return
 		}
 
-		if errors.Is(err, errClientHungUp) {
-			s.logger.DebugContext(s.ctx, "Client disconnected",
-				slog.Any("remote_addr", clientConn.RemoteAddr()))
-
+		// The target ended the session under us: worth recording, but not a
+		// failure of dbbat.
+		if s.logHangup(session, err, clientConn) {
 			return
 		}
 
@@ -407,4 +411,25 @@ func isClientRefusal(err error) bool {
 	}
 
 	return false
+}
+
+// logHangup reports a session one side ended on its own and returns true: the
+// client at DEBUG, the target at WARN. session.logger carries connection_uid
+// once the row exists.
+func (s *Server) logHangup(session *Session, err error, clientConn net.Conn) bool {
+	if errors.Is(err, errClientHungUp) {
+		s.logger.DebugContext(s.ctx, "Client disconnected",
+			slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+		return true
+	}
+
+	if !errors.Is(err, errUpstreamClosed) {
+		return false
+	}
+
+	session.logger.WarnContext(s.ctx, "Upstream closed the session", slog.Any("error", err),
+		slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+	return true
 }

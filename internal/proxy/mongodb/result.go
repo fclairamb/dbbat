@@ -18,6 +18,12 @@ import (
 // (e.g. a bulk insert body) doesn't bloat the queries table.
 const maxSQLTextLen = 8 * 1024
 
+// errClientDisconnectedMidResponse completes a command still awaiting its reply
+// when the session ends without a termination reason: the client hung up (or
+// the upstream went away) before the reply was relayed. Same wording as the
+// PostgreSQL and SQL Server proxies, so the query history reads alike.
+const errClientDisconnectedMidResponse = "client disconnected before the response completed"
+
 // captureResult correlates an upstream reply to the query that produced it and
 // records the query log row with any captured cursor rows / rowsAffected
 // (phases 2–3). Called for every upstream→client message.
@@ -255,6 +261,20 @@ func (s *Session) captureCursorRows(body bson.Raw) ([]store.QueryRow, bool) {
 // fields, stores captured rows, and bumps connection + grant counters. Mirrors
 // the MySQL proxy's recordQuery.
 func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffected *int64, queryError *string) {
+	s.recordQueryWith(pq, rows, rowsAffected, queryError, true)
+}
+
+// recordQuerySync is recordQuery with the store write done before it returns.
+// The teardown uses it: the connection row is closed, and its query chain
+// sealed, right after, so a background insert would land behind the seal.
+func (s *Session) recordQuerySync(pq *pendingQuery, queryError *string) {
+	s.recordQueryWith(pq, nil, nil, queryError, false)
+}
+
+// recordQueryWith is the shared body of recordQuery and recordQuerySync.
+func (s *Session) recordQueryWith(
+	pq *pendingQuery, rows []store.QueryRow, rowsAffected *int64, queryError *string, async bool,
+) {
 	if s.connection == nil {
 		return
 	}
@@ -285,7 +305,7 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 	// finished while its rows are still arriving.
 	hasRows := len(rows) > 0
 
-	go safe.RunGuarded(s.ctx, s.logger, goroutineNameCommandRecord, func() {
+	persist := func() {
 		sink := s.server.rowWriter.NewSink()
 
 		// The sink is created here and never escapes, but a panic between
@@ -348,7 +368,13 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 				s.logger.DebugContext(s.ctx, "increment connection stats failed", slog.Any("error", err))
 			}
 		}
-	})
+	}
+
+	if async {
+		go safe.RunGuarded(s.ctx, s.logger, goroutineNameCommandRecord, persist)
+	} else {
+		safe.RunGuarded(s.ctx, s.logger, goroutineNameCommandRecord, persist)
+	}
 
 	if s.grant != nil {
 		s.grant.QueryCount++
@@ -364,12 +390,9 @@ func buildSQLText(cmd string, body bson.Raw) string {
 		return cmd
 	}
 
-	text := cmd + " " + string(extJSON)
-	if len(text) > maxSQLTextLen {
-		text = text[:maxSQLTextLen]
-	}
-
-	return text
+	// Relaxed Extended JSON writes non-ASCII as raw UTF-8, so the cut must
+	// land on a rune boundary or the query insert fails.
+	return shared.TruncateOnRune(cmd+" "+string(extJSON), maxSQLTextLen)
 }
 
 // extractParams pulls session/transaction metadata (lsid, txnNumber) into the

@@ -138,7 +138,7 @@ func TestCompressedLegacyOpCodeStillRefused(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, opCodeCompressed, outer.opCode)
 
-	inner, _, err := decompressMessage(outer)
+	inner, _, err := decompressMessage(outer, maxWireMessageSize)
 	require.NoError(t, err)
 	assert.Equal(t, opCodeReply, inner.opCode)
 }

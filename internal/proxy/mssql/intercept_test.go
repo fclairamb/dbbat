@@ -224,6 +224,28 @@ func TestSQLBatchEnforcement(t *testing.T) {
 			sql: "BULK INSERT t FROM 'données.csv'", wantErr: ErrBulkCopyBlocked,
 		},
 		{
+			// A bulk load writes rows: read_only refuses it without block_copy.
+			name: "a bulk insert is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "BULK INSERT t FROM 'données.csv'", wantErr: shared.ErrReadOnlyViolation,
+		},
+		{
+			name: "a bulk insert split by a comment is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "BULK/**/INSERT t FROM 'f.csv'", wantErr: shared.ErrReadOnlyViolation,
+		},
+		{
+			name: "an insert bulk is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "INSERT BULK t (a int)", wantErr: shared.ErrReadOnlyViolation,
+		},
+		{name: "a bulk insert is allowed under a full-write grant", sql: "BULK INSERT t FROM 'données.csv'"},
+		{
+			name: "select into is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "SELECT a INTO t2 FROM t", wantErr: shared.ErrReadOnlyViolation,
+		},
+		{
+			name: "select into is blocked by block_ddl", controls: []string{store.ControlBlockDDL},
+			sql: "SELECT a INTO /* x */ #t2 FROM t", wantErr: shared.ErrDDLBlocked,
+		},
+		{
 			name: "a password change is always blocked",
 			sql:  "ALTER USER [bob] WITH PASSWORD = 'x'", wantErr: shared.ErrPasswordChangeBlocked,
 		},
@@ -1366,4 +1388,186 @@ func TestTruncateSQLCutsOnARuneBoundary(t *testing.T) {
 	}
 
 	assert.Equal(t, "SELECT 1", truncateSQL("SELECT 1"))
+}
+
+// intNNullParam encodes a NULL nullable 4-byte integer parameter.
+func intNNullParam(name string) []byte {
+	buf := append(paramHead(name), 0x00)
+
+	return append(buf, typeIntN, 4, 0)
+}
+
+// cursorCall builds an sp_cursor RPC: @cursor, then the optype parameter the case
+// wants, then @rownum and @table.
+func cursorCall(optype []byte) []byte {
+	return rpcByID(spCursor, intNParam("", 7, 0), optype, intNParam("", 1, 0), nvarcharParam("", ""))
+}
+
+// TestCursorPositionedWritesAreEnforced is the regression test for security
+// finding M2 (2026-10-30): sp_cursor was forwarded as bookkeeping, but its
+// UPDATE, DELETE and INSERT optypes write to the cursor's base table, which the
+// cursor's SELECT — the only statement dbbat checked — never revealed.
+func TestCursorPositionedWritesAreEnforced(t *testing.T) {
+	t.Parallel()
+
+	const (
+		optUpdate      = 0x0001
+		optDelete      = 0x0002
+		optInsert      = 0x0004
+		optRefresh     = 0x0008
+		optLock        = 0x0010
+		optSetPosition = 0x0020
+		optAbsolute    = 0x0040
+	)
+
+	optype := func(v int32) []byte { return cursorCall(intNParam("", v, 0)) }
+
+	writes := map[string][]byte{
+		"UPDATE":                     optype(optUpdate),
+		"DELETE":                     optype(optDelete),
+		"INSERT":                     optype(optInsert),
+		"UPDATE combined with flags": optype(optUpdate | optSetPosition | optAbsolute),
+		"DELETE by named @optype, out of order": rpcByID(spCursor,
+			intNParam("@cursor", 7, 0),
+			intNParam("@rownum", 1, 0),
+			intNParam("@OpType", optDelete, 0)),
+	}
+
+	unreadable := map[string][]byte{
+		"absent optype":       rpcByID(spCursor, intNParam("", 7, 0)),
+		"NULL optype":         cursorCall(intNNullParam("")),
+		"optype sent as text": cursorCall(nvarcharParam("", "1")),
+		"positional slot misnamed": rpcByID(spCursor,
+			intNParam("@cursor", 7, 0),
+			intNParam("@rownum", optRefresh, 0)),
+	}
+
+	bookkeeping := map[string][]byte{
+		"REFRESH":     optype(optRefresh),
+		"LOCK":        optype(optLock),
+		"SETPOSITION": optype(optSetPosition),
+		"ABSOLUTE":    optype(optAbsolute | optSetPosition),
+		"sp_cursorfetch": rpcByID(spCursorFetch,
+			intNParam("", 7, 0), intNParam("", 2, 0), intNParam("", 1, 0), intNParam("", 10, 0)),
+		"sp_cursorclose": rpcByID(spCursorClose, intNParam("", 7, 0)),
+	}
+
+	decide := func(t *testing.T, controls []string, payload []byte) error {
+		t.Helper()
+
+		session := sessionWithGrant(t, grantWithControls(controls...))
+
+		requests, err := parseRPC(payload)
+		require.NoError(t, err)
+
+		st := session.describeRPC(requests)
+		if st.refusal != nil {
+			return st.refusal
+		}
+
+		return session.validate(st)
+	}
+
+	restrictive := map[string][]string{
+		"read_only":  {store.ControlReadOnly},
+		"block_ddl":  {store.ControlBlockDDL},
+		"block_copy": {store.ControlBlockCopy},
+	}
+
+	for grantName, controls := range restrictive {
+		for name, payload := range writes {
+			t.Run(grantName+" refuses "+name, func(t *testing.T) {
+				t.Parallel()
+				require.ErrorIs(t, decide(t, controls, payload), ErrCursorWriteBlocked)
+			})
+		}
+
+		for name, payload := range unreadable {
+			t.Run(grantName+" refuses "+name, func(t *testing.T) {
+				t.Parallel()
+				require.ErrorIs(t, decide(t, controls, payload), ErrCursorWriteBlocked)
+			})
+		}
+
+		for name, payload := range bookkeeping {
+			t.Run(grantName+" allows "+name, func(t *testing.T) {
+				t.Parallel()
+				require.NoError(t, decide(t, controls, payload))
+			})
+		}
+	}
+
+	all := make(map[string][]byte)
+	for _, set := range []map[string][]byte{writes, unreadable, bookkeeping} {
+		for name, payload := range set {
+			all[name] = payload
+		}
+	}
+
+	for name, payload := range all {
+		t.Run("full write allows "+name, func(t *testing.T) {
+			t.Parallel()
+			require.NoError(t, decide(t, nil, payload))
+		})
+	}
+}
+
+// approvalSession builds a session whose approval gate holds on DELETE. The gate
+// has no store, so a match surfaces as ErrApprovalUnavailable from Hold: enough
+// to tell "would have been held" from "ran straight through".
+func approvalSession(t *testing.T) *session {
+	t.Helper()
+
+	grant := &store.Grant{
+		Definition: &store.GrantDefinition{ApprovalPatterns: []string{`(?i)\bDELETE\b`}},
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}
+
+	sess := sessionWithGrant(t, grant)
+	sess.approvalGate = shared.NewApprovalGate(shared.ApprovalDeps{Enabled: true}, grant, uuid.New(), nil, "prod")
+
+	return sess
+}
+
+// TestApprovalMatchesRPCTextPastTheStorageLimit is the regression test for
+// approval patterns being matched against the RPC text after its truncation to
+// maxSQLTextLen: a DELETE sitting past the first 8 KB of an sp_executesql was
+// forwarded without the four-eyes hold, although it is what actually runs.
+func TestApprovalMatchesRPCTextPastTheStorageLimit(t *testing.T) {
+	t.Parallel()
+
+	sess := approvalSession(t)
+
+	sql := "/*" + strings.Repeat("x", 2*maxSQLTextLen) + "*/ DELETE FROM employés"
+
+	requests, err := parseRPC(rpcByID(spExecuteSQL, nvarcharMaxParam("", sql)))
+	require.NoError(t, err)
+
+	st := sess.describeRPC(requests)
+	require.NoError(t, st.refusal)
+	assert.Equal(t, sql, st.text, "the matched text must be the full statement")
+	assert.LessOrEqual(t, len(truncateSQL(st.text)), maxSQLTextLen, "what is stored stays bounded")
+
+	_, err = sess.holdIfNeeded(context.Background(), st)
+	require.ErrorIs(t, err, shared.ErrApprovalUnavailable, "the DELETE past 8 KB must be held")
+}
+
+// TestApprovalHoldPositiveControls: a short RPC that does not match is not
+// held, and a SQLBatch match keeps holding.
+func TestApprovalHoldPositiveControls(t *testing.T) {
+	t.Parallel()
+
+	sess := approvalSession(t)
+
+	requests, err := parseRPC(rpcByID(spExecuteSQL, nvarcharMaxParam("", "SELECT 1")))
+	require.NoError(t, err)
+
+	uid, err := sess.holdIfNeeded(context.Background(), sess.describeRPC(requests))
+	require.NoError(t, err)
+	assert.Equal(t, uuid.Nil, uid)
+
+	const batch = "DELETE FROM employés"
+
+	_, err = sess.holdIfNeeded(context.Background(), statement{text: batch, enforce: []string{batch}})
+	require.ErrorIs(t, err, shared.ErrApprovalUnavailable, "a SQLBatch DELETE must still be held")
 }

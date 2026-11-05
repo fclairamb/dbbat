@@ -479,7 +479,7 @@ text, so recording the handle would make the four-eyes rule silently stop
 applying the moment a client used prepared statements. Releasing a handle
 (`sp_unprepare`) is *not* logged as its statement — it is not running it again.
 
-Three cases cannot be resolved, and all three **fail closed whenever the grant
+Four cases cannot be resolved, and all four **fail closed whenever the grant
 restricts anything** (`read_only`, `block_ddl` or `block_copy`) — and are
 forwarded when it restricts nothing, because then there is nothing to fail
 closed about:
@@ -489,16 +489,25 @@ closed about:
 - **A stored procedure called by name.** `EXEC dbo.Something` is opaque: dbbat
   cannot see the body, so it cannot prove the procedure respects the
   restriction. (`ErrOpaqueProcedureBlocked`)
+- **A positioned write through a cursor.** `sp_cursor` (procedure id 1) is
+  not bookkeeping: its `@optype` (parameter 1, or named `@optype`) can ask for
+  a positioned `UPDATE` (`0x01`), `DELETE` (`0x02`) or `INSERT` (`0x04`) on the
+  cursor's base table, with the new values as parameters. The statement dbbat
+  checked when the cursor was opened is its `SELECT`, which passes `read_only`,
+  so the write is refused when any of those bits is set — combined with flags
+  or not — and when the optype cannot be read as an integer (absent, NULL, or
+  sent as another type). `REFRESH`, `LOCK`, `SETPOSITION` and `ABSOLUTE` go
+  through. (`ErrCursorWriteBlocked`)
 - **A request that will not parse.** An unparseable SQLBatch or RPC — including
   one whose `ALL_HEADERS` block does not validate — is refused rather than
   relayed, because it is one dbbat cannot enforce a grant on.
-  (`ErrMalformedRequest`) Unlike the two above, this one fails closed under
+  (`ErrMalformedRequest`) Unlike the three above, this one fails closed under
   *every* grant, restrictive or not.
 
 Cursor bookkeeping that carries neither a statement nor a decision —
-`sp_cursor`, `sp_cursorfetch`, `sp_cursoroption`, `sp_cursorclose`,
-`sp_cursorunprepare`, `sp_unprepare` — is allowed under a restrictive grant: the
-statement it acts on was checked when it was prepared or opened.
+`sp_cursorfetch`, `sp_cursoroption`, `sp_cursorclose`, `sp_cursorunprepare`,
+`sp_unprepare` — is allowed under a restrictive grant: the statement it acts on
+was checked when it was prepared or opened.
 
 ### `block_copy` on SQL Server
 
@@ -694,6 +703,15 @@ optimistically instead used to leave a session that kept running with a
 `DONE_ATTN` owed to nobody, which the next refused statement would take: the
 client saw "cancelled" where it should have seen the real error.
 
+A statement's `queries` row is written when its response's end-of-message
+packet is relayed. When the session ends first — a client that sends a
+statement and closes its socket straight away, which still has it forwarded and
+executed upstream — the teardown completes the statement still in flight with
+`client disconnected before the response completed`, or with the termination
+message when dbbat is what ended the session. The write happens before the
+connection row is closed, so the row is inside the sealed query chain, and the
+bytes since the last completion are charged to it.
+
 ## `read_only` is a text control on SQL Server
 
 SQL Server has no session-level read-only mode, so there is no server-side pin
@@ -704,7 +722,13 @@ instance ignores it. `read_only` is therefore the text classification alone
 of the batch: a batch needs no separator, so `shared.ValidateMSSQLBatch` scans
 the whole text for the reserved write and DDL keywords outside literals, quoted
 and bracketed identifiers, the way the `USE` scan does (`MERGE JOIN` /
-`MERGE UNION` hints excepted). `EXEC <proc>` is **not**
+`MERGE UNION` hints excepted). The same scan refuses `SELECT … INTO <table>`
+(`#temp` included) under both controls, since it creates and fills a table: an
+INTO counts when the statement owning it at its parenthesis depth is a SELECT
+and its target is not a variable, so `INSERT INTO`, `MERGE INTO`, a DML's
+`OUTPUT … INTO` and `FETCH … INTO @v` keep their classification. `BULK INSERT`
+and `INSERT BULK` load rows, so `read_only` refuses them without `block_copy`
+too. `EXEC <proc>` is **not**
 refused under `read_only`: drivers and tools send `sp_reset_connection`,
 `sp_executesql` wrappers of plain reads and `sp_describe_first_result_set`, and
 the RPC path cannot tell those from a procedure that writes. A procedure or a

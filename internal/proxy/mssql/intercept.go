@@ -6,7 +6,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -25,6 +24,12 @@ const maxSQLTextLen = 8 * 1024
 // `BULK INSERT` and `OPENROWSET(BULK …)` are the server-side file forms.
 var bulkCopyPattern = regexp.MustCompile(`(?i)\b(?:BULK\s+INSERT|INSERT\s+BULK|OPENROWSET\s*\(\s*BULK)\b`)
 
+// bulkWritePattern is the part of bulkCopyPattern that writes rows into a
+// table, which read_only refuses whatever block_copy says. `OPENROWSET(BULK …)`
+// is left out: on its own it reads a file as a rowset, and the INSERT that would
+// make it a write is refused as one.
+var bulkWritePattern = regexp.MustCompile(`(?i)\b(?:BULK\s+INSERT|INSERT\s+BULK)\b`)
+
 // pendingQuery is the statement whose response is currently in flight.
 type pendingQuery struct {
 	sqlText string
@@ -41,7 +46,11 @@ type pendingQuery struct {
 
 // statement is what one client message turned out to be asking for.
 type statement struct {
-	// text is what is logged and shown, and what approval patterns match.
+	// text is what approval patterns match, and — truncated to maxSQLTextLen
+	// at each use — what is logged and shown. It is held untruncated: a
+	// pattern matching past the first 8 KB of an RPC must still hold it, since
+	// the statement forwarded upstream is the full one. Every storage, log and
+	// display site calls truncateSQL itself.
 	text string
 	// enforce holds every statement the grant controls run against. Usually
 	// one; an RPC batch has several, and an sp_execute contributes the SQL its
@@ -123,7 +132,9 @@ func (s *session) describeRPC(requests []rpcRequest) statement {
 		texts = append(texts, s.describeRPCRequest(req, &st))
 	}
 
-	st.text = truncateSQL(strings.Join(texts, "; "))
+	// Untruncated on purpose: holdIfNeeded matches approval patterns against
+	// it. Storage and display truncate at their own call sites.
+	st.text = strings.Join(texts, "; ")
 
 	return st
 }
@@ -146,6 +157,18 @@ func (s *session) describeRPCRequest(req rpcRequest, st *statement) string {
 
 	case handleOnly(req):
 		return s.describeHandleRequest(req, st)
+
+	case req.isWellKnown() && req.procID == spCursor:
+		// Positioned operations on an open cursor. REFRESH, LOCK, SETPOSITION
+		// and ABSOLUTE are bookkeeping; UPDATE, DELETE and INSERT write to the
+		// cursor's base table with values the cursor's SELECT never showed, so
+		// under a restrictive grant they fail closed — as does an optype dbbat
+		// cannot read.
+		if grantRestricts(s.grant) && st.refusal == nil && req.cursorWrites() {
+			st.refusal = ErrCursorWriteBlocked
+		}
+
+		return req.logText()
 
 	case req.isWellKnown() && harmlessProcs[req.procID]:
 		// Cursor bookkeeping: no statement, nothing a control is about.
@@ -394,6 +417,11 @@ func (s *session) checkStatement(sql string) error {
 	// grant while SQL Server read the statement unchanged.
 	if s.grant.ShouldBlockCopy() && shared.MatchesNormalizedSQL(sql, bulkCopyPattern) {
 		return ErrBulkCopyBlocked
+	}
+
+	// A bulk load writes rows, so read_only refuses it too, not only block_copy.
+	if s.grant.IsReadOnly() && shared.MatchesNormalizedSQL(sql, bulkWritePattern) {
+		return shared.ErrReadOnlyViolation
 	}
 
 	return nil
@@ -737,16 +765,7 @@ func appendParams(params *store.QueryParameters, values []string) *store.QueryPa
 // the query insert outright. Losing the audit row for an oversize statement is
 // exactly the wrong failure.
 func truncateSQL(sql string) string {
-	if len(sql) <= maxSQLTextLen {
-		return sql
-	}
-
-	cut := maxSQLTextLen
-	for cut > 0 && !utf8.RuneStart(sql[cut]) {
-		cut--
-	}
-
-	return sql[:cut]
+	return shared.TruncateOnRune(sql, maxSQLTextLen)
 }
 
 // usernameOf renders a user for logs without dereferencing a nil.

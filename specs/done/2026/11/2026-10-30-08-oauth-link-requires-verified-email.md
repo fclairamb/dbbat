@@ -27,6 +27,10 @@ The generic OIDC provider rejects an email only when the issuer explicitly says 
 - `email_verified: true` still links (positive control). An existing identity link still signs in whatever the claim says.
 - With the admin rule: a verified email matching an admin username is not auto-linked.
 
-## Open questions
+## Resolved open questions
+
+(autopilot: recommended answer) Refuse email-match linking onto admin accounts entirely; an admin links their identity explicitly from a session.
+
+## Original questions
 
 - Refuse email-match linking onto admin accounts entirely? Recommended: yes. An admin can link their identity explicitly from a session.

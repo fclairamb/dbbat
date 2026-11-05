@@ -23,10 +23,6 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// handshakeTimeout bounds the whole PRELOGIN → TLS → LOGIN7 exchange. A client
-// that opens a socket and says nothing must not hold a goroutine forever.
-const handshakeTimeout = 30 * time.Second
-
 // Session-level errors.
 var (
 	// ErrUnexpectedFirstMessage — the connection did not start with PRELOGIN.
@@ -340,7 +336,10 @@ func newSession(conn net.Conn, server *Server) *session {
 // The returned error describes why the session ended. A refusal the client was
 // properly told about returns nil: it is an outcome, not a fault.
 func (s *session) Run(ctx context.Context) error {
-	if err := s.conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+	// The whole PRELOGIN → TLS → LOGIN7 exchange runs under the shared pre-auth
+	// window: a client that opens a socket and says nothing must not hold a
+	// goroutine forever.
+	if err := shared.ArmPreAuthDeadline(s.conn, s.server.preAuth.Timeout()); err != nil {
 		return fmt.Errorf("mssql: set handshake deadline: %w", err)
 	}
 
@@ -435,7 +434,7 @@ func (s *session) serve(ctx context.Context) error {
 
 	// The handshake deadline must go before the relay starts: a session is
 	// allowed to sit idle for as long as the client keeps it open.
-	if err := s.conn.SetDeadline(time.Time{}); err != nil {
+	if err := shared.ClearPreAuthDeadline(s.conn); err != nil {
 		return fmt.Errorf("mssql: clear handshake deadline: %w", err)
 	}
 
@@ -679,6 +678,25 @@ func (s *session) recordDisconnect(ctx context.Context) {
 		return
 	}
 
+	termination := s.recordedTermination()
+
+	// The statement that was in flight never got a response, so nothing else
+	// will ever complete its row: say why here, before the session record
+	// closes. A client that sends a statement and hangs up straight away still
+	// had it forwarded and executed upstream, so dropping it would leave a
+	// statement that may have changed data out of the query history and the
+	// per-connection chain. First, so the bytes streamed for it are charged to
+	// it rather than to the bytes-only flush below. Synchronous, so the row is
+	// in the chain before CloseConnectionWithReason seals it.
+	if pending := s.takePending(); pending != nil {
+		errText := errClientDisconnectedMidResponse
+		if termination.Set() {
+			errText = termination.Message()
+		}
+
+		s.recordQuerySync(ctx, pending, queryOutcome{queryError: &errText})
+	}
+
 	// Flush any client-side bytes not yet attributed to a statement, so a
 	// session's connection total is honest even when it ends mid-response.
 	if delta := s.takeByteDelta(); delta > 0 {
@@ -689,16 +707,7 @@ func (s *session) recordDisconnect(ctx context.Context) {
 		}
 	}
 
-	termination := s.recordedTermination()
 	if termination.Set() {
-		// The statement that was in flight never got a response, so nothing
-		// else will ever complete its row. Say why here, before the session
-		// record closes.
-		if pending := s.takePending(); pending != nil {
-			errText := termination.Message()
-			s.recordQuery(ctx, pending, queryOutcome{queryError: &errText})
-		}
-
 		// "terminated" before "closed": why, then that.
 		s.publisher.ConnectionWithReason(ctx, shared.ConnectionTerminated, termination.Reason)
 	}

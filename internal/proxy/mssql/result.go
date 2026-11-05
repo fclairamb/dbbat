@@ -22,6 +22,12 @@ import (
 // bytes are unaffected — they were forwarded packet by packet as they arrived.
 const maxAccountBuffer = 8 * 1024 * 1024
 
+// errClientDisconnectedMidResponse completes a statement still in flight when
+// the session ends without a termination reason: the client hung up (or the
+// upstream went away) before the response's end-of-message was relayed. Same
+// wording as the PostgreSQL proxy, so the query history reads alike.
+const errClientDisconnectedMidResponse = "client disconnected before the response completed"
+
 // errNeedMore means a token is not complete yet, so the walk must wait for the
 // next packet. It is the incremental counterpart of ErrTokenTruncated.
 var errNeedMore = errors.New("mssql: incomplete TDS token")
@@ -632,6 +638,18 @@ type queryOutcome struct {
 // captured results is inserted bare and completed only once the rows have
 // landed, so a query never reads as finished while its rows are still arriving.
 func (s *session) recordQuery(ctx context.Context, pending *pendingQuery, outcome queryOutcome) {
+	s.recordQueryWith(ctx, pending, outcome, true)
+}
+
+// recordQuerySync is recordQuery with the store write done before it returns.
+// The teardown uses it: the connection row is closed, and its query chain
+// sealed, right after, so a background insert would land behind the seal.
+func (s *session) recordQuerySync(ctx context.Context, pending *pendingQuery, outcome queryOutcome) {
+	s.recordQueryWith(ctx, pending, outcome, false)
+}
+
+// recordQueryWith is the shared body of recordQuery and recordQuerySync.
+func (s *session) recordQueryWith(ctx context.Context, pending *pendingQuery, outcome queryOutcome, async bool) {
 	if s.connection == nil || s.server.store == nil {
 		return
 	}
@@ -658,9 +676,15 @@ func (s *session) recordQuery(ctx context.Context, pending *pendingQuery, outcom
 
 	hasRows := len(outcome.rows) > 0
 
-	go safe.RunGuarded(ctx, s.logger, goroutineNameQueryRecord, func() {
+	persist := func() {
 		s.persistQuery(ctx, pending.approvalUID, record, outcome, hasRows, bytesTransferred)
-	})
+	}
+
+	if async {
+		go safe.RunGuarded(ctx, s.logger, goroutineNameQueryRecord, persist)
+	} else {
+		safe.RunGuarded(ctx, s.logger, goroutineNameQueryRecord, persist)
+	}
 
 	s.chargeGrant(bytesTransferred)
 }

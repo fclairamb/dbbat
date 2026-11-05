@@ -101,6 +101,7 @@ func TestWriter_MaxSize(t *testing.T) {
 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
+	require.NoError(t, os.Remove(path)) // NewWriter never overwrites a capture
 
 	// A 100-byte payload becomes a 154-byte frame in a 200-byte packet block.
 	w, err := NewWriter(path, hdr, info.Size()+250)

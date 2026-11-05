@@ -59,6 +59,10 @@ type oracleThroughProxy struct {
 	// into a cleanup because the container-hosted OCI client runs sqlplus
 	// *inside* it — see oci_client_integration_test.go.
 	oracle testcontainers.Container
+
+	// proxy is the dbbat listener itself, for a test that tunes it after the
+	// fixture is up (its pre-auth window is atomic for that reason).
+	proxy *Server
 }
 
 // oracleFixtureOptions are the knobs startOracleThroughProxyWith takes. The
@@ -236,6 +240,7 @@ func startOracleThroughProxyWith(t *testing.T, opts oracleFixtureOptions) *oracl
 		user:     user,
 		dbUID:    db.UID,
 		oracle:   oracleContainer,
+		proxy:    proxy,
 	}
 }
 

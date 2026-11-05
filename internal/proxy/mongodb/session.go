@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -233,6 +234,12 @@ func newSession(rawConn net.Conn, server *Server) *Session {
 func (s *Session) Run() error {
 	defer s.deregisterRevocation()
 
+	// The first byte and the TLS handshake run under the pre-auth window: a
+	// socket that says nothing would otherwise hold this goroutine forever.
+	if err := shared.ArmPreAuthDeadline(s.clientConn, s.server.preAuth.Timeout()); err != nil {
+		return fmt.Errorf("set pre-auth deadline: %w", err)
+	}
+
 	if err := s.setupTransport(); err != nil {
 		return err
 	}
@@ -241,6 +248,12 @@ func (s *Session) Run() error {
 	// upstream/connection/guard are set up.
 	if err := s.preAuthLoop(); err != nil {
 		return err
+	}
+
+	// Authenticated: an established session may sit idle for as long as the
+	// client keeps it open.
+	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
+		return fmt.Errorf("clear pre-auth deadline: %w", err)
 	}
 
 	defer s.closeUpstream()
@@ -319,8 +332,19 @@ func (s *Session) setupTransport() error {
 
 // preAuthLoop answers hello/ping/etc until a saslStart authenticates the
 // session (returns nil) or the connection ends / errors.
+//
+// Unlike the other protocols, the pre-auth window is an *idle* bound here,
+// re-armed before every message, not a bound on the whole exchange: a driver's
+// monitoring connection never authenticates and legitimately stays in this
+// loop for its whole life, polling hello every heartbeatFrequencyMS (10s by
+// default). What it must not do is sit silent, so each message has to arrive
+// within the window of the previous one.
 func (s *Session) preAuthLoop() error {
 	for {
+		if err := shared.ArmPreAuthDeadline(s.clientConn, s.server.preAuth.Timeout()); err != nil {
+			return fmt.Errorf("set pre-auth deadline: %w", err)
+		}
+
 		m, err := s.readClientMessage()
 		if err != nil {
 			return fmt.Errorf("pre-auth read: %w", err)
@@ -351,7 +375,16 @@ func (s *Session) readClientMessage() (*message, error) {
 		return m, nil
 	}
 
-	inner, compressorID, err := decompressMessage(m)
+	// Before authentication an inflated frame is capped far below the wire
+	// limit: hello and the SASL exchange are a few hundred bytes (and the spec
+	// forbids compressing the auth commands anyway), while trusting the
+	// declared size let a few KB of zlib buy a 48 MB inflation per frame.
+	maxUncompressed := maxWireMessageSize
+	if !s.authenticated {
+		maxUncompressed = preAuthMaxUncompressedSize
+	}
+
+	inner, compressorID, err := decompressMessage(m, maxUncompressed)
 	if err != nil {
 		return nil, err
 	}
@@ -733,6 +766,22 @@ func (s *Session) recordDisconnect() {
 		return
 	}
 
+	termination := s.recordedTermination()
+
+	// The commands still awaiting a reply never get one, so nothing else will
+	// complete their rows: say why here, before the session record closes.
+	// Plural: a driver can pipeline several on one connection. Whether dbbat
+	// ended the session or the client simply hung up, each was forwarded and
+	// may have run upstream, so dropping it would leave it out of the query
+	// history and the per-connection chain. First, so the bytes streamed for
+	// them are charged to them rather than to the bytes-only flush below.
+	message := errClientDisconnectedMidResponse
+	if termination.Set() {
+		message = termination.Message()
+	}
+
+	s.flushPending(message)
+
 	// Flush any client-side bytes not yet attributed to a query.
 	total := s.cumulativeClientBytes()
 	if delta := total - s.lastBytesSnapshot; delta > 0 {
@@ -745,13 +794,7 @@ func (s *Session) recordDisconnect() {
 		}
 	}
 
-	termination := s.recordedTermination()
 	if termination.Set() {
-		// The commands still awaiting a reply never get one, so nothing else
-		// will complete their rows. Say why here, before the session record
-		// closes. Plural: a driver can pipeline several on one connection.
-		s.flushPendingOnTermination(termination)
-
 		// "terminated" before "closed": why, then that.
 		s.stream.ConnectionWithReason(s.ctx, shared.ConnectionTerminated, termination.Reason)
 	}
@@ -856,9 +899,11 @@ func (p *prefixConn) Read(b []byte) (int, error) {
 	return p.Conn.Read(b)
 }
 
-// flushPendingOnTermination records every command that was still awaiting an
-// upstream reply when dbbat ended the session, with the reason it ended.
-func (s *Session) flushPendingOnTermination(t store.Termination) {
+// flushPending records every command that was still awaiting an upstream reply
+// when the session ended, with message as its error. Oldest first, so the
+// query history keeps the order they were sent in. Synchronous, so the rows
+// are in the chain before the connection close seals it.
+func (s *Session) flushPending(message string) {
 	s.pendingMu.Lock()
 
 	pending := make([]*pendingQuery, 0, len(s.pending))
@@ -874,9 +919,10 @@ func (s *Session) flushPendingOnTermination(t store.Termination) {
 	s.statementClock.Stop()
 	s.pendingMu.Unlock()
 
-	message := t.Message()
+	sort.SliceStable(pending, func(i, j int) bool { return pending[i].start.Before(pending[j].start) })
 
 	for _, pq := range pending {
-		s.recordQuery(pq, nil, nil, &message)
+		errText := message
+		s.recordQuerySync(pq, &errText)
 	}
 }

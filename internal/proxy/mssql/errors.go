@@ -92,6 +92,15 @@ var (
 	ErrOpaqueProcedureBlocked = errors.New(
 		"dbbat: this grant restricts what statements may do, and dbbat cannot see " +
 			"what a stored procedure does: call it with an explicit statement instead")
+	// ErrCursorWriteBlocked — an sp_cursor call asked for a positioned UPDATE,
+	// DELETE or INSERT on a cursor's base table (or its optype could not be
+	// read), under a grant that restricts what a statement may do. The cursor's
+	// SELECT was checked when it was opened; the write it carries here is not a
+	// statement dbbat can check, so it fails closed. See docs/mssql.md.
+	ErrCursorWriteBlocked = errors.New(
+		"dbbat: this grant restricts what statements may do, and a positioned " +
+			"update, delete or insert through a cursor cannot be checked: " +
+			"send an explicit statement instead")
 	// ErrUnknownPreparedStatement — an sp_execute named a prepared-statement
 	// handle dbbat never saw prepared on this session, so the statement it
 	// would run is unknown. Fails closed under a restrictive grant.

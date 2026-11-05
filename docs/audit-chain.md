@@ -20,7 +20,10 @@ It detects:
 - an entry **deleted** from the middle of the chain;
 - entries **reordered**;
 - rows deleted from the **end** of a captured result set (the capture's final
-  head is sealed onto the query row when the capture finishes);
+  head is sealed onto the query row when the capture finishes), including
+  against an attacker who clears that stamp in the same breath: the stamp also
+  has a chained copy in `audit_log` (see [Sealed copies of the
+  stamps](#sealed-copies-of-the-stamps));
 - entries deleted from the **end** of a session's query history, including
   against an attacker who rewrites the stamp afterwards *or clears it outright*
   — the stamp is keyed, and its absence on a closed session that logged
@@ -35,7 +38,11 @@ It detects:
 - **every** statement of a session deleted — not just its tail. The walk
   enumerates stamped connections as well as connections with surviving
   statements, so an emptied session is judged rather than skipped (see [A
-  session emptied of every statement](#a-session-emptied-of-every-statement));
+  session emptied of every statement](#a-session-emptied-of-every-statement)).
+  That holds even when the stamp is cleared along with the statements: a
+  **closed** session's stamp is compared with the copy its chained
+  `connection.closed` entry sealed, and the walk enumerates sessions from those
+  entries too (see [Sealed copies of the stamps](#sealed-copies-of-the-stamps));
 - a **whole session** deleted, connection row and all — but *only* through the
   two `audit_log` entries every session writes, never through the `connections`
   row itself, which is not chained (see [The session
@@ -428,6 +435,12 @@ Retention cannot trip it either. `CleanupOldQueryRows` only ever deletes rows;
 no sweep clears a stamp. A closed session it emptied keeps its stamp and is
 judged by the next section instead.
 
+What this table cannot see on its own is the stamp cleared **together with every
+statement** it protects: no chained statement survives, so the row reads as the
+first line — a session that logged nothing. That combination is caught one level
+up, by the stamp's sealed copy; see [Sealed copies of the
+stamps](#sealed-copies-of-the-stamps).
+
 #### A session emptied of every statement
 
 An earlier revision of the walk enumerated connections out of `queries`
@@ -557,6 +570,63 @@ that stamps it. Verification enumerates queries that carry a stamp as well as qu
 with surviving rows, so a capture deleted *outright* still gets caught by its
 orphaned stamp instead of vanishing from the walk.
 
+### Sealed copies of the stamps
+
+Both stamps — `connections.query_chain_mac` and `queries.row_chain_mac` — sit on
+plain rows of unchained tables. Forging one needs the key; clearing one does
+not, and clearing it **together with everything it protects** leaves a state no
+rule on that row can tell apart from "nothing was ever recorded":
+
+```sql
+-- a session: every statement and the stamp
+DELETE FROM queries WHERE connection_id = …;
+UPDATE connections SET query_chain_mac = NULL, query_chain_len = 0 WHERE uid = …;
+
+-- a capture: its tail (or all of it) and the stamp
+DELETE FROM query_rows WHERE query_id = … AND row_number > 100;
+UPDATE queries SET row_chain_mac = NULL, row_chain_len = 0 WHERE uid = …;
+```
+
+So each stamp also has a copy in `audit_log`, which is chained and never reaped:
+
+- the **query-chain** stamp is the one the session's `connection.closed` entry
+  already carried (`query_chain_mac`, `query_chain_len`,
+  `query_chain_stamp_version`);
+- the **row-chain** stamp goes into a `query.rows_sealed` entry, written after
+  the capture's flush barrier. Seals are batched — one entry per second at most,
+  or per 500 captures — because the audit chain is one store-wide sequence and a
+  chained insert per captured statement would serialize every capture across
+  every replica. Like the session entries it is left out of an unfiltered
+  `GET /api/v1/audit` and reachable with `?event_type=query.rows_sealed`.
+
+Verification compares each surviving row's stamp with its sealed copy: a stamp
+that is **missing or different** is a break. The walks also enumerate from the
+copies, so a session or a capture reduced to a bare row with no stamp and no
+chained record is still walked. The copy's own MAC is checked on the spot, so
+editing it to agree with a cleared stamp is a break too; *deleting* it breaks
+the audit chain, which `dbbat audit verify` without a flag reports — run both.
+The comparison only applies to a **closed** session (an open one has no
+`connection.closed` entry yet; the sweep's prefix rules above cover it) and to a
+row that still exists: a copy whose connection or query is gone altogether is
+the whole-record deletion [the session entries](#the-session-entries) account
+for, or retention.
+
+What stays legitimately unstamped, with no copy to contradict it:
+
+- a session that logged nothing, or one still open;
+- a capture whose process died **before its flush barrier** — it never sealed,
+  so it has no stamp and no copy, and only its prefix and interior are
+  protected, exactly as before;
+- a capture sealed less than a second before its process **crashed**: the stamp
+  on the query row is durable, the batched copy was still in memory. That
+  capture keeps the protection the stamp alone gives (any rewrite of the stamp
+  is still a break), but clearing the stamp with its rows goes unnoticed. A
+  clean shutdown flushes the pending copies.
+
+A store written before this change keeps working: the `connection.closed`
+entries it already holds are compared as they are, and captures sealed before it
+simply have no copy.
+
 ## Coverage
 
 The audit chain covers every column of an `audit_log` row: `uid`, `event_type`,
@@ -680,6 +750,22 @@ ever grow, and the previously recorded head must still appear in the chain.
 introduced. They are reported rather than folded into the verified count: no
 MAC exists for them and none can be created after the fact.
 
+"Before chaining was introduced" is judged against the `created_at` of
+`chain_seq 1`, which is inside that entry's MAC (the anchor's own timestamp is
+unsealed and only stands in while the chain has no entry yet). An audit row with
+a `NULL` `chain_seq` written at or after that point cannot come from dbbat — a
+keyed store chains every audit write — so it is a **break** ("inserted outside
+the chain"), not one more pre-anchor row. The same holds one level down: a
+`queries` row with a `NULL` `chain_seq` in a session that has chained statements
+or a stamp breaks that session's walk. A session with neither predates chaining
+and is not judged. Statements held for approval are chained when they are held
+(`CreatePendingQuery`); one written unchained by an older build carries an
+`approval_status`, and that alone exempts it — nothing sealed records when held
+statements started being chained, so a forged row that sets an approval status
+is the other residual here. What remains open: a forged row *backdated* before
+`chain_seq 1` still reads as pre-anchor, so the count is worth recording next to
+the head — it should never grow.
+
 A `--queries` run reports the same way, plus a count that is *not* a failure:
 
 ```json
@@ -772,6 +858,8 @@ prevent it, and it says nothing about rows written before the anchor. See
 - `internal/store/chain.go` — keying, payload construction, head caches
 - `internal/store/chain_canonical.go` — the canonical serialization
 - `internal/store/chain_verify.go` — the walkers
+- `internal/store/chain_sealed.go` — the sealed copies of the stamps
+  (`query.rows_sealed`, the `connection.closed` cross-check)
 - `internal/api/audit_verify.go` — the admin-only REST endpoints and the cache
   that bounds them
 - `internal/store/audit.go`, `internal/store/queries.go`,
@@ -783,5 +871,6 @@ prevent it, and it says nothing about rows written before the anchor. See
 - `internal/migrations/sql/20260810000000_audit_chain.*.sql`,
   `internal/migrations/sql/20260810010000_query_row_chain.*.sql`,
   `internal/migrations/sql/20260810020000_connections_query_chain_stamp_version.*.sql`,
-  `internal/migrations/sql/20260812000000_audit_log_control_plane_index.*.sql`
+  `internal/migrations/sql/20260812000000_audit_log_control_plane_index.*.sql`,
+  `internal/migrations/sql/20261105100000_audit_log_sealed_stamp_indexes.*.sql`
 - `main.go` — the `audit verify` command

@@ -149,6 +149,25 @@ func TestValidateMySQLQuery_BlocksDangerousPatterns(t *testing.T) {
 		{"SELECT col FROM t INTO DUMPFILE '/tmp/d.bin'", "binary file write"},
 		{"SET GLOBAL max_connections = 1000", "server-wide config change"},
 		{"SET PASSWORD FOR 'bob' = 'secret'", "password change"},
+		{"SET @@GLOBAL.general_log_file = '/tmp/x'", "global prefix spelling"},
+		{"SET @@global.max_connections = 1", "lowercase global prefix"},
+		{"SET @@ global . max_connections = 1", "spaced global prefix"},
+		{"SET PERSIST max_connections = 1", "persisted change"},
+		{"SET PERSIST_ONLY max_connections = 1", "persist-only change"},
+		{"SET @@PERSIST.max_connections = 1", "persist prefix spelling"},
+		{"SET @@persist_only.max_connections = 1", "persist-only prefix spelling"},
+		{"SET @@session.x=1, @@global.y=2", "global later in the SET list"},
+		{"SET sql_mode = '', GLOBAL max_connections = 1", "GLOBAL keyword later in the SET list"},
+		{"SET /* c */ GLOBAL max_connections = 1", "comment between SET and GLOBAL"},
+		{"SELECT 1; SET GLOBAL max_connections = 1", "second statement"},
+		{"LOAD XML INFILE '/tmp/x.xml' INTO TABLE t", "server-side XML read"},
+		{"LOAD XML LOCAL INFILE '/etc/passwd' INTO TABLE t", "client-side XML exfiltration"},
+		{"LOAD DATA LOW_PRIORITY LOCAL INFILE '/etc/passwd' INTO TABLE t", "LOAD DATA with priority modifier"},
+		{"LOAD XML CONCURRENT INFILE '/tmp/x.xml' INTO TABLE t", "LOAD XML with concurrency modifier"},
+		{"SHUTDOWN", "shutdown statement"},
+		{"  restart", "restart statement"},
+		{"/* c */ SHUTDOWN", "commented shutdown"},
+		{"SELECT 1; RESTART", "restart as second statement"},
 	}
 	for _, tt := range blocked {
 		t.Run(tt.reason, func(t *testing.T) {
@@ -166,6 +185,13 @@ func TestValidateMySQLQuery_AllowsSafeQueries(t *testing.T) {
 		"SELECT * FROM users",
 		"SELECT REPLACE(name, 'old', 'new') FROM t", // REPLACE() function, not REPLACE INTO
 		"SET SESSION sql_mode = 'STRICT_TRANS_TABLES'",
+		"SET @@session.sql_mode = 'STRICT_TRANS_TABLES'",
+		"SET SESSION x = 1",
+		"SET @user_var = 1",
+		"SET @v = @@global.version",
+		"SELECT @@global.version",
+		"SELECT restart_count FROM t",
+		"SELECT * FROM shutdown_log",
 		"SELECT NOW()",
 		"SHOW TABLES",
 	}
@@ -1254,5 +1280,202 @@ func TestValidateMySQLQuery_ReadOnlyPin(t *testing.T) {
 		"SELECT * FROM calls",
 	} {
 		require.NoError(t, ValidateMySQLQuery(sql, ro), sql)
+	}
+}
+
+// TestSelectInto_IsAWriteAndDDL is the regression test for SELECT … INTO
+// <table>: it creates a table and fills it, yet it starts with SELECT, so the
+// prefix-shaped classifiers read it as a read. PostgreSQL text goes through
+// IsWriteQuery/IsDDLQuery, SQL Server text through ValidateMSSQLBatch.
+func TestSelectInto_IsAWriteAndDDL(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"SELECT a INTO t2 FROM t",
+		"select a into t2 from t",
+		"SELECT a INTO /* hidden */ t2 FROM t",
+		"SELECT a INTO -- hidden\n t2 FROM t",
+		"SELECT a /**/INTO/**/t2 FROM t",
+		`SELECT a INTO "t2" FROM t`,
+		"WITH c AS (SELECT 1 AS a) SELECT a INTO t2 FROM c",
+		"SELECT 1; SELECT a INTO t2 FROM t",
+	} {
+		t.Run("postgresql "+sql, func(t *testing.T) {
+			t.Parallel()
+
+			assert.True(t, IsWriteQuery(sql), "write")
+			assert.True(t, IsDDLQuery(sql), "ddl")
+		})
+	}
+
+	for _, sql := range []string{
+		"SELECT a INTO TEMP t2 FROM t",
+		"SELECT a INTO UNLOGGED TABLE t2 FROM t",
+		"EXPLAIN ANALYZE SELECT a INTO t2 FROM t",
+	} {
+		t.Run("postgresql "+sql, func(t *testing.T) {
+			t.Parallel()
+
+			assert.True(t, IsWriteQuery(sql), "write")
+			assert.True(t, IsDDLQuery(sql), "ddl")
+		})
+	}
+
+	for _, sql := range []string{
+		"SELECT a INTO t2 FROM t",
+		"SELECT a INTO /* hidden */ t2 FROM t",
+		"SELECT a INTO #tmp FROM t",
+		"SELECT a INTO [dbo].[t2] FROM t",
+		"SELECT 1 SELECT a INTO t2 FROM t",
+		"DECLARE @n int = 1; SELECT a INTO t2 FROM t WHERE b = @n",
+		"UPDATE t SET a = 1 SELECT a INTO t2 FROM t",
+	} {
+		t.Run("mssql "+sql, func(t *testing.T) {
+			t.Parallel()
+
+			require.ErrorIs(t, ValidateMSSQLBatch(sql, controlGrant(store.ControlReadOnly)), ErrReadOnlyViolation)
+			require.ErrorIs(t, ValidateMSSQLBatch(sql, controlGrant(store.ControlBlockDDL)), ErrDDLBlocked)
+		})
+	}
+}
+
+// TestSelectInto_KeepsOtherIntosAlone is the positive control: an INTO that
+// assigns a variable, or that belongs to an INSERT, a MERGE or a DML's OUTPUT
+// clause, keeps its classification.
+func TestSelectInto_KeepsOtherIntosAlone(t *testing.T) {
+	t.Parallel()
+
+	readOnly := controlGrant(store.ControlReadOnly)
+	blockDDL := controlGrant(store.ControlBlockDDL)
+
+	// Oracle: SELECT … INTO v inside a PL/SQL block assigns a variable.
+	for _, sql := range []string{
+		"DECLARE v NUMBER; BEGIN SELECT COUNT(*) INTO v FROM t; END;",
+		"BEGIN SELECT a INTO v FROM t WHERE ROWNUM = 1; END;",
+	} {
+		require.NoError(t, ValidateOracleQuery(sql, readOnly), "oracle read_only: %s", sql)
+		require.NoError(t, ValidateOracleQuery(sql, blockDDL), "oracle block_ddl: %s", sql)
+	}
+
+	// MySQL: SELECT … INTO @v is a variable assignment, and MySQL has no
+	// SELECT … INTO <table> at all.
+	for _, sql := range []string{"SELECT a INTO @v FROM t", "SELECT a, b INTO @x, @y FROM t LIMIT 1"} {
+		require.NoError(t, ValidateMySQLQuery(sql, readOnly), "mysql read_only: %s", sql)
+		require.NoError(t, ValidateMySQLQuery(sql, blockDDL), "mysql block_ddl: %s", sql)
+	}
+
+	// INSERT INTO … SELECT stays a write, and is not DDL.
+	for _, sql := range []string{"INSERT INTO t SELECT a FROM u", "INSERT INTO t (a) SELECT a FROM u WHERE b IN (SELECT b FROM v)"} {
+		assert.True(t, IsWriteQuery(sql), "write: %s", sql)
+		assert.False(t, IsDDLQuery(sql), "not ddl: %s", sql)
+		require.NoError(t, ValidateMSSQLBatch(sql, blockDDL), "mssql block_ddl: %s", sql)
+	}
+
+	// Reads that merely spell INTO somewhere the keyword is not.
+	pgReads := []string{
+		"SELECT into_x FROM t",
+		"SELECT a AS into_x FROM t",
+		"SELECT t.into FROM t",
+		`SELECT "into" x FROM t`,
+		"SELECT 'a INTO b' FROM t",
+		"SELECT $$ INTO t2 $$",
+		"SELECT a[1] FROM t WHERE b[c[1]] = 2",
+	}
+	for _, sql := range pgReads {
+		assert.False(t, IsWriteQuery(sql), "pg read: %s", sql)
+		assert.False(t, IsDDLQuery(sql), "pg not ddl: %s", sql)
+	}
+
+	mssqlAllowed := []string{
+		"SELECT into_x FROM t",
+		"SELECT [into x] FROM t",
+		"DECLARE @a int; DECLARE c CURSOR FOR SELECT a FROM t; OPEN c; FETCH NEXT FROM c INTO @a",
+		"SELECT @into = a FROM t",
+	}
+	for _, sql := range mssqlAllowed {
+		require.NoError(t, ValidateMSSQLBatch(sql, readOnly), "mssql read_only: %s", sql)
+		require.NoError(t, ValidateMSSQLBatch(sql, blockDDL), "mssql block_ddl: %s", sql)
+	}
+
+	// A DML's OUTPUT … INTO writes (refused by read_only as the DML it is), but
+	// it creates nothing, including when a subquery SELECT precedes the INTO.
+	for _, sql := range []string{
+		"UPDATE t SET a = (SELECT b FROM u) OUTPUT inserted.a INTO log_t",
+		"DELETE FROM t OUTPUT deleted.a INTO log_t",
+		"MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE;",
+	} {
+		require.NoError(t, ValidateMSSQLBatch(sql, blockDDL), "mssql block_ddl: %s", sql)
+	}
+}
+
+// TestValidateOracleQuery_RefusesRenamePurgeFlashbackComment is the regression
+// test for Oracle's DDL verbs that start with none of the old keywords.
+func TestValidateOracleQuery_RefusesRenamePurgeFlashbackComment(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"RENAME t TO u",
+		"PURGE TABLE t",
+		"PURGE RECYCLEBIN",
+		"FLASHBACK TABLE t TO BEFORE DROP",
+		"FLASHBACK TABLE t TO TIMESTAMP SYSTIMESTAMP - INTERVAL '1' HOUR",
+		"COMMENT ON TABLE t IS 'x'",
+		"/* leading */ RENAME t TO u",
+		"-- leading\nPURGE TABLE t",
+		"/*x*/FLASHBACK TABLE t TO BEFORE DROP",
+		"/*x*/ comment on column t.a is 'x'",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			t.Parallel()
+
+			require.ErrorIs(t, ValidateOracleQuery(sql, controlGrant(store.ControlReadOnly)), ErrReadOnlyViolation)
+			require.ErrorIs(t, ValidateOracleQuery(sql, controlGrant(store.ControlBlockDDL)), ErrDDLBlocked)
+			require.NoError(t, ValidateOracleQuery(sql, &store.Grant{Definition: &store.GrantDefinition{}}))
+		})
+	}
+
+	for _, sql := range []string{
+		"SELECT rename_at FROM t",
+		"SELECT object_name, original_name FROM recyclebin",
+		"SELECT comments FROM user_tab_comments",
+	} {
+		require.NoError(t, ValidateOracleQuery(sql, controlGrant(store.ControlReadOnly)), "read_only: %s", sql)
+		require.NoError(t, ValidateOracleQuery(sql, controlGrant(store.ControlBlockDDL)), "block_ddl: %s", sql)
+	}
+
+	// PostgreSQL's COMMENT ON is DDL too.
+	assert.True(t, IsDDLQuery("COMMENT ON TABLE t IS 'x'"))
+}
+
+// TestValidateOracleLogonAlterSession: the logon statement gets the mid-session
+// gate plus the one-ALTER-SESSION shape rule.
+func TestValidateOracleLogonAlterSession(t *testing.T) {
+	t.Parallel()
+
+	full := &store.Grant{Definition: &store.GrantDefinition{}}
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+
+	for _, sql := range []string{
+		"ALTER SESSION SET TIME_ZONE='+02:00'",
+		"ALTER SESSION SET NLS_LANGUAGE='AMERICAN' NLS_TERRITORY='AMERICA'  TIME_ZONE='+02:00'",
+		"/* driver */ alter session set time_zone='Europe/Paris'",
+	} {
+		require.NoError(t, ValidateOracleLogonAlterSession(sql, readOnly), sql)
+		require.NoError(t, ValidateOracleLogonAlterSession(sql, full), sql)
+	}
+
+	require.ErrorIs(t, ValidateOracleLogonAlterSession("ALTER SESSION SET CONTAINER=PDB2", full),
+		ErrOraclePatternBlocked)
+	require.ErrorIs(t, ValidateOracleLogonAlterSession("ALTER SESSION SET SQL_TRACE=TRUE", readOnly),
+		ErrReadOnlyViolation)
+	require.NoError(t, ValidateOracleLogonAlterSession("ALTER SESSION SET SQL_TRACE=TRUE", full))
+
+	for _, sql := range []string{
+		"SELECT 1 FROM DUAL",
+		"BEGIN NULL; END;",
+		"ALTER SESSION SET TIME_ZONE='+02:00'; DROP TABLE t",
+		"ALTER SYSTEM SET X=1",
+	} {
+		require.ErrorIs(t, ValidateOracleLogonAlterSession(sql, full), ErrOracleLogonAlterSessionShape, sql)
 	}
 }

@@ -112,7 +112,7 @@ All authenticated endpoints are rate-limited. Response headers include:
 
 ### Authentication Rate Limiting
 
-Failed login attempts are rate-limited per username with exponential backoff:
+Failed login attempts are rate-limited with exponential backoff:
 
 | Failures | Delay |
 |----------|-------|
@@ -122,7 +122,18 @@ Failed login attempts are rate-limited per username with exponential backoff:
 | 7-9 | 2 minutes |
 | 10+ | 5 minutes |
 
-Rate-limited authentication attempts receive a `429 Too Many Requests` response with error code `auth_rate_limited`.
+The backoff is counted per **username and source address** together, so failures from one address
+back off that address only: a stranger who knows a username (`admin` always exists) cannot keep the
+account locked out for its owner. Two more limits sit on top:
+
+- `POST /auth/login` and `PUT /auth/password` are rate limited per address before any credential is
+  checked (the anonymous limit, `DBB_RATE_LIMIT_*`), against spraying many usernames from one source.
+- A coarse ceiling of **100 failures per hour per username**, from all addresses together, blocks
+  password login for that username everywhere until the hour is over. It is a backstop against
+  guessing spread over many addresses, and reaching it is logged at WARN and written to the audit
+  log as `auth.failure_ceiling`.
+
+Rate-limited authentication attempts receive a `429 Too Many Requests` response with error code `RATE_LIMITED` and a `Retry-After` header.
 
 ## Pagination
 

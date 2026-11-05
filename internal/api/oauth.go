@@ -446,13 +446,19 @@ func (s *Server) handleOAuthExchange(c *gin.Context) {
 	c.JSON(http.StatusOK, LoginExchangeResponse{AccessToken: string(plainKey), TokenType: "Bearer"})
 }
 
+// AuditEventUserIdentityLinked is written when an OAuth/OIDC identity is
+// linked onto an existing account because its verified email matched the
+// account's username.
+const AuditEventUserIdentityLinked = "user.identity_linked"
+
 // errOAuthUserNotLinked is returned when no local user could be found or created.
 var errOAuthUserNotLinked = errors.New("no linked account and auto-create disabled")
 
 // findOrCreateOAuthUser resolves an OAuthUser to a local user.
 // Resolution order:
 //  1. Existing identity link (provider + provider_id)
-//  2. Match by email against existing usernames
+//  2. Match by email against existing usernames — only for a positively
+//     verified email, and never onto an admin account (matchOAuthUserByEmail)
 //  3. Auto-create if enabled
 //
 // Every path that returns an existing user runs the directory role mapping
@@ -483,18 +489,12 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 	}
 
 	// 2. Try to match by email (use email as username lookup)
-	if oauthUser.Email != "" {
-		user, err = s.store.GetUserByUsername(ctx, oauthUser.Email)
-		if err == nil {
-			// Found a user with username matching the email, link identity
-			if linkErr := s.linkIdentity(ctx, user.UID, providerName, oauthUser); linkErr != nil {
-				return nil, fmt.Errorf("link identity: %w", linkErr)
-			}
-			return s.syncOAuthRoles(ctx, user, providerName, oauthUser)
-		}
-		if !errors.Is(err, store.ErrUserNotFound) {
-			return nil, fmt.Errorf("email lookup: %w", err)
-		}
+	user, err = s.matchOAuthUserByEmail(ctx, providerName, oauthUser)
+	if err != nil {
+		return nil, err
+	}
+	if user != nil {
+		return s.syncOAuthRoles(ctx, user, providerName, oauthUser)
 	}
 
 	// 3. Auto-create if enabled for this provider
@@ -548,6 +548,89 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 	s.auditOAuthUserCreated(ctx, user, providerName, oauthUser)
 
 	return user, nil
+}
+
+// matchOAuthUserByEmail links an unlinked identity onto the existing account
+// whose username equals its email, and returns that account. It returns nil
+// (and no error) when no link is made, so the caller falls through to
+// auto-create or refusal.
+//
+// The link signs the caller in as that account with all its roles, and asks
+// its owner nothing, so it is only made when the provider positively asserted
+// the address is verified: an issuer that omits `email_verified`, or lets
+// users edit their email, would otherwise hand any account whose username is
+// an email address to whoever typed it in. An admin account is never linked
+// this way, verified or not: the admin links the identity from a session.
+func (s *Server) matchOAuthUserByEmail(
+	ctx context.Context,
+	providerName string,
+	oauthUser *auth.OAuthUser,
+) (*store.User, error) {
+	if oauthUser.Email == "" {
+		return nil, nil //nolint:nilnil // nil user = no match, fall through
+	}
+
+	user, err := s.store.GetUserByUsername(ctx, oauthUser.Email)
+	if errors.Is(err, store.ErrUserNotFound) {
+		return nil, nil //nolint:nilnil // nil user = no match, fall through
+	}
+	if err != nil {
+		return nil, fmt.Errorf("email lookup: %w", err)
+	}
+
+	if !oauthUser.EmailVerified {
+		s.logger.WarnContext(ctx, "not linking OAuth identity by email: the provider did not assert the email is verified",
+			slog.String("provider", providerName),
+			slog.String("email", oauthUser.Email),
+			slog.Any("uid", user.UID))
+
+		return nil, nil //nolint:nilnil // nil user = no link, fall through
+	}
+
+	if user.IsAdmin() {
+		s.logger.WarnContext(ctx, "not linking OAuth identity by email onto an admin account: link it from a session",
+			slog.String("provider", providerName),
+			slog.String("email", oauthUser.Email),
+			slog.Any("uid", user.UID))
+
+		return nil, nil //nolint:nilnil // nil user = no link, fall through
+	}
+
+	if err := s.linkIdentity(ctx, user.UID, providerName, oauthUser); err != nil {
+		return nil, fmt.Errorf("link identity: %w", err)
+	}
+
+	s.auditIdentityLinked(ctx, user, providerName, oauthUser)
+
+	return user, nil
+}
+
+// auditIdentityLinked records an identity linked onto an existing account by
+// email match, so a takeover through that path leaves a trace.
+func (s *Server) auditIdentityLinked(ctx context.Context, user *store.User, providerName string, oauthUser *auth.OAuthUser) {
+	details, err := json.Marshal(map[string]any{
+		"provider":    providerName,
+		"provider_id": oauthUser.ProviderID,
+		"email":       oauthUser.Email,
+		"method":      "email_match",
+	})
+	if err != nil {
+		s.logger.WarnContext(ctx, "failed to encode identity link audit details", slog.Any("error", err))
+
+		return
+	}
+
+	// PerformedBy stays nil: no dbbat user made this link, a verified
+	// identity from providerName did.
+	if err := s.store.LogAuditEvent(ctx, &store.AuditEvent{
+		EventType: AuditEventUserIdentityLinked,
+		UserID:    &user.UID,
+		Details:   details,
+	}); err != nil {
+		s.logger.WarnContext(ctx, "failed to record identity link audit event",
+			slog.String("username", user.Username),
+			slog.Any("error", err))
+	}
 }
 
 // linkIdentity creates a UserIdentity record linking a local user to an OAuth provider.

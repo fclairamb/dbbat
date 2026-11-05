@@ -63,13 +63,27 @@ type Writer struct {
 	mu        sync.Mutex
 }
 
+// Captures hold plaintext statements, bind parameters and result rows, so
+// both the files and the spool directory are private to the dbbat process
+// owner, whatever the umask.
+const (
+	// FilePerm is the mode a capture file is created with.
+	FilePerm os.FileMode = 0o600
+	// DirPerm is the mode the dump directory is created with.
+	DirPerm os.FileMode = 0o700
+)
+
 // NewWriter creates a new capture file and writes the pcapng section header
-// (carrying the session metadata) and interface description.
+// (carrying the session metadata) and interface description. The file must
+// not exist yet: a session capture is never written over another one.
 func NewWriter(path string, header Header, maxSize int64) (*Writer, error) {
-	return newWriter(path, header, maxSize, newEndpoints(header, false))
+	return newWriter(path, header, maxSize, newEndpoints(header, false), os.O_EXCL)
 }
 
-func newWriter(path string, header Header, maxSize int64, ep endpoints) (*Writer, error) {
+// newWriter creates the capture at path with FilePerm. createFlag is
+// os.O_EXCL for a live capture, os.O_TRUNC for a derived file (anonymise)
+// that may legitimately replace a previous output.
+func newWriter(path string, header Header, maxSize int64, ep endpoints, createFlag int) (*Writer, error) {
 	// pcapng timestamps are unsigned microseconds/nanoseconds since the Unix
 	// epoch: a zero or pre-epoch start time would not round-trip. Normalise it
 	// (and record the normalised value in the metadata) so the capture stays
@@ -83,9 +97,16 @@ func newWriter(path string, header Header, maxSize int64, ep endpoints) (*Writer
 		return nil, fmt.Errorf("marshal session metadata: %w", err)
 	}
 
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|createFlag, FilePerm)
 	if err != nil {
 		return nil, fmt.Errorf("create capture file: %w", err)
+	}
+
+	// O_TRUNC keeps the mode of a file that already existed: tighten it.
+	if err := f.Chmod(FilePerm); err != nil {
+		_ = f.Close()
+
+		return nil, fmt.Errorf("restrict capture file permissions: %w", err)
 	}
 
 	counter := &countingWriter{w: f}

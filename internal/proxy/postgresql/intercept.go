@@ -84,6 +84,7 @@ var readOnlySetConfigNames = []string{
 // procedure may COMMIT and start a fresh transaction after changing the session
 // default, which no reading of the text can rule out. Anchored at the start of
 // a statement, including the second statement of a simple-query batch.
+// block_ddl refuses the same two, since either body can run DDL.
 var readOnlyProcedurePattern = regexp.MustCompile(`(?i)(?:^|;)\s*(?:DO|CALL)\b`)
 
 // statementTimeoutBypassPatterns detect a client trying to unset or widen the
@@ -154,6 +155,14 @@ func (s *Session) validateStatement(sqlText string) error {
 	// Control: block_ddl (only check if not already read_only, since read_only blocks DDL at PG level)
 	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && isDDLQuery(sqlText) {
 		return ErrDDLNotPermitted
+	}
+
+	// Control: block_ddl, code dbbat cannot see. A DO block or a CALL carries
+	// no DDL keyword up front, yet its body can run any DDL (directly or via
+	// EXECUTE). Same fail-closed rule as the other dialects
+	// (shared.RefusesOpaqueDynamicSQL).
+	if s.grant.ShouldBlockDDL() && shared.MatchesNormalizedSQL(sqlText, readOnlyProcedurePattern) {
+		return ErrDDLProcedureCall
 	}
 
 	// Control: block_copy
@@ -241,6 +250,8 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 			// reconcile in the upstream leg keys on it.
 			syncEpoch: s.clientSyncEpoch,
 		}
+
+		s.chargeQueryQuota()
 
 		s.refreshStatementClock()
 
@@ -461,6 +472,8 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 
 		s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
 
+		s.chargeQueryQuota()
+
 		s.refreshStatementClock()
 
 		return nil
@@ -674,9 +687,29 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 	// Persist asynchronously so the proxy isn't blocked on the store write.
 	s.persistQueryAsync(query, s.currentQuery.rowSink, recordPending, copyRows, bytesTransferred)
 
-	// Update local grant state for in-session quota checks
-	s.grant.QueryCount++
+	// Update local grant state for in-session quota checks. The query itself
+	// was already charged when it was admitted (chargeQueryQuota); bytes are
+	// only known now.
 	s.grant.BytesTransferred += bytesTransferred
+}
+
+// chargeQueryQuota counts an admitted statement against the in-session query
+// quota, at the moment it is queued for upstream rather than when it
+// completes. Charging on completion let a client pipeline any number of
+// Executes before one Sync: each passed checkQuotas against the same stale
+// count, because none had reached ReadyForQuery yet.
+//
+// The persisted side needs nothing: the cross-session total is a COUNT(*) of
+// queries rows (populateGrantCounters), and every admitted statement yields
+// exactly one row when it completes, aborts or is torn down — the same row the
+// old completion-time increment stood for. Refusals are charged separately, in
+// recordBlockedQuery, and never reach this point.
+//
+// Callers hold bookMu.
+func (s *Session) chargeQueryQuota() {
+	if s.grant != nil {
+		s.grant.QueryCount++
+	}
 }
 
 // persistQueryAsync writes the query log row, its captured rows, and the
@@ -711,7 +744,11 @@ func (s *Session) persistQueryAsync(
 		return
 	}
 
+	s.persists.start()
+
 	go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
+		defer s.persists.done()
+
 		// A panic here must not leave the sink unresolved: the shared row writer
 		// waits on it before inserting anything this query queued. Fail is a
 		// no-op once Resolve has run, so this only bites on the panic path.

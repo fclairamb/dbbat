@@ -1728,8 +1728,10 @@ export interface paths {
          * List audit events
          * @description Returns a list of audit log events.
          *
-         *     The per-session entries (`connection.opened` and `connection.closed`)
-         *     are left out of an unfiltered listing: a busy proxy writes tens of
+         *     The per-session entries (`connection.opened`, `connection.closed`,
+         *     `connection.terminated`) and the batched `query.rows_sealed` entries
+         *     (sealed copies of finished captures' row-chain stamps) are left out of
+         *     an unfiltered listing: a busy proxy writes tens of
          *     thousands of them a day and they would bury the control-plane changes
          *     this list exists for. Ask for one by name with `event_type` to get it
          *     back. They are ordinary chained audit rows either way — see
@@ -7267,8 +7269,9 @@ export interface operations {
             query?: {
                 /**
                  * @description Filter by event type (e.g., user.created, grant.revoked). Naming
-                 *     `connection.opened` or `connection.closed` is also how those
-                 *     session entries are listed, since they are excluded by default.
+                 *     `connection.opened`, `connection.closed`, `connection.terminated` or
+                 *     `query.rows_sealed` is also how those entries are listed, since
+                 *     they are excluded by default.
                  */
                 event_type?: string;
                 /** @description Filter by user UID (the user being acted upon) */

@@ -46,7 +46,7 @@ info:
 
     ## Authentication Rate Limiting
 
-    Failed login attempts are rate-limited per username with exponential backoff:
+    Failed login attempts are rate-limited per (username, source address) with exponential backoff:
 
     - 1-2 failures: no delay
     - 3-4 failures: 5 seconds
@@ -54,7 +54,12 @@ info:
     - 7-9 failures: 2 minutes
     - 10+ failures: 5 minutes
 
-    Rate-limited authentication attempts receive a `429 Too Many Requests` response with error code `auth_rate_limited`.
+    Failures from one address never back off another, so nobody can keep an account locked out for its owner.
+    `POST /auth/login` and `PUT /auth/password` are also rate limited per address before any credential is checked.
+    A ceiling of 100 failures per hour per username, summed over all addresses, blocks that username
+    everywhere until the hour is over; reaching it is audited as `auth.failure_ceiling`.
+
+    Rate-limited authentication attempts receive a `429 Too Many Requests` response with error code `RATE_LIMITED` and a `Retry-After` header.
   version: 1.0.0
   contact:
     name: DBBat
@@ -3317,8 +3322,10 @@ paths:
       description: |
         Returns a list of audit log events.
 
-        The per-session entries (`connection.opened` and `connection.closed`)
-        are left out of an unfiltered listing: a busy proxy writes tens of
+        The per-session entries (`connection.opened`, `connection.closed`,
+        `connection.terminated`) and the batched `query.rows_sealed` entries
+        (sealed copies of finished captures' row-chain stamps) are left out of
+        an unfiltered listing: a busy proxy writes tens of
         thousands of them a day and they would bury the control-plane changes
         this list exists for. Ask for one by name with `event_type` to get it
         back. They are ordinary chained audit rows either way — see
@@ -3332,8 +3339,9 @@ paths:
           in: query
           description: |
             Filter by event type (e.g., user.created, grant.revoked). Naming
-            `connection.opened` or `connection.closed` is also how those
-            session entries are listed, since they are excluded by default.
+            `connection.opened`, `connection.closed`, `connection.terminated` or
+            `query.rows_sealed` is also how those entries are listed, since
+            they are excluded by default.
           schema:
             type: string
         - name: user_id

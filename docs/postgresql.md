@@ -201,6 +201,27 @@ default reaches none of its statements, and the tripwire handles the next one.
 For a database that must never be written to through dbbat, a read-only
 database account remains the strongest guarantee.
 
+## Block-DDL grants
+
+`block_ddl` has no server-side pin: it is dbbat's own check on the statement
+text, which refuses a statement whose first keyword is `CREATE`, `ALTER`,
+`DROP`, `TRUNCATE` or `COMMENT` (`ErrDDLNotPermitted`), and a
+`SELECT … INTO <table>` anywhere in the text — it creates a table, and its
+first keyword is `SELECT`. The INTO is read outside literals, quoted
+identifiers and dollar-quoted bodies, after any comment, and only when it
+belongs to a SELECT (not to `INSERT INTO`). The same reading makes it a write
+for the `read_only` text check, which the pin already backed.
+
+A `DO` block or a `CALL` carries none of those keywords, yet its body can run
+any DDL, directly or built at run time with `EXECUTE`. Both are therefore
+refused under `block_ddl` too (`ErrDDLProcedureCall`, whose text names the
+control), through `validateStatement`, so the simple and extended paths cannot
+drift. This is the PostgreSQL side of the fail-closed rule the other dialects
+apply to opaque dynamic SQL (`shared.RefusesOpaqueDynamicSQL`). `block_copy`
+alone does not refuse them: COPY to or from the client cannot run inside
+PL/pgSQL. A grant with `read_only` refuses them first, with
+`shared.ErrReadOnlyProcedureCall`.
+
 ## Testing
 
 ### Integration tests
@@ -265,6 +286,30 @@ paged grid and empty statement: from the first stale entry on, every pop took
 the wrong item, the last statements of the session were never completed, and
 the clock stayed armed on an idle backend — an idle session got killed
 `limit + 2s` after its *last* statement.
+
+Each terminator completes its statement **on the spot**, with its own rows
+affected, error and duration, and drops it from the queue. The upstream answers
+`Execute`s strictly in order, so the statement receiving a `RowDescription` or
+`DataRow` is always the **head** of the queue. A pipelined batch (a pgx `Batch`,
+a JDBC batch: several `Execute`s before one `Sync`) used to attribute rows to
+the *tail* and park each terminated entry until the `ReadyForQuery`, which
+stored every statement's captured rows under another statement's SQL and left
+the first one uncompleted. Bytes are attributed per terminator, as the
+wire-level diff since the previous completion: a batch's client bytes all
+arrive before its first answer, so they count against its first statement, and
+the trailing `ReadyForQuery` rides on the next one, as on the simple-query path.
+A simple `Query` sent behind a pipelined batch waits for its own
+`ReadyForQuery`, the one its epoch names.
+
+When the session ends — most often a client that closes its socket in the
+middle of a result — the teardown completes every statement still in flight
+with `client disconnected before the response completed` (or `aborted: session
+ended before the response completed` when the upstream side went first), and
+the bytes since the last completion go to the statement being answered. With
+nothing in flight, the trailing bytes (the last `ReadyForQuery`, the client's
+`Terminate`) are flushed to the connection without counting a query. Before
+this, a client could stream just under `max_bytes_transferred`, hang up, and
+reconnect to a budget that had never seen those bytes.
 
 Behind the four terminators there is a protocol backstop: upstream sends one
 `ReadyForQuery` per message that earns one (a forwarded `Sync` or a forwarded
