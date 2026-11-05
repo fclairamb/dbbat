@@ -1,7 +1,6 @@
 package shared
 
 import (
-	"errors"
 	"net"
 	"os"
 	"testing"
@@ -34,7 +33,7 @@ func TestArmAndClearPreAuthDeadline(t *testing.T) {
 	require.NoError(t, ArmPreAuthDeadline(server, 50*time.Millisecond))
 
 	_, err := server.Read(make([]byte, 1))
-	require.True(t, errors.Is(err, os.ErrDeadlineExceeded), "got %v", err)
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded)
 
 	require.NoError(t, ArmPreAuthDeadline(server, 50*time.Millisecond))
 	require.NoError(t, ClearPreAuthDeadline(server))

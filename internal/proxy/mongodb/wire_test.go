@@ -247,7 +247,6 @@ func sessionReading(raw []byte, authenticated bool) *Session {
 //
 //nolint:paralleltest // measures process-wide allocation; a parallel test would pollute it
 func TestDecompressMessage_PreAuthRefusesOversizedDeclaration(t *testing.T) {
-
 	const declared = 40 * 1000 * 1000
 
 	frame := compressedFrame(t, compressorZlib, bson.D{{Key: "hello", Value: 1}}, declared)
@@ -270,7 +269,6 @@ func TestDecompressMessage_PreAuthRefusesOversizedDeclaration(t *testing.T) {
 //
 //nolint:paralleltest // measures process-wide allocation; a parallel test would pollute it
 func TestDecompressMessage_InflationStopsAtDeclaredSize(t *testing.T) {
-
 	big := bytes.Repeat([]byte{'a'}, 8*1024*1024)
 	frame := compressedFrame(t, compressorZlib, bson.D{{Key: "insert", Value: "c"}, {Key: "pad", Value: big}}, 1024)
 

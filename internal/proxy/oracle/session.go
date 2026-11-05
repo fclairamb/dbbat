@@ -405,6 +405,23 @@ func newSession(
 	return s
 }
 
+// completeLogin hands the client its AUTH OK and leaves the pre-auth phase:
+// the relay slot goes back and the deadline is lifted, so the session may sit
+// idle for as long as the client keeps it open.
+func (s *session) completeLogin(authOK []byte, releaseRelay func()) error {
+	if _, err := s.clientConn.Write(authOK); err != nil {
+		return fmt.Errorf("failed to send AUTH OK: %w", err)
+	}
+
+	releaseRelay()
+
+	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
+		return fmt.Errorf("clear pre-auth deadline: %w", err)
+	}
+
+	return nil
+}
+
 // acquirePreAuthRelay takes a pre-auth relay slot without waiting. The
 // returned release is idempotent, so it can be both deferred and called on
 // success.
@@ -613,16 +630,8 @@ func (s *session) run() error {
 		authOK = reframeAuthOK(authOK, s.upstreamAuthOKFlags, s.upstreamAuthOKFragLens, s.tnsLegacyLength)
 	}
 
-	if _, err := s.clientConn.Write(authOK); err != nil {
-		return fmt.Errorf("failed to send AUTH OK: %w", err)
-	}
-
-	// Logged in: the slot goes back and the session may sit idle for as long
-	// as the client keeps it open.
-	releaseRelay()
-
-	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
-		return fmt.Errorf("clear pre-auth deadline: %w", err)
+	if err := s.completeLogin(authOK, releaseRelay); err != nil {
+		return err
 	}
 
 	// Step 7: Record connection
