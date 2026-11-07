@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.32.1](https://github.com/fclairamb/dbbat/compare/v0.32.0...v0.32.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/slack-go/slack to v0.35.0 ([#476](https://github.com/fclairamb/dbbat/issues/476)) ([966d033](https://github.com/fclairamb/dbbat/commit/966d0335f8db4607d0e5e7e60b417175d1be7996))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.10.0 ([#479](https://github.com/fclairamb/dbbat/issues/479)) ([ab0e1b9](https://github.com/fclairamb/dbbat/commit/ab0e1b933989bc76e8bf620a24a5edb670c09727))
+* **deps:** update testcontainers-go monorepo to v0.45.0 ([#478](https://github.com/fclairamb/dbbat/issues/478)) ([69827f2](https://github.com/fclairamb/dbbat/commit/69827f213d55d6fe48885cc8d328e420d6f7cb71))
+
 ## [0.32.0](https://github.com/fclairamb/dbbat/compare/v0.31.1...v0.32.0) (2026-11-05)
 
 
