@@ -382,13 +382,32 @@ func (p *useScanner) dynamicArgument(kw string) (string, dynamicOutcome) {
 // execParenStatement reads the argument of `EXEC(…)` / `EXECUTE(…)`.
 //
 // No parenthesis means this was not dynamic SQL at all but an ordinary
-// procedure call (`EXEC dbo.some_proc`), which keeps falling through as text.
+// procedure call (`EXEC dbo.some_proc`), which keeps falling through as text —
+// except when the procedure name is written as a bracketed or quoted
+// identifier (`EXEC [sp_executesql] N'…'`, `EXEC "sp_executesql" N'…'`). There
+// the statement runs through a SQL-carrying system procedure whose name
+// skipOpaque has already stepped over as an identifier, so the keyword match
+// that would have extracted the inner statement never fired. Reading that
+// statement back out would mean unwrapping the delimiter (and its `]]`/`""`
+// escapes) exactly, so instead the form is reported as undecidable: it fails
+// closed under read_only/block_ddl the same way `EXEC(@sql)` does, and is left
+// alone under a full-write grant.
 func (p *useScanner) execParenStatement() (string, dynamicOutcome) {
 	saved := p.i
 
 	p.spaces()
 
 	if p.eof() || p.s[p.i] != '(' {
+		// A delimited identifier in the procedure-name slot: the call may route
+		// to a system procedure that runs its argument as a statement, and
+		// dbbat cannot certify what that statement is without unwrapping the
+		// delimiter. Undecidable, not inert.
+		if !p.eof() && (p.s[p.i] == '[' || p.s[p.i] == '"') {
+			p.i = saved
+
+			return "", dynamicUndecidable
+		}
+
 		p.i = saved
 
 		return "", dynamicNotDynamic
