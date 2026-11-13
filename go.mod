@@ -42,7 +42,7 @@ require (
 	github.com/urfave/cli/v3 v3.14.0
 	github.com/xdg-go/scram v1.4.0
 	go.mongodb.org/mongo-driver/v2 v2.10.0
-	gocloud.dev v0.48.1
+	gocloud.dev v0.49.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/oauth2 v0.38.0
 	golang.org/x/text v0.44.0
