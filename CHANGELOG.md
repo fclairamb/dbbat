@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.32.1](https://github.com/fclairamb/dbbat/compare/v0.32.0...v0.32.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/jackc/pgx/v5 to v5.13.0 ([#487](https://github.com/fclairamb/dbbat/issues/487)) ([22331fb](https://github.com/fclairamb/dbbat/commit/22331fb579b22e2262c9afeefa243ee7192e717b))
+* **deps:** update module github.com/moby/moby/api to v1.57.0 ([#493](https://github.com/fclairamb/dbbat/issues/493)) ([5b7b7e7](https://github.com/fclairamb/dbbat/commit/5b7b7e7218148f6c7170121ea9ef37325c1c6ae0))
+* **deps:** update module github.com/slack-go/slack to v0.35.0 ([#476](https://github.com/fclairamb/dbbat/issues/476)) ([966d033](https://github.com/fclairamb/dbbat/commit/966d0335f8db4607d0e5e7e60b417175d1be7996))
+* **deps:** update module github.com/slack-go/slack to v0.36.0 ([#495](https://github.com/fclairamb/dbbat/issues/495)) ([2a4160b](https://github.com/fclairamb/dbbat/commit/2a4160b8b8b0170635dd2e4568f7bf1ecc758566))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.10.0 ([#479](https://github.com/fclairamb/dbbat/issues/479)) ([ab0e1b9](https://github.com/fclairamb/dbbat/commit/ab0e1b933989bc76e8bf620a24a5edb670c09727))
+* **deps:** update module gocloud.dev to v0.48.0 ([#488](https://github.com/fclairamb/dbbat/issues/488)) ([f4cab76](https://github.com/fclairamb/dbbat/commit/f4cab7678bbb268686f997c16b7e1a6a9468281f))
+* **deps:** update module gocloud.dev to v0.48.1 ([#490](https://github.com/fclairamb/dbbat/issues/490)) ([ae8f06a](https://github.com/fclairamb/dbbat/commit/ae8f06a309ee5e85812778b24039e4bc1fe5034f))
+* **deps:** update module gocloud.dev to v0.49.0 ([#491](https://github.com/fclairamb/dbbat/issues/491)) ([de8ed90](https://github.com/fclairamb/dbbat/commit/de8ed90b451490eb6234b80372e037c996cb0caf))
+* **deps:** update module golang.org/x/crypto to v0.59.0 ([#489](https://github.com/fclairamb/dbbat/issues/489)) ([2ba543b](https://github.com/fclairamb/dbbat/commit/2ba543b4283368fcaef9b964ab8034b98be52b55))
+* **deps:** update module golang.org/x/oauth2 to v0.38.0 ([#481](https://github.com/fclairamb/dbbat/issues/481)) ([00155c9](https://github.com/fclairamb/dbbat/commit/00155c99ad93a8ee72352cbb2874e9c6b885676e))
+* **deps:** update module golang.org/x/text to v0.44.0 ([#483](https://github.com/fclairamb/dbbat/issues/483)) ([c2d8dc9](https://github.com/fclairamb/dbbat/commit/c2d8dc959bb74c286ef51c22c6b8df9ec565f99f))
+* **deps:** update testcontainers-go monorepo to v0.45.0 ([#478](https://github.com/fclairamb/dbbat/issues/478)) ([69827f2](https://github.com/fclairamb/dbbat/commit/69827f213d55d6fe48885cc8d328e420d6f7cb71))
+
 ## [0.32.0](https://github.com/fclairamb/dbbat/compare/v0.31.1...v0.32.0) (2026-11-05)
 
 
