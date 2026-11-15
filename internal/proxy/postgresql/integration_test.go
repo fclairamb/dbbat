@@ -1318,3 +1318,40 @@ func TestIntegration_PipelinedBatch_MiddleStatementFails(t *testing.T) {
 	assert.Equal(t, "no completion message from upstream", *rows[last].Error)
 	assert.Empty(t, f.capturedRowText(ctx, rows[last].UID))
 }
+
+// TestIntegration_ResultCapture_PreparedStatementKeepsColumnNames covers a pgx
+// QueryRow: the statement is described in its own exchange and the Execute that
+// follows gets no RowDescription, yet the captured row must carry its name.
+func TestIntegration_ResultCapture_PreparedStatementKeepsColumnNames(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	var got int
+
+	require.NoError(t, conn.QueryRow(ctx, "SELECT 41 + 1 AS captured_answer").Scan(&got))
+	require.Equal(t, 42, got)
+
+	require.Eventually(t, func() bool {
+		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 200})
+		if err != nil {
+			return false
+		}
+
+		for i := range queries {
+			if !strings.Contains(queries[i].SQLText, "captured_answer") {
+				continue
+			}
+
+			rows, err := f.store.GetQueryRows(ctx, queries[i].UID, "", 10)
+			if err != nil || len(rows.Rows) == 0 {
+				return false
+			}
+
+			return strings.Contains(string(rows.Rows[0].RowData), `"captured_answer"`)
+		}
+
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "captured row must carry its column name")
+}
