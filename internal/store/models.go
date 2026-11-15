@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"time"
@@ -715,6 +716,10 @@ type Query struct {
 	ChainSeq *int64 `bun:"chain_seq" json:"-"`
 	PrevMAC  []byte `bun:"prev_mac" json:"-"`
 	MAC      []byte `bun:"mac" json:"-"`
+
+	// Chained is derived from ChainSeq when the row is read: false means the
+	// row carries no chain position, so nothing vouches for it.
+	Chained bool `bun:"-" json:"chained"`
 
 	// RowChainMAC seals the final head of this query's *result row* chain when
 	// the capture finishes, and RowChainLen is how many captured rows that head
@@ -1433,6 +1438,24 @@ type AuditLog struct {
 	ChainSeq *int64 `bun:"chain_seq" json:"-"`
 	PrevMAC  []byte `bun:"prev_mac" json:"-"`
 	MAC      []byte `bun:"mac" json:"-"`
+
+	// Chained is derived from ChainSeq when the row is read: false means the
+	// row carries no chain position (pre-anchor, keyless store, or forged).
+	Chained bool `bun:"-" json:"chained"`
+}
+
+// AfterScanRow derives Chained from ChainSeq after each row is read.
+func (a *AuditLog) AfterScanRow(_ context.Context) error {
+	a.Chained = a.ChainSeq != nil
+
+	return nil
+}
+
+// AfterScanRow derives Chained from ChainSeq after each row is read.
+func (q *Query) AfterScanRow(_ context.Context) error {
+	q.Chained = q.ChainSeq != nil
+
+	return nil
 }
 
 // AuditEvent is an alias for backward compatibility
@@ -1612,8 +1635,11 @@ type OAuthState struct {
 	Provider    string          `bun:"provider,notnull" json:"provider"`
 	RedirectURL string          `bun:"redirect_url" json:"redirect_url,omitempty"`
 	Metadata    json.RawMessage `bun:"metadata,type:jsonb" json:"metadata,omitempty"`
-	ExpiresAt   time.Time       `bun:"expires_at,notnull" json:"expires_at"`
-	CreatedAt   time.Time       `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	// LinkUserID is set when the flow was started by a signed-in user to
+	// attach the returned identity to their own account.
+	LinkUserID *uuid.UUID `bun:"link_user_id,type:uuid" json:"link_user_id,omitempty"`
+	ExpiresAt  time.Time  `bun:"expires_at,notnull" json:"expires_at"`
+	CreatedAt  time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
 // APIKeyFilter represents filters for listing API keys

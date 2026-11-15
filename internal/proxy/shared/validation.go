@@ -742,11 +742,49 @@ func ValidateOracleLogonAlterSession(sql string, grant *store.Grant) error {
 	return ValidateOracleQuery(sql, grant)
 }
 
+var (
+	// oracleDictionaryVerb matches Oracle statements that rewrite the data
+	// dictionary or the audit policy: DDL under Oracle's own documentation, and
+	// led by none of the shared ddlKeywords. Oracle-only on purpose: ANALYZE is
+	// run by PostgreSQL monitoring tools and LOCK is PostgreSQL's / MySQL's, where
+	// the session pin (or its own rules) already answers.
+	oracleDictionaryVerb = regexp.MustCompile(
+		`(?i)^\s*(?:AUDIT|NOAUDIT|ANALYZE|ASSOCIATE\s+STATISTICS|DISASSOCIATE\s+STATISTICS)\b`)
+	// oracleLockTable matches LOCK TABLE: not a write, but it blocks every writer
+	// for the length of the transaction (PostgreSQL refuses it read-only too).
+	oracleLockTable = regexp.MustCompile(`(?i)^\s*LOCK\s+TABLE\b`)
+)
+
+// validateOracleVerbs applies read_only and block_ddl to the Oracle verbs that
+// the shared prefix lists do not know. Oracle has no session pin, so the text
+// is the control.
+func validateOracleVerbs(matchable string, grant *store.Grant) error {
+	if oracleDictionaryVerb.MatchString(matchable) {
+		if grant.IsReadOnly() {
+			return ErrReadOnlyViolation
+		}
+
+		if grant.ShouldBlockDDL() {
+			return ErrDDLBlocked
+		}
+	}
+
+	if oracleLockTable.MatchString(matchable) && grant.IsReadOnly() {
+		return ErrReadOnlyViolation
+	}
+
+	return nil
+}
+
 // validateOracleStatement is the controls and the pattern list over one
 // already-normalised statement, with no unwrapping — applied to the statement a
 // client sent and, unchanged, to the statement that statement would execute.
 func validateOracleStatement(matchable string, grant *store.Grant) error {
 	if err := validateQuery(matchable, syntaxStandard, grant); err != nil {
+		return err
+	}
+
+	if err := validateOracleVerbs(matchable, grant); err != nil {
 		return err
 	}
 

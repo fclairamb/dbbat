@@ -54,6 +54,12 @@ type DynamicSQL struct {
 	// locate, a second level of nesting), which are findings about the
 	// statement rather than about how much of it arrived.
 	Unterminated bool
+	// Procedure reports that the batch invokes a stored procedure by name
+	// (`EXEC dbo.Recalc`, `EXEC sp_cursor …`) — anything after EXEC/EXECUTE that
+	// is neither `(` nor one of the SQL-carrying system procedures, whose
+	// statement is checked instead. The body is invisible to dbbat, so whether
+	// it is refused is a grant question, exactly as for an RPC.
+	Procedure bool
 }
 
 // MSSQLDynamicSQL reads every dynamic-SQL form in a T-SQL batch whose text dbbat
@@ -143,11 +149,57 @@ func mssqlDynamicSQL(sql string) (DynamicSQL, bool) {
 			dyn.Opaque = true
 
 		case dynamicNotDynamic:
-			// Not dynamic SQL at all (a bare `EXEC dbo.p`). Ordinary text.
+			// Not dynamic SQL at all (a bare `EXEC dbo.p`): a procedure call
+			// whose body dbbat cannot see, unless it is a SQL-carrying system
+			// procedure, which the keyword scan reaches next.
+			if (kw == kwExec || kw == kwExecute) && !p.execTargetsSQLProcedure() {
+				dyn.Procedure = true
+			}
 		}
 	}
 
 	return dyn, true
+}
+
+// execTargetsSQLProcedure reports whether the EXEC/EXECUTE just consumed calls
+// one of the SQL-carrying system procedures (optionally qualified, optionally
+// as `@rc = proc`). It does not consume.
+func (p *useScanner) execTargetsSQLProcedure() bool {
+	i := p.skipBlanks(p.i)
+
+	if i < len(p.s) && p.s[i] == '@' {
+		eq := strings.IndexByte(p.s[i:], '=')
+		if eq < 0 || strings.ContainsAny(strings.TrimSpace(p.s[i:i+eq]), " \t\r\n") {
+			return false
+		}
+
+		i = p.skipBlanks(i + eq + 1)
+	}
+
+	start := i
+	for i < len(p.s) && (isUseNameByte(p.s[i], p.syntax) || strings.IndexByte(".[]", p.s[i]) >= 0) {
+		i++
+	}
+
+	name := strings.NewReplacer("[", "", "]", "").Replace(p.s[start:i])
+	name = name[strings.LastIndexByte(name, '.')+1:]
+
+	for _, kw := range mssqlDynamicKeywords[2:] {
+		if strings.EqualFold(name, kw) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// skipBlanks returns the index of the first non-whitespace byte at or after i.
+func (p *useScanner) skipBlanks(i int) int {
+	for i < len(p.s) && strings.IndexByte(" \t\r\n", p.s[i]) >= 0 {
+		i++
+	}
+
+	return i
 }
 
 // dynamicOutcome is what one dynamic-SQL keyword turned out to be. The two

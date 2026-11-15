@@ -578,7 +578,7 @@ laxer rule set for dynamic SQL would turn every control into a suggestion:
 | dynamic SQL nested inside dynamic SQL | **refused** (`shared.ErrDynamicSQLNotCheckable`) rather than unwrapped further |
 | a statement argument that cannot be located at all | **refused**, same error |
 | `EXEC(@sql)`, `EXEC sp_executesql @sql`, `@stmt = @sql`, `EXEC('USE ' + @db)`, `EXEC sp_prepare @h OUT, NULL, @sql, 1` | **refused under `read_only`/`block_ddl` only** (`shared.ErrDynamicSQLOpaque`) — see below |
-| `EXEC dbo.some_proc`, `EXEC dbo.p @a = 1` | an ordinary procedure call, not dynamic SQL: opaque, and already failed closed under a restrictive grant on the RPC path |
+| `EXEC dbo.some_proc`, `EXEC dbo.p @a = 1` | an ordinary procedure call, not dynamic SQL: opaque, and failed closed under a restrictive grant (`ErrOpaqueProcedureBlocked`) on both the RPC and the SQLBatch path, including `EXEC sp_cursor …` written as batch text and a call inside an `sp_executesql` payload. `EXEC sp_executesql …` and the other SQL-carrying procedures are checked on their statement instead |
 | `EXEC(…) AT <linked_server>` | **out of scope and unenforced** — see below |
 
 Which parameter names can carry the statement is **one list**

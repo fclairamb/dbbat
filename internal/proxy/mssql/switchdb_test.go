@@ -305,10 +305,10 @@ func TestBenignDynamicSQLStillRuns(t *testing.T) {
 		"EXEC sp_executesql N'SELECT @a', N'@a int', @a = 1",
 		"EXEC sp_executesql @stmt = N'SELECT @a', @params = N'@a int', @a = 1",
 		"EXEC('USE AppDb; SELECT 1')",
-		// An ordinary procedure call is not dynamic SQL and must keep falling
-		// through as text — this is not a blanket refusal of EXEC.
-		"EXEC dbo.some_proc",
-		"EXEC dbo.p @a = 1",
+		// A procedure call is refused under read_only (ErrOpaqueProcedureBlocked,
+		// see TestSQLBatchEnforcement), not for being dynamic SQL; a return-code
+		// capture of a SQL-carrying procedure stays a read.
+		"EXEC @rc = sp_executesql N'SELECT 1'",
 		// An all-literal concatenation is decidable: the operands are written
 		// apart and the server runs them joined, so the fold reads the statement
 		// the server will run — and a benign one stays benign.

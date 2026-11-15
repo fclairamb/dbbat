@@ -10,6 +10,7 @@ import {
 import { PageHeader } from "@/components/shared/PageHeader";
 import { PageLoader, LoadingSpinner } from "@/components/shared/LoadingSpinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { UnverifiedBadge } from "@/components/shared/UnverifiedBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -157,6 +158,10 @@ function QueryDetailPage() {
               ) : (
                 <Badge variant="secondary">Success</Badge>
               )}
+              <UnverifiedBadge
+                chained={query.chained}
+                testId="query-detail-unverified-badge"
+              />
             </div>
             <div>
               <div className="text-sm font-medium text-muted-foreground mb-1">

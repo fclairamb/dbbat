@@ -413,6 +413,11 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticatedAuth := authenticated.Group("/auth")
 			authenticatedAuth.POST("/logout", s.handleLogout)
 			authenticatedAuth.GET("/me", s.handleMe)
+			// Link an SSO identity to the signed-in account. Web session
+			// only: it changes how the account can be reached.
+			for name := range s.oauthProviders {
+				authenticatedAuth.POST("/"+name+"/link", s.requireWebSession(), s.handleOAuthLink(name))
+			}
 			// Device authorization consent page + decision. GET is any
 			// authenticated user (the page is behind login); POST mints a
 			// real API key, so it requires Web Session or Basic Auth, like
@@ -430,6 +435,8 @@ func (s *Server) setupRouter() *gin.Engine {
 			// still resolve.
 			users.GET("/role-syncs", s.requireAdminOrViewer(), s.handleListRoleSyncs)
 			users.GET("/last-connections", s.requireAdminOrViewer(), s.handleListLastConnections)
+			users.GET("/me/identities", s.handleListMyIdentities)
+			users.DELETE("/me/identities/:provider", s.requireWebSession(), s.handleUnlinkMyIdentity)
 			users.GET("/:uid", s.handleGetUser)
 			users.PUT("/:uid", s.handleUpdateUser)
 			// Note: PUT /:uid/password is registered separately (uses credential auth, not Bearer)

@@ -733,6 +733,30 @@ func TestHandleQuery_BlocksDDL(t *testing.T) {
 			expectErr: nil,
 		},
 		{
+			name:      "block_ddl blocks DDL after a harmless statement",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "SELECT 1; DROP TABLE t",
+			expectErr: ErrDDLNotPermitted,
+		},
+		{
+			name:      "block_ddl blocks DDL after a quoted semicolon",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "SELECT ';'; CREATE TABLE t (a int)",
+			expectErr: ErrDDLNotPermitted,
+		},
+		{
+			name:      "block_ddl allows DDL text inside a literal",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "SELECT 'x; DROP TABLE t'",
+			expectErr: nil,
+		},
+		{
+			name:      "block_copy blocks COPY after a harmless statement",
+			controls:  []string{store.ControlBlockCopy},
+			sql:       "SELECT 1; COPY t TO STDOUT",
+			expectErr: ErrCopyNotPermitted,
+		},
+		{
 			name:      "no controls allows DDL",
 			controls:  []string{},
 			sql:       "CREATE TABLE test (id INT)",

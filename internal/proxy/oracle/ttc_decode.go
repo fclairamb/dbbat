@@ -1161,6 +1161,8 @@ var findSQLKeywords = [][]byte{
 	[]byte("DECLARE"), []byte("WITH"), []byte("MERGE"), []byte("CALL"),
 	[]byte("TRUNCATE"), []byte("GRANT"), []byte("REVOKE"),
 	[]byte("RENAME"), []byte("PURGE"), []byte("FLASHBACK"), []byte("COMMENT"),
+	[]byte("AUDIT"), []byte("NOAUDIT"), []byte("ANALYZE"), []byte("ASSOCIATE"),
+	[]byte("DISASSOCIATE"), []byte("LOCK"),
 }
 
 // findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.

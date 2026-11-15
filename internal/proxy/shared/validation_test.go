@@ -1479,6 +1479,51 @@ func TestValidateOracleQuery_RefusesRenamePurgeFlashbackComment(t *testing.T) {
 	assert.True(t, IsDDLQuery("COMMENT ON TABLE t IS 'x'"))
 }
 
+// TestValidateOracleQuery_RefusesAuditAnalyzeLock is the regression test for the
+// Oracle dictionary verbs (AUDIT, NOAUDIT, ANALYZE, ASSOCIATE/DISASSOCIATE
+// STATISTICS) and LOCK TABLE, which start with none of the shared keywords.
+func TestValidateOracleQuery_RefusesAuditAnalyzeLock(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"AUDIT SELECT ON t",
+		"NOAUDIT ALL",
+		"ANALYZE TABLE t COMPUTE STATISTICS",
+		"ANALYZE TABLE t VALIDATE STRUCTURE",
+		"ASSOCIATE STATISTICS WITH COLUMNS t.a USING s",
+		"DISASSOCIATE STATISTICS FROM COLUMNS t.a",
+		"/* x */ audit all",
+		"-- x\nanalyze index i compute statistics",
+		"BEGIN EXECUTE IMMEDIATE 'NOAUDIT ALL'; END;",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			t.Parallel()
+
+			require.ErrorIs(t, ValidateOracleQuery(sql, controlGrant(store.ControlReadOnly)), ErrReadOnlyViolation)
+			require.ErrorIs(t, ValidateOracleQuery(sql, controlGrant(store.ControlBlockDDL)), ErrDDLBlocked)
+			require.NoError(t, ValidateOracleQuery(sql, &store.Grant{Definition: &store.GrantDefinition{}}))
+		})
+	}
+
+	// LOCK TABLE is not DDL: read_only only.
+	lock := "LOCK TABLE t IN EXCLUSIVE MODE"
+	require.ErrorIs(t, ValidateOracleQuery(lock, controlGrant(store.ControlReadOnly)), ErrReadOnlyViolation)
+	require.NoError(t, ValidateOracleQuery(lock, controlGrant(store.ControlBlockDDL)))
+
+	// Positive controls: columns named audit_at / lock_id stay reads.
+	for _, sql := range []string{
+		"SELECT audit_at, lock_id FROM t",
+		"SELECT analyze_flag FROM t WHERE lock_id = 1",
+	} {
+		require.NoError(t, ValidateOracleQuery(sql, controlGrant(store.ControlReadOnly)), sql)
+		require.NoError(t, ValidateOracleQuery(sql, controlGrant(store.ControlBlockDDL)), sql)
+	}
+
+	// Other dialects keep ANALYZE and LOCK: monitoring tools run them.
+	assert.False(t, IsWriteQuery("ANALYZE t"))
+	assert.False(t, IsDDLQuery("LOCK TABLE t IN SHARE MODE"))
+}
+
 // TestValidateOracleLogonAlterSession: the logon statement gets the mid-session
 // gate plus the one-ALTER-SESSION shape rule.
 func TestValidateOracleLogonAlterSession(t *testing.T) {
