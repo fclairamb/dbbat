@@ -20,6 +20,29 @@ const (
 	SSLModeVerifyFull = "verify-full"
 )
 
+// SSLModes lists every ssl_mode a server row may carry, in libpq's order from
+// weakest to strongest. It is the single enumeration the API validates against,
+// so the API and PlanFor cannot drift apart.
+func SSLModes() []string {
+	return []string{SSLModeDisable, SSLModeAllow, SSLModePrefer, SSLModeRequire, SSLModeVerifyCA, SSLModeVerifyFull}
+}
+
+// IsKnownSSLMode reports whether mode is one PlanFor recognizes. The empty
+// string counts: it is the default of every unset row and means prefer.
+func IsKnownSSLMode(mode string) bool {
+	if mode == "" {
+		return true
+	}
+
+	for _, known := range SSLModes() {
+		if mode == known {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Attempt is one way of reaching the target. A nil TLS config means "connect in
 // plaintext"; a non-nil one means "encrypt with exactly this config".
 type Attempt struct {
@@ -79,9 +102,11 @@ type Plan struct {
 // cleanly express "verify the chain but not the name" without a custom
 // VerifyPeerCertificate, and erring stricter than libpq is the safe direction.
 //
-// An unrecognized mode is treated as prefer, matching the historical behavior
-// of both the proxy and the probe: a typo'd row keeps working, opportunistically
-// encrypted, rather than failing closed on a field nobody validates.
+// An unrecognized mode fails closed to require: TLS is mandatory, so a typo'd
+// row such as "verify-ful" is never silently downgraded to plaintext. The API
+// rejects unknown modes on create and update, so only rows stored before that
+// validation existed can reach this branch; they keep connecting (encrypted)
+// instead of breaking live sessions on upgrade.
 func PlanFor(mode, host string) Plan {
 	plaintext := Attempt{}
 	// InsecureSkipVerify is libpq parity, not an oversight: require/prefer/allow
@@ -95,12 +120,12 @@ func PlanFor(mode, host string) Plan {
 		return Plan{Mode: mode, Attempts: []Attempt{plaintext}}
 	case SSLModeAllow:
 		return Plan{Mode: mode, Attempts: []Attempt{plaintext, encrypted}}
-	case SSLModeRequire:
-		return Plan{Mode: mode, Attempts: []Attempt{encrypted}}
+	case SSLModePrefer, "":
+		return Plan{Mode: mode, Attempts: []Attempt{encrypted, plaintext}}
 	case SSLModeVerifyCA, SSLModeVerifyFull:
 		return Plan{Mode: mode, Attempts: []Attempt{verified}}
-	default: // "prefer" and the empty default.
-		return Plan{Mode: mode, Attempts: []Attempt{encrypted, plaintext}}
+	default: // require, and any unknown mode (fail closed).
+		return Plan{Mode: mode, Attempts: []Attempt{encrypted}}
 	}
 }
 

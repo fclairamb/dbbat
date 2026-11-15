@@ -179,7 +179,7 @@ func TestAuthFailureTracker_PerSource(t *testing.T) {
 func TestAuthFailureTracker_UsernameCeiling(t *testing.T) {
 	t.Parallel()
 
-	t.Run("distributed failures reach the ceiling once and block every source", func(t *testing.T) {
+	t.Run("distributed failures reach the ceiling once and start a burst for every source", func(t *testing.T) {
 		t.Parallel()
 		tracker := newAuthFailureTracker()
 
@@ -198,21 +198,46 @@ func TestAuthFailureTracker_UsernameCeiling(t *testing.T) {
 			t.Errorf("ceiling reported %d times, want exactly once", crossings)
 		}
 
-		allowed, retryAfter := tracker.checkRateLimit("admin", "203.0.113.99")
-		if allowed {
-			t.Error("a fresh source should be blocked once the username hit its ceiling")
+		// The ceiling never stops the password from being checked: a fresh
+		// source passes the pre-check, and the burst shows in ceilingRetryAfter.
+		if allowed, _ := tracker.checkRateLimit("admin", "203.0.113.99"); !allowed {
+			t.Error("the ceiling must not refuse a password check before it happens")
 		}
+		retryAfter := tracker.ceilingRetryAfter("admin")
 		if retryAfter <= int((authUsernameCeilingWindow - time.Minute).Seconds()) {
-			t.Errorf("retryAfter = %d, want close to the ceiling window", retryAfter)
+			t.Errorf("ceilingRetryAfter = %d, want close to the ceiling window", retryAfter)
+		}
+		if got := tracker.ceilingRetryAfter("bob"); got != 0 {
+			t.Errorf("another username: ceilingRetryAfter = %d, want 0", got)
 		}
 
-		// A success does not lift the ceiling, and other usernames are untouched.
-		tracker.resetFailures("admin", "203.0.113.99")
-		if allowed, _ := tracker.checkRateLimit("admin", "203.0.113.99"); allowed {
-			t.Error("a success should not lift the username ceiling")
+		// A success lifts the ceiling and reports the burst it ended.
+		if got := tracker.resetFailures("admin", "203.0.113.99"); got != authUsernameCeiling+5 {
+			t.Errorf("resetFailures = %d, want %d", got, authUsernameCeiling+5)
 		}
-		if allowed, _ := tracker.checkRateLimit("bob", "203.0.113.99"); !allowed {
-			t.Error("another username should not be affected")
+		if got := tracker.ceilingRetryAfter("admin"); got != 0 {
+			t.Errorf("after a success: ceilingRetryAfter = %d, want 0", got)
+		}
+		if got := tracker.resetFailures("admin", "203.0.113.99"); got != 0 {
+			t.Errorf("a second success reported a burst of %d, want 0", got)
+		}
+	})
+
+	t.Run("a success below the ceiling clears it without reporting a burst", func(t *testing.T) {
+		t.Parallel()
+		tracker := newAuthFailureTracker()
+
+		for i := 0; i < authUsernameCeiling-1; i++ {
+			tracker.recordFailure("admin", fmt.Sprintf("10.3.%d.%d", i/256, i%256))
+		}
+
+		if got := tracker.resetFailures("admin", "203.0.113.99"); got != 0 {
+			t.Errorf("resetFailures = %d, want 0 below the ceiling", got)
+		}
+
+		// The count restarted: one more failure does not reach the ceiling.
+		if tracker.recordFailure("admin", "203.0.113.98") {
+			t.Error("the ceiling count should have been cleared by the success")
 		}
 	})
 
@@ -241,8 +266,8 @@ func TestAuthFailureTracker_UsernameCeiling(t *testing.T) {
 
 		tracker.sweep(time.Now().Add(authUsernameCeilingWindow + time.Minute))
 
-		if allowed, _ := tracker.checkRateLimit("admin", "203.0.113.99"); !allowed {
-			t.Error("the ceiling should be gone after its window")
+		if got := tracker.ceilingRetryAfter("admin"); got != 0 {
+			t.Errorf("the ceiling should be gone after its window, ceilingRetryAfter = %d", got)
 		}
 		tracker.mu.RLock()
 		defer tracker.mu.RUnlock()

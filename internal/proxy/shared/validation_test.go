@@ -1283,6 +1283,38 @@ func TestValidateMySQLQuery_ReadOnlyPin(t *testing.T) {
 	}
 }
 
+// TestValidateMySQLQuery_CallUnderBlockDDL: a stored procedure body can run
+// any DDL, so a block_ddl grant refuses CALL as PostgreSQL does, with an error
+// naming that control. read_only keeps its own error; a full-write grant runs it.
+func TestValidateMySQLQuery_CallUnderBlockDDL(t *testing.T) {
+	t.Parallel()
+
+	blockDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
+	ro := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+	open := &store.Grant{Definition: &store.GrantDefinition{}}
+
+	for _, sql := range []string{
+		"CALL do_migration()",
+		"call rebuild_schema",
+		"SELECT 1; CALL p()",
+		"/* x */ CALL p()",
+		"-- hi\nCALL migrate()",
+	} {
+		require.ErrorIs(t, ValidateMySQLQuery(sql, blockDDL), ErrDDLProcedureCall, sql)
+		require.ErrorIs(t, ValidateMySQLQuery(sql, ro), ErrReadOnlyProcedureCall, sql)
+		require.NoError(t, ValidateMySQLQuery(sql, open), sql)
+	}
+
+	// An identifier starting with or named call is not a CALL statement.
+	for _, sql := range []string{
+		"SELECT call_count FROM t",
+		"SELECT * FROM calls",
+		"SELECT `call` FROM t",
+	} {
+		require.NoError(t, ValidateMySQLQuery(sql, blockDDL), sql)
+	}
+}
+
 // TestSelectInto_IsAWriteAndDDL is the regression test for SELECT … INTO
 // <table>: it creates a table and fills it, yet it starts with SELECT, so the
 // prefix-shaped classifiers read it as a read. PostgreSQL text goes through

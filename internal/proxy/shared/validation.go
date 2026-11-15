@@ -29,6 +29,14 @@ var (
 	// and the operator needs to know the fix is a grant without read_only.
 	ErrReadOnlyProcedureCall = errors.New("procedure calls and anonymous code blocks are not " +
 		"permitted with read-only access: dbbat cannot see what they would run")
+	// ErrDDLProcedureCall — a block_ddl grant met a MySQL/MariaDB stored
+	// procedure call (`CALL`). block_ddl is a check on the statement text, and
+	// the procedure's body, which can run any DDL directly or through a
+	// PREPARE/EXECUTE, lives in the database. Its own error, naming the control,
+	// so the refusal row says why a statement with no DDL keyword was stopped.
+	// The PostgreSQL proxy has its own, which also covers DO blocks.
+	ErrDDLProcedureCall = errors.New("procedure calls (CALL) are not permitted: your access grant " +
+		"blocks schema modifications, and dbbat cannot see what they would run")
 	// ErrReadOnlyPinBypass — a read_only MySQL/MariaDB session tried to take the
 	// server-side read-only pin off (`SET TRANSACTION READ WRITE`,
 	// `START TRANSACTION READ WRITE`, `SET tx_read_only = 0`, …).
@@ -182,8 +190,9 @@ var oracleBlockedPatterns = []*regexp.Regexp{
 //     an assignment stays allowed unless it follows a comma (fails closed).
 //   - SHUTDOWN / RESTART as SQL statements; the COM_SHUTDOWN protocol command
 //     is refused by the proxy itself.
-//   - SET PASSWORD: covered separately by IsPasswordChangeQuery for ALTER USER,
-//     but the SET PASSWORD syntax also exists.
+//   - SET PASSWORD (`SET PASSWORD FOR u = PASSWORD('x')` included): the
+//     ALTER USER/CREATE USER/GRANT … IDENTIFIED forms are refused separately,
+//     with ErrPasswordChangeBlocked (see mysqlPasswordChange).
 //
 // None of these starts with a write or DDL keyword, so the grant controls
 // would not catch them: they are blocked whatever the grant says.
@@ -829,11 +838,29 @@ var (
 	// mysqlProcedureCall matches CALL at the start of a statement, including
 	// the second statement of a multi-statement text.
 	mysqlProcedureCall = regexp.MustCompile(`(?i)(?:^|;)\s*CALL\b`)
+	// mysqlPasswordChange matches MySQL/MariaDB's own password-change spelling,
+	// which carries no PASSWORD token and so escapes isPasswordChangeQuery:
+	// `ALTER USER CURRENT_USER() IDENTIFIED BY 'x'`, `ALTER USER u IDENTIFIED
+	// WITH plugin BY|AS …`, `CREATE [OR REPLACE] USER … IDENTIFIED …` and the
+	// legacy `GRANT … IDENTIFIED BY …`. A statement must start with one of these
+	// prefixes (first statement or after a `;`), so a column named `identified`
+	// in a SELECT or an ALTER TABLE stays allowed. The tail is unbounded rather
+	// than stopped at `;`, because a quoted account name (`'a;b'@'%'`) may hold
+	// one: a later statement naming `identified` is refused too, which fails
+	// closed.
+	mysqlPasswordChange = regexp.MustCompile(
+		`(?is)(?:^|;)\s*(?:(?:ALTER|CREATE(?:\s+OR\s+REPLACE)?)\s+(?:USER|ROLE)|GRANT)\b.*\bIDENTIFIED\b`)
 )
 
 // validateMySQLStatement is the controls and the pattern list over one
 // already-normalised statement, with no unwrapping.
 func validateMySQLStatement(matchable string, grant *store.Grant) error {
+	// Every dbbat session to a server shares one upstream account: changing
+	// its password locks every other user out. Refused whatever the grant.
+	if mysqlPasswordChange.MatchString(matchable) {
+		return ErrPasswordChangeBlocked
+	}
+
 	if err := validateQuery(matchable, syntaxMySQL, grant); err != nil {
 		return err
 	}
@@ -849,6 +876,11 @@ func validateMySQLStatement(matchable string, grant *store.Grant) error {
 		if mysqlProcedureCall.MatchString(matchable) {
 			return ErrReadOnlyProcedureCall
 		}
+	}
+
+	// A procedure body can run DDL that the text checks never see.
+	if grant.ShouldBlockDDL() && mysqlProcedureCall.MatchString(matchable) {
+		return ErrDDLProcedureCall
 	}
 
 	for _, pattern := range mysqlBlockedPatterns {

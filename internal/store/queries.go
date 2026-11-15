@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
@@ -39,14 +40,19 @@ type QueryRowsCursor struct {
 	Offset int64 `json:"offset"`
 }
 
-// storableSQLText repairs statement text so the insert cannot fail on it:
-// `sql_text` is a Postgres `text` column, which refuses invalid UTF-8 and the
-// NUL byte. Both reach here from client-chosen bytes, and a refused insert
-// would drop a statement that has already run from the query history. Every
-// proxy and the MCP path insert through CreateQuery or CreatePendingQuery, so
-// this is the one place no protocol can forget. The repaired text is what the
-// chain MAC covers, so verification reads back exactly what was sealed.
-func storableSQLText(s string) string {
+// storableText repairs client-chosen text so the insert cannot fail on it:
+// Postgres `text` columns refuse invalid UTF-8 and the NUL byte, and `jsonb`
+// refuses the NUL character too. All of these reach here from client-chosen
+// bytes, and a refused insert would drop a statement that has already run from
+// the query history. Every proxy and the MCP path insert through CreateQuery,
+// CreatePendingQuery or StoreQueryRows, so these are the places no protocol can
+// forget. The repaired value is what the chain MAC covers, so verification
+// reads back exactly what was sealed.
+//
+// It is the one repair rule: statement text, bound parameter values
+// (storableParameters) and captured rows (storableRowData) all go through it,
+// so the three cannot drift.
+func storableText(s string) string {
 	s = strings.ToValidUTF8(s, "\uFFFD")
 	if strings.IndexByte(s, 0) >= 0 {
 		s = strings.ReplaceAll(s, "\x00", "\uFFFD")
@@ -55,13 +61,104 @@ func storableSQLText(s string) string {
 	return s
 }
 
+// storableSQLText repairs statement text for the `sql_text` column.
+func storableSQLText(s string) string {
+	return storableText(s)
+}
+
+// storableParameters repairs the decoded parameter values before they are
+// marshaled to the `parameters` jsonb column, where a NUL (encoded as \u0000)
+// would make the whole insert fail. Raw holds base64 and is left alone. The
+// caller's value is never mutated: a copy is returned when anything changes.
+func storableParameters(params *QueryParameters) *QueryParameters {
+	if params == nil {
+		return nil
+	}
+
+	var values []string
+
+	for i, v := range params.Values {
+		repaired := storableText(v)
+		if repaired == v {
+			continue
+		}
+
+		if values == nil {
+			values = make([]string, len(params.Values))
+			copy(values, params.Values)
+		}
+
+		values[i] = repaired
+	}
+
+	if values == nil {
+		return params
+	}
+
+	clone := *params
+	clone.Values = values
+
+	return &clone
+}
+
+// jsonNULEscape is how a NUL character appears inside a JSON string once
+// encoded; Postgres refuses it in a jsonb value.
+var jsonNULEscape = []byte(`\u0000`)
+
+// storableRowData repairs a captured row document before it reaches the
+// `row_data` jsonb column: invalid UTF-8 and raw NUL bytes go through
+// storableText, and every \u0000 escape inside a string becomes \ufffd —
+// the same U+FFFD storableText substitutes. An escaped backslash followed by
+// "u0000" is literal text and is kept. Valid documents without either problem
+// are returned byte-identical.
+func storableRowData(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+
+	needsText := !utf8.Valid(raw) || bytes.IndexByte(raw, 0) >= 0
+	if !needsText && !bytes.Contains(raw, jsonNULEscape) {
+		return raw
+	}
+
+	data := raw
+	if needsText {
+		data = []byte(storableText(string(raw)))
+	}
+
+	out := make([]byte, 0, len(data))
+
+	for i := 0; i < len(data); i++ {
+		if data[i] != '\\' || i+1 >= len(data) {
+			out = append(out, data[i])
+
+			continue
+		}
+
+		// Inside a JSON string a backslash always starts an escape: copy it
+		// whole so an escaped backslash cannot be mistaken for the start of
+		// another one.
+		if bytes.HasPrefix(data[i:], jsonNULEscape) {
+			out = append(out, `\ufffd`...)
+			i += len(jsonNULEscape) - 1
+
+			continue
+		}
+
+		out = append(out, data[i], data[i+1])
+		i++
+	}
+
+	return out
+}
+
 // CreateQuery creates a new query record
 func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 	result := &Query{
 		UID:          newUIDv7(), // Generate UUIDv7 for time-ordered inserts
 		ConnectionID: query.ConnectionID,
 		SQLText:      storableSQLText(query.SQLText),
-		Parameters:   query.Parameters,
+		Parameters:   storableParameters(query.Parameters),
 		ExecutedAt:   query.ExecutedAt,
 		DurationMs:   query.DurationMs,
 		RowsAffected: query.RowsAffected,
@@ -295,7 +392,7 @@ func (s *Store) StoreQueryRows(ctx context.Context, rows []PendingQueryRow) erro
 			UID:          newUIDv7(), // Generate UUIDv7 for each row
 			QueryID:      row.QueryID,
 			RowNumber:    row.RowNumber,
-			RowData:      row.RowData,
+			RowData:      storableRowData(row.RowData),
 			RowSizeBytes: row.RowSizeBytes,
 		}
 	}

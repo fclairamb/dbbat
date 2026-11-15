@@ -60,3 +60,10 @@ exception.
   (refuse the connection) or fail closed to `require`? Recommended: fail closed
   to `require` for an existing row and reject at the API boundary for new/edited
   rows, so an upgrade does not break live sessions while new typos are caught.
+
+## Resolved open questions
+
+- Reject an unknown `ssl_mode` at the API boundary for new and edited server rows.
+  For an already-stored unknown mode (pre-fix rows), `PlanFor` fails closed to
+  `require` (no error), so an upgrade does not break live sessions while new typos
+  are caught. (autopilot: recommended answer)

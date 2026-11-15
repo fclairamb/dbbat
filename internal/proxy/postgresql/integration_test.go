@@ -1355,3 +1355,53 @@ func TestIntegration_ResultCapture_PreparedStatementKeepsColumnNames(t *testing.
 		return false
 	}, 5*time.Second, 100*time.Millisecond, "captured row must carry its column name")
 }
+
+// countQueriesWithText counts the logged queries carrying exactly this text.
+func (f *fixture) countQueriesWithText(ctx context.Context, t *testing.T, sql string) int {
+	t.Helper()
+
+	queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 200})
+	require.NoError(t, err)
+
+	n := 0
+
+	for i := range queries {
+		if queries[i].SQLText == sql {
+			n++
+		}
+	}
+
+	return n
+}
+
+// TestIntegration_PipelinedSimpleQueries_AllLogged sends two simple Queries in
+// one flush, before reading any response, against a real PostgreSQL: both ran
+// upstream, so both must be logged. A single Query, the positive control,
+// still logs exactly one row.
+func TestIntegration_PipelinedSimpleQueries_AllLogged(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	const (
+		first  = "SELECT 1 AS pipelined_first"
+		second = "SELECT 2 AS pipelined_second"
+		single = "SELECT 3 AS not_pipelined"
+	)
+
+	sendPipelined(t, conn, first, second)
+	sendPipelined(t, conn, single)
+
+	require.Eventually(t, func() bool {
+		return f.countQueriesWithText(ctx, t, first) == 1 &&
+			f.countQueriesWithText(ctx, t, second) == 1 &&
+			f.countQueriesWithText(ctx, t, single) == 1
+	}, 5*time.Second, 100*time.Millisecond, "each pipelined Query must be logged once")
+
+	// No late duplicate either.
+	time.Sleep(300 * time.Millisecond)
+	assert.Equal(t, 1, f.countQueriesWithText(ctx, t, first))
+	assert.Equal(t, 1, f.countQueriesWithText(ctx, t, second))
+	assert.Equal(t, 1, f.countQueriesWithText(ctx, t, single))
+}

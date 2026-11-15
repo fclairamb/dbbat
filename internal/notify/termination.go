@@ -155,7 +155,7 @@ func buildTerminationBlocks(ev store.TerminationEvent, publicURL string, include
 	if includeSQL && ev.QueryHead != "" {
 		blocks = append(blocks, slack.NewSectionBlock(
 			slack.NewTextBlockObject(
-				"mrkdwn", "```"+truncateSQL(ev.QueryHead, TerminationSQLHeadLength)+"```", false, false,
+				"mrkdwn", "```"+EscapeSlackText(truncateSQL(ev.QueryHead, TerminationSQLHeadLength))+"```", false, false,
 			), nil, nil,
 		))
 	}
@@ -175,7 +175,7 @@ func terminationMainText(ev store.TerminationEvent) string {
 	text := "*User*: " + terminationUserLabel(ev)
 
 	if ev.Grant != nil && ev.Grant.Definition != nil {
-		text += fmt.Sprintf(" · *Grant*: %s", ev.Grant.Definition.Name)
+		text += fmt.Sprintf(" · *Grant*: %s", EscapeSlackText(ev.Grant.Definition.Name))
 	}
 
 	text += "\n*Reason*: " + terminationReasonText(ev)
@@ -205,13 +205,13 @@ func terminationDatabaseLabel(ev store.TerminationEvent) string {
 func terminationReasonText(ev store.TerminationEvent) string {
 	switch ev.Reason {
 	case store.TerminationAdminTerminated:
-		by := ev.TerminatedBy
+		by := EscapeSlackText(ev.TerminatedBy)
 		if by == "" {
 			by = "an admin"
 		}
 
 		if ev.Detail != "" {
-			return fmt.Sprintf("Terminated by %s: %s", by, ev.Detail)
+			return fmt.Sprintf("Terminated by %s: %s", by, EscapeSlackText(ev.Detail))
 		}
 
 		return "Terminated by " + by
@@ -230,6 +230,6 @@ func terminationReasonText(ev store.TerminationEvent) string {
 		return "the grant's transfer quota was exceeded"
 
 	default:
-		return ev.Reason
+		return EscapeSlackText(ev.Reason)
 	}
 }

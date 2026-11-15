@@ -427,7 +427,7 @@ func renewalText(ev GrantRequestEvent, publicURL string) string {
 		formatDuration(ev.Definition.DurationSeconds))
 
 	if j := strings.TrimSpace(ev.Request.Justification); j != "" {
-		text += fmt.Sprintf(" — %q", j)
+		text += fmt.Sprintf(" — %q", EscapeSlackText(j))
 	}
 
 	return text + fmt.Sprintf(" · <%s/app/grant-requests|request>", publicURL)
@@ -498,7 +498,7 @@ func buildBlocks(ev GrantRequestEvent, publicURL string) []slack.Block {
 func mainSectionText(ev GrantRequestEvent) string {
 	dbName := "—"
 	if ev.Server != nil {
-		dbName = ev.Server.Name
+		dbName = EscapeSlackText(ev.Server.Name)
 	}
 
 	defName := "—"
@@ -506,7 +506,7 @@ func mainSectionText(ev GrantRequestEvent) string {
 	durationText := ""
 
 	if ev.Definition != nil {
-		defName = ev.Definition.Name
+		defName = EscapeSlackText(ev.Definition.Name)
 		durationText = formatDuration(ev.Definition.DurationSeconds)
 	}
 
@@ -518,16 +518,16 @@ func mainSectionText(ev GrantRequestEvent) string {
 	if ev.Action != GrantActionCreated && ev.Decider != nil {
 		mainText += fmt.Sprintf("\n*%s by*: %s",
 			strings.Title(string(ev.Action)), //nolint:staticcheck // titlecase short verb is fine here
-			userLabel(ev.Decider),
+			EscapeSlackText(userLabel(ev.Decider)),
 		)
 	}
 
 	if ev.Request.Justification != "" {
-		mainText += "\n*Justification*: " + ev.Request.Justification
+		mainText += "\n*Justification*: " + EscapeSlackText(ev.Request.Justification)
 	}
 
 	if ev.Request.DecisionReason != nil && *ev.Request.DecisionReason != "" {
-		mainText += "\n*Reason*: " + *ev.Request.DecisionReason
+		mainText += "\n*Reason*: " + EscapeSlackText(*ev.Request.DecisionReason)
 	}
 
 	return mainText
@@ -547,12 +547,12 @@ func mentionLine(ev GrantRequestEvent) string {
 
 	dbName := "—"
 	if ev.Server != nil {
-		dbName = ev.Server.Name
+		dbName = EscapeSlackText(ev.Server.Name)
 	}
 
 	defName := "access"
 	if ev.Definition != nil {
-		defName = ev.Definition.Name
+		defName = EscapeSlackText(ev.Definition.Name)
 	}
 
 	line := fmt.Sprintf("%s requested access on *%s* with *%s*.", requester, dbName, defName)
@@ -598,13 +598,28 @@ func actionsBlock(requestUID string) *slack.ActionBlock {
 
 // slackMention renders a Slack @-mention for a linked user (<@ID>) or falls
 // back to the plain username for users without a linked Slack identity.
-// A blank fallback yields "" so callers can skip empty entries.
+// A blank fallback yields "" so callers can skip empty entries. Both the ID
+// and the fallback are escaped: the result is meant for mrkdwn text.
 func slackMention(slackID, fallback string) string {
 	if slackID != "" {
-		return "<@" + slackID + ">"
+		return "<@" + EscapeSlackText(slackID) + ">"
 	}
 
-	return fallback
+	return EscapeSlackText(fallback)
+}
+
+// slackEscaper replaces the three characters Slack treats as control
+// sequences in mrkdwn text (mentions, links, entities).
+var slackEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// EscapeSlackText escapes the Slack mrkdwn metacharacters (&, <, >) of a
+// user-supplied string, so it renders as literal text instead of a live
+// mention (<!channel>, <@U…>) or a masked link (<https://…|click here>).
+// Apply it to every user-supplied value interpolated into mrkdwn text,
+// code spans and blocks included (Slack decodes entities there too). Never
+// apply it to plain_text objects: they would show the entities verbatim.
+func EscapeSlackText(s string) string {
+	return slackEscaper.Replace(s)
 }
 
 func userLabel(u *store.User) string {

@@ -232,6 +232,13 @@ type Session struct {
 	// together. Zero means shared.PreAuthTimeout.
 	preAuthTimeout time.Duration
 
+	// queuedSimpleQueries holds the simple Queries a pipelining client sent
+	// while currentQuery was still waiting for its ReadyForQuery, oldest
+	// first. currentQuery is always the oldest staged simple Query; each one
+	// moves up when the one before it completes (completeSimpleQuery).
+	// Guarded by bookMu.
+	queuedSimpleQueries []*pendingQuery
+
 	// clientSyncEpoch counts the client messages that each earn exactly one
 	// upstream ReadyForQuery: every forwarded Sync and every forwarded simple
 	// Query. Each pendingQuery stamps it when queued, so the RFQ answering
@@ -1211,6 +1218,10 @@ func (s *Session) reconcilePendingQueries() {
 
 	ready := s.upstreamReadyEpoch
 
+	// logQuery persists s.currentQuery; a simple Query staged behind these
+	// entries keeps its slot.
+	staged := s.currentQuery
+
 	kept := s.extendedState.pendingQueries[:0]
 
 	for _, q := range s.extendedState.pendingQueries {
@@ -1235,7 +1246,7 @@ func (s *Session) reconcilePendingQueries() {
 	}
 
 	s.extendedState.pendingQueries = kept
-	s.currentQuery = nil
+	s.currentQuery = staged
 }
 
 // oldestPendingQuery returns the statement the statement clock is parked on:
@@ -1708,6 +1719,11 @@ func (s *Session) completeSimpleQuery(res *simpleQueryResult) {
 
 		s.logQuery(res.rowsAffected, res.queryError, bytesTransferred)
 		s.currentQuery = nil
+
+		// A pipelining client may have sent further simple Queries before
+		// this one was answered: the next one is the statement upstream
+		// answers now, and waits for its own ReadyForQuery.
+		s.promoteQueuedSimpleQuery()
 	}
 
 	// Whatever this exchange left behind is over with it: a terminator
@@ -1717,6 +1733,37 @@ func (s *Session) completeSimpleQuery(res *simpleQueryResult) {
 	s.copyState = nil
 	res.rowsAffected = nil
 	res.queryError = nil
+}
+
+// stageSimpleQuery stages a forwarded simple Query for logging. The slot is
+// currentQuery, unless a previous simple Query still waits for its
+// ReadyForQuery (a client pipelining several Queries in one flush): then it
+// queues behind it instead of overwriting it, which left every Query but the
+// last of the flush unlogged.
+//
+// Callers hold bookMu.
+func (s *Session) stageSimpleQuery(q *pendingQuery) {
+	if s.currentQuery == nil {
+		s.currentQuery = q
+
+		return
+	}
+
+	s.queuedSimpleQueries = append(s.queuedSimpleQueries, q)
+}
+
+// promoteQueuedSimpleQuery moves the oldest queued simple Query into the
+// currentQuery slot once that slot is free.
+//
+// Callers hold bookMu.
+func (s *Session) promoteQueuedSimpleQuery() {
+	if s.currentQuery != nil || len(s.queuedSimpleQueries) == 0 {
+		return
+	}
+
+	s.currentQuery = s.queuedSimpleQueries[0]
+	s.queuedSimpleQueries[0] = nil
+	s.queuedSimpleQueries = s.queuedSimpleQueries[1:]
 }
 
 // receiveFromUpstream reads the next upstream message for the relay, and is
