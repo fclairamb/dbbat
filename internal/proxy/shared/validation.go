@@ -29,6 +29,14 @@ var (
 	// and the operator needs to know the fix is a grant without read_only.
 	ErrReadOnlyProcedureCall = errors.New("procedure calls and anonymous code blocks are not " +
 		"permitted with read-only access: dbbat cannot see what they would run")
+	// ErrDDLProcedureCall — a block_ddl grant met a MySQL/MariaDB stored
+	// procedure call (`CALL`). block_ddl is a check on the statement text, and
+	// the procedure's body, which can run any DDL directly or through a
+	// PREPARE/EXECUTE, lives in the database. Its own error, naming the control,
+	// so the refusal row says why a statement with no DDL keyword was stopped.
+	// The PostgreSQL proxy has its own, which also covers DO blocks.
+	ErrDDLProcedureCall = errors.New("procedure calls (CALL) are not permitted: your access grant " +
+		"blocks schema modifications, and dbbat cannot see what they would run")
 	// ErrReadOnlyPinBypass — a read_only MySQL/MariaDB session tried to take the
 	// server-side read-only pin off (`SET TRANSACTION READ WRITE`,
 	// `START TRANSACTION READ WRITE`, `SET tx_read_only = 0`, …).
@@ -830,6 +838,11 @@ func validateMySQLStatement(matchable string, grant *store.Grant) error {
 		if mysqlProcedureCall.MatchString(matchable) {
 			return ErrReadOnlyProcedureCall
 		}
+	}
+
+	// A procedure body can run DDL that the text checks never see.
+	if grant.ShouldBlockDDL() && mysqlProcedureCall.MatchString(matchable) {
+		return ErrDDLProcedureCall
 	}
 
 	for _, pattern := range mysqlBlockedPatterns {
