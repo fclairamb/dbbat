@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.32.2](https://github.com/fclairamb/dbbat/compare/v0.32.1...v0.32.2) (2026-11-15)
+
+
+### Features
+
+* **auth:** link or unlink a Slack or OIDC identity to your own account from the new Profile page; unlinking the last sign-in method is refused, and both actions are audited ([#498](https://github.com/fclairamb/dbbat/issues/498)) ([3daf59e](https://github.com/fclairamb/dbbat/commit/3daf59e79ea57f2dda6e72b160dbd002a54d74a6))
+* **audit:** audit and query listings flag rows outside the MAC chain with an Unverified badge ([#498](https://github.com/fclairamb/dbbat/issues/498)) ([3daf59e](https://github.com/fclairamb/dbbat/commit/3daf59e79ea57f2dda6e72b160dbd002a54d74a6))
+
+### Bug Fixes
+
+* **grants:** close batch-statement grant bypasses ([#498](https://github.com/fclairamb/dbbat/issues/498)) ([3daf59e](https://github.com/fclairamb/dbbat/commit/3daf59e79ea57f2dda6e72b160dbd002a54d74a6))
+  * PostgreSQL: `block_ddl` / `block_copy` check every statement of a simple-query batch, not only the first (`SELECT 1; DROP TABLE t` is refused)
+  * SQL Server: `EXEC <procedure>` sent as SQLBatch text (including `sp_cursor` and nested `sp_executesql`) is refused under `read_only`, `block_ddl` and `block_copy`, like the RPC path
+  * Oracle: `AUDIT`, `NOAUDIT`, `ANALYZE` and `ASSOCIATE`/`DISASSOCIATE STATISTICS` are refused under `read_only` and `block_ddl`, `LOCK TABLE` under `read_only`
+* **capture:** PostgreSQL captured rows keep their column names and decoded binary values when an Execute has no RowDescription (pgx prepared statements, paged portals) ([#498](https://github.com/fclairamb/dbbat/issues/498)) ([3daf59e](https://github.com/fclairamb/dbbat/commit/3daf59e79ea57f2dda6e72b160dbd002a54d74a6))
+
 ## [0.32.1](https://github.com/fclairamb/dbbat/compare/v0.32.0...v0.32.1) (2026-11-15)
 
 
