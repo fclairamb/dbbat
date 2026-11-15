@@ -78,3 +78,9 @@ log in with the right password" while keeping the distributed-guessing backstop.
 - Should a correct password past the ceiling be allowed silently, or allowed
   **and** audited as "login succeeded during an active guessing burst"?
   Recommended: allow and audit (keeps the signal without locking the user out).
+
+## Resolved open questions
+
+- A correct password past the per-username ceiling is allowed **and** audited as
+  "login succeeded during an active guessing burst", so the signal is kept without
+  locking the legitimate user out. (autopilot: recommended answer)
