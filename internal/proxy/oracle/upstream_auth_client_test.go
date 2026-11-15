@@ -361,6 +361,8 @@ func TestRunUpstreamClientAuthHandshake(t *testing.T) {
 		password: password,
 	}
 
+	scriptedSrv.done = make(chan struct{})
+
 	go scriptedSrv.run()
 
 	logger := slog.New(slog.DiscardHandler)
@@ -390,13 +392,20 @@ func TestRunUpstreamClientAuthHandshake(t *testing.T) {
 		encryptionKey:      encryptionKey,
 	}
 
-	if err := clientPipe.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	// The deadline is only a hang guard: the exchange takes tens of
+	// milliseconds, but a CI runner saturated by parallel race-enabled tests
+	// can starve this goroutine for seconds, and a tight deadline then closes
+	// the pipe under the client mid-handshake.
+	if err := clientPipe.SetDeadline(time.Now().Add(scriptedAuthDeadline)); err != nil {
 		t.Fatalf("set deadline: %v", err)
 	}
 
 	if err := s.runUpstreamClientAuth(); err != nil {
 		t.Fatalf("runUpstreamClientAuth: %v", err)
 	}
+
+	// Wait for the server goroutine before reading its error (no data race).
+	<-scriptedSrv.done
 
 	if scriptedSrv.err != nil {
 		t.Fatalf("scripted server: %v", scriptedSrv.err)
@@ -411,12 +420,18 @@ type scriptedAuthServer struct {
 	conn     net.Conn
 	password string
 	err      error
+	done     chan struct{}
 }
 
+// scriptedAuthDeadline bounds the scripted exchange so a genuine hang fails
+// the test instead of blocking it forever.
+const scriptedAuthDeadline = 60 * time.Second
+
 func (s *scriptedAuthServer) run() {
+	defer close(s.done)
 	defer func() { _ = s.conn.Close() }()
 
-	if err := s.conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := s.conn.SetDeadline(time.Now().Add(scriptedAuthDeadline)); err != nil {
 		s.err = err
 
 		return
