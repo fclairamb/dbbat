@@ -611,6 +611,13 @@ func (s *session) resolveHoldCanceled(uid uuid.UUID) bool {
 		return false
 	}
 
+	// heldMu is held across Resolve: the moment the decision is delivered the
+	// parked session wakes and asks takeAttentionAck, and it must find the mark
+	// set, not race the reader for it (it would answer an error, not the ack).
+	// Resolve never blocks and never calls back into the session.
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
 	if !s.server.approvalDeps.Registry.Resolve(approval.Decision{
 		QueryUID: uid,
 		Status:   store.ApprovalAbandoned,
@@ -620,9 +627,7 @@ func (s *session) resolveHoldCanceled(uid uuid.UUID) bool {
 		return false
 	}
 
-	s.heldMu.Lock()
 	s.attentionAckDue = true
-	s.heldMu.Unlock()
 
 	return true
 }
