@@ -15,6 +15,7 @@ import {
   LockKeyhole,
   Gamepad2,
   Settings,
+  User,
 } from "lucide-react";
 
 import { useAuth } from "@/contexts/AuthContext";
@@ -277,6 +278,12 @@ export function AppSidebar() {
                   )}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem asChild data-testid="profile-menu-item">
+                  <Link to="/profile">
+                    <User className="mr-2 h-4 w-4" />
+                    <span>Profile</span>
+                  </Link>
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => setPasswordDialogOpen(true)}>
                   <LockKeyhole className="mr-2 h-4 w-4" />
                   <span>Change password</span>

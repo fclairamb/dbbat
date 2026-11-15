@@ -152,59 +152,77 @@ func (s *Server) roleMappingInfo(ctx context.Context) roleMappingInfo {
 // GET /api/v1/auth/:provider
 func (s *Server) handleOAuthAuthorize(providerName string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		provider, ok := s.oauthProviders[providerName]
+		redirectURL, ok := s.startOAuthFlow(c, providerName, sanitizeLoginRedirect(c.Query("redirect")), nil)
 		if !ok {
-			writeError(c, http.StatusNotFound, ErrCodeNotFound, "unknown OAuth provider")
-			return
-		}
-
-		// Generate random state token
-		stateToken, err := generateRandomState()
-		if err != nil {
-			writeInternalError(c, s.logger, err, "failed to generate OAuth state")
-			return
-		}
-
-		callbackURL := s.buildCallbackURL(c.Request, providerName)
-
-		// PKCE-capable providers mint a code verifier here; it has to be
-		// persisted with the state row *before* the redirect, because the
-		// callback may well land on a different replica.
-		redirectURL, verifier, err := authorizeURLFor(c.Request.Context(), provider, stateToken, callbackURL)
-		if err != nil {
-			writeInternalError(c, s.logger, err, "failed to build OAuth authorization URL")
-			return
-		}
-
-		var metadata json.RawMessage
-		if verifier != "" {
-			metadata, err = json.Marshal(oauthStateMetadata{PKCEVerifier: verifier})
-			if err != nil {
-				writeInternalError(c, s.logger, err, "failed to encode OAuth state metadata")
-				return
-			}
-		}
-
-		// Persist state for CSRF validation. The state row also carries the
-		// post-login redirect target (e.g. the device consent page that
-		// bounced the user here), so the callback can send the user back to
-		// where they started instead of the dashboard.
-		oauthState := &store.OAuthState{
-			State:       stateToken,
-			Provider:    providerName,
-			RedirectURL: sanitizeLoginRedirect(c.Query("redirect")),
-			Metadata:    metadata,
-		}
-
-		// The TTL is applied by the store from the database clock — the same one
-		// the callback's `expires_at > NOW()` check reads.
-		if _, err := s.store.CreateOAuthState(c.Request.Context(), oauthState, oauthStateTTL); err != nil {
-			writeInternalError(c, s.logger, err, "failed to persist OAuth state")
 			return
 		}
 
 		c.Redirect(http.StatusFound, redirectURL)
 	}
+}
+
+// startOAuthFlow persists a fresh oauth_states row for providerName and returns
+// the provider's authorization URL. linkUserID binds the row to a signed-in
+// user (the "link my identity" flow); nil for an ordinary login. On failure it
+// has already written the error response and returns ok=false.
+func (s *Server) startOAuthFlow(
+	c *gin.Context,
+	providerName, redirect string,
+	linkUserID *uuid.UUID,
+) (string, bool) {
+	provider, ok := s.oauthProviders[providerName]
+	if !ok {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "unknown OAuth provider")
+		return "", false
+	}
+
+	// Generate random state token
+	stateToken, err := generateRandomState()
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to generate OAuth state")
+		return "", false
+	}
+
+	callbackURL := s.buildCallbackURL(c.Request, providerName)
+
+	// PKCE-capable providers mint a code verifier here; it has to be
+	// persisted with the state row *before* the redirect, because the
+	// callback may well land on a different replica.
+	redirectURL, verifier, err := authorizeURLFor(c.Request.Context(), provider, stateToken, callbackURL)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to build OAuth authorization URL")
+		return "", false
+	}
+
+	var metadata json.RawMessage
+	if verifier != "" {
+		metadata, err = json.Marshal(oauthStateMetadata{PKCEVerifier: verifier})
+		if err != nil {
+			writeInternalError(c, s.logger, err, "failed to encode OAuth state metadata")
+			return "", false
+		}
+	}
+
+	// Persist state for CSRF validation. The state row also carries the
+	// post-login redirect target (e.g. the device consent page that
+	// bounced the user here), so the callback can send the user back to
+	// where they started instead of the dashboard.
+	oauthState := &store.OAuthState{
+		State:       stateToken,
+		Provider:    providerName,
+		RedirectURL: redirect,
+		Metadata:    metadata,
+		LinkUserID:  linkUserID,
+	}
+
+	// The TTL is applied by the store from the database clock — the same one
+	// the callback's `expires_at > NOW()` check reads.
+	if _, err := s.store.CreateOAuthState(c.Request.Context(), oauthState, oauthStateTTL); err != nil {
+		writeInternalError(c, s.logger, err, "failed to persist OAuth state")
+		return "", false
+	}
+
+	return redirectURL, true
 }
 
 // authorizeURLFor builds the provider's authorization URL, using PKCE when
@@ -312,7 +330,18 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 			s.logger.ErrorContext(ctx, "OAuth code exchange failed",
 				slog.String("provider", providerName),
 				slog.Any("error", err))
+			if oauthState.LinkUserID != nil {
+				s.redirectProfileLinkError(c)
+				return
+			}
 			s.redirectWithError(c, ErrCodeOAuthFailed, redirectTarget)
+			return
+		}
+
+		// A flow started from a signed-in session links the identity onto
+		// that session's user; it never logs anyone in.
+		if oauthState.LinkUserID != nil {
+			s.completeIdentityLink(c, providerName, *oauthState.LinkUserID, oauthUser)
 			return
 		}
 

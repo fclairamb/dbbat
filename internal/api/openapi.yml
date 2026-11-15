@@ -576,6 +576,64 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /auth/oidc/link:
+    post:
+      tags:
+        - Auth
+      summary: Start linking an SSO identity to the current account
+      description: |
+        Starts the provider's authorization flow with a state row bound to the
+        calling user. The callback attaches the returned identity to that user
+        (it never logs anyone in), refuses an identity already linked to
+        another user with 409, records `user.identity_linked` with
+        `method: session`, and redirects the browser to the profile page.
+        Web session only: API keys are refused.
+      operationId: linkOidcIdentity
+      responses:
+        '200':
+          description: The URL to send the browser to
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthLinkResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/slack/link:
+    post:
+      tags:
+        - Auth
+      summary: Start linking an SSO identity to the current account
+      description: |
+        Starts the provider's authorization flow with a state row bound to the
+        calling user. The callback attaches the returned identity to that user
+        (it never logs anyone in), refuses an identity already linked to
+        another user with 409, records `user.identity_linked` with
+        `method: session`, and redirects the browser to the profile page.
+        Web session only: API keys are refused.
+      operationId: linkSlackIdentity
+      responses:
+        '200':
+          description: The URL to send the browser to
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthLinkResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /auth/device/consent:
     get:
       tags:
@@ -820,6 +878,49 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /users/me/identities:
+    get:
+      tags:
+        - Users
+      summary: List the SSO identities linked to the current user
+      operationId: listMyIdentities
+      responses:
+        '200':
+          description: Linked identities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentitiesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /users/me/identities/{provider}:
+    delete:
+      tags:
+        - Users
+      summary: Unlink an SSO identity from the current user
+      description: Audited as `user.identity_unlinked`. Web session only.
+      operationId: unlinkMyIdentity
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Identity unlinked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -6507,6 +6608,40 @@ components:
           description: The one-time code handed to the browser by the OAuth callback
       required:
         - code
+
+    OAuthLinkResponse:
+      type: object
+      properties:
+        authorize_url:
+          type: string
+      required:
+        - authorize_url
+
+    Identity:
+      type: object
+      properties:
+        provider:
+          type: string
+        email:
+          type: string
+        display_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - provider
+        - created_at
+
+    IdentitiesResponse:
+      type: object
+      properties:
+        identities:
+          type: array
+          items:
+            $ref: '#/components/schemas/Identity'
+      required:
+        - identities
 
     LoginExchangeResponse:
       type: object

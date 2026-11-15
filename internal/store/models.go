@@ -1612,8 +1612,11 @@ type OAuthState struct {
 	Provider    string          `bun:"provider,notnull" json:"provider"`
 	RedirectURL string          `bun:"redirect_url" json:"redirect_url,omitempty"`
 	Metadata    json.RawMessage `bun:"metadata,type:jsonb" json:"metadata,omitempty"`
-	ExpiresAt   time.Time       `bun:"expires_at,notnull" json:"expires_at"`
-	CreatedAt   time.Time       `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	// LinkUserID is set when the flow was started by a signed-in user to
+	// attach the returned identity to their own account.
+	LinkUserID *uuid.UUID `bun:"link_user_id,type:uuid" json:"link_user_id,omitempty"`
+	ExpiresAt  time.Time  `bun:"expires_at,notnull" json:"expires_at"`
+	CreatedAt  time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
 // APIKeyFilter represents filters for listing API keys

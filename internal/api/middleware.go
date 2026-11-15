@@ -205,6 +205,19 @@ func (s *Server) requireWebSessionOrBasicAuth() gin.HandlerFunc {
 	}
 }
 
+// requireWebSession middleware ensures the request carries a web session: not
+// an API key, and not Basic Auth either.
+func (s *Server) requireWebSession() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if getAuthMethod(c) != authMethodWebSession {
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "this operation requires a web session")
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // getAuthMethod returns the authentication method used for the current request
 func getAuthMethod(c *gin.Context) string {
 	method, exists := c.Get(contextKeyAuthMethod)

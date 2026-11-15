@@ -340,6 +340,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/oidc/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start linking an SSO identity to the current account
+         * @description Starts the provider's authorization flow with a state row bound to the
+         *     calling user. The callback attaches the returned identity to that user
+         *     (it never logs anyone in), refuses an identity already linked to
+         *     another user with 409, records `user.identity_linked` with
+         *     `method: session`, and redirects the browser to the profile page.
+         *     Web session only: API keys are refused.
+         */
+        post: operations["linkOidcIdentity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/slack/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start linking an SSO identity to the current account
+         * @description Starts the provider's authorization flow with a state row bound to the
+         *     calling user. The callback attaches the returned identity to that user
+         *     (it never logs anyone in), refuses an identity already linked to
+         *     another user with 409, records `user.identity_linked` with
+         *     `method: session`, and redirects the browser to the profile page.
+         *     Web session only: API keys are refused.
+         */
+        post: operations["linkSlackIdentity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/device/consent": {
         parameters: {
             query?: never;
@@ -488,6 +538,43 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/me/identities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the SSO identities linked to the current user */
+        get: operations["listMyIdentities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/me/identities/{provider}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Unlink an SSO identity from the current user
+         * @description Audited as `user.identity_unlinked`. Web session only.
+         */
+        delete: operations["unlinkMyIdentity"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3678,6 +3765,19 @@ export interface components {
             /** @description The one-time code handed to the browser by the OAuth callback */
             code: string;
         };
+        OAuthLinkResponse: {
+            authorize_url: string;
+        };
+        Identity: {
+            provider: string;
+            email?: string;
+            display_name?: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        IdentitiesResponse: {
+            identities: components["schemas"]["Identity"][];
+        };
         LoginExchangeResponse: {
             /** @description The web session token (web_...), delivered exactly once */
             access_token: string;
@@ -4619,6 +4719,9 @@ export type DeviceAuthorizationResponse = components['schemas']['DeviceAuthoriza
 export type DeviceTokenRequest = components['schemas']['DeviceTokenRequest'];
 export type DeviceTokenResponse = components['schemas']['DeviceTokenResponse'];
 export type LoginExchangeRequest = components['schemas']['LoginExchangeRequest'];
+export type OAuthLinkResponse = components['schemas']['OAuthLinkResponse'];
+export type Identity = components['schemas']['Identity'];
+export type IdentitiesResponse = components['schemas']['IdentitiesResponse'];
 export type LoginExchangeResponse = components['schemas']['LoginExchangeResponse'];
 export type OAuthError = components['schemas']['OAuthError'];
 export type DeviceConsentInfo = components['schemas']['DeviceConsentInfo'];
@@ -5082,6 +5185,54 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    linkOidcIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The URL to send the browser to */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthLinkResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    linkSlackIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The URL to send the browser to */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthLinkResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     getDeviceConsent: {
         parameters: {
             query: {
@@ -5275,6 +5426,52 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listMyIdentities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Linked identities */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentitiesResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    unlinkMyIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Identity unlinked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
