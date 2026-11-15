@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.2](https://github.com/fclairamb/dbbat/compare/v0.32.1...v0.32.2) (2026-11-15)
+
+
+### Bug Fixes
+
+* **grants:** close batch-statement grant bypasses, keep PG capture metadata, add SSO identity linking ([#498](https://github.com/fclairamb/dbbat/issues/498)) ([3daf59e](https://github.com/fclairamb/dbbat/commit/3daf59e79ea57f2dda6e72b160dbd002a54d74a6))
+
 ## [0.32.1](https://github.com/fclairamb/dbbat/compare/v0.32.0...v0.32.1) (2026-11-15)
 
 
