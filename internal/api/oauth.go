@@ -539,16 +539,10 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 	// Generate a unique username from the display name or email
 	username := s.generateUniqueUsername(ctx, oauthUser.DisplayName, oauthUser.Email)
 
-	// Create user with a random password (they authenticate via OAuth)
-	randomPass, err := generateRandomPassword()
-	if err != nil {
-		return nil, fmt.Errorf("generate password: %w", err)
-	}
-
-	passwordHash, err := crypto.HashPassword(randomPass)
-	if err != nil {
-		return nil, fmt.Errorf("hash password: %w", err)
-	}
+	// Create the user with an unusable password hash (they authenticate via
+	// OAuth): it never verifies, and marks the account as having no local
+	// password so the last sign-in method cannot be unlinked.
+	passwordHash := unusablePasswordHash
 
 	user, err = s.store.CreateUser(ctx, username, passwordHash, roles)
 	if err != nil {
@@ -557,8 +551,7 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 
 	// Mark password as changed so the user can access the UI without being forced
 	// to change a password they never knew.
-	dummyHash := passwordHash // Same hash, just triggers password_changed_at update
-	if err := s.store.UpdateUser(ctx, user.UID, store.UserUpdate{PasswordHash: &dummyHash}); err != nil {
+	if err := s.store.UpdateUser(ctx, user.UID, store.UserUpdate{PasswordHash: &passwordHash}); err != nil {
 		return nil, fmt.Errorf("mark password changed: %w", err)
 	}
 
@@ -715,15 +708,6 @@ func generateRandomState() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// generateRandomPassword produces a random password for auto-created users.
-func generateRandomPassword() (string, error) {
-	b := make([]byte, randomPassLength)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("crypto/rand: %w", err)
-	}
-	return hex.EncodeToString(b), nil
-}
-
 // buildCallbackURL constructs the OAuth callback URL from the current request.
 func (s *Server) buildCallbackURL(r *http.Request, providerName string) string {
 	scheme := "https"
@@ -860,4 +844,13 @@ func (s *Server) consumeRedirectTarget(ctx context.Context, stateToken, provider
 		return ""
 	}
 	return oauthState.RedirectURL
+}
+
+// unusablePasswordHash is stored for accounts created through OAuth. It is not
+// a valid argon2id encoding, so no password ever verifies against it.
+const unusablePasswordHash = "!oauth-no-local-password"
+
+// hasLocalPassword reports whether the user can sign in with a password.
+func hasLocalPassword(user *store.User) bool {
+	return user.PasswordHash != "" && user.PasswordHash != unusablePasswordHash
 }

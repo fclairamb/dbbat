@@ -237,6 +237,12 @@ func (s *Server) handleUnlinkMyIdentity(c *gin.Context) {
 		return
 	}
 
+	if len(identities) == 1 && !hasLocalPassword(currentUser) {
+		writeError(c, http.StatusConflict, ErrCodeConflict,
+			"cannot unlink your only sign-in method: set a password or link another identity first")
+		return
+	}
+
 	if err := s.store.DeleteUserIdentity(ctx, target.UID); err != nil {
 		writeInternalError(c, s.logger, err, "failed to unlink identity")
 		return

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -169,6 +170,62 @@ func TestUnlinkMyIdentity(t *testing.T) {
 
 	w = h.do(http.MethodDelete, "/users/me/identities/"+h.name)
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestUnlinkRefusesLastSignInMethod(t *testing.T) {
+	t.Parallel()
+
+	h := newLinkHarness(t, []string{store.RoleConnector})
+	hash := unusablePasswordHash
+	require.NoError(t, h.store.UpdateUser(t.Context(), h.user.UID, store.UserUpdate{PasswordHash: &hash}))
+	h.user.PasswordHash = hash
+
+	state := h.start(t)
+	h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+state)
+
+	w := h.do(http.MethodDelete, "/users/me/identities/"+h.name)
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "only sign-in method")
+
+	ids, err := h.store.GetUserIdentities(t.Context(), h.user.UID)
+	require.NoError(t, err)
+	assert.Len(t, ids, 1, "the identity must survive the refused unlink")
+}
+
+func TestOAuthLinkExpiredStateFails(t *testing.T) {
+	t.Parallel()
+
+	h := newLinkHarness(t, []string{store.RoleConnector})
+	token := "expired-" + uuid.NewString()
+	_, err := h.store.CreateOAuthState(t.Context(), &store.OAuthState{
+		State: token, Provider: h.name, LinkUserID: &h.user.UID,
+	}, -time.Minute)
+	require.NoError(t, err)
+
+	w := h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+token)
+	assert.Contains(t, w.Header().Get("Location"), "OAUTH_STATE_MISMATCH")
+
+	ids, err := h.store.GetUserIdentities(t.Context(), h.user.UID)
+	require.NoError(t, err)
+	assert.Empty(t, ids)
+}
+
+func TestOAuthLinkStateProviderMismatchFails(t *testing.T) {
+	t.Parallel()
+
+	h := newLinkHarness(t, []string{store.RoleConnector})
+	otherName := "other-" + uuid.NewString()[:8]
+	h.server.oauthProviders[otherName] = &recordingProvider{name: otherName, user: h.provider.user}
+	h.router.GET("/auth/"+otherName+"/callback", h.server.handleOAuthCallback(otherName))
+
+	state := h.start(t) // state row is bound to h.name
+
+	w := h.do(http.MethodGet, "/auth/"+otherName+"/callback?code=x&state="+state)
+	assert.Contains(t, w.Header().Get("Location"), "OAUTH_STATE_MISMATCH")
+
+	ids, err := h.store.GetUserIdentities(t.Context(), h.user.UID)
+	require.NoError(t, err)
+	assert.Empty(t, ids)
 }
 
 func ptrOf[T any](v T) *T { return &v }
