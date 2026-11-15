@@ -867,6 +867,32 @@ func TestIntegration_BlockDDL_BlocksCreateTable(t *testing.T) {
 	f.assertBlockedQueryLogged(ctx, simpleSQL)
 }
 
+// TestIntegration_BlockDDL_RefusesBatchedDrop verifies block_ddl refuses a
+// simple-query batch whose first statement is harmless and whose second is
+// DDL, and that the table is still there afterwards.
+func TestIntegration_BlockDDL_RefusesBatchedDrop(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	seed := f.mustConnect(ctx, fixturePass)
+	_, err := seed.Exec(ctx, "CREATE TABLE batch_keep (id int)")
+	require.NoError(t, err)
+	require.NoError(t, seed.Close(ctx))
+
+	f.replaceGrant(ctx, []string{"block_ddl"})
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	_, err = conn.Exec(ctx, "SELECT 1; DROP TABLE batch_keep", pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "a batch hiding DDL after a SELECT must be refused")
+
+	var n int
+
+	require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM batch_keep").Scan(&n),
+		"the table must still exist and the session must survive")
+	assert.Equal(t, 0, n)
+}
+
 // TestIntegration_BlockDDL_RefusesDoBlock verifies block_ddl refuses a DO
 // block (and a CALL) whose body would drop a table, and that the table is
 // still there afterwards.
