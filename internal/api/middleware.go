@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
@@ -100,10 +101,10 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 	// Look up user
 	user, err := s.store.GetUserByUsername(c.Request.Context(), username)
 	if err != nil {
-		// Record failure AFTER credential verification fails
-		s.noteAuthFailure(c, username)
+		// Record the failure AFTER credential verification fails; past the
+		// username ceiling this is a 429, as for POST /auth/login.
 		c.Header("WWW-Authenticate", `Basic realm="DBBat"`)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
+		s.failAuth(c, username, "invalid credentials")
 		c.Abort()
 		return
 	}
@@ -117,15 +118,16 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 		valid, err = verifyPasswordDirect(user.PasswordHash, password)
 	}
 	if err != nil || !valid {
-		// Record failure AFTER credential verification fails
-		s.noteAuthFailure(c, username)
+		// Record the failure AFTER credential verification fails; past the
+		// username ceiling this is a 429, as for POST /auth/login.
 		c.Header("WWW-Authenticate", `Basic realm="DBBat"`)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
+		s.failAuth(c, username, "invalid credentials")
 		c.Abort()
 		return
 	}
 
-	// Reset failure count on successful login
+	// Reset failure count on successful login; a success during a guessing
+	// burst is audited and lifts the username ceiling, as for POST /auth/login.
 	s.noteAuthSuccess(c, username)
 
 	// Same rule as POST /auth/login: a password that was never changed — the
@@ -540,7 +542,7 @@ func (s *Server) noteAuthFailure(c *gin.Context, username string) {
 		EventType: store.AuditEventAuthFailureCeiling,
 		Details:   details,
 	}
-	if user, err := s.store.GetUserByUsername(ctx, username); err == nil {
+	if user := s.throttleKeyUser(ctx, username); user != nil {
 		event.UserID = &user.UID
 	}
 
@@ -582,13 +584,30 @@ func (s *Server) noteAuthSuccess(c *gin.Context, username string) {
 		EventType: store.AuditEventAuthSuccessDuringCeiling,
 		Details:   details,
 	}
-	if user, err := s.store.GetUserByUsername(ctx, username); err == nil {
+	if user := s.throttleKeyUser(ctx, username); user != nil {
 		event.UserID = &user.UID
 	}
 
 	if err := s.store.LogAuditEvent(ctx, event); err != nil {
 		s.logger.ErrorContext(ctx, "failed to audit a login during a guessing burst", slog.Any("error", err))
 	}
+}
+
+// throttleKeyUser resolves a throttle key to its user, for the audit trail.
+// The key is a username, except for PUT /users/:uid/password without one,
+// which throttles on the target UID. It returns nil when no user matches.
+func (s *Server) throttleKeyUser(ctx context.Context, key string) *store.User {
+	if user, err := s.store.GetUserByUsername(ctx, key); err == nil {
+		return user
+	}
+
+	if uid, err := uuid.Parse(key); err == nil {
+		if user, err := s.store.GetUserByUID(ctx, uid); err == nil {
+			return user
+		}
+	}
+
+	return nil
 }
 
 // isTestMode returns true if the server is running in test mode
