@@ -3987,6 +3987,8 @@ export interface components {
             results_truncated?: boolean;
             /** @description True when dbbat lost result rows it meant to keep: the batched row writer's queue was full (storage fell behind the proxy) or a batch insert failed. Deliberately distinct from `results_truncated` — truncation is an expected, configured prefix, a drop is dbbat failing to keep up — and the two are never conflated. Rows are never held back from the client to keep the capture complete. */
             results_dropped?: boolean;
+            /** @description False when the row carries no chain position (`chain_seq` is NULL): nothing vouches for it. Expected for rows written before the chain anchor or by a store without an encryption key; any other unchained row may be forged. Run `dbbat audit verify` to check. */
+            chained?: boolean;
             /**
              * @description Approval-hold state. Absent for the overwhelming majority of queries (no approval pattern matched). `pending` means the statement is parked mid-flight waiting for a human and has NOT run. `abandoned` means the client gave up (disconnect, cancel, grant expiry, shutdown) before anyone decided — nothing ran, and it is deliberately distinct from `denied`. There is no `timeout` value: a hold has no clock of its own.
              * @enum {string|null}
@@ -4101,6 +4103,8 @@ export interface components {
              * @description Event timestamp
              */
             created_at: string;
+            /** @description False when the row carries no chain position (`chain_seq` is NULL): nothing vouches for it. Expected for rows written before the chain anchor or by a store without an encryption key; any other unchained row may be forged. Run `dbbat audit verify` to check. */
+            chained?: boolean;
         };
         /**
          * @description When one user last opened a proxy session, as returned by

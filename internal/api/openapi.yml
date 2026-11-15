@@ -7018,6 +7018,13 @@ components:
             truncation is an expected, configured prefix, a drop is dbbat
             failing to keep up — and the two are never conflated. Rows are
             never held back from the client to keep the capture complete.
+        chained:
+          type: boolean
+          description: >-
+            False when the row carries no chain position (`chain_seq` is
+            NULL): nothing vouches for it. Expected for rows written before
+            the chain anchor or by a store without an encryption key; any other
+            unchained row may be forged. Run `dbbat audit verify` to check.
         approval_status:
           type: string
           nullable: true
@@ -7202,6 +7209,13 @@ components:
           type: string
           format: date-time
           description: Event timestamp
+        chained:
+          type: boolean
+          description: >-
+            False when the row carries no chain position (`chain_seq` is
+            NULL): nothing vouches for it. Expected for rows written before
+            the chain anchor or by a store without an encryption key; any other
+            unchained row may be forged. Run `dbbat audit verify` to check.
       required:
         - uid
         - event_type

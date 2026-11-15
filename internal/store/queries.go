@@ -738,7 +738,7 @@ func (s *Store) buildListQueriesQuery(
 		Model(dest).
 		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, " +
 			"q.results_truncated, q.results_dropped, q.copy_format, q.copy_direction, " +
-			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, c.user_id, c.database_id").
+			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, q.chain_seq, c.user_id, c.database_id").
 		Join("JOIN connections c ON q.connection_id = c.uid")
 
 	if filter.ConnectionID != nil {
