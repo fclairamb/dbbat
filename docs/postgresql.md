@@ -212,6 +212,11 @@ identifiers and dollar-quoted bodies, after any comment, and only when it
 belongs to a SELECT (not to `INSERT INTO`). The same reading makes it a write
 for the `read_only` text check, which the pin already backed.
 
+A simple-query string can carry several statements and PostgreSQL runs them
+all, so the check reads every statement of the batch (split outside literals,
+comments and dollar-quoted bodies), not just the first: `SELECT 1; DROP TABLE t`
+is refused. `block_copy` reads a batch the same way.
+
 A `DO` block or a `CALL` carries none of those keywords, yet its body can run
 any DDL, directly or built at run time with `EXECUTE`. Both are therefore
 refused under `block_ddl` too (`ErrDDLProcedureCall`, whose text names the

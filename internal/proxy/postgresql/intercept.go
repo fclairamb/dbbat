@@ -153,7 +153,7 @@ func (s *Session) validateStatement(sqlText string) error {
 	}
 
 	// Control: block_ddl (only check if not already read_only, since read_only blocks DDL at PG level)
-	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && isDDLQuery(sqlText) {
+	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && anyStatement(sqlText, isDDLQuery) {
 		return ErrDDLNotPermitted
 	}
 
@@ -166,7 +166,7 @@ func (s *Session) validateStatement(sqlText string) error {
 	}
 
 	// Control: block_copy
-	if s.grant.ShouldBlockCopy() && isCopyQuery(sqlText) {
+	if s.grant.ShouldBlockCopy() && anyStatement(sqlText, isCopyQuery) {
 		return ErrCopyNotPermitted
 	}
 
@@ -178,6 +178,28 @@ func (s *Session) validateStatement(sqlText string) error {
 	}
 
 	return nil
+}
+
+// anyStatement reports whether pred holds for the text or for any statement of
+// a simple-query batch. PostgreSQL runs every statement of a Query message, and
+// the prefix classifiers only read the first keyword.
+func anyStatement(sqlText string, pred func(string) bool) bool {
+	if pred(sqlText) {
+		return true
+	}
+
+	parts := shared.SplitPostgresStatements(sqlText)
+	if len(parts) < 2 {
+		return false
+	}
+
+	for _, part := range parts {
+		if pred(part) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // validateReadOnlyBatch checks every statement of a simple-query string on a
