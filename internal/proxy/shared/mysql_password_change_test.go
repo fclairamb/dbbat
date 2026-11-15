@@ -39,11 +39,11 @@ func TestValidateMySQLQuery_BlocksIdentifiedPasswordChange(t *testing.T) {
 
 	for name, grant := range grants {
 		for _, sql := range refused {
-			assert.ErrorIs(t, ValidateMySQLQuery(sql, grant), ErrPasswordChangeBlocked, "%s: %s", name, sql)
+			require.ErrorIs(t, ValidateMySQLQuery(sql, grant), ErrPasswordChangeBlocked, "%s: %s", name, sql)
 		}
 
 		// MariaDB's SET PASSWORD spelling stays on mysqlBlockedPatterns.
-		assert.ErrorIs(t, ValidateMySQLQuery("SET PASSWORD FOR u = PASSWORD('x')", grant),
+		require.ErrorIs(t, ValidateMySQLQuery("SET PASSWORD FOR u = PASSWORD('x')", grant),
 			ErrMySQLPatternBlocked, name)
 	}
 
@@ -54,11 +54,11 @@ func TestValidateMySQLQuery_BlocksIdentifiedPasswordChange(t *testing.T) {
 		"CREATE TABLE t (identified bool)",
 		"ALTER USER u ACCOUNT LOCK",
 	} {
-		assert.NoError(t, ValidateMySQLQuery(sql, full), "should allow: %s", sql)
+		require.NoError(t, ValidateMySQLQuery(sql, full), "should allow: %s", sql)
 	}
 
 	// The IDENTIFIED arm is MySQL-only: the standard path PostgreSQL uses is
 	// unchanged.
-	assert.NoError(t, ValidateQuery("SELECT identified FROM audit", full))
-	assert.ErrorIs(t, ValidateQuery("ALTER ROLE app ENCRYPTED PASSWORD 'x'", full), ErrPasswordChangeBlocked)
+	require.NoError(t, ValidateQuery("SELECT identified FROM audit", full))
+	require.ErrorIs(t, ValidateQuery("ALTER ROLE app ENCRYPTED PASSWORD 'x'", full), ErrPasswordChangeBlocked)
 }
