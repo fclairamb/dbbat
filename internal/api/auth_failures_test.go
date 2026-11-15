@@ -324,26 +324,24 @@ func TestLogin_RepeatedFailuresFromOneIPAreThrottled(t *testing.T) {
 }
 
 // The per-username ceiling is the backstop against guessing spread over many
-// addresses: crossing it blocks every source and leaves an audit entry.
-func TestLogin_UsernameCeilingBlocksEverySourceAndIsAudited(t *testing.T) {
+// addresses: crossing it makes every source's wrong password a 429 and leaves
+// an audit entry.
+func TestLogin_UsernameCeilingThrottlesWrongPasswordsAndIsAudited(t *testing.T) {
 	t.Parallel()
 
 	tl := throttledLoginServer(t)
 	server, dataStore, user, router := tl.server, tl.store, tl.user, tl.router
 
-	// 99 failures from 99 distinct addresses, straight into the tracker.
-	for i := 0; i < authUsernameCeiling-1; i++ {
-		server.authFailureTracker.recordFailure("alice", fmt.Sprintf("10.9.%d.%d", i/256, i%256))
-	}
+	reachCeiling(t, server, router)
 
-	// The hundredth, through the handler, crosses the ceiling.
-	w := postLoginFrom(router, "192.0.2.200", "wrong")
-	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
-
-	// Even the right password from a never-seen address is now refused.
-	w = postLoginFrom(router, "203.0.113.1", "correct-horse")
+	// A wrong password from a never-seen address is refused with Retry-After.
+	w := postLoginFrom(router, "203.0.113.1", "wrong")
 	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
 	assert.NotEmpty(t, w.Header().Get("Retry-After"))
+
+	var body ErrorBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeRateLimited, body.Code)
 
 	eventType := store.AuditEventAuthFailureCeiling
 	events, err := dataStore.ListAuditEvents(context.Background(), store.AuditFilter{EventType: &eventType})
@@ -356,6 +354,61 @@ func TestLogin_UsernameCeilingBlocksEverySourceAndIsAudited(t *testing.T) {
 	require.NoError(t, json.Unmarshal(events[0].Details, &details))
 	assert.Equal(t, "alice", details["username"])
 	assert.Equal(t, "192.0.2.200", details["last_client_ip"])
+}
+
+// The ceiling is not a lockout lever: past it, the owner's correct password
+// still logs in (before the fix it was refused with 429 before the password
+// was even checked), the success is audited, and it lifts the ceiling, so the
+// next wrong password is a plain 401 again.
+func TestLogin_UsernameCeilingLetsTheCorrectPasswordThrough(t *testing.T) {
+	t.Parallel()
+
+	tl := throttledLoginServer(t)
+	server, dataStore, user, router := tl.server, tl.store, tl.user, tl.router
+
+	reachCeiling(t, server, router)
+
+	w := postLoginFrom(router, "203.0.113.1", "correct-horse")
+	require.Equal(t, http.StatusOK, w.Code, "the owner's correct password past the ceiling: %s", w.Body.String())
+
+	eventType := store.AuditEventAuthSuccessDuringCeiling
+	events, err := dataStore.ListAuditEvents(context.Background(), store.AuditFilter{EventType: &eventType})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.NotNil(t, events[0].UserID)
+	assert.Equal(t, user.UID, *events[0].UserID)
+
+	var details map[string]any
+	require.NoError(t, json.Unmarshal(events[0].Details, &details))
+	assert.Equal(t, "alice", details["username"])
+	assert.Equal(t, "203.0.113.1", details["client_ip"])
+	assert.EqualValues(t, authUsernameCeiling, details["failures"])
+
+	// The ceiling is gone: a wrong password from yet another address meets
+	// only the per-source backoff, which has nothing against it.
+	w = postLoginFrom(router, "203.0.113.2", "wrong")
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+
+	// A later success, outside any burst, is not audited again.
+	w = postLoginFrom(router, "203.0.113.3", "correct-horse")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	events, err = dataStore.ListAuditEvents(context.Background(), store.AuditFilter{EventType: &eventType})
+	require.NoError(t, err)
+	assert.Len(t, events, 1)
+}
+
+// reachCeiling brings alice to the per-username ceiling: 99 failures from 99
+// distinct addresses straight into the tracker, then the hundredth through
+// the handler, which still gets its 401.
+func reachCeiling(t *testing.T, server *Server, router *gin.Engine) {
+	t.Helper()
+
+	for i := 0; i < authUsernameCeiling-1; i++ {
+		server.authFailureTracker.recordFailure("alice", fmt.Sprintf("10.9.%d.%d", i/256, i%256))
+	}
+
+	w := postLoginFrom(router, "192.0.2.200", "wrong")
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
 }
 
 // POST /auth/login and PUT /auth/password are IP rate limited before any

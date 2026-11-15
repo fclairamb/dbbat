@@ -128,10 +128,12 @@ account locked out for its owner. Two more limits sit on top:
 
 - `POST /auth/login` and `PUT /auth/password` are rate limited per address before any credential is
   checked (the anonymous limit, `DBB_RATE_LIMIT_*`), against spraying many usernames from one source.
-- A coarse ceiling of **100 failures per hour per username**, from all addresses together, blocks
-  password login for that username everywhere until the hour is over. It is a backstop against
-  guessing spread over many addresses, and reaching it is logged at WARN and written to the audit
-  log as `auth.failure_ceiling`.
+- A coarse ceiling of **100 failures per hour per username**, from all addresses together, turns
+  every further wrong password for that username into a `429`, from any address, until the hour is
+  over. It is a backstop against guessing spread over many addresses, not a lockout: the password is
+  still checked, the right one logs in and lifts the ceiling. Reaching the ceiling is logged at WARN
+  and written to the audit log as `auth.failure_ceiling`; a correct login that lifts it is audited as
+  `auth.success_during_failure_ceiling`.
 
 Rate-limited authentication attempts receive a `429 Too Many Requests` response with error code `RATE_LIMITED` and a `Retry-After` header.
 

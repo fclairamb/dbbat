@@ -57,7 +57,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	// Check rate limit BEFORE verifying credentials
+	// Per-source backoff BEFORE verifying credentials (the username ceiling only refuses wrong passwords, in failAuth)
 	if !s.checkAuthThrottle(c, req.Username) {
 		return
 	}
@@ -67,16 +67,14 @@ func (s *Server) handleLogin(c *gin.Context) {
 	// Look up user
 	user, err := s.store.GetUserByUsername(ctx, req.Username)
 	if err != nil {
-		s.noteAuthFailure(c, req.Username)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
+		s.failAuth(c, req.Username, "invalid credentials")
 		return
 	}
 
 	// Verify password
 	valid, err := crypto.VerifyPassword(user.PasswordHash, req.Password)
 	if err != nil || !valid {
-		s.noteAuthFailure(c, req.Username)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
+		s.failAuth(c, req.Username, "invalid credentials")
 		return
 	}
 
@@ -209,7 +207,7 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 		return
 	}
 
-	// Check rate limit BEFORE verifying credentials
+	// Per-source backoff BEFORE verifying credentials (the username ceiling only refuses wrong passwords, in failAuth)
 	if !s.checkAuthThrottle(c, req.Username) {
 		return
 	}
@@ -219,16 +217,14 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 	// Look up user
 	user, err := s.store.GetUserByUsername(ctx, req.Username)
 	if err != nil {
-		s.noteAuthFailure(c, req.Username)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid username or current password")
+		s.failAuth(c, req.Username, "Invalid username or current password")
 		return
 	}
 
 	// Verify current password
 	valid, err := crypto.VerifyPassword(user.PasswordHash, req.CurrentPassword)
 	if err != nil || !valid {
-		s.noteAuthFailure(c, req.Username)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid username or current password")
+		s.failAuth(c, req.Username, "Invalid username or current password")
 		return
 	}
 
@@ -294,7 +290,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		// Username provided - authenticate via username
 		rateLimitKey = req.Username
 
-		// Check rate limit BEFORE verifying credentials
+		// Per-source backoff BEFORE verifying credentials (the username ceiling only refuses wrong passwords, in failAuth)
 		if !s.checkAuthThrottle(c, rateLimitKey) {
 			return
 		}
@@ -302,15 +298,14 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		var err error
 		authUser, err = s.store.GetUserByUsername(ctx, req.Username)
 		if err != nil {
-			s.noteAuthFailure(c, rateLimitKey)
-			writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid username or current password")
+			s.failAuth(c, rateLimitKey, "Invalid username or current password")
 			return
 		}
 	} else {
 		// No username - user is changing their own password, use target UID
 		rateLimitKey = targetUID.String()
 
-		// Check rate limit BEFORE verifying credentials
+		// Per-source backoff BEFORE verifying credentials (the username ceiling only refuses wrong passwords, in failAuth)
 		if !s.checkAuthThrottle(c, rateLimitKey) {
 			return
 		}
@@ -318,8 +313,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		var err error
 		authUser, err = s.store.GetUserByUID(ctx, targetUID)
 		if err != nil {
-			s.noteAuthFailure(c, rateLimitKey)
-			writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid current password")
+			s.failAuth(c, rateLimitKey, "Invalid current password")
 			return
 		}
 	}
@@ -327,8 +321,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 	// Verify the authenticating user's password
 	valid, err := crypto.VerifyPassword(authUser.PasswordHash, req.CurrentPassword)
 	if err != nil || !valid {
-		s.noteAuthFailure(c, rateLimitKey)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid current password")
+		s.failAuth(c, rateLimitKey, "Invalid current password")
 		return
 	}
 
