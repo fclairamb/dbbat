@@ -242,15 +242,16 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 	// sqlText — the *client's* text — is what is recorded, here and everywhere
 	// else. The tag below is applied to the outgoing message only.
 	if err := s.book(func() error {
-		s.currentQuery = &pendingQuery{
+		s.stageSimpleQuery(&pendingQuery{
 			sql:         sqlText,
 			startTime:   time.Now(),
 			approvalUID: approvalUID,
 			// The RFQ answering this Query is the syncEpoch+1-th one — the
 			// reconcile in the upstream leg keys on it.
 			syncEpoch: s.clientSyncEpoch,
-		}
+		})
 
+		// One charge per forwarded statement, pipelined or not.
 		s.chargeQueryQuota()
 
 		s.refreshStatementClock()

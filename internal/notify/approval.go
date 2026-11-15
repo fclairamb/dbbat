@@ -323,19 +323,19 @@ func (e *ApprovalEscalator) buildHoldBlocks(hold ApprovalHold, status, byName, r
 	))
 
 	body := fmt.Sprintf("*User*: %s\n*Database*: %s\n*Matched pattern*: `%s`\n*Held for*: %s\n*Status*: %s",
-		hold.Username,
-		hold.DatabaseName,
-		hold.Pattern,
+		EscapeSlackText(hold.Username),
+		EscapeSlackText(hold.DatabaseName),
+		EscapeSlackText(hold.Pattern),
 		formatHeldFor(hold.StartedAt),
 		approvalStatusLabel(status),
 	)
 
 	if byName != "" {
-		body += "\n*Resolved by*: " + byName
+		body += "\n*Resolved by*: " + EscapeSlackText(byName)
 	}
 
 	if reason != "" {
-		body += "\n*Reason*: " + reason
+		body += "\n*Reason*: " + EscapeSlackText(reason)
 	}
 
 	blocks := []slack.Block{
@@ -345,7 +345,7 @@ func (e *ApprovalEscalator) buildHoldBlocks(hold ApprovalHold, status, byName, r
 
 	if e.includeSQL && hold.SQL != "" {
 		blocks = append(blocks, slack.NewSectionBlock(
-			slack.NewTextBlockObject("mrkdwn", "```"+truncateSQL(hold.SQL, MaxSlackSQLLength)+"```", false, false), nil, nil,
+			slack.NewTextBlockObject("mrkdwn", "```"+EscapeSlackText(truncateSQL(hold.SQL, MaxSlackSQLLength))+"```", false, false), nil, nil,
 		))
 	}
 
