@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -761,6 +763,10 @@ func toDatabaseLimitedResponse(db *store.Server) DatabaseLimitedResponse {
 // validateCreateProtocolFields validates and defaults the per-protocol fields
 // of a create request in place, returning an error message (empty when valid).
 func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
+	if errMsg := validateSSLMode(req.SSLMode); errMsg != "" {
+		return errMsg
+	}
+
 	switch req.Protocol {
 	case store.ProtocolSSH:
 		// SSH bastions have no database_name/ssl_mode; they need a private key
@@ -800,6 +806,17 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 	return ""
 }
 
+// validateSSLMode rejects an ssl_mode PlanFor does not recognize, so a typo such
+// as "verify-ful" is refused instead of being stored and shown as a verifying
+// mode. The empty string is accepted: it means prefer.
+func validateSSLMode(mode string) string {
+	if upstream.IsKnownSSLMode(mode) {
+		return ""
+	}
+
+	return "ssl_mode must be one of: " + strings.Join(upstream.SSLModes(), ", ")
+}
+
 // validateUpdateProtocolFields validates an update against the row it will
 // produce, returning an error message (empty when valid).
 //
@@ -820,6 +837,12 @@ func validateUpdateProtocolFields(current *store.Server, req *UpdateDatabaseRequ
 
 	if !isSupportedProtocol(protocol) {
 		return "protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes"
+	}
+
+	if req.SSLMode != nil {
+		if errMsg := validateSSLMode(*req.SSLMode); errMsg != "" {
+			return errMsg
+		}
 	}
 
 	if protocol != store.ProtocolKubernetes {
