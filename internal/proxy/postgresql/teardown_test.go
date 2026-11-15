@@ -155,3 +155,26 @@ func TestLoopback_CleanTerminate_NoExtraRowsOrBytes(t *testing.T) {
 	assert.Equal(t, int64(len("Z\x00\x00\x00\x05I")+len("X\x00\x00\x00\x04")), total-attributed,
 		"the flush carries only the trailing ReadyForQuery and Terminate frames")
 }
+
+// TestLoopback_ClientHangupWithPipelinedSimpleQueries: every simple Query a
+// pipelining client sent before hanging up reached upstream, so each one is
+// completed by the teardown — not just the oldest staged one.
+func TestLoopback_ClientHangupWithPipelinedSimpleQueries(t *testing.T) {
+	t.Parallel()
+
+	h := newLoopback(t)
+
+	h.sendForwarded(t, &pgproto3.Query{String: "SELECT 1"})
+	h.sendForwarded(t, &pgproto3.Query{String: "SELECT 2"})
+	h.awaitSyncEpoch(t, 2)
+
+	h.hangUp(t)
+
+	rows := h.awaitConnectionQueries(t, 2)
+	for _, row := range rows {
+		require.NotNilf(t, row.Error, "%q must be completed with an error", row.SQLText)
+		assert.Equal(t, errClientDisconnectedMidResponse, *row.Error)
+	}
+
+	assert.ElementsMatch(t, []string{"SELECT 1", "SELECT 2"}, []string{rows[0].SQLText, rows[1].SQLText})
+}
