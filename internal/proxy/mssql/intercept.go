@@ -388,7 +388,29 @@ func (s *session) validateStatement(sql string) error {
 
 	inner, readable := shared.MSSQLDynamicSQL(sql)
 
+	// A procedure called by name — in the batch or in a dynamic payload — has a
+	// body dbbat cannot see: the same fail-closed answer as the RPC path.
+	if readable && grantRestricts(s.grant) && s.callsProcedure(inner) {
+		return ErrOpaqueProcedureBlocked
+	}
+
 	return shared.ValidateDynamicSQL(inner, readable, s.grant, s.checkStatement)
+}
+
+// callsProcedure reports whether the batch, or any dynamic payload it carries,
+// invokes a stored procedure by name.
+func (s *session) callsProcedure(dyn shared.DynamicSQL) bool {
+	if dyn.Procedure {
+		return true
+	}
+
+	for _, payload := range dyn.Payloads {
+		if inner, ok := shared.MSSQLDynamicSQL(payload); ok && inner.Procedure {
+			return true
+		}
+	}
+
+	return false
 }
 
 // checkStatement is the static controls over one statement's own text, with no

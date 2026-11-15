@@ -249,6 +249,36 @@ func TestSQLBatchEnforcement(t *testing.T) {
 			name: "a password change is always blocked",
 			sql:  "ALTER USER [bob] WITH PASSWORD = 'x'", wantErr: shared.ErrPasswordChangeBlocked,
 		},
+		{
+			name: "EXEC of a procedure is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "EXEC dbo.Recalc", wantErr: ErrOpaqueProcedureBlocked,
+		},
+		{
+			name: "EXECUTE of a procedure is blocked by block_ddl", controls: []string{store.ControlBlockDDL},
+			sql: "SELECT 1; execute [dbo].[Recalc] @a = 1", wantErr: ErrOpaqueProcedureBlocked,
+		},
+		{
+			name: "EXEC sp_cursor is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "EXEC sp_cursor 7, 1, 1, N'', N'x'", wantErr: ErrOpaqueProcedureBlocked,
+		},
+		{
+			name: "EXEC of a procedure inside sp_executesql is blocked", controls: []string{store.ControlReadOnly},
+			sql: "EXEC sp_executesql N'EXEC dbo.Recalc'", wantErr: ErrOpaqueProcedureBlocked,
+		},
+		{name: "EXEC of a procedure is allowed under a full-write grant", sql: "EXEC dbo.Recalc"},
+		{name: "EXEC sp_cursor is allowed under a full-write grant", sql: "EXEC sp_cursor 7, 1, 1, N'', N'x'"},
+		{
+			name: "EXEC sp_executesql of a read stays allowed", controls: []string{store.ControlReadOnly},
+			sql: "EXEC sp_executesql N'SELECT 1'",
+		},
+		{
+			name: "EXEC @rc = sys.sp_executesql of a read stays allowed", controls: []string{store.ControlReadOnly},
+			sql: "EXEC @rc = sys.sp_executesql N'SELECT 1'",
+		},
+		{
+			name: "EXEC inside a literal or comment is not a call", controls: []string{store.ControlReadOnly},
+			sql: "SELECT 'EXEC dbo.Recalc' /* EXEC dbo.Recalc */",
+		},
 	}
 
 	for _, tc := range tests {
