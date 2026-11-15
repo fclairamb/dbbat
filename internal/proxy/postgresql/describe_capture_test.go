@@ -89,3 +89,38 @@ func TestResultFormat(t *testing.T) {
 	assert.Equal(t, int16(1), resultFormat([]int16{0, 1}, 1))
 	assert.Equal(t, int16(0), resultFormat([]int16{0, 1}, 5))
 }
+
+// A Describe whose batch the upstream closed (ReadyForQuery) without answering
+// it is dropped; one from the current batch is kept.
+func TestDropStaleDescribes(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession("write")
+	s.extendedState.describeQueue = []describeTarget{
+		{name: "old", epoch: 1},
+		{name: "current", epoch: 2},
+	}
+
+	s.bookMu.Lock()
+	s.upstreamReadyEpoch = 1
+	s.dropStaleDescribes()
+	s.bookMu.Unlock()
+
+	// upstreamReadyEpoch=1: epoch 1 is not < 1, so both are still pending.
+	require.Len(t, s.extendedState.describeQueue, 2)
+
+	s.bookMu.Lock()
+	s.upstreamReadyEpoch = 2
+	s.dropStaleDescribes()
+	s.bookMu.Unlock()
+
+	require.Len(t, s.extendedState.describeQueue, 1)
+	assert.Equal(t, "current", s.extendedState.describeQueue[0].name)
+
+	s.bookMu.Lock()
+	s.upstreamReadyEpoch = 3
+	s.dropStaleDescribes()
+	s.bookMu.Unlock()
+
+	assert.Empty(t, s.extendedState.describeQueue)
+}
