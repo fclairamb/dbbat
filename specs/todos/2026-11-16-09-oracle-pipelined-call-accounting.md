@@ -54,8 +54,19 @@ proxy now does, by one of:
 - A client that hangs up, and an upstream that hangs up, while a call waits
   its turn both end the session (see the mssql `WaitsItsTurn` tests).
 
+## Accepted limits
+
+- A multi-packet response's tail can still be credited to the next pipelined
+  call: the held call is released on the first upstream packet of the previous
+  answer, because the end of a call is not reliably detectable in the TNS
+  stream. Waiting for a reliable end marker would risk stalling or deadlocking
+  sessions, so the first-packet release is the accepted trade-off.
+
 ## To verify
 
 - Whether any real Oracle driver (JDBC thin, python-oracledb thin, OCI)
   actually pipelines calls outside of piggybacked messages, which the proxy
   must keep treating as part of the following call.
+
+Status: unverified here. This cannot be checked without a real Oracle; it is
+left to the nightly integration suite.

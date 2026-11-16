@@ -108,10 +108,21 @@ func TestPipelinedCall_WaitsForPreviousAnswerAndKeepsItsOwnResult(t *testing.T) 
 	require.NoError(t, err)
 	assert.Contains(t, string(second.Payload), "SELECT 1 FROM DUAL")
 
+	// The second answer comes much later than the first one.
+	const secondAnswerDelay = 1500 * time.Millisecond
+
+	time.Sleep(secondAnswerDelay)
 	p.answer(1, nil)
 
 	ok := p.recorder.awaitCreated(t)
 	assert.Equal(t, "SELECT 1 FROM DUAL", ok.SQLText)
+
+	require.NotNil(t, failed.DurationMs)
+	require.NotNil(t, ok.DurationMs)
+	assert.Less(t, *failed.DurationMs, float64(secondAnswerDelay.Milliseconds()),
+		"the DELETE's duration stops at its own answer, not at the later one")
+	assert.GreaterOrEqual(t, *ok.DurationMs, float64(secondAnswerDelay.Milliseconds())*0.8,
+		"the SELECT's duration covers its own wait")
 	assert.Nil(t, ok.Error, "the SELECT is not charged the DELETE's error")
 	require.NotNil(t, ok.RowsAffected)
 	assert.EqualValues(t, 1, *ok.RowsAffected)
