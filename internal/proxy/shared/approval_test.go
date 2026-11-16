@@ -112,7 +112,7 @@ func testGate(t *testing.T, patterns []string) (*ApprovalGate, *fakeApprovalStor
 		Registry:     reg,
 		Broker:       broker,
 		PollInterval: 10 * time.Millisecond,
-	}, grant, uuid.New(), user, "prod")
+	}, ApprovalDialectStandard, grant, uuid.New(), user, "prod")
 
 	return gate, st, reg
 }
@@ -122,7 +122,7 @@ func TestGateInactiveWithoutPatternsOrFlag(t *testing.T) {
 
 	grant := &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"(?i)DELETE"}}}
 
-	off := NewApprovalGate(ApprovalDeps{Enabled: false}, grant, uuid.New(), nil, "")
+	off := NewApprovalGate(ApprovalDeps{Enabled: false}, ApprovalDialectStandard, grant, uuid.New(), nil, "")
 	if off.Active() {
 		t.Fatal("gate must be inert when the feature flag is off")
 	}
@@ -131,7 +131,7 @@ func TestGateInactiveWithoutPatternsOrFlag(t *testing.T) {
 		t.Fatal("disabled gate matched")
 	}
 
-	empty := NewApprovalGate(ApprovalDeps{Enabled: true}, &store.Grant{Definition: &store.GrantDefinition{}}, uuid.New(), nil, "")
+	empty := NewApprovalGate(ApprovalDeps{Enabled: true}, ApprovalDialectStandard, &store.Grant{Definition: &store.GrantDefinition{}}, uuid.New(), nil, "")
 	if empty.Active() {
 		t.Fatal("gate with no patterns must be inert")
 	}
@@ -183,7 +183,7 @@ func TestGateMatchingIsCaseSensitiveWithoutTheInlineFlag(t *testing.T) {
 func TestGateSkipsUncompilablePattern(t *testing.T) {
 	t.Parallel()
 
-	gate := NewApprovalGate(ApprovalDeps{Enabled: true}, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"(unclosed", `(?i)DROP`}}}, uuid.New(), nil, "")
+	gate := NewApprovalGate(ApprovalDeps{Enabled: true}, ApprovalDialectStandard, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"(unclosed", `(?i)DROP`}}}, uuid.New(), nil, "")
 
 	if !gate.Active() {
 		t.Fatal("one bad pattern must not disable the gate")
@@ -463,7 +463,7 @@ func TestHoldFailsClosedWhenPersistFails(t *testing.T) {
 
 	gate := NewApprovalGate(ApprovalDeps{
 		Enabled: true, Store: st, Registry: approval.NewRegistry(), Broker: events.New(),
-	}, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"x"}}}, uuid.New(), nil, "")
+	}, ApprovalDialectStandard, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"x"}}}, uuid.New(), nil, "")
 
 	_, err := gate.Hold(context.Background(), HoldRequest{SQL: "x", Pattern: "x", Guard: NewLimitGuard(nil, nil, nil)})
 	if !errors.Is(err, ErrApprovalUnavailable) {
@@ -481,7 +481,7 @@ func TestHoldPublishesOnBothTopics(t *testing.T) {
 
 	gate := NewApprovalGate(ApprovalDeps{
 		Enabled: true, Store: st, Registry: reg, Broker: broker, PollInterval: 10 * time.Millisecond,
-	}, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"(?i)DELETE"}}}, connUID, &store.User{UID: uuid.New(), Username: "alice"}, "prod")
+	}, ApprovalDialectStandard, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"(?i)DELETE"}}}, connUID, &store.User{UID: uuid.New(), Username: "alice"}, "prod")
 
 	sub := broker.Subscribe(func(string, *events.Event) bool { return true }, 64)
 	defer sub.Close()
@@ -532,4 +532,112 @@ func waitForPending(t *testing.T, st *fakeApprovalStore) *store.Query {
 	t.Fatal("gate never persisted a pending query")
 
 	return nil
+}
+
+// deleteOrdersPattern is the pattern shape docs/approvals.md teaches.
+const deleteOrdersPattern = `(?i)DELETE\s+FROM\s+orders`
+
+// TestApprovalPatternsMatchCommentedStatements is the 2026-11-16 scan's M1: a
+// comment between two keywords is ignored by the database, so it must not
+// carry the statement past its hold.
+func TestApprovalPatternsMatchCommentedStatements(t *testing.T) {
+	t.Parallel()
+
+	compiled := CompileApprovalPatterns([]string{deleteOrdersPattern})
+
+	cases := []struct {
+		name    string
+		sql     string
+		dialect ApprovalDialect
+		want    bool
+	}{
+		{"plain", "DELETE FROM orders WHERE id = 1", ApprovalDialectStandard, true},
+		{"empty block comment", "DELETE/**/FROM orders", ApprovalDialectStandard, true},
+		{"block comment", "DELETE /* x */ FROM orders", ApprovalDialectStandard, true},
+		{"line comment", "DELETE -- x\nFROM orders", ApprovalDialectStandard, true},
+		{"comment before table", "DELETE FROM /* x */ orders", ApprovalDialectStandard, true},
+		{"mysql hash comment", "DELETE # x\nFROM orders", ApprovalDialectMySQL, true},
+		{"mysql block comment", "DELETE/**/FROM orders", ApprovalDialectMySQL, true},
+		// MySQL runs the body of /*! … */: it stays in the matched text.
+		{"mysql executable comment", "DELETE /*!50000 FROM */ orders", ApprovalDialectMySQL, true},
+		// Positive controls: the raw text still matches as before.
+		{"pattern in a literal", "SELECT 'DELETE FROM orders'", ApprovalDialectStandard, true},
+		// Open question of the spec, answered "keep": a comment holding the
+		// pattern text matches the raw text, so it is held as before the fix.
+		{"pattern only in a comment", "SELECT 1 /* DELETE FROM orders */", ApprovalDialectStandard, true},
+		{"unrelated", "SELECT 1", ApprovalDialectStandard, false},
+		{"unrelated mysql", "SELECT 1 # nothing", ApprovalDialectMySQL, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			pattern, got := compiled.MatchDialect(tc.sql, tc.dialect)
+			if got != tc.want {
+				t.Fatalf("MatchDialect(%q) = %v, want %v", tc.sql, got, tc.want)
+			}
+
+			if got && pattern != deleteOrdersPattern {
+				t.Fatalf("wrong pattern reported: %q", pattern)
+			}
+		})
+	}
+}
+
+// TestApprovalDialectMySQLHashIsNotStandardComment pins that the dialect is
+// honored: `#` is not a comment outside MySQL, so the standard dialect does
+// not strip it.
+func TestApprovalDialectMySQLHashIsNotStandardComment(t *testing.T) {
+	t.Parallel()
+
+	compiled := CompileApprovalPatterns([]string{deleteOrdersPattern})
+
+	if _, ok := compiled.MatchDialect("DELETE # x\nFROM orders", ApprovalDialectStandard); ok {
+		t.Fatal("standard dialect treated # as a comment")
+	}
+}
+
+// TestApprovalDialectMongoDBMatchesRawTextOnly keeps MongoDB's behavior:
+// extended JSON has no comments, so nothing is stripped.
+func TestApprovalDialectMongoDBMatchesRawTextOnly(t *testing.T) {
+	t.Parallel()
+
+	compiled := CompileApprovalPatterns([]string{`"delete":\s*"orders"`})
+
+	if _, ok := compiled.MatchDialect(`  {"delete": "orders"}  `, ApprovalDialectMongoDB); !ok {
+		t.Fatal("raw mongo command no longer matches")
+	}
+
+	if _, ok := compiled.MatchDialect(`{"delete": /**/ "orders"}`, ApprovalDialectMongoDB); ok {
+		t.Fatal("mongo dialect stripped a SQL comment")
+	}
+}
+
+// TestGateMatchUsesItsDialect checks the live gate threads its dialect.
+func TestGateMatchUsesItsDialect(t *testing.T) {
+	t.Parallel()
+
+	grant := &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{deleteOrdersPattern}}}
+
+	pg := NewApprovalGate(ApprovalDeps{Enabled: true}, ApprovalDialectStandard, grant, uuid.New(), nil, "")
+	if _, ok := pg.Match("DELETE /* x */ FROM orders"); !ok {
+		t.Fatal("standard gate let a block comment evade the pattern")
+	}
+
+	my := NewApprovalGate(ApprovalDeps{Enabled: true}, ApprovalDialectMySQL, grant, uuid.New(), nil, "")
+	if _, ok := my.Match("DELETE # x\nFROM orders"); !ok {
+		t.Fatal("mysql gate let a # comment evade the pattern")
+	}
+}
+
+// TestValidatePatternsMatchesCommentedStatements: the validate-patterns API
+// reports what the gate does.
+func TestValidatePatternsMatchesCommentedStatements(t *testing.T) {
+	t.Parallel()
+
+	_, results := ValidatePatternsAgainstQueries([]string{deleteOrdersPattern}, []string{"DELETE/**/FROM orders"})
+	if len(results) != 1 || !results[0].Matched {
+		t.Fatalf("validate-patterns missed a commented statement: %+v", results)
+	}
 }

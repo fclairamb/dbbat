@@ -381,7 +381,12 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
 - Time-windowed grants (`starts_at`, `expires_at`; the length is the
   definition's `duration_seconds`)
 - Controls: `read_only`, `block_copy`, `block_ddl` (combinable; empty = full write)
-- Optional quotas: `max_query_counts`, `max_bytes_transferred`
+- Optional quotas: `max_query_counts`, `max_bytes_transferred`. One budget per
+  grant across all its live sessions: `cache.UsageRegistry` (via
+  `shared.RegisterGrantUsage`, `shared.QuotaUsage`, `LimitGuard.WithUsage`)
+  sums the grant's sessions on this replica over a store baseline that
+  excludes them; the heartbeat re-reads that baseline every
+  `store.GrantUsageRefreshInterval` (5 s), which is the cross-replica lag
 - **Two kinds of group, never a bare "group"**: `user_groups` name sets of
   people, `server_groups` name sets of database servers. A definition scopes on
   both — `user_group_uids` (who may request it), `server_group_uids` (which

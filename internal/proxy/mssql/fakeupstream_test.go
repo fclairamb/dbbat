@@ -36,6 +36,11 @@ type fakeUpstream struct {
 	// silent makes it record every post-login message and answer none, so a
 	// statement stays in flight for as long as the test wants.
 	silent bool
+	// respond, when set, chooses the answer to the index-th post-login message
+	// (attentions aside) in place of batchResponse. It runs outside mu and may
+	// block, which is how a test keeps one response in flight. A nil answer
+	// makes the fake hang up instead of answering.
+	respond func(index int, req fakeRequest) []byte
 
 	mu     sync.Mutex
 	logins []*Login7
@@ -192,24 +197,44 @@ func (f *fakeUpstream) serve(conn net.Conn) {
 	// while they exchange messages.
 	_ = conn.SetDeadline(time.Time{})
 
+	answered := 0
+
 	for {
 		msgType, payload, err := pkt.ReadMessage()
 		if err != nil {
 			return
 		}
 
-		f.mu.Lock()
-		f.requests = append(f.requests, fakeRequest{
+		req := fakeRequest{
 			msgType: msgType,
 			status:  pkt.lastReadStatus,
 			payload: payload,
-		})
+		}
+
+		f.mu.Lock()
+		f.requests = append(f.requests, req)
 		response := f.batchResponse
 		silent := f.silent
+		respond := f.respond
 		f.mu.Unlock()
+
+		if respond != nil && msgType != packetTypeAttention {
+			response = respond(answered, req)
+			answered++
+
+			if response == nil {
+				return
+			}
+		}
 
 		if silent {
 			continue
+		}
+
+		// SQL Server acknowledges a cancel with a DONE carrying DONE_ATTN, and
+		// the proxy holds the next request until it has seen one.
+		if msgType == packetTypeAttention {
+			response = buildAttentionAck()
 		}
 
 		if err := pkt.WriteMessage(packetTypeReply, response); err != nil {

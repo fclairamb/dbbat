@@ -418,11 +418,33 @@ definition-save time, so a bad pattern is a `400`, not a runtime surprise.
 
 Bounds: at most 32 patterns per definition, 512 characters each.
 
+### What a pattern is matched against
+
+Every pattern is tested against two texts, and the statement is held if
+either matches:
+
+1. **The statement as sent**, trimmed: exactly what `/queries` shows.
+2. **The statement with its comments removed**, every run of whitespace then
+   collapsed to one space. Comments use the protocol's syntax: `/* … */` and
+   `-- …` for PostgreSQL, Oracle and SQL Server; MySQL adds `# …`, and keeps
+   the body of a `/*! … */` executable comment as text, since MySQL runs it.
+   Literals are never touched. MongoDB commands are extended JSON, which has
+   no comments: only the first text applies.
+
+So `(?i)DELETE\s+FROM\s+orders` holds `DELETE FROM orders`,
+`DELETE/**/FROM orders` and `DELETE -- x⏎FROM orders` alike: the database runs
+them the same way, so a comment cannot carry a statement past its hold.
+Matching the raw text too means a pattern never matches less than what it
+matches in `/queries`: a statement that only mentions the pattern in a
+comment or a literal (`SELECT 1 /* DELETE FROM orders */`) is still held.
+The validate-patterns endpoint previews with the PostgreSQL/Oracle/SQL Server
+syntax.
+
 ### Write your patterns case-insensitively
 
 **Matching is case-sensitive unless you make it otherwise.** The statement is
-only *trimmed* before matching (`shared.NormalizeSQL`) — it is not
-upper-cased. This differs from the static controls (`read_only`, `block_ddl`,
+never upper-cased before matching (`shared.NormalizeSQL` only trims it; see
+above for comments). This differs from the static controls (`read_only`, `block_ddl`,
 `block_copy`), which upper-case the statement before their keyword-prefix
 checks and are therefore case-insensitive for free.
 

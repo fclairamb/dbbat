@@ -66,6 +66,21 @@ func storableSQLText(s string) string {
 	return storableText(s)
 }
 
+// storableError repairs an upstream-chosen error message for the `error`
+// column. The text comes from the upstream server (on SQL Server a client can
+// pick it with THROW / RAISERROR), so a NUL in it must not make the insert
+// fail and drop an executed statement from the history. The chain MAC does not
+// cover this column.
+func storableError(s *string) *string {
+	if s == nil {
+		return nil
+	}
+
+	repaired := storableText(*s)
+
+	return &repaired
+}
+
 // storableParameters repairs the decoded parameter values before they are
 // marshaled to the `parameters` jsonb column, where a NUL (encoded as \u0000)
 // would make the whole insert fail. Raw holds base64 and is left alone. The
@@ -162,7 +177,7 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 		ExecutedAt:   query.ExecutedAt,
 		DurationMs:   query.DurationMs,
 		RowsAffected: query.RowsAffected,
-		Error:        query.Error,
+		Error:        storableError(query.Error),
 		// COPY metadata, set by the protocols that recognize a bulk transfer
 		// (PostgreSQL today). Nil for every other statement.
 		CopyFormat:    query.CopyFormat,
@@ -795,7 +810,7 @@ func (s *Store) UpdateQueryCompletion(
 	}
 
 	if queryError != nil {
-		q = q.Set("error = ?", *queryError)
+		q = q.Set("error = ?", *storableError(queryError))
 	}
 
 	_, err := q.Exec(ctx)

@@ -452,6 +452,27 @@ parameter fails the suite instead of quietly reintroducing the connect-time
 refusal. SQL Developer over the OCI driver is expected to send the same shapes;
 that is inference, not measurement — it is not in the corpus.
 
+### Password changes are refused whatever the grant
+
+Every dbbat session to a server logs in as one shared upstream account, so a
+proxied user who changes that account's password breaks dbbat's stored
+credential and every other user's next connection fails. Password changes are
+therefore refused under **every** grant, full write included, with
+`shared.ErrPasswordChangeBlocked`:
+
+- `ALTER USER … PASSWORD …` (the shared classifier, as on PostgreSQL);
+- `ALTER USER … IDENTIFIED …` and `CREATE USER … IDENTIFIED …`, Oracle's own
+  spelling, which carries no `PASSWORD` token: `IDENTIFIED BY <pw>` (a user may
+  change their own password without the old one under the default profile),
+  and `IDENTIFIED EXTERNALLY` / `IDENTIFIED GLOBALLY`, which change how the
+  account authenticates (`oraclePasswordChange`).
+
+The match runs on the comment-stripped scratch copy, at a statement start, and
+over every dynamic payload (`EXECUTE IMMEDIATE 'ALTER USER … IDENTIFIED BY …'`
+too). A column named `identified` in a `SELECT` or an `ALTER TABLE` stays
+allowed. The `IDENTIFIED` arm is Oracle-scoped (MySQL has its own,
+`mysqlPasswordChange`), so PostgreSQL's behaviour does not change.
+
 ### Dynamic SQL, and how far the checks reach into it
 
 `BEGIN EXECUTE IMMEDIATE 'DELETE FROM t'; END;` is a write whose first keyword is
@@ -532,6 +553,7 @@ COMMIT), so on this protocol the text **is** the control.
 | an anonymous block (`BEGIN …`, `DECLARE …`, behind an optional `<<label>>`) whose body contains `INSERT`, `UPDATE`, `DELETE` or `MERGE` as a bare word | refused (`shared.ErrReadOnlyViolation`) |
 | a `WITH` statement containing one of those words — including 12c's `WITH FUNCTION … PRAGMA AUTONOMOUS_TRANSACTION` | refused (`shared.ErrReadOnlyViolation`), by the shared CTE rule every protocol gets |
 | `CALL …` | refused (`shared.ErrReadOnlyProcedureCall`): what a procedure does is in the database, not in the statement |
+| `CALL …` under `block_ddl` | refused (`shared.ErrDDLProcedureCall`), for the same reason. An anonymous block that calls a procedure (`BEGIN pkg.proc; END;`) stays out of reach under both controls: a DDL-less database account is the real guarantee |
 | a block with no such word — `BEGIN DBMS_OUTPUT.ENABLE(NULL); END;`, `SELECT … INTO` | allowed, as before |
 
 The words are matched outside literals and quoted identifiers, and not after a
@@ -5037,3 +5059,17 @@ two packets alone. Until it does:
 Treat a green statement-timeout test on Oracle as proving the *session* ended,
 not that the server stopped working. Removing this caveat needs a test that
 watches `v$session` (or the server's CPU) after the teardown.
+
+## `ssl_mode` on an Oracle row
+
+dbbat does not encrypt the upstream leg of an Oracle session: the proxy relays
+the client's own TNS Connect over a plain socket, whatever the row's
+`ssl_mode`. The API therefore refuses `require`, `verify-ca` and `verify-full`
+on an Oracle row (400); `disable`, `allow`, `prefer` and empty are accepted.
+For an encrypted leg, use network encryption on the Oracle server or a tunnel.
+
+A row saved with one of those modes before this rule keeps working. *Test
+connection* does honour the mode (go-ora's TLS and certificate verification),
+so it adds a warning (`oracle_upstream_not_encrypted`): the check was
+encrypted, a real session is not. The server form does not offer an SSL mode
+for Oracle rows.

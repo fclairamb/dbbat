@@ -223,7 +223,7 @@ func (h *handler) runIntercepted(
 		return nil, shared.ErrGrantRevoked
 	}
 
-	if err := checkQuotas(s.grant); err != nil {
+	if err := checkQuotas(s.grant, s.usage); err != nil {
 		errStr := err.Error()
 		h.recordQuery(sql, params, time.Now(), &errStr)
 
@@ -664,6 +664,7 @@ func (h *handler) recordQueryWithUID(
 	// In-session quota counters so the next checkQuotas() reflects this query.
 	if s.grant != nil {
 		s.grant.QueryCount++
+		s.usage.AddQueries(1)
 		s.grant.BytesTransferred += bytesTransferred
 	}
 }

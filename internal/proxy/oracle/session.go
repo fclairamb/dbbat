@@ -202,8 +202,12 @@ type session struct {
 	// (which does no I/O); the client leg takes it in explicit regions, with
 	// holdIfNeeded deliberately outside them. Functions below are annotated
 	// with which side of that boundary they sit on.
-	trackerMu    sync.Mutex
-	tracker      *oracleQueryTracker
+	trackerMu sync.Mutex
+	tracker   *oracleQueryTracker
+
+	// callTurn is the bookkeeping that makes a pipelined call wait for the
+	// previous one's answer: see pipelining.go.
+	callTurn     callTurn
 	queryStorage config.QueryStorageConfig
 
 	// fragmentedMessage is the client TTC message currently being gated, when
@@ -308,6 +312,10 @@ type session struct {
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
+	// usage is this session's share of its grant's quota consumption, so the
+	// grant's quotas are one budget across all its sessions. Nil when the
+	// grant has no quota.
+	usage *cache.UsageHandle
 	// liveSession is signaled when an admin ends *this* session, keyed by the
 	// connection uid rather than by the grant.
 	liveSession *cache.SessionHandle
@@ -1766,6 +1774,11 @@ func (s *session) proxyMessages() error {
 	// relaying such a request from another replica — signals.
 	s.liveSession = s.store.Sessions().Register(s.connectionUID)
 
+	// And add it to its grant's shared consumption reading, so the grant's
+	// quotas are one budget across all its sessions. Released in cleanup.
+	s.usage = shared.RegisterGrantUsage(s.store.Usage(), s.grant, s.bytesFromClient, s.bytesToClient)
+	s.usage.SetConnection(s.connectionUID)
+
 	// Build the limit guard now that the grant is known, and run a watchdog to
 	// tear the session down if a limit is crossed (or the grant is revoked)
 	// while a query is blocked producing no traffic. The inline check in
@@ -1773,6 +1786,7 @@ func (s *session) proxyMessages() error {
 	// error frame.
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithUsage(s.usage).
 		WithTermination(s.liveSession).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
@@ -1781,7 +1795,7 @@ func (s *session) proxyMessages() error {
 		databaseName = s.database.Name
 	}
 
-	s.approvalGate = shared.NewApprovalGate(s.approvalDeps, s.grant, s.connectionUID, s.user, databaseName)
+	s.approvalGate = shared.NewApprovalGate(s.approvalDeps, shared.ApprovalDialectStandard, s.grant, s.connectionUID, s.user, databaseName)
 	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, databaseName).
 		WithApprovals(s.approvalGate)
 	s.stream.Connection(s.ctx, shared.ConnectionOpened)
@@ -1799,6 +1813,8 @@ func (s *session) proxyMessages() error {
 	}, s.closeConns)
 
 	errChan := make(chan error, 2)
+
+	s.callTurn.upstreamDone = make(chan struct{})
 
 	// Both directions run under safe.RunRelay, which turns a panic into an
 	// error on errChan instead of a dead process: these are goroutines of their
@@ -2307,7 +2323,7 @@ func (s *session) closeConns() {
 // for TTC-level query interception, and forwards to upstream.
 func (s *session) clientToUpstream() error {
 	for {
-		pkt, err := readTNSPacket(s.clientConn)
+		pkt, err := s.nextClientPacket()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
@@ -2356,6 +2372,10 @@ func (s *session) gateAndForwardDataMessage(pkt *TNSPacket) error {
 	blocked := s.interceptClientMessage(msg.gate)
 
 	s.fragmentedMessage = nil
+
+	if !blocked {
+		s.armCallAnswer()
+	}
 
 	if blocked {
 		// Every fragment is dropped, not just the first: the refusal was
@@ -2876,6 +2896,8 @@ func statementOpOffsets(ttcPayload []byte) []int {
 // upstreamToClient reads TNS packets from upstream, intercepts Data packets
 // for response tracking and row capture, and forwards to the client.
 func (s *session) upstreamToClient() error {
+	defer s.callTurn.noteUpstreamGone()
+
 	for {
 		pkt, err := readTNSPacket(s.upstreamConn)
 		if err != nil {
@@ -2892,6 +2914,11 @@ func (s *session) upstreamToClient() error {
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
 			s.interceptUpstreamMessage(pkt)
 		}
+
+		// Whatever it was, the upstream has started answering: a call held behind
+		// it may go. After the intercept, so a response that ends the call has
+		// already completed its statement.
+		s.noteUpstreamResponse()
 
 		// Forward to client. The capture's server→client recording point is the
 		// write tap on s.clientConn (startDumpIfConfigured), not a call here: a
@@ -3904,6 +3931,7 @@ func (s *session) cleanup() {
 	}
 
 	s.store.Sessions().Deregister(s.connectionUID, s.liveSession)
+	s.usage.Release()
 
 	if s.dump != nil {
 		if err := s.dump.Close(); err != nil {
