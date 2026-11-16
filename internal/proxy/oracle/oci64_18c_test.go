@@ -175,3 +175,96 @@ func TestOCI64TokenFormIsNotReadAsTheTokenlessOne(t *testing.T) {
 		assert.Falsef(t, ok, "frame %d with a broken sequence pad", i)
 	}
 }
+
+// replay18cFetch runs one describe and the fetches behind it through a fresh
+// 18c session, and returns the rows it captured.
+func replay18cFetch(t *testing.T, shape oerShape, describe []byte, fetches ...[]byte) []map[string]interface{} {
+	t.Helper()
+
+	s, rowStore, _ := newCapturingSession(t, 10000)
+	s.oer = shape
+
+	s.trackerMu.Lock()
+	s.handleQueryResultV2(extractTTCPayload(describe))
+
+	pending := s.tracker.pendingQuery
+	if pending == nil {
+		s.trackerMu.Unlock()
+
+		return nil
+	}
+
+	sink := pending.rowSink
+
+	for _, f := range fetches {
+		s.handleContinuation(extractTTCPayload(f))
+	}
+	s.trackerMu.Unlock()
+
+	sink.Flush(t.Context())
+
+	return rowStore.rowData(t)
+}
+
+// The 18c describes parse whole, column names included, and the rows they and
+// their fetches carry are captured under those names. Read with the 23ai
+// record tail, the multi-column describes do not walk.
+func TestOCI64_18cRowCaptureCarriesTheDescribesValues(t *testing.T) {
+	t.Parallel()
+
+	describes := recordedFrames(t, "testdata/oci64_18c_describe.hex")
+	require.Len(t, describes, 4)
+
+	for i, payload := range describes {
+		ttc := extractTTCPayload(payload)
+		require.Equalf(t, byte(TTCFuncQueryResult), ttc[0], "frame %d is a describe", i)
+		assert.NotEmptyf(t, parseColumnDescribes(ttc, oci64_18cOERShape()), "frame %d", i)
+	}
+
+	assert.Nil(t, parseColumnDescribes(extractTTCPayload(describes[2]), oci64OERShape()),
+		"the 23ai tail misaligns the second record")
+
+	rows := replay18cFetch(t, oci64_18cOERShape(), describes[2])
+	require.Len(t, rows, 1)
+	assert.Equal(t, "x", rows[0]["BIG"])
+	assert.Equal(t, "ab   ", rows[0]["C5"])
+	assert.Equal(t, "7a7a", rows[0]["R"])
+	assert.Equal(t, ociDescribeObjectValue, rows[0]["OBJ"])
+
+	seven := recordedFrames(t, "testdata/oci64_18c_sevencols.hex")
+	require.Len(t, seven, 3)
+	assert.Equal(t, []map[string]interface{}{{
+		"C1": "1", "C2": "v1", "C3": "10", "C4": "w1", "C5": "100", "C6": "x1", "C7": "1000",
+	}}, replay18cFetch(t, oci64_18cOERShape(), seven[2]))
+
+	long := recordedFrames(t, "testdata/oci64_18c_long.hex")
+	require.Len(t, long, 7)
+	assert.Equal(t, []map[string]interface{}{
+		{"C1": "aaaaaa", "C2": "bbbbbb", "C3": "cccccc", "L1": "longvalue-0123456789"},
+		{"C1": "aaaaaa", "C2": "bbbbbb", "C3": "cccccc", "L1": ""},
+	}, replay18cFetch(t, oci64_18cOERShape(), long[2], long[3], long[4]))
+}
+
+// An 18c LOB column is the locator straight behind its length. Read with the
+// 23ai prefix (a LOB size and a chunk size), the row is lost; read as 18c
+// sends it, every ordinary column survives the LOBs between them.
+func TestOCI64_18cLOBFetchKeepsEveryOrdinaryColumn(t *testing.T) {
+	t.Parallel()
+
+	frames := recordedFrames(t, "testdata/oci64_18c_lob.hex")
+	require.Len(t, frames, 4)
+
+	assert.Equal(t, []map[string]interface{}{{
+		"C1": "aaaaaa", "D1": "<CLOB locator>",
+		"C2": "bbbbbb", "D2": "<CLOB locator>",
+		"C3": "cccccc", "D3": "<BLOB locator>",
+		"C4": "dddddd", "D4": "<CLOB locator>",
+		"C5": "eeeeee", "X1": ociLOBXMLValue,
+		"C6": "ffffff", "D5": "",
+		"C7": "gggggg",
+	}}, replay18cFetch(t, oci64_18cOERShape(), frames[2], frames[3]))
+
+	// The 23ai field version reads the record tail at its 23ai width, so the
+	// describe itself refuses to walk and no row is offered a wrong layout.
+	assert.Empty(t, replay18cFetch(t, oci64OERShape(), frames[2], frames[3]))
+}

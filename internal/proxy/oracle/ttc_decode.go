@@ -2591,9 +2591,17 @@ func readFixedLOBColumn(
 		return "", offset, true // a NULL LOB: the column is its zero maxSize and nothing else
 	}
 
-	if shape.fixedWidth64 {
+	switch {
+	case shape.fixedWidth64 && shape.serverPredates(ttcFieldVersion23_1):
+		// Oracle 18c XE sends a 64-bit OCI client the locator straight behind
+		// its length: no LOB size and no chunk size in front of it. Measured on
+		// every LOB column of testdata/oci64_18c_lob.hex, whose locators
+		// (0x28 bytes, the length repeated as their CLR prefix) sit four bytes
+		// past the column's start where 23ai's sit sixteen.
+		return readFixedLOBLocator(payload, offset, maxSize, colTypes, col)
+	case shape.fixedWidth64:
 		offset += lobFixedSize64Len
-	} else {
+	default:
 		next, ok := skipCompressedInt(payload, offset)
 		if !ok {
 			return "", 0, false
@@ -2603,6 +2611,13 @@ func readFixedLOBColumn(
 	}
 
 	offset += lobFixedChunkSizeLen
+
+	return readFixedLOBLocator(payload, offset, maxSize, colTypes, col)
+}
+
+// readFixedLOBLocator reads the CLR-prefixed locator of a fixed-width LOB
+// column, whose length must be the maxSize the column's header already gave.
+func readFixedLOBLocator(payload []byte, offset, maxSize int, colTypes []int, col int) (string, int, bool) {
 	if offset >= len(payload) {
 		return "", 0, false
 	}
