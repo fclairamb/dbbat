@@ -487,6 +487,13 @@ func execWideNoStatementCursor(body []byte) (uint16, bool) {
 // three times it (this client sends plain lengths where the Instant Client
 // sends 3x UTF-8 buffer sizes — the same split docs/oracle.md records for the
 // AUTH key/value fields).
+//
+// Against Oracle 18c the same client writes the same header **without** bytes
+// 3..16 (the token block, see wide64FieldsAt): options at 3, the cursor id at
+// 7, the sentinel at 11 and the length at 19, measured on
+// testdata/oci64_18c_refcursor_drives.hex and oci64_18c_parse_execs.hex. The
+// offsets below are the token form's; the walks read each field at its
+// distance from wide64FieldsAt instead, so one walk serves both.
 const (
 	execWide64SeqPadAt   = 9
 	execWide64CursorIDAt = 21
@@ -494,6 +501,31 @@ const (
 	execWide64SQLLenAt   = execWide64SentinelAt + 8
 	execWide64MinLen     = execWide64SQLLenAt + 8
 )
+
+// execWide64Fields is a 64-bit OCI exec header's field offsets, resolved for
+// the form this frame's header takes.
+type execWide64Fields struct {
+	cursorIDAt, sentinelAt, sqlLenAt, end int
+}
+
+// execWide64FieldsOf resolves the 64-bit exec header's offsets for body, or
+// reports false when body cannot hold the whole header in either form.
+func execWide64FieldsOf(body []byte) (execWide64Fields, bool) {
+	at, ok := wide64FieldsAt(body)
+	if !ok {
+		return execWide64Fields{}, false
+	}
+
+	shift := at - closeCursorsWide8HeaderLen
+	f := execWide64Fields{
+		cursorIDAt: execWide64CursorIDAt + shift,
+		sentinelAt: execWide64SentinelAt + shift,
+		sqlLenAt:   execWide64SQLLenAt + shift,
+		end:        execWide64MinLen + shift,
+	}
+
+	return f, len(body) >= f.end
+}
 
 // execWide64NoStatementCursor reports the cursor id of a 64-bit OCI execute op
 // that declares **no statement** — the dialect's `PRINT rc` on a REF cursor,
@@ -522,15 +554,8 @@ const (
 // A false positive here refuses a re-execution on a client that was working, so
 // every one of those is required rather than merely preferred.
 func execWide64NoStatementCursor(body []byte) (uint16, bool) {
-	if len(body) < execWide64MinLen {
-		return 0, false
-	}
-
-	if body[3] != 0x00 || body[4] != 0x00 {
-		return 0, false
-	}
-
-	if binary.LittleEndian.Uint64(body[execWide64SeqPadAt:execWide64SeqPadAt+8]) != uint64(body[2])+1 {
+	f, ok := execWide64FieldsOf(body)
+	if !ok {
 		return 0, false
 	}
 
@@ -539,13 +564,13 @@ func execWide64NoStatementCursor(body []byte) (uint16, bool) {
 	// keeps a header this reading does not understand — a truncated one, or a
 	// shape a future client invents — from being gated against whatever those
 	// four bytes hold.
-	for _, b := range body[execWide64SentinelAt : execWide64SQLLenAt+8] {
+	for _, b := range body[f.sentinelAt:f.end] {
 		if b != 0 {
 			return 0, false
 		}
 	}
 
-	cursorID := binary.LittleEndian.Uint32(body[execWide64CursorIDAt : execWide64CursorIDAt+4])
+	cursorID := binary.LittleEndian.Uint32(body[f.cursorIDAt : f.cursorIDAt+4])
 	if cursorID == 0 || cursorID > cursorReexecMaxID {
 		return 0, false
 	}
@@ -638,37 +663,25 @@ const execWide64SQLLenWidth = 8
 // the CLR short prefix immediately in front of the text. Reading it as a
 // buffered length would have handed the rewriter a third of the statement.
 func execSQLLengthWide64Field(body []byte) (execSQLLenField, bool) {
-	const (
-		sentinelAt = execWide64SentinelAt
-		sqlLenAt   = execWide64SQLLenAt
-	)
-
-	if len(body) < execWide64MinLen {
-		return execSQLLenField{}, false
-	}
-
-	if body[3] != 0x00 || body[4] != 0x00 {
-		return execSQLLenField{}, false
-	}
-
-	if binary.LittleEndian.Uint64(body[execWide64SeqPadAt:execWide64SeqPadAt+8]) != uint64(body[2])+1 {
+	f, ok := execWide64FieldsOf(body)
+	if !ok {
 		return execSQLLenField{}, false
 	}
 
 	for i, b := range closeCursorsWideSentinel {
-		if body[sentinelAt+i] != b {
+		if body[f.sentinelAt+i] != b {
 			return execSQLLenField{}, false
 		}
 	}
 
-	declared := binary.LittleEndian.Uint64(body[sqlLenAt : sqlLenAt+execWide64SQLLenWidth])
+	declared := binary.LittleEndian.Uint64(body[f.sqlLenAt : f.sqlLenAt+execWide64SQLLenWidth])
 	if declared == 0 || declared > execMaxSQLLen {
 		return execSQLLenField{}, false
 	}
 
 	return execSQLLenField{
 		value: int(declared),
-		at:    sqlLenAt,
+		at:    f.sqlLenAt,
 		width: execWide64SQLLenWidth,
 		kind:  stmtLenWide64UB8,
 	}, true

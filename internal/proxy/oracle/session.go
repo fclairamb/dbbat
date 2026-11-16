@@ -3273,7 +3273,7 @@ func (s *session) observeClientAuthEncoding(phase1Payload []byte) {
 	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Payload)
 
 	if ttc := extractTTCPayload(phase1Payload); ttc != nil {
-		s.clientWide64Encoding = usesWide64OpHeader(ttc)
+		s.clientWide64Encoding = isWide64AuthPhase1(ttc)
 	}
 }
 

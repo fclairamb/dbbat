@@ -1,0 +1,177 @@
+package oracle
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// The sqlplus 18.4 bundled in gvenzl/oracle-xe:18.4.0-slim speaks the 64-bit
+// OCI dialect, but against a server below TTC field version 23.1, so its op
+// headers carry no token block (wide64FieldsAt) and its column records end
+// after the two classic trailing integers (wide64ColumnRecordTailLenPre23).
+// Every fixture here was recorded on the nightly 18c leg; see the files'
+// own headers.
+const (
+	oci64_18cAuthPhase1       = "testdata/oci64_18c_auth_phase1.hex"
+	oci64_18cParseExecs       = "testdata/oci64_18c_parse_execs.hex"
+	oci64_18cRefCursorDrives  = "testdata/oci64_18c_refcursor_drives.hex"
+	oci64_18cBindOutputs      = "testdata/oci64_18c_refcursor_bind_output.hex"
+	oci64_18cLongStatementLen = 40610
+)
+
+// oci64_18cOERShape is what an 18c sqlplus session learns: the 64-bit
+// fixed-width encoding, from a server advertising a field version below 23.1.
+func oci64_18cOERShape() oerShape {
+	shape := oci64OERShape()
+	shape.serverFieldVersion = ttcFieldVersion20_1 - 1
+
+	return shape
+}
+
+// The dialect is learned off the client's own AUTH Phase 1. Until the
+// tokenless header was read, an 18c sqlplus session was taken for the 4-byte
+// dialect, and every 64-bit walk below was never asked.
+func TestOCI64_18cAuthPhase1IsLearnedAsTheWide64Dialect(t *testing.T) {
+	t.Parallel()
+
+	frames := recordedFrames(t, oci64_18cAuthPhase1)
+	require.Len(t, frames, 1)
+
+	ttc := extractTTCPayload(frames[0])
+	require.NotEmpty(t, ttc)
+	require.Equal(t, []byte{0x03, 0x76}, ttc[:2], "the fixture is an AUTH Phase 1")
+
+	at, ok := wide64FieldsAt(ttc)
+	require.True(t, ok)
+	assert.Equal(t, 3, at, "18c writes no token block: the fields follow the sequence byte")
+	assert.True(t, isWide64AuthPhase1(ttc), "18c sqlplus is the 64-bit dialect")
+
+	s := &session{}
+	s.observeClientAuthEncoding(frames[0])
+	assert.True(t, s.clientWide64Encoding, "and the session must learn it")
+
+	// The 23ai Phase 1 of the same client family still reads as before.
+	bundled := extractTTCPayload(recordedFrames(t, "testdata/oci_bundled_auth_phase1.hex")[0])
+	at, ok = wide64FieldsAt(bundled)
+	require.True(t, ok)
+	assert.Equal(t, closeCursorsWide8HeaderLen, at, "23ai carries the token block")
+	assert.True(t, isWide64AuthPhase1(bundled))
+
+	// A 4-byte client's tokenless Phase 1 (a ub4 key/value count, so the third
+	// sentinel sits four bytes earlier) must not be taken for this dialect.
+	fourByte := make([]byte, 0, len(ttc))
+	fourByte = append(fourByte, ttc[:3+28]...)
+	fourByte = append(fourByte, ttc[3+32:]...)
+	assert.False(t, isWide64AuthPhase1(fourByte), "a ub4 count is the 4-byte dialect")
+}
+
+// The statement behind an 18c close list is read whole, by its header length,
+// including the first fragment of a statement six packets long — which is
+// what tells the reassembly to wait for the rest.
+func TestOCI64_18cParseExecsAreReadByTheirHeader(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		"BEGIN DBMS_OUTPUT.DISABLE; END;",
+		"BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:1,NULL); END;",
+		"SELECT DECODE('A','A','1','2') FROM SYS.DUAL",
+		"INSERT INTO dbbat_blocked_probe VALUES (99)",
+	}
+	closed := [][]uint16{{2}, {2}, {3}, {3}}
+
+	frames := recordedFrames(t, oci64_18cParseExecs)
+	require.Len(t, frames, len(want)+1)
+
+	for i, sql := range want {
+		ttc := extractTTCPayload(frames[i])
+		require.NotEmptyf(t, ttc, "frame %d", i)
+
+		ids, err := decodeCloseCursors(ttc)
+		require.NoErrorf(t, err, "frame %d opens with a tokenless 64-bit close list", i)
+		assert.Equalf(t, closed[i], ids, "frame %d closes", i)
+
+		result, err := decodePiggybackExecSQL(ttc, true)
+		require.NoErrorf(t, err, "frame %d", i)
+		assert.Equalf(t, sql, result.SQL, "frame %d", i)
+		assert.False(t, result.Truncated)
+
+		_, reexec := execNoStatementCursor(ttc, true)
+		assert.Falsef(t, reexec, "frame %d carries a statement, so it is no re-execution", i)
+
+		_, short := statementFragmentShortfall(ttc, true)
+		assert.Falsef(t, short, "frame %d is whole", i)
+	}
+
+	first := extractTTCPayload(frames[len(want)])
+	require.Equal(t, []byte{0x03, 0x5e}, first[:2])
+
+	length, ok := execSQLLength(first, true)
+	require.True(t, ok, "the 18c exec header declares the statement's length")
+	assert.Equal(t, oci64_18cLongStatementLen, length)
+
+	need, ok := statementFragmentShortfall(first, true)
+	require.True(t, ok, "the first fragment must be reported short, or no reassembly starts")
+	assert.Positive(t, need)
+
+	// Before the session knew the dialect, the 4-byte reading answered nothing.
+	_, ok = execSQLLength(first, false)
+	assert.False(t, ok)
+}
+
+// The REF cursor ids the 18c server hands back are read out of its call
+// responses, and the client's next frames drive exactly those cursors.
+func TestOCI64_18cRefCursorIDsMatchTheCursorsTheClientDrives(t *testing.T) {
+	t.Parallel()
+
+	want := []uint16{2, 3}
+
+	var learned []uint16
+
+	for i, payload := range recordedFrames(t, oci64_18cBindOutputs) {
+		ttc := extractTTCPayload(payload)
+		require.Equalf(t, byte(ttcMsgIOVector), ttc[0], "frame %d is a call response", i)
+
+		learned = append(learned, refCursorIDsInBindOutput(oci64_18cOERShape(), ttc)...)
+
+		assert.Emptyf(t, refCursorIDsInBindOutput(oci64OERShape(), ttc),
+			"frame %d: read with the 23ai record tail, the descriptor must not walk", i)
+	}
+
+	assert.Equal(t, want, learned)
+
+	var driven []uint16
+
+	for i, payload := range recordedFrames(t, oci64_18cRefCursorDrives) {
+		ttc := extractTTCPayload(payload)
+
+		id, ok := execNoStatementCursor(ttc, true)
+		require.Truef(t, ok, "drive %d declares no statement, so it is a re-execution", i)
+
+		driven = append(driven, id)
+	}
+
+	assert.Equal(t, want, driven)
+}
+
+// A token-form header that fails its own guard is not re-read as the
+// tokenless form: the fields that form would read are not where a 23ai frame
+// keeps them.
+func TestOCI64TokenFormIsNotReadAsTheTokenlessOne(t *testing.T) {
+	t.Parallel()
+
+	for i, payload := range recordedFrames(t, oci64ParseExecs) {
+		ttc := extractTTCPayload(payload)
+		if !strings.HasPrefix(string(ttc[:2]), "\x03\x5e") {
+			continue
+		}
+
+		broken := append([]byte(nil), ttc...)
+		broken[execWide64SeqPadAt] ^= 0xff
+
+		_, ok := execSQLLength(broken, true)
+		assert.Falsef(t, ok, "frame %d with a broken sequence pad", i)
+	}
+}

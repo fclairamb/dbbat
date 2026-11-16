@@ -124,6 +124,11 @@ const (
 	// fields. 19c advertises 12, 18c lower still.
 	ttcFieldVersion20_1 = 14
 
+	// ttcFieldVersion23_1 is the first version whose column records carry the
+	// data-use-case domain fields and the annotation count. Below it a 64-bit
+	// OCI column record ends right after the two classic trailing integers.
+	ttcFieldVersion23_1 = 17
+
 	// ttcFieldVersion23_4 is the first version that can negotiate the TTC
 	// end-of-response marker. Below it a client never expects one, and a 0x1d
 	// behind an OER is read as the code of a message the client does not know.
