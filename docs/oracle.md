@@ -3690,7 +3690,7 @@ once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 | `ORACLE_TEST_REQUIRE_OCI_CLIENT` | `1` turns "no OCI client available" from a skip into a failure. Set on every Oracle leg in CI — see below |
 | `ORACLE_TEST_OCI_CLIENT` | Pins where sqlplus comes from: `path` (an install on `PATH`) or `container` (the one bundled in the Oracle image). Unset = auto, `PATH` first. The capture harness honours the same variable and the same values |
 | `ORACLE_CAPTURE_OCI_FIXTURES` | `1` lets `TestCapture_OCIFixturesThroughDBBat` **rewrite** the OCI hex fixtures under `testdata/` from a live proxy session. Off otherwise: it is capture tooling wearing the integration tag, and those files are what every other test in the package is pinned against — see below |
-| `ORACLE_TEST_DUMP_DIR` | Records every session the integration fixtures proxy, with dbbat's own capture (both directions, synthesized refusals included, pcapng as `loadTestDump` reads it), one subdirectory per test. The integration workflow's `capture_dumps` dispatch input sets it, together with `ORACLE_CAPTURE_OCI_FIXTURES=1` and `CAPTURE_KEEP_DUMP_DIR`, and uploads the result per leg as the `oracle-captures-<leg>` artifact. That is the way to get bytes from the amd64-only 18c XE leg: `gh workflow run "Integration tests" --ref <branch> -f capture_dumps=true`. Fixtures recorded there are committed with an `_18c` suffix, never over the 23ai ones |
+| `ORACLE_TEST_DUMP_DIR` | Records every session the integration fixtures proxy, with dbbat's own capture (both directions, synthesized refusals included, pcapng as `loadTestDump` reads it), one subdirectory per test. The integration workflow's `capture_dumps` dispatch input sets it, together with `ORACLE_CAPTURE_OCI_FIXTURES=1` and `CAPTURE_KEEP_DUMP_DIR`, and uploads the result per leg as the `oracle-captures-<leg>` artifact. That is the way to get bytes from the amd64-only 18c XE leg: `gh workflow run "Integration tests" --ref <branch> -f capture_dumps=true`. Fixtures recorded there are committed as `oci64_18c_*.hex`, never over the 23ai ones. The recorders rewrite `testdata/` in the CI checkout, so the package's unit tests in that same run read the re-recorded fixtures and some fail: a capture run is for the artifact, not a verdict |
 
 #### Where the OCI client comes from
 
@@ -3895,13 +3895,37 @@ relay re-sends the same Connect, up to `maxConnectResends` times
 (`exchangeConnect`), and `TestIntegration_TNSCapture` goes through the same
 helper.
 
-**Still open on 18c** (issue #505): the OCI 18.4 client's exec, describe and
-bind-output layouts. A statement longer than the SDU is recorded as its first
-fragment only (most likely the 18.4 exec header's declared length is not
-read, so no reassembly starts), rows are not captured, REF cursor ids are not read out of
-the bind output, and statement tags are not applied. Each one needs an 18.4
-recording to write the decoder against. The `capture_dumps` input above
-produces them.
+The 18.4 sqlplus is the **64-bit OCI dialect** (the one the 23.26 client in
+oracle-free speaks), but negotiated against a server below field version 23.1,
+and three things that version gates are missing from the wire:
+
+- **No token block in the op header.** 23ai's 64-bit header carries 14 bytes
+  between the sequence byte and the op's fields (`00 00`, a ub4, and the next
+  call's sequence as a ub8); 18c's has none, so the fields start at byte 3.
+  `wide64FieldsAt` resolves where they start, the exec, close-list and
+  re-execution walks read each field at its distance from there, and the
+  session learns the dialect from `isWide64AuthPhase1`, which checks the
+  field list behind the header (a 4-byte client's ub4 key/value count puts
+  its third sentinel four bytes earlier). Before that, an 18c session was
+  taken for the 4-byte dialect: a statement longer than the SDU was recorded
+  as its first fragment, REF cursor drives went undecoded, a refusal behind a
+  close list could not be framed (`ORA-03113`), and statement tags were not
+  applied.
+- **Shorter column records.** A 64-bit column record ends after the two classic
+  trailing integers (6 bytes, `wide64ColumnRecordTailLenPre23`) instead of the
+  24-byte span that carries the 23ai domain fields and annotation count. Sized
+  by the server's field version, in describes and in REF cursor descriptors.
+- **No LOB prefix.** A LOB column's locator follows its ub4 length directly,
+  without the LOB size and chunk size 23ai sends in front of it.
+
+The fixtures are `testdata/oci64_18c_*.hex`, recorded on the 18c leg with
+`capture_dumps`, and `oci64_18c_test.go` replays them.
+
+One proxy-side hang surfaced on the same runs and was not 18c-specific: a
+statement longer than `execMaxSQLLen` is not reassembled, so its tail reaches
+the call-turn wait (`pipelining.go`) as packets of its own. Only a packet that
+opens a call (`0x03`, `0x0e`, `0x11`) is held there now; the tail of the call in
+flight goes upstream at once.
 
 ### Pre-auth relay (Oracle 23ai)
 
