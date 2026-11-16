@@ -301,3 +301,70 @@ func TestOCI64_18cCallBehindACloseListIsGated(t *testing.T) {
 	read := extractTTCPayload(frames[2])
 	require.NoError(t, newSession().handlePiggybackExec(read), "the DECODE probe is a read")
 }
+
+// execLengthOf reads the statement length an exec declares, past the close
+// list a piggyback staples in front of it.
+func execLengthOf(t *testing.T, ttc []byte) int {
+	t.Helper()
+
+	body := ttc
+	if end, ok := closeCursorsEnd(ttc); ok {
+		body = ttc[end:]
+	}
+
+	length, ok := execSQLLength(body, true)
+	require.True(t, ok, "the exec header must declare its statement's length")
+
+	return length
+}
+
+// The 18c parse-execs go through the statement tagger the way the proxy hands
+// them over: the tag reaches the wire in front of the client's own text, the
+// PL/SQL BEGIN … END; calls included, and the 64-bit length field is
+// rewritten to the tagged statement's length.
+func TestOCI64_18cParseExecsAreTagged(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		"BEGIN DBMS_OUTPUT.DISABLE; END;",
+		"BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:1,NULL); END;",
+		"SELECT DECODE('A','A','1','2') FROM SYS.DUAL",
+		"INSERT INTO dbbat_blocked_probe VALUES (99)",
+	}
+	terminated := []int{0, 1, 0, 0}
+
+	frames := recordedFrames(t, oci64_18cParseExecs)
+	require.Len(t, frames, len(want)+1)
+
+	s := taggedSession(t, 8192)
+	s.clientWide64Encoding = true
+
+	for i, sql := range want {
+		ttc := extractTTCPayload(frames[i])
+		require.NotEmptyf(t, ttc, "frame %d", i)
+
+		// SET_MODULE declares its NUL terminator inside the length, so the
+		// field is one past the text there; the tag grows it by its own size.
+		before := execLengthOf(t, ttc)
+		require.Equalf(t, len(sql)+terminated[i], before, "frame %d declares its own text", i)
+
+		out, ok := s.rewriteStatementMessage(messageOf(ttc))
+		require.Truef(t, ok, "frame %d: the 18c session must certify and tag", i)
+		require.True(t, s.tagging.certified)
+
+		wire := upstreamTTC(t, out)
+
+		got, ok := decodeExecStatement(wire, true)
+		require.Truef(t, ok, "frame %d: the rewritten frame must still decode", i)
+		assert.Equalf(t, taggingTagPrefix+sql, got, "frame %d", i)
+
+		assert.Equalf(t, len(taggingTagPrefix)+before, execLengthOf(t, wire),
+			"frame %d: the length field declares the tagged statement", i)
+
+		if ids, err := decodeCloseCursors(ttc); err == nil {
+			gotIDs, err := decodeCloseCursors(wire)
+			require.NoErrorf(t, err, "frame %d: the close list survives the rewrite", i)
+			assert.Equalf(t, ids, gotIDs, "frame %d", i)
+		}
+	}
+}
