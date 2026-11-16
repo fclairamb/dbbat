@@ -127,7 +127,7 @@ func isGatedCall(pkt *TNSPacket) bool {
 		return false
 	}
 
-	switch TTCFunctionCode(pkt.Payload[ttcDataFlagsSize]) {
+	switch TTCFunctionCode(pkt.Payload[ttcDataFlagsSize]) { //nolint:exhaustive // only the calls whose answer may be held
 	case TTCFuncPiggyback, TTCFuncOALL8, TTCFuncOFETCH:
 		return true
 	default:

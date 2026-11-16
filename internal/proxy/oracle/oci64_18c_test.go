@@ -128,9 +128,10 @@ func TestOCI64_18cRefCursorIDsMatchTheCursorsTheClientDrives(t *testing.T) {
 
 	want := []uint16{2, 3}
 
-	var learned []uint16
+	frames := recordedFrames(t, oci64_18cBindOutputs)
+	learned := make([]uint16, 0, len(frames))
 
-	for i, payload := range recordedFrames(t, oci64_18cBindOutputs) {
+	for i, payload := range frames {
 		ttc := extractTTCPayload(payload)
 		require.Equalf(t, byte(ttcMsgIOVector), ttc[0], "frame %d is a call response", i)
 
@@ -142,9 +143,10 @@ func TestOCI64_18cRefCursorIDsMatchTheCursorsTheClientDrives(t *testing.T) {
 
 	assert.Equal(t, want, learned)
 
-	var driven []uint16
+	drives := recordedFrames(t, oci64_18cRefCursorDrives)
+	driven := make([]uint16, 0, len(drives))
 
-	for i, payload := range recordedFrames(t, oci64_18cRefCursorDrives) {
+	for i, payload := range drives {
 		ttc := extractTTCPayload(payload)
 
 		id, ok := execNoStatementCursor(ttc, true)
