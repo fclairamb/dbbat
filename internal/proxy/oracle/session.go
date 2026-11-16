@@ -202,8 +202,12 @@ type session struct {
 	// (which does no I/O); the client leg takes it in explicit regions, with
 	// holdIfNeeded deliberately outside them. Functions below are annotated
 	// with which side of that boundary they sit on.
-	trackerMu    sync.Mutex
-	tracker      *oracleQueryTracker
+	trackerMu sync.Mutex
+	tracker   *oracleQueryTracker
+
+	// callTurn is the bookkeeping that makes a pipelined call wait for the
+	// previous one's answer: see pipelining.go.
+	callTurn     callTurn
 	queryStorage config.QueryStorageConfig
 
 	// fragmentedMessage is the client TTC message currently being gated, when
@@ -1795,6 +1799,8 @@ func (s *session) proxyMessages() error {
 
 	errChan := make(chan error, 2)
 
+	s.callTurn.upstreamDone = make(chan struct{})
+
 	// Both directions run under safe.RunRelay, which turns a panic into an
 	// error on errChan instead of a dead process: these are goroutines of their
 	// own, and the only other recover in the Oracle proxy is on
@@ -2302,7 +2308,7 @@ func (s *session) closeConns() {
 // for TTC-level query interception, and forwards to upstream.
 func (s *session) clientToUpstream() error {
 	for {
-		pkt, err := readTNSPacket(s.clientConn)
+		pkt, err := s.nextClientPacket()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
@@ -2351,6 +2357,10 @@ func (s *session) gateAndForwardDataMessage(pkt *TNSPacket) error {
 	blocked := s.interceptClientMessage(msg.gate)
 
 	s.fragmentedMessage = nil
+
+	if !blocked {
+		s.armCallAnswer()
+	}
 
 	if blocked {
 		// Every fragment is dropped, not just the first: the refusal was
@@ -2871,6 +2881,8 @@ func statementOpOffsets(ttcPayload []byte) []int {
 // upstreamToClient reads TNS packets from upstream, intercepts Data packets
 // for response tracking and row capture, and forwards to the client.
 func (s *session) upstreamToClient() error {
+	defer s.callTurn.noteUpstreamGone()
+
 	for {
 		pkt, err := readTNSPacket(s.upstreamConn)
 		if err != nil {
@@ -2887,6 +2899,11 @@ func (s *session) upstreamToClient() error {
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
 			s.interceptUpstreamMessage(pkt)
 		}
+
+		// Whatever it was, the upstream has started answering: a call held behind
+		// it may go. After the intercept, so a response that ends the call has
+		// already completed its statement.
+		s.noteUpstreamResponse()
 
 		// Forward to client. The capture's server→client recording point is the
 		// write tap on s.clientConn (startDumpIfConfigured), not a call here: a
