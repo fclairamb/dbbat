@@ -4987,3 +4987,17 @@ two packets alone. Until it does:
 Treat a green statement-timeout test on Oracle as proving the *session* ended,
 not that the server stopped working. Removing this caveat needs a test that
 watches `v$session` (or the server's CPU) after the teardown.
+
+## `ssl_mode` on an Oracle row
+
+dbbat does not encrypt the upstream leg of an Oracle session: the proxy relays
+the client's own TNS Connect over a plain socket, whatever the row's
+`ssl_mode`. The API therefore refuses `require`, `verify-ca` and `verify-full`
+on an Oracle row (400); `disable`, `allow`, `prefer` and empty are accepted.
+For an encrypted leg, use network encryption on the Oracle server or a tunnel.
+
+A row saved with one of those modes before this rule keeps working. *Test
+connection* does honour the mode (go-ora's TLS and certificate verification),
+so it adds a warning (`oracle_upstream_not_encrypted`): the check was
+encrypted, a real session is not. The server form does not offer an SSL mode
+for Oracle rows.

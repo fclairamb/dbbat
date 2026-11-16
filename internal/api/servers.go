@@ -767,6 +767,10 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 		return errMsg
 	}
 
+	if errMsg := validateOracleSSLMode(req.Protocol, req.SSLMode); errMsg != "" {
+		return errMsg
+	}
+
 	switch req.Protocol {
 	case store.ProtocolSSH:
 		// SSH bastions have no database_name/ssl_mode; they need a private key
@@ -817,6 +821,25 @@ func validateSSLMode(mode string) string {
 	return "ssl_mode must be one of: " + strings.Join(upstream.SSLModes(), ", ")
 }
 
+// validateOracleSSLMode refuses the ssl_modes an Oracle row cannot honour: the
+// proxy relays the client's TNS Connect over a plain socket whatever the row
+// says, so require/verify-* would be a fail-open setting (and a green
+// connectivity check would prove more than a real session does).
+func validateOracleSSLMode(protocol, mode string) string {
+	if protocol != store.ProtocolOracle {
+		return ""
+	}
+
+	switch mode {
+	case "require", "verify-ca", "verify-full":
+		return "ssl_mode " + mode + " is not supported for Oracle: dbbat does not encrypt the " +
+			"Oracle upstream leg (use network encryption on the Oracle server, or a tunnel); " +
+			"use disable, allow or prefer"
+	}
+
+	return ""
+}
+
 // validateUpdateProtocolFields validates an update against the row it will
 // produce, returning an error message (empty when valid).
 //
@@ -841,6 +864,20 @@ func validateUpdateProtocolFields(current *store.Server, req *UpdateDatabaseRequ
 
 	if req.SSLMode != nil {
 		if errMsg := validateSSLMode(*req.SSLMode); errMsg != "" {
+			return errMsg
+		}
+	}
+
+	// Refuse on a new ssl_mode, or on a protocol change that would carry the
+	// stored one onto an Oracle row. An existing Oracle row that is merely
+	// edited keeps working: the connectivity check warns about it instead.
+	switch {
+	case req.SSLMode != nil:
+		if errMsg := validateOracleSSLMode(protocol, *req.SSLMode); errMsg != "" {
+			return errMsg
+		}
+	case protocol != current.Protocol:
+		if errMsg := validateOracleSSLMode(protocol, current.SSLMode); errMsg != "" {
 			return errMsg
 		}
 	}
