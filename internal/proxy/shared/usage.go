@@ -27,6 +27,8 @@ func RegisterGrantUsage(registry *cache.UsageRegistry, grant *store.Grant, from,
 // with its limits: the session's own reading (connect-time snapshot plus its
 // own statements and bytes) plus what every other session of the grant used
 // since. usage may be nil, which leaves the session's own reading.
-func QuotaUsage(grant *store.Grant, usage *cache.UsageHandle) (queries, bytes int64) {
+//
+// It returns (statements, bytes).
+func QuotaUsage(grant *store.Grant, usage *cache.UsageHandle) (int64, int64) {
 	return grant.QueryCount + usage.OtherQueries(), grant.BytesTransferred + usage.OtherBytes()
 }

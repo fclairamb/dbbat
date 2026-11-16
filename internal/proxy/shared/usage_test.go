@@ -45,7 +45,8 @@ func (s *quotaSession) query(bytes int64) {
 	s.usage.AddQueries(1)
 }
 
-func quotaExceeded(s *quotaSession) (queries, bytes bool) {
+// quotaExceeded reports (statement quota hit, byte quota hit).
+func quotaExceeded(s *quotaSession) (bool, bool) {
 	q, b := QuotaUsage(s.grant, s.usage)
 
 	return q >= *s.grant.MaxQueryCounts(), b >= *s.grant.MaxBytesTransferred()

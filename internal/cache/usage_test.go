@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 )
 
+var errRefreshFailed = errors.New("refresh failed")
+
 // fakeStore stands in for the store aggregate: per-connection persisted
 // totals, summed minus the excluded connections, as Store.GrantUsage does.
 type fakeStore struct {
@@ -194,7 +196,7 @@ func TestUsageRegistry_RefreshErrorKeepsBase(t *testing.T) {
 
 	r := NewUsageRegistry()
 	h := r.Register(uuid.New(), 7, 70, nil, nil)
-	boom := errors.New("boom")
+	boom := errRefreshFailed
 
 	err := r.Refresh(context.Background(), func(context.Context, uuid.UUID, []uuid.UUID) (int64, int64, error) {
 		return 0, 0, boom

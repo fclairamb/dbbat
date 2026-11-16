@@ -554,7 +554,7 @@ func excludeConnections(column string, exclude []uuid.UUID) func(*bun.SelectQuer
 			return q
 		}
 
-		return q.Where("? NOT IN (?)", bun.Ident(column), bun.In(exclude))
+		return q.Where("? NOT IN (?)", bun.Ident(column), bun.List(exclude))
 	}
 }
 
