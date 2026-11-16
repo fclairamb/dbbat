@@ -229,3 +229,95 @@ func TestNextOERFrame_NoEndOfResponseBelow23_4(t *testing.T) {
 		})
 	}
 }
+
+// oci64_18cServerReplies are the responses the 18c XE server sent sqlplus 18.4
+// on the nightly leg, every one of which ends in that server's own OER.
+var oci64_18cServerReplies = []string{
+	"testdata/oci64_18c_describe.hex",
+	"testdata/oci64_18c_lob.hex",
+	"testdata/oci64_18c_long.hex",
+	"testdata/oci64_18c_sevencols.hex",
+	"testdata/oci64_18c_refcursor_bind_output.hex",
+}
+
+// oci64_18cRefusalSession is an 18c sqlplus session at the point it is
+// refused: the 64-bit OCI client, the 18453 challenge, and a server below 20c.
+func oci64_18cRefusalSession(t *testing.T) *session {
+	t.Helper()
+
+	s := newTestSession(nil)
+	s.clientWideEncoding = true
+	s.clientWide64Encoding = true
+	s.upstreamCustomHash = true
+	s.clientVerifierType = VerifierType18453
+	s.observeOERServerCaps(setProtocolReplyWithFieldVersion(t, 11))
+
+	return s
+}
+
+// TestRefusalOn18cIsShapedLikeThe18cServersOwnOER takes the server shape off
+// the 18c XE server's own replies rather than off a hand-built one, and checks
+// the refusal bytes dbbat sends an 18c sqlplus against it: the AUTH refusal and
+// the mid-session one, learned and unlearned, all carry the tail that server
+// writes and no end-of-response marker.
+func TestRefusalOn18cIsShapedLikeThe18cServersOwnOER(t *testing.T) {
+	t.Parallel()
+
+	learned := oci64_18cRefusalSession(t)
+	samples := 0
+
+	for _, path := range oci64_18cServerReplies {
+		for i, frame := range recordedFrames(t, path) {
+			ttc := extractTTCPayload(frame)
+			require.NotEmptyf(t, ttc, "%s[%d]", path, i)
+
+			var server oerShape
+
+			require.Truef(t, learnOERShape(&server, ttc), "%s[%d] ends in the server's own OER", path, i)
+			assert.Equalf(t, 0, server.extraTailFields, "%s[%d]: no 20c tail fields", path, i)
+			assert.Truef(t, server.fixedWidth64, "%s[%d]", path, i)
+			assert.Falsef(t, server.endOfResponse, "%s[%d]: 18c ends no message with 0x1d", path, i)
+
+			learned.learnOERTail(ttc)
+
+			samples++
+		}
+	}
+
+	require.Positive(t, samples)
+	require.True(t, learned.oerShapeSnapshot().tailLearned, "the 18c replies must teach the shape")
+
+	for name, refuse := range map[string]func(*session) (oerShape, int, byte){
+		"auth refusal":    (*session).authRefusalOERShape,
+		"session refusal": (*session).nextOERFrame,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			encode := func(s *session) []byte {
+				shape, _, _ := refuse(s)
+
+				return encodeOERPacket(shape, oerSummary{
+					CallStatus: 1, SeqNumber: 7, ErrorCode: 1031,
+					ErrorMessage: "ORA-01031: refused", CallNumber: 3,
+				})
+			}
+
+			fromServer := encode(learned)
+			fallback := encode(oci64_18cRefusalSession(t))
+
+			assert.Equal(t, fromServer, fallback,
+				"before any 18c OER was read, the refusal is the one the 18c server's own replies teach")
+
+			var sent oerShape
+
+			ttc := extractTTCPayload(fromServer[tnsHeaderSize:])
+			require.True(t, learnOERShape(&sent, ttc), "dbbat's refusal must read as an OER")
+			assert.Equal(t, 0, sent.extraTailFields, "the tail the 18c server writes")
+			assert.True(t, sent.fixedWidth64)
+			assert.False(t, sent.endOfResponse)
+			assert.NotEqual(t, byte(ttcEndOfResponse), fromServer[len(fromServer)-1],
+				"no end-of-response marker on the wire")
+		})
+	}
+}
