@@ -584,10 +584,28 @@ func isCloseCursorsWide8Header(ttcPayload []byte) bool {
 // The second field is always this header's own sequence number plus one — the
 // sequence the next TTC message on the wire will carry — measured across every
 // recorded frame from this client, AUTH and proxy mode alike.
+//
+// Against a server older than 23ai the header has no token block at all (see
+// wide64FieldsAt) and the sentinel follows the sequence byte directly. That
+// form has no sequence to check, so the session does not learn its dialect
+// from this test: observeClientAuthEncoding asks isWide64AuthPhase1, which
+// checks the field list behind the header as well.
 func usesWide64OpHeader(ttcPayload []byte) bool {
-	const sentinelStart = closeCursorsWide8HeaderLen
+	at, ok := wide64FieldsAt(ttcPayload)
+	if !ok || len(ttcPayload) < at+len(closeCursorsWideSentinel) {
+		return false
+	}
 
-	if len(ttcPayload) < sentinelStart+len(closeCursorsWideSentinel) {
+	return bytes.Equal(ttcPayload[at:at+len(closeCursorsWideSentinel)], closeCursorsWideSentinel)
+}
+
+// hasWide64TokenBlock reports whether a 64-bit OCI op header carries the token
+// block a 23ai server negotiates from TTC field version 23.1 on — the 14 bytes
+// `[0x00][0x00][ub4 …][sb8 seq+1]` between the sequence byte and the op's own
+// fields — guarded the way it always was: the two zero bytes, and the "next
+// sequence" that must be this header's own sequence plus one.
+func hasWide64TokenBlock(ttcPayload []byte) bool {
+	if len(ttcPayload) < closeCursorsWide8HeaderLen {
 		return false
 	}
 
@@ -596,11 +614,66 @@ func usesWide64OpHeader(ttcPayload []byte) bool {
 	}
 
 	next := binary.LittleEndian.Uint64(ttcPayload[closeCursorsWide8SeqOffset : closeCursorsWide8SeqOffset+8])
-	if next != uint64(ttcPayload[2])+1 {
+
+	return next == uint64(ttcPayload[2])+1
+}
+
+// wide64FieldsAt is where a 64-bit OCI op's own fields start: past the token
+// block when the header carries one (23ai), straight after the sequence byte
+// when it does not.
+//
+// The second form is Oracle 18c XE's, measured on the sqlplus 18.4 bundled in
+// gvenzl/oracle-xe:18.4.0-slim (testdata/oci64_18c_*.hex): the same client
+// family as 23.26, the same 8-byte integers and the same field list, but no
+// token block, because a server below field version 23.1 never negotiates it.
+// Its AUTH Phase 1 opens `03 76 02 fe x8 0b000000 …` where 23ai's opens
+// `03 76 02 00 00 00000000 0300000000000000 fe x8 0b000000 …` — byte for byte
+// the same once those fourteen bytes are taken out.
+//
+// The two forms cannot answer for each other's frames. A tokenless header has
+// the op's first field at byte 3, and every 64-bit op has an `fe x8` sentinel
+// within its first sixteen bytes of fields, so the eight bytes at 9..16 a
+// token check reads never equal a small sequence number; and the token form's
+// bytes 3..16 are zeros and a sequence, never a sentinel. What reads the
+// fields afterwards validates them as before.
+//
+// ok is false only when the payload is too short to hold a header at all.
+func wide64FieldsAt(ttcPayload []byte) (int, bool) {
+	if hasWide64TokenBlock(ttcPayload) {
+		return closeCursorsWide8HeaderLen, true
+	}
+
+	if len(ttcPayload) < 3 {
+		return 0, false
+	}
+
+	return 3, true
+}
+
+// isWide64AuthPhase1 reports whether an AUTH Phase 1 is the 64-bit OCI one,
+// with or without the token block. Beyond the op header's own sentinel it
+// requires the next two the 64-bit field list puts there — after the ub4 user
+// length and the ub4 mode, and after the **8-byte** key/value count — which is
+// what tells the tokenless form from a 4-byte client's, whose count is a ub4
+// and whose third sentinel therefore sits four bytes earlier.
+func isWide64AuthPhase1(ttcPayload []byte) bool {
+	const (
+		secondSentinel = 16 // fe x8, ub4 user length, ub4 mode
+		thirdSentinel  = 32 // then fe x8 and the ub8 key/value count
+	)
+
+	at, ok := wide64FieldsAt(ttcPayload)
+	if !ok || len(ttcPayload) < at+thirdSentinel+len(closeCursorsWideSentinel) {
 		return false
 	}
 
-	return bytes.Equal(ttcPayload[sentinelStart:sentinelStart+len(closeCursorsWideSentinel)], closeCursorsWideSentinel)
+	for _, off := range []int{0, secondSentinel, thirdSentinel} {
+		if !bytes.Equal(ttcPayload[at+off:at+off+len(closeCursorsWideSentinel)], closeCursorsWideSentinel) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // decodeCloseCursorsWide8 walks the 64-bit OCI close list: an 8-byte count,
@@ -613,7 +686,12 @@ func usesWide64OpHeader(ttcPayload []byte) bool {
 // enough bytes for the whole list. A payload that does not fit is rejected and
 // nothing is deleted.
 func decodeCloseCursorsWide8(ttcPayload []byte) ([]uint16, int, error) {
-	pos := closeCursorsWide8HeaderLen + len(closeCursorsWideSentinel)
+	at, ok := wide64FieldsAt(ttcPayload)
+	if !ok {
+		return nil, 0, fmt.Errorf("%w: truncated wide header", ErrNotCloseCursors)
+	}
+
+	pos := at + len(closeCursorsWideSentinel)
 
 	if pos+8 > len(ttcPayload) {
 		return nil, 0, fmt.Errorf("%w: truncated wide count", ErrNotCloseCursors)
@@ -2509,9 +2587,17 @@ func readFixedLOBColumn(
 		return "", offset, true // a NULL LOB: the column is its zero maxSize and nothing else
 	}
 
-	if shape.fixedWidth64 {
+	switch {
+	case shape.fixedWidth64 && shape.serverPredates(ttcFieldVersion23_1):
+		// Oracle 18c XE sends a 64-bit OCI client the locator straight behind
+		// its length: no LOB size and no chunk size in front of it. Measured on
+		// every LOB column of testdata/oci64_18c_lob.hex, whose locators
+		// (0x28 bytes, the length repeated as their CLR prefix) sit four bytes
+		// past the column's start where 23ai's sit sixteen.
+		return readFixedLOBLocator(payload, offset, maxSize, colTypes, col)
+	case shape.fixedWidth64:
 		offset += lobFixedSize64Len
-	} else {
+	default:
 		next, ok := skipCompressedInt(payload, offset)
 		if !ok {
 			return "", 0, false
@@ -2521,6 +2607,13 @@ func readFixedLOBColumn(
 	}
 
 	offset += lobFixedChunkSizeLen
+
+	return readFixedLOBLocator(payload, offset, maxSize, colTypes, col)
+}
+
+// readFixedLOBLocator reads the CLR-prefixed locator of a fixed-width LOB
+// column, whose length must be the maxSize the column's header already gave.
+func readFixedLOBLocator(payload []byte, offset, maxSize int, colTypes []int, col int) (string, int, bool) {
 	if offset >= len(payload) {
 		return "", 0, false
 	}

@@ -111,9 +111,28 @@ func (s *session) unansweredCall() <-chan struct{} {
 // answer they wait for.
 const pipelineQueueMax = 4
 
-// isGatedCall reports whether pkt is a Data packet the relay would gate.
+// isGatedCall reports whether pkt is a Data packet that opens a call: a TTC
+// function message (0x03), a legacy OALL8 (0x0e), or a piggyback (0x11, the
+// close-cursors list or session-state message a call is stapled behind).
+//
+// Any other Data packet is not a new call but the rest of the one in flight,
+// and holding it until that call is answered deadlocks the session: the
+// upstream answers only once it has the whole message. That is what a
+// statement longer than execMaxSQLLen does, whose tail reassembly does not
+// read (statementFragmentShortfall refuses the implausible length), so the
+// tail arrives here as its own packets — a 2 MB statement from go-ora hung
+// TestIntegration_OracleStatementLengthCeiling until the suite timed out.
 func isGatedCall(pkt *TNSPacket) bool {
-	return pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1
+	if pkt.Type != TNSPacketTypeData || len(pkt.Payload) < ttcDataFlagsSize+1 {
+		return false
+	}
+
+	switch TTCFunctionCode(pkt.Payload[ttcDataFlagsSize]) { //nolint:exhaustive // only the calls whose answer may be held
+	case TTCFuncPiggyback, TTCFuncOALL8, TTCFuncOFETCH:
+		return true
+	default:
+		return false
+	}
 }
 
 // readsAheadOf reports whether the client may be read past pkt while it is held.

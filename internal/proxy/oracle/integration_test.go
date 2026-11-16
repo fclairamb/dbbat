@@ -52,6 +52,27 @@ func oracleTestImage() string {
 	return defaultOracleImage
 }
 
+// oracleTestImageMajor is the Oracle release the test image's tag names
+// (`gvenzl/oracle-xe:18.4.0-slim` is 18, `gvenzl/oracle-free:23-slim` 23), or
+// 0 when the tag does not open with a number.
+func oracleTestImageMajor() int {
+	img := oracleTestImage()
+
+	tag := img[strings.LastIndex(img, ":")+1:]
+	end := 0
+
+	for end < len(tag) && tag[end] >= '0' && tag[end] <= '9' {
+		end++
+	}
+
+	major, err := strconv.Atoi(tag[:end])
+	if err != nil {
+		return 0
+	}
+
+	return major
+}
+
 // oracleTestService returns the PDB service name exposed by the test image:
 // gvenzl's XE images serve XEPDB1, the Free (23ai) images FREEPDB1, and the
 // enterprise image is started below with ORACLE_PDB=ORCLPDB1.
@@ -225,15 +246,15 @@ func TestIntegration_TNSCapture(t *testing.T) {
 	connectPayload := buildTNSConnect(oracleTestService())
 	connectPkt := encodeTNSPacket(TNSPacketTypeConnect, connectPayload)
 
-	_, err = conn.Write(connectPkt)
+	// Oracle 18c XE's listener answers this Connect with Resend first: the
+	// client is expected to send it again, which is what the proxy's own
+	// upstream dial does through the same helper.
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	resp, resends, err := exchangeConnect(conn, connectPkt)
 	require.NoError(t, err)
 
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	resp, err := readTNSPacket(conn)
-	require.NoError(t, err)
-
-	t.Logf("Oracle responded with packet type: %s (code=%d), payload length: %d",
-		resp.Type, resp.Type, len(resp.Payload))
+	t.Logf("Oracle responded with packet type: %s (code=%d), payload length: %d, after %d Resend(s)",
+		resp.Type, resp.Type, len(resp.Payload), resends)
 
 	assert.True(t,
 		resp.Type == TNSPacketTypeAccept ||
@@ -308,7 +329,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 		MaxResultBytes: 1048576,
 	}
 
-	proxy := NewServer(dataStore, encryptionKey, nil, queryStorage, config.DumpConfig{}, slog.Default())
+	proxy := NewServer(dataStore, encryptionKey, nil, queryStorage, integrationDumpConfig(t), slog.Default())
 	go func() { _ = proxy.Start(":0") }()
 	defer func() { _ = proxy.Shutdown(ctx) }()
 
@@ -541,7 +562,7 @@ func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
 	_, plainKey, err := dataStore.CreateAPIKey(ctx, user.UID, "agent-key", nil, encryptionKey)
 	require.NoError(t, err)
 
-	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.Default())
+	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, integrationDumpConfig(t), slog.Default())
 	go func() { _ = proxy.Start("127.0.0.1:0") }()
 
 	defer func() { _ = proxy.Shutdown(ctx) }()
@@ -664,7 +685,7 @@ func TestIntegration_UpstreamProgramCarriesConnectionUID(t *testing.T) {
 	_, plainKey, err := dataStore.CreateAPIKey(ctx, user.UID, "agent-key", nil, encryptionKey)
 	require.NoError(t, err)
 
-	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.Default())
+	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, integrationDumpConfig(t), slog.Default())
 	go func() { _ = proxy.Start("127.0.0.1:0") }()
 
 	defer func() { _ = proxy.Shutdown(ctx) }()

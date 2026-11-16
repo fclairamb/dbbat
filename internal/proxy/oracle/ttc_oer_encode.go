@@ -101,6 +101,45 @@ type oerShape struct {
 	// tailLearned records that extraTailFields, fixedWidth and endOfResponse
 	// came from a real upstream OER rather than the default.
 	tailLearned bool
+
+	// serverFieldVersion is the upstream's own ServerCompileTimeCaps[7], as it
+	// advertised it — not lowered to the client's, and not floored like
+	// ttcVersion. 0 means no Set Protocol reply was read.
+	//
+	// It answers the two questions the unlearned fallbacks have to settle
+	// before anything has been learned, and that only the server's version
+	// can: whether the summary object carries the two "fields added in Oracle
+	// Database 20c" (a server older than 20c never sends them), and whether a
+	// message can end with the end-of-response marker (never below 23.4).
+	// Oracle 18c XE advertises a version below both, which is what the
+	// 23ai-measured guesses got wrong there. See serverPredates.
+	serverFieldVersion int
+}
+
+// TTC field versions (ServerCompileTimeCaps[7]) the fallbacks key off, named
+// after Oracle's TNS_CCAP_FIELD_VERSION_* constants.
+const (
+	// ttcFieldVersion20_1 is the first version whose summary object carries the
+	// SQL type and server checksum after the row count — the two extra tail
+	// fields. 19c advertises 12, 18c lower still.
+	ttcFieldVersion20_1 = 14
+
+	// ttcFieldVersion23_1 is the first version whose column records carry the
+	// data-use-case domain fields and the annotation count. Below it a 64-bit
+	// OCI column record ends right after the two classic trailing integers.
+	ttcFieldVersion23_1 = 17
+
+	// ttcFieldVersion23_4 is the first version that can negotiate the TTC
+	// end-of-response marker. Below it a client never expects one, and a 0x1d
+	// behind an OER is read as the code of a message the client does not know.
+	ttcFieldVersion23_4 = 24
+)
+
+// serverPredates reports that the upstream advertised a TTC field version, and
+// that it is below version. Unknown is not "older": a shape that never read a
+// Set Protocol reply keeps the fallbacks measured against 23ai.
+func (o oerShape) serverPredates(version int) bool {
+	return o.serverFieldVersion > 0 && o.serverFieldVersion < version
 }
 
 // defaultOERShape is what dbbat assumes before it has seen anything: the shape
@@ -128,6 +167,7 @@ func (o oerShape) orDefault() oerShape {
 		d.fixedWidth64 = o.fixedWidth64
 		d.endOfResponse = o.endOfResponse
 		d.tailLearned = o.tailLearned
+		d.serverFieldVersion = o.serverFieldVersion
 
 		return d
 	}
@@ -903,6 +943,7 @@ func observeOERCapabilities(shape *oerShape, raw []byte) bool {
 
 	if len(caps) > oerCapFieldVersionIndex && caps[oerCapFieldVersionIndex] > 0 {
 		shape.ttcVersion = min(shape.ttcVersion, int(caps[oerCapFieldVersionIndex]))
+		shape.serverFieldVersion = int(caps[oerCapFieldVersionIndex])
 	}
 
 	return true

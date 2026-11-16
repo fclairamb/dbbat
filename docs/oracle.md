@@ -3690,6 +3690,7 @@ once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 | `ORACLE_TEST_REQUIRE_OCI_CLIENT` | `1` turns "no OCI client available" from a skip into a failure. Set on every Oracle leg in CI — see below |
 | `ORACLE_TEST_OCI_CLIENT` | Pins where sqlplus comes from: `path` (an install on `PATH`) or `container` (the one bundled in the Oracle image). Unset = auto, `PATH` first. The capture harness honours the same variable and the same values |
 | `ORACLE_CAPTURE_OCI_FIXTURES` | `1` lets `TestCapture_OCIFixturesThroughDBBat` **rewrite** the OCI hex fixtures under `testdata/` from a live proxy session. Off otherwise: it is capture tooling wearing the integration tag, and those files are what every other test in the package is pinned against — see below |
+| `ORACLE_TEST_DUMP_DIR` | Records every session the integration fixtures proxy, with dbbat's own capture (both directions, synthesized refusals included, pcapng as `loadTestDump` reads it), one subdirectory per test. The integration workflow's `capture_dumps` dispatch input sets it, together with `ORACLE_CAPTURE_OCI_FIXTURES=1` and `CAPTURE_KEEP_DUMP_DIR`, and uploads the result per leg as the `oracle-captures-<leg>` artifact. That is the way to get bytes from the amd64-only 18c XE leg: `gh workflow run "Integration tests" --ref <branch> -f capture_dumps=true`. Fixtures recorded there are committed as `oci64_18c_*.hex`, never over the 23ai ones. The recorders rewrite `testdata/` in the CI checkout, so the package's unit tests in that same run read the re-recorded fixtures and some fail: a capture run is for the artifact, not a verdict |
 
 #### Where the OCI client comes from
 
@@ -3854,6 +3855,77 @@ returned. See "Ending a call: the OER encoder" above.
 Note that `buildTNSConnect` in the test file announces TNS version 313 on purpose: from 315
 onwards Oracle expects the extended Connect format (see "TNS Version >= 315" above), which
 that simplified builder does not emit, and a 23ai listener drops the connection outright.
+
+### Oracle 18c XE: what differs from 23ai
+
+The nightly `18c XE (pinned)` leg runs the suite against
+`gvenzl/oracle-xe:18.4.0-slim`, with the sqlplus 18.4 bundled in that image as
+the OCI client. 18c negotiates TNS 315, the same envelope as 23ai, so the
+differences are in the TTC layer, and they all come from one number: the
+server's **TTC field version** (`ServerCompileTimeCaps[7]`). 23ai Free advertises
+27, 19c 12, 18c lower still. dbbat keeps the server's own value on the OER shape
+(`oerShape.serverFieldVersion`, recorded by `observeOERCapabilities`) and gates
+three fallbacks on it. Each was measured against 23ai and is used only before
+anything has been learned off an upstream OER:
+
+- **The thin 18453 challenge summary** (`clientChallengeTrailer`) ends with the
+  two "fields added in Oracle Database 20c" (a SQL type and a server checksum).
+  Below field version 14 (`TNS_CCAP_FIELD_VERSION_20_1`) no server sends them,
+  and JDBC thin parses the summary to the version it negotiated: the two surplus
+  zeros stay in its read buffer and the first one is read as the next message
+  code, so the login fails with `ORA-17401: Protocol violation [0]` thrown from
+  `doOAUTH`. This is the same failure ojdbc6 had against the hand-built 6949
+  summary. The width is measured, not derived: the 19c recording
+  `dbeaver_init.pcapng` (JDBC thin) carries a Phase 1 summary two fields shorter
+  than the 23ai capture (`TestClientChallengeTrailer_JDBCThinOnAPre20cServer`).
+  So this also affects JDBC thin against 19c.
+- **The AUTH-refusal tail** (`authRefusalOERShape`) guesses the same pair for a
+  modern client, and drops it below 20c.
+- **The OCI end-of-response marker**: the unlearned OCI refusal frame ended with
+  the TTC end-of-response marker (0x1d), which 23ai negotiates with OCI. Nothing
+  below field version 24 (`TNS_CCAP_FIELD_VERSION_23_4`) can negotiate it. An
+  18c sqlplus reads the stray byte as an unknown message and drops the session,
+  so a `read_only` refusal surfaced as `ORA-03113` then `ORA-03114` instead of
+  `ORA-01031`.
+
+An unknown version (no Set Protocol reply read) keeps the 23ai behaviour.
+
+The 18c listener also answers a first Connect with **Resend**. The pre-auth
+relay re-sends the same Connect, up to `maxConnectResends` times
+(`exchangeConnect`), and `TestIntegration_TNSCapture` goes through the same
+helper.
+
+The 18.4 sqlplus is the **64-bit OCI dialect** (the one the 23.26 client in
+oracle-free speaks), but negotiated against a server below field version 23.1,
+and three things that version gates are missing from the wire:
+
+- **No token block in the op header.** 23ai's 64-bit header carries 14 bytes
+  between the sequence byte and the op's fields (`00 00`, a ub4, and the next
+  call's sequence as a ub8); 18c's has none, so the fields start at byte 3.
+  `wide64FieldsAt` resolves where they start, the exec, close-list and
+  re-execution walks read each field at its distance from there, and the
+  session learns the dialect from `isWide64AuthPhase1`, which checks the
+  field list behind the header (a 4-byte client's ub4 key/value count puts
+  its third sentinel four bytes earlier). Before that, an 18c session was
+  taken for the 4-byte dialect: a statement longer than the SDU was recorded
+  as its first fragment, REF cursor drives went undecoded, a refusal behind a
+  close list could not be framed (`ORA-03113`), and statement tags were not
+  applied.
+- **Shorter column records.** A 64-bit column record ends after the two classic
+  trailing integers (6 bytes, `wide64ColumnRecordTailLenPre23`) instead of the
+  24-byte span that carries the 23ai domain fields and annotation count. Sized
+  by the server's field version, in describes and in REF cursor descriptors.
+- **No LOB prefix.** A LOB column's locator follows its ub4 length directly,
+  without the LOB size and chunk size 23ai sends in front of it.
+
+The fixtures are `testdata/oci64_18c_*.hex`, recorded on the 18c leg with
+`capture_dumps`, and `oci64_18c_test.go` replays them.
+
+One proxy-side hang surfaced on the same runs and was not 18c-specific: a
+statement longer than `execMaxSQLLen` is not reassembled, so its tail reaches
+the call-turn wait (`pipelining.go`) as packets of its own. Only a packet that
+opens a call (`0x03`, `0x0e`, `0x11`) is held there now; the tail of the call in
+flight goes upstream at once.
 
 ### Pre-auth relay (Oracle 23ai)
 
