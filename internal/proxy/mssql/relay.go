@@ -52,7 +52,8 @@ type clientMessage struct {
 // pipelining client make the proxy allocate without limit. A client that fills
 // it stops being read, which costs nothing but the in-band cancel detection
 // below. The pump's own backlog, while it waits for its turn, is bounded the
-// same way.
+// same way, so a pipelining client can have about twice clientReadAhead
+// messages buffered at the proxy in all.
 const clientReadAhead = 4
 
 // Names the per-session goroutines report themselves under when one of them
@@ -241,12 +242,23 @@ func (s *session) pumpClientToUpstream(ctx context.Context) error {
 			msg = backlog[0]
 			backlog = backlog[1:]
 		} else {
-			next, ok := <-msgs
-			if !ok {
+			// awaitUpstreamTurn hands back a nil queue once the reader has closed
+			// it. With the backlog drained there is nothing left to forward, and
+			// a receive on nil would park this pump for good, and relay with it.
+			if msgs == nil {
 				return s.clientReadError()
 			}
 
-			msg = next
+			select {
+			case next, ok := <-msgs:
+				if !ok {
+					return s.clientReadError()
+				}
+
+				msg = next
+			case <-s.done:
+				return nil
+			}
 		}
 
 		if msg.msgType != packetTypeAttention {

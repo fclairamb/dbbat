@@ -213,3 +213,69 @@ func TestAlternatingRequestsAreLoggedAsBefore(t *testing.T) {
 	assert.Contains(t, queries[1].SQLText, "SELECT 2")
 	assert.Equal(t, int64(2), *queries[1].RowsAffected)
 }
+
+// TestClientGoneWhileARequestWaitsItsTurnEndsTheSession is the regression test
+// for a pump left reading a nil queue: a client that pipelines a second request
+// and hangs up before the first one's answer had the pump forward the second
+// once the first was answered, then park for good, and the session never ended.
+func TestClientGoneWhileARequestWaitsItsTurnEndsTheSession(t *testing.T) {
+	t.Parallel()
+
+	fixture, client, release := pipelineFixture(t)
+
+	require.NoError(t, client.pkt.WriteMessage(packetTypeSQLBatch, sqlBatchPayload("SELECT 1")))
+	require.NoError(t, client.pkt.WriteMessage(packetTypeSQLBatch, sqlBatchPayload("SELECT 2")))
+
+	require.Eventually(t, func() bool { return len(fixture.fake.receivedRequests()) == 1 },
+		15*time.Second, 20*time.Millisecond, "the first request must have been forwarded upstream")
+
+	require.NoError(t, client.conn.Close())
+
+	// Let the reader see the close before the first answer frees the turn.
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+
+	fixture.waitForClosedConnection(t)
+}
+
+// TestUpstreamGoneWhileARequestWaitsItsTurnEndsTheSession checks the other
+// side: an upstream that hangs up instead of answering ends the session, even
+// with a request parked behind the unanswered one.
+func TestUpstreamGoneWhileARequestWaitsItsTurnEndsTheSession(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAuthFixture(t, encryptNotSup, "disable")
+
+	release := make(chan struct{})
+
+	fixture.fake.mu.Lock()
+	fixture.fake.respond = func(index int, req fakeRequest) []byte {
+		if index == 0 {
+			<-release
+
+			return nil // hang up
+		}
+
+		return countingResponse(index, req)
+	}
+	fixture.fake.mu.Unlock()
+
+	client, outcome := fixture.login(t, fixtureUser, fixturePassword, fixtureDBEntry)
+	require.True(t, outcome.Acked)
+
+	require.NoError(t, client.conn.SetDeadline(time.Now().Add(60*time.Second)))
+
+	require.NoError(t, client.pkt.WriteMessage(packetTypeSQLBatch, sqlBatchPayload("SELECT 1")))
+	require.NoError(t, client.pkt.WriteMessage(packetTypeSQLBatch, sqlBatchPayload("SELECT 2")))
+
+	require.Eventually(t, func() bool { return len(fixture.fake.receivedRequests()) == 1 },
+		15*time.Second, 20*time.Millisecond, "the first request must have been forwarded upstream")
+
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+
+	fixture.waitForClosedConnection(t)
+
+	assert.Len(t, fixture.fake.receivedRequests(), 1,
+		"the parked request must not be forwarded once the upstream is gone")
+}

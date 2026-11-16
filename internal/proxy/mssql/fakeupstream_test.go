@@ -38,7 +38,8 @@ type fakeUpstream struct {
 	silent bool
 	// respond, when set, chooses the answer to the index-th post-login message
 	// (attentions aside) in place of batchResponse. It runs outside mu and may
-	// block, which is how a test keeps one response in flight.
+	// block, which is how a test keeps one response in flight. A nil answer
+	// makes the fake hang up instead of answering.
 	respond func(index int, req fakeRequest) []byte
 
 	mu     sync.Mutex
@@ -220,6 +221,10 @@ func (f *fakeUpstream) serve(conn net.Conn) {
 		if respond != nil && msgType != packetTypeAttention {
 			response = respond(answered, req)
 			answered++
+
+			if response == nil {
+				return
+			}
 		}
 
 		if silent {
