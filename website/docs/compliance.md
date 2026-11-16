@@ -10,7 +10,7 @@ description: How DBBat's capabilities map to SOC 2, ISO/IEC 27001:2022 and PCI D
 :::danger DBBat is not certified against anything
 
 DBBat holds no SOC 2 report, no ISO/IEC 27001 certificate and no PCI DSS
-Attestation of Compliance. It is an AGPL-3.0 project you download and run
+Attestation of Compliance. It is an MIT-licensed project you download and run
 yourself, so there is nothing to inherit.
 
 **DBBat is a control you deploy, not a certificate you inherit.**

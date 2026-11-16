@@ -309,4 +309,4 @@ See [CLAUDE.md](CLAUDE.md) for development documentation.
 
 ## License
 
-AGPL-3.0
+[MIT](LICENSE)

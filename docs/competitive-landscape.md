@@ -46,7 +46,7 @@ second pair of eyes. This document maps who else plays there and how they differ
 | **Data masking** | No | Yes (ML, ~150 PII types) | Limited | Limited | No | Enterprise only | No | Yes (column policies) |
 | **Session capture format** | **pcapng (Wireshark-readable)** | Proprietary replay | Proprietary | Proprietary | Proprietary | N/A | Video-style replay | N/A |
 | **Slack-native approvals** | Yes (buttons, Socket Mode) | Yes | Via plugins | Yes | Yes | Via IM integration | Via bots | Slack/Teams/PagerDuty |
-| **License** | AGPL-3.0 | Open core (CNCF member) | Open core (Community/Enterprise) | Proprietary | Proprietary | Open core; governance = Enterprise | GPLv3 + commercial | Apache-2.0 |
+| **License** | MIT | Open core (CNCF member) | Open core (Community/Enterprise) | Proprietary | Proprietary | Open core; governance = Enterprise | GPLv3 + commercial | Apache-2.0 |
 | **Deployment** | Self-hosted, 1 binary + PostgreSQL | SaaS + self-hosted | Self-hosted + Cloud | SaaS control plane + gateways | SaaS control plane | Self-hosted + Cloud | Self-hosted | Self-hosted |
 | **Scope beyond databases** | No — databases only | HTTP APIs, terminals | SSH, K8s, RDP, apps | SSH, K8s, cloud, web | SSH, K8s, RDP, web | Schema change management | SSH, RDP, K8s | REST/SOAP/GraphQL/gRPC |
 
@@ -92,7 +92,7 @@ checklist (SOC 2, HIPAA, PCI DSS, ISO 27001) enterprise buyers ask for.
 
 *vs DBBat:* the enterprise incumbent. Closed source, per-user pricing, and a
 SaaS control plane some regulated buyers can't accept — which is exactly the
-gap a self-hosted AGPL proxy can fill.
+gap a self-hosted MIT-licensed proxy can fill.
 
 ### Border0
 
