@@ -124,7 +124,17 @@ func readLogonAlterSessionValue(tail []byte, wide, bigChunks bool) (string, erro
 		return "", nil
 	}
 
-	value, clrN := readCLRVariant(tail[lenSize:], bigChunks)
+	var (
+		value []byte
+		clrN  int
+	)
+
+	if wide {
+		value, clrN = readCLRWide(tail[lenSize:], bigChunks)
+	} else {
+		value, clrN = readCLRVariant(tail[lenSize:], bigChunks)
+	}
+
 	if clrN == 0 {
 		return "", fmt.Errorf("%w: truncated value", errLogonAlterSessionUnreadable)
 	}
@@ -138,6 +148,43 @@ func readLogonAlterSessionValue(tail []byte, wide, bigChunks bool) (string, erro
 	}
 
 	return string(value), nil
+}
+
+// readCLRWide reads a CLR value in the OCI (wide) dialect. The short form is
+// the thin one (a length byte, then the bytes). The long form differs: on a
+// session that negotiated UseBigClrChunks, the DB-bundled sqlplus 23.26 writes
+// each chunk length as a 4-byte little-endian ub4, and ends with a zero-length
+// one — not the compressed ints a thin client writes there
+// (testdata/oci_bundled_auth_phase2.hex, a 489-byte AUTH_ALTER_SESSION).
+// Without bigChunks the long form is read with one-byte chunk lengths, as
+// readCLR always has.
+func readCLRWide(buf []byte, bigChunks bool) ([]byte, int) {
+	if !bigChunks || len(buf) == 0 || buf[0] != 0xFE {
+		return readCLR(buf)
+	}
+
+	var data []byte
+
+	offset := 1
+	for {
+		if offset+4 > len(buf) {
+			return nil, 0
+		}
+
+		chunkLen := int(binary.LittleEndian.Uint32(buf[offset : offset+4]))
+		offset += 4
+
+		if chunkLen == 0 {
+			return data, offset
+		}
+
+		if chunkLen > len(buf)-offset {
+			return nil, 0
+		}
+
+		data = append(data, buf[offset:offset+chunkLen]...)
+		offset += chunkLen
+	}
 }
 
 // asciiUpper returns a copy of b with a-z upper-cased and every other byte,

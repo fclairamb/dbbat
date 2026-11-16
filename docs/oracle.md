@@ -418,7 +418,12 @@ user, and a dbbat grant is scoped to a database rather than a schema.
 Every client sends an `ALTER SESSION` as a key/value of its AUTH Phase 2
 (`AUTH_ALTER_SESSION`: time zone and NLS settings in every recording — one
 statement, NUL-terminated, short or `0xFE`-chunked on thin clients, 4-byte
-declared length on OCI). dbbat forwards the client's Phase 2 with only the
+declared length on OCI). On OCI the long form differs too: once the session
+negotiated big CLR chunks, the DB-bundled sqlplus 23.26 writes each chunk length
+as a 4-byte little-endian ub4 and ends with a zero one (`readCLRWide`,
+`testdata/oci_bundled_auth_phase2.hex`, a 489-byte value that also sets
+`NLS_TIME_FORMAT` and `NLS_TIME_TZ_FORMAT`). Read as compressed ints, it refused
+every sqlplus login against 23ai with "truncated value" (issue #500). dbbat forwards the client's Phase 2 with only the
 credentials swapped, and Oracle runs that value while it establishes the
 session, so it is a statement that never reaches the mid-session gate. It used
 to be forwarded unchecked, which let a client choose at logon what dbbat refuses
