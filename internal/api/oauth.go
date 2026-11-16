@@ -68,12 +68,14 @@ type roleMappingInfo struct {
 }
 
 // oauthStateMetadata is the JSON payload stashed on the `oauth_states` row
-// for the duration of a single login round-trip. It currently carries only
-// the PKCE code verifier, which must be minted before the redirect and
-// presented at the callback — and must survive a restart or a hop to another
-// replica, so it cannot live in process memory.
+// for the duration of a single login round-trip. It carries the PKCE code
+// verifier, which must be minted before the redirect and presented at the
+// callback — and must survive a restart or a hop to another replica, so it
+// cannot live in process memory — and, for a link flow, the hash of the nonce
+// cookie that binds the callback to the browser that started it.
 type oauthStateMetadata struct {
-	PKCEVerifier string `json:"pkce_verifier,omitempty"`
+	PKCEVerifier  string `json:"pkce_verifier,omitempty"`
+	LinkNonceHash string `json:"link_nonce_hash,omitempty"`
 }
 
 // handleAuthProviders returns which authentication methods are available.
@@ -194,9 +196,25 @@ func (s *Server) startOAuthFlow(
 		return "", false
 	}
 
+	stateMetadata := oauthStateMetadata{PKCEVerifier: verifier}
+
+	// A link flow is bound to this browser: the callback only links when it
+	// presents the nonce cookie set here. The state token alone travels in the
+	// authorization URL, and whoever opens that URL completes the flow.
+	if linkUserID != nil {
+		nonce, nonceErr := generateRandomState()
+		if nonceErr != nil {
+			writeInternalError(c, s.logger, nonceErr, "failed to generate OAuth link nonce")
+			return "", false
+		}
+
+		stateMetadata.LinkNonceHash = linkNonceHash(nonce)
+		s.setLinkNonceCookie(c, providerName, nonce, int(oauthStateTTL/time.Second))
+	}
+
 	var metadata json.RawMessage
-	if verifier != "" {
-		metadata, err = json.Marshal(oauthStateMetadata{PKCEVerifier: verifier})
+	if stateMetadata != (oauthStateMetadata{}) {
+		metadata, err = json.Marshal(stateMetadata)
 		if err != nil {
 			writeInternalError(c, s.logger, err, "failed to encode OAuth state metadata")
 			return "", false
@@ -259,16 +277,22 @@ func exchangeCodeFor(
 // the issuer then rejects the exchange if it expected a challenge, which is
 // the correct failure mode.
 func pkceVerifier(state *store.OAuthState) string {
-	if state == nil || len(state.Metadata) == 0 {
-		return ""
-	}
+	return stateMetadataOf(state).PKCEVerifier
+}
 
+// stateMetadataOf decodes the metadata of a state row; a row without usable
+// metadata yields the zero value.
+func stateMetadataOf(state *store.OAuthState) oauthStateMetadata {
 	var metadata oauthStateMetadata
-	if err := json.Unmarshal(state.Metadata, &metadata); err != nil {
-		return ""
+	if state == nil || len(state.Metadata) == 0 {
+		return metadata
 	}
 
-	return metadata.PKCEVerifier
+	if err := json.Unmarshal(state.Metadata, &metadata); err != nil {
+		return oauthStateMetadata{}
+	}
+
+	return metadata
 }
 
 // handleOAuthCallback returns a handler that completes the OAuth flow.
@@ -317,6 +341,16 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 
 		if oauthState.Provider != providerName {
 			s.redirectWithError(c, ErrCodeOAuthStateMismatch, redirectTarget)
+			return
+		}
+
+		// A link flow only completes in the browser that started it.
+		if oauthState.LinkUserID != nil && !s.linkNonceMatches(c, providerName, oauthState) {
+			s.logger.WarnContext(ctx, "identity link refused: the callback did not come from the browser that started the flow",
+				slog.String("provider", providerName),
+				slog.Any("link_user_uid", *oauthState.LinkUserID))
+			s.redirectProfileLinkError(c)
+
 			return
 		}
 
@@ -708,20 +742,28 @@ func generateRandomState() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// buildCallbackURL constructs the OAuth callback URL from the current request.
-func (s *Server) buildCallbackURL(r *http.Request, providerName string) string {
-	scheme := "https"
-	if r.TLS == nil {
-		// Check common proxy headers
-		if fwdProto := r.Header.Get("X-Forwarded-Proto"); fwdProto != "" {
-			scheme = fwdProto
-		} else {
-			scheme = "http"
-		}
+// requestScheme is the scheme the browser used to reach us.
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
 	}
 
-	host := r.Host
-	return fmt.Sprintf("%s://%s/api/v1/auth/%s/callback", scheme, host, providerName)
+	// Check common proxy headers
+	if fwdProto := r.Header.Get("X-Forwarded-Proto"); fwdProto != "" {
+		return fwdProto
+	}
+
+	return "http"
+}
+
+// callbackPath is the path of a provider's OAuth callback.
+func callbackPath(providerName string) string {
+	return "/api/v1/auth/" + providerName + "/callback"
+}
+
+// buildCallbackURL constructs the OAuth callback URL from the current request.
+func (s *Server) buildCallbackURL(r *http.Request, providerName string) string {
+	return fmt.Sprintf("%s://%s%s", requestScheme(r), r.Host, callbackPath(providerName))
 }
 
 // usernameRegexp matches characters that are NOT safe for usernames.

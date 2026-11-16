@@ -25,6 +25,9 @@ type linkHarness struct {
 	user     *store.User
 	router   *gin.Engine
 	method   *string
+	// nonce is the link-nonce cookie the last POST /link set: the browser that
+	// started the flow presents it at the callback.
+	nonce *http.Cookie
 }
 
 func newLinkHarness(t *testing.T, roles []string) *linkHarness {
@@ -61,14 +64,21 @@ func newLinkHarness(t *testing.T, roles []string) *linkHarness {
 	}
 }
 
-func (h *linkHarness) do(method, path string) *httptest.ResponseRecorder {
+func (h *linkHarness) do(method, path string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
-	h.router.ServeHTTP(w, httptest.NewRequest(method, path, nil))
+	req := httptest.NewRequest(method, path, nil)
+
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+
+	h.router.ServeHTTP(w, req)
 
 	return w
 }
 
-// start runs POST /link and returns the state token the provider was handed.
+// start runs POST /link and returns the state token the provider was handed,
+// keeping the nonce cookie it set for callback.
 func (h *linkHarness) start(t *testing.T) string {
 	t.Helper()
 
@@ -77,7 +87,25 @@ func (h *linkHarness) start(t *testing.T) string {
 	assert.Contains(t, w.Body.String(), "authorize_url")
 	require.NotEmpty(t, h.provider.lastState)
 
+	h.nonce = nil
+
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == linkNonceCookie {
+			h.nonce = cookie
+		}
+	}
+
 	return h.provider.lastState
+}
+
+// callback completes the flow from the browser that started it.
+func (h *linkHarness) callback(state string) *httptest.ResponseRecorder {
+	var cookies []*http.Cookie
+	if h.nonce != nil {
+		cookies = append(cookies, &http.Cookie{Name: h.nonce.Name, Value: h.nonce.Value})
+	}
+
+	return h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+state, cookies...)
 }
 
 func TestOAuthLinkFromSessionLinksAdminAndAudits(t *testing.T) {
@@ -86,7 +114,7 @@ func TestOAuthLinkFromSessionLinksAdminAndAudits(t *testing.T) {
 	h := newLinkHarness(t, []string{store.RoleAdmin})
 	state := h.start(t)
 
-	w := h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+state)
+	w := h.callback(state)
 	require.Equal(t, http.StatusFound, w.Code)
 
 	loc, err := url.Parse(w.Header().Get("Location"))
@@ -106,7 +134,7 @@ func TestOAuthLinkFromSessionLinksAdminAndAudits(t *testing.T) {
 	assert.Contains(t, string(events[0].Details), `"method": "session"`)
 
 	// The state row is single use.
-	w = h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+state)
+	w = h.callback(state)
 	assert.Contains(t, w.Header().Get("Location"), "OAUTH_STATE_MISMATCH")
 }
 
@@ -122,7 +150,7 @@ func TestOAuthLinkRefusesIdentityOwnedByAnotherUser(t *testing.T) {
 	require.NoError(t, err)
 
 	state := h.start(t)
-	w := h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+state)
+	w := h.callback(state)
 	assert.Equal(t, http.StatusConflict, w.Code)
 
 	ids, err := h.store.GetUserIdentities(t.Context(), h.user.UID)
@@ -149,7 +177,7 @@ func TestUnlinkMyIdentity(t *testing.T) {
 
 	h := newLinkHarness(t, []string{store.RoleConnector})
 	state := h.start(t)
-	h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+state)
+	h.callback(state)
 
 	w := h.do(http.MethodGet, "/users/me/identities")
 	require.Equal(t, http.StatusOK, w.Code)
@@ -181,7 +209,7 @@ func TestUnlinkRefusesLastSignInMethod(t *testing.T) {
 	h.user.PasswordHash = hash
 
 	state := h.start(t)
-	h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+state)
+	h.callback(state)
 
 	w := h.do(http.MethodDelete, "/users/me/identities/"+h.name)
 	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
@@ -222,6 +250,72 @@ func TestOAuthLinkStateProviderMismatchFails(t *testing.T) {
 
 	w := h.do(http.MethodGet, "/auth/"+otherName+"/callback?code=x&state="+state)
 	assert.Contains(t, w.Header().Get("Location"), "OAUTH_STATE_MISMATCH")
+
+	ids, err := h.store.GetUserIdentities(t.Context(), h.user.UID)
+	require.NoError(t, err)
+	assert.Empty(t, ids)
+}
+
+// TestOAuthLinkRefusesCallbackFromAnotherBrowser is the link-CSRF guard: the
+// authorization URL of a link flow, opened by someone other than the user who
+// started it, must not attach that person's identity to the starter's account.
+func TestOAuthLinkRefusesCallbackFromAnotherBrowser(t *testing.T) {
+	t.Parallel()
+
+	h := newLinkHarness(t, []string{store.RoleConnector})
+	state := h.start(t)
+	require.NotNil(t, h.nonce, "POST /link must set the link nonce cookie")
+	assert.True(t, h.nonce.HttpOnly)
+	assert.Equal(t, http.SameSiteLaxMode, h.nonce.SameSite)
+	assert.Equal(t, "/api/v1/auth/"+h.name+"/callback", h.nonce.Path)
+
+	for _, tc := range []struct {
+		name    string
+		cookies []*http.Cookie
+	}{
+		{"no cookie", nil},
+		{"wrong cookie", []*http.Cookie{{Name: linkNonceCookie, Value: "not-the-nonce"}}},
+	} {
+		w := h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+state, tc.cookies...)
+		require.Equal(t, http.StatusFound, w.Code, tc.name)
+		assert.Contains(t, w.Header().Get("Location"), "link_error=", tc.name)
+
+		ids, err := h.store.GetUserIdentities(t.Context(), h.user.UID)
+		require.NoError(t, err)
+		assert.Empty(t, ids, "%s: the identity must not be linked", tc.name)
+
+		_, err = h.store.GetUserByIdentity(t.Context(), h.name, h.provider.user.ProviderID)
+		require.ErrorIs(t, err, store.ErrIdentityNotFound, tc.name)
+
+		state = h.start(t)
+	}
+
+	// Positive control: the browser that started the flow links.
+	w := h.callback(state)
+	require.Equal(t, http.StatusFound, w.Code)
+	assert.Contains(t, w.Header().Get("Location"), "linked="+h.name)
+
+	got, err := h.store.GetUserByIdentity(t.Context(), h.name, h.provider.user.ProviderID)
+	require.NoError(t, err)
+	assert.Equal(t, h.user.UID, got.UID)
+}
+
+// TestOAuthLinkRefusesStateWithoutNonce covers a link state row minted without
+// a nonce (none is, but a row written by an earlier build would be): it must
+// not link, whatever cookie the browser sends.
+func TestOAuthLinkRefusesStateWithoutNonce(t *testing.T) {
+	t.Parallel()
+
+	h := newLinkHarness(t, []string{store.RoleConnector})
+	token := "nononce-" + uuid.NewString()
+	_, err := h.store.CreateOAuthState(t.Context(), &store.OAuthState{
+		State: token, Provider: h.name, LinkUserID: &h.user.UID,
+	}, time.Minute)
+	require.NoError(t, err)
+
+	w := h.do(http.MethodGet, "/auth/"+h.name+"/callback?code=x&state="+token,
+		&http.Cookie{Name: linkNonceCookie, Value: "anything"})
+	assert.Contains(t, w.Header().Get("Location"), "link_error=")
 
 	ids, err := h.store.GetUserIdentities(t.Context(), h.user.UID)
 	require.NoError(t, err)
