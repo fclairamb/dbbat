@@ -35,6 +35,8 @@ func accept18c() []byte {
 // a listener answering the 18c Accept and then hanging up fails the execution
 // with an error instead of panicking.
 func TestExecuteOracleSurvives18cAccept(t *testing.T) {
+	t.Parallel()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

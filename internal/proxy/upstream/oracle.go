@@ -85,19 +85,28 @@ type recoveringConnector struct {
 }
 
 // Connect runs the wrapped Connect, turning a panic into an error.
-func (c recoveringConnector) Connect(ctx context.Context) (conn driver.Conn, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			if conn != nil {
-				_ = conn.Close()
-			}
+func (c recoveringConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	var (
+		conn driver.Conn
+		err  error
+	)
 
-			conn = nil
-			err = fmt.Errorf("%w: %v", ErrOracleDriverPanic, r)
-		}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if conn != nil {
+					_ = conn.Close()
+				}
+
+				conn = nil
+				err = fmt.Errorf("%w: %v", ErrOracleDriverPanic, r)
+			}
+		}()
+
+		conn, err = c.Connector.Connect(ctx)
 	}()
 
-	return c.Connector.Connect(ctx)
+	return conn, err
 }
 
 // oracleDSN renders the go-ora connect string for a server row. Split out from

@@ -105,6 +105,8 @@ func fakeTNSListener(t *testing.T, accept []byte) string {
 // listener hanging up afterwards: an error, no panic, and not the recovered
 // driver panic either (which would mean the unpatched go-ora is back).
 func TestConnectOracleSurvives18cAccept(t *testing.T) {
+	t.Parallel()
+
 	addr := fakeTNSListener(t, loadAccept18c(t))
 
 	host, _, _ := net.SplitHostPort(addr)
@@ -142,16 +144,16 @@ func TestConnectOracleSurvives18cAccept(t *testing.T) {
 type panickingConnector struct{}
 
 func (panickingConnector) Connect(context.Context) (driver.Conn, error) {
-	var empty []byte
-
-	return nil, errors.New(string(empty[3:])) // index out of range, like #500
+	panic("runtime error: index out of range [3] with length 0") // like #500
 }
 
 func (panickingConnector) Driver() driver.Driver { return nil }
 
-// TestRecoveringOracleConnectorTurnsPanicIntoError is the defence in depth: a
+// TestRecoveringOracleConnectorTurnsPanicIntoError is the defense in depth: a
 // driver panic during login comes back as ErrOracleDriverPanic.
 func TestRecoveringOracleConnectorTurnsPanicIntoError(t *testing.T) {
+	t.Parallel()
+
 	conn, err := RecoveringOracleConnector(panickingConnector{}).Connect(context.Background())
 	if conn != nil {
 		t.Fatalf("conn = %v, want nil", conn)
