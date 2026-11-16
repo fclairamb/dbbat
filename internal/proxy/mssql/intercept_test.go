@@ -1016,7 +1016,7 @@ func TestArmWindowCancelLosingLeavesTheNextRefusalIntact(t *testing.T) {
 	// The approved statement runs, and the cancel that lost is put back on the
 	// upstream leg behind it — the fake answers both.
 	assert.Equal(t, buildDoneToken(0, 1), client.readReply(t), "the released statement's answer must reach the client")
-	assert.Equal(t, buildDoneToken(0, 1), client.readReply(t), "the re-emitted cancel is answered too")
+	assert.Equal(t, buildAttentionAck(), client.readReply(t), "the re-emitted cancel is answered too")
 
 	require.Eventually(t, func() bool { return len(fixture.fake.receivedRequests()) == 2 },
 		15*time.Second, 20*time.Millisecond)

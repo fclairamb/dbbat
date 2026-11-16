@@ -102,11 +102,12 @@ type session struct {
 	// Wire-level byte counters for the client-facing socket. lastBytesSnapshot
 	// is what makes each query's bytes_transferred a delta rather than a total.
 	//
-	// statsMu guards lastBytesSnapshot and the in-session grant counters. TDS
-	// without MARS is strictly alternating, so the request pump (which records a
+	// statsMu guards lastBytesSnapshot and the in-session grant counters. The
+	// forward pump serializes requests, so the request pump (which records a
 	// blocked statement) and the response pump (which records a completed one)
-	// never really overlap — but nothing in the code *establishes* that, and an
-	// unsynchronized counter is a race whether or not it is ever observed.
+	// do not overlap — but only the turn bookkeeping below establishes that,
+	// and an unsynchronized counter is a race whether or not it is ever
+	// observed.
 	statsMu           sync.Mutex
 	bytesFromClient   *atomic.Int64
 	bytesToClient     *atomic.Int64
@@ -167,11 +168,25 @@ type session struct {
 	attentionUpstreamDue bool
 
 	// pending is the statement whose response is currently being accounted
-	// for. TDS without MARS is strictly alternating, so one slot is enough;
-	// MARS is refused in PRELOGIN precisely because it would not be. The two
+	// for. One slot is enough because the forward pump serializes requests
+	// itself (see turnMu below) rather than trusting the client to alternate;
+	// MARS is refused in PRELOGIN because it would break that too. The two
 	// relay pumps hand it over, hence the mutex.
 	pendingMu sync.Mutex
 	pending   *pendingQuery
+
+	// turnMu guards whose turn it is on the upstream leg. requestDue says a
+	// request was claimed (it may be in interception, on an approval hold, or
+	// forwarded) and its response EOM has not been seen; attentionDue says an
+	// ATTENTION went upstream and its DONE_ATTN acknowledgement has not been
+	// seen. The forward pump sends the next request only once both are clear,
+	// so a client that pipelines requests cannot make one response be
+	// attributed to another request. turnFree is closed, and dropped, when the
+	// leg becomes free while the pump waits on it.
+	turnMu       sync.Mutex
+	requestDue   bool
+	attentionDue bool
+	turnFree     chan struct{}
 
 	// accountant walks the response token stream of the message currently
 	// arriving. Only the upstream→client pump ever touches it.

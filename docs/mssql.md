@@ -351,6 +351,17 @@ on an encrypted client leg too. The channel is bounded because a parked session
 must not let a pipelining client make the proxy allocate without limit; a client
 that fills it simply stops being read.
 
+**Requests are serialized at the proxy.** TDS without MARS is request/response,
+but nothing stops a client from sending its next request before the previous
+response has arrived. The response accounting keeps a single in-flight
+statement, so the forward pump does not intercept or forward a request until the
+upstream has answered the previous one (its response EOM), nor until an
+`ATTENTION` it forwarded has been acknowledged with a `DONE_ATTN`. Otherwise a
+second request would overwrite the first, whose response would be logged under
+the second statement's text while the second went unlogged. `ATTENTION` itself
+is never held back: it is the cancel for the request in flight, so the pump
+forwards it at once, ahead of any request queued behind it.
+
 The same goroutine is why this proxy has no `shared.WatchedConn` underneath its
 client socket, unlike the other four: the socket is being read at all times, so
 a FIN is noticed the moment it lands.
