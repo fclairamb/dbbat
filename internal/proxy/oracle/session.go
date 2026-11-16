@@ -1766,7 +1766,7 @@ func (s *session) proxyMessages() error {
 		databaseName = s.database.Name
 	}
 
-	s.approvalGate = shared.NewApprovalGate(s.approvalDeps, s.grant, s.connectionUID, s.user, databaseName)
+	s.approvalGate = shared.NewApprovalGate(s.approvalDeps, shared.ApprovalDialectStandard, s.grant, s.connectionUID, s.user, databaseName)
 	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, databaseName).
 		WithApprovals(s.approvalGate)
 	s.stream.Connection(s.ctx, shared.ConnectionOpened)

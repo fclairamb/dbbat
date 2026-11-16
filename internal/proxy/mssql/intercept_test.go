@@ -1554,7 +1554,7 @@ func approvalSession(t *testing.T) *session {
 	}
 
 	sess := sessionWithGrant(t, grant)
-	sess.approvalGate = shared.NewApprovalGate(shared.ApprovalDeps{Enabled: true}, grant, uuid.New(), nil, "prod")
+	sess.approvalGate = shared.NewApprovalGate(shared.ApprovalDeps{Enabled: true}, shared.ApprovalDialectStandard, grant, uuid.New(), nil, "prod")
 
 	return sess
 }

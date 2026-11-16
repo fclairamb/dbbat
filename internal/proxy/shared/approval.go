@@ -133,6 +133,7 @@ type ApprovalDeps struct {
 type ApprovalGate struct {
 	deps       ApprovalDeps
 	compiled   *CompiledApprovalPatterns
+	dialect    ApprovalDialect
 	definition *store.GrantDefinition
 
 	connectionUID uuid.UUID
@@ -188,9 +189,20 @@ func (g *ApprovalGate) ResolutionFor(queryUID uuid.UUID) *ApprovalResolution {
 // failing the session: they are validated at definition-save time, so a bad
 // one here means data predating validation, and refusing every connection over
 // it would be a worse failure than gating one statement less.
-func NewApprovalGate(deps ApprovalDeps, grant *store.Grant, connectionUID uuid.UUID, user *store.User, databaseName string) *ApprovalGate {
+//
+// dialect is the protocol's comment syntax, which Match uses to build the
+// comment-stripped copy of each statement it also tests the patterns against.
+func NewApprovalGate(
+	deps ApprovalDeps,
+	dialect ApprovalDialect,
+	grant *store.Grant,
+	connectionUID uuid.UUID,
+	user *store.User,
+	databaseName string,
+) *ApprovalGate {
 	g := &ApprovalGate{
 		deps:          deps,
+		dialect:       dialect,
 		connectionUID: connectionUID,
 		databaseName:  databaseName,
 	}
@@ -222,9 +234,11 @@ func (g *ApprovalGate) Active() bool {
 	return g != nil && g.deps.Enabled && g.compiled.Len() > 0
 }
 
-// Match reports the first pattern the statement matches. Matching runs on the
-// same normalized SQL text the static validators use, so an operator writing a
-// pattern does not have to reason about a second normalization.
+// Match reports the first pattern the statement matches. Every pattern is
+// tested against the statement as sent (trimmed, the text /queries shows) and
+// against a copy with the gate's dialect comments removed and whitespace runs
+// collapsed (see CompiledApprovalPatterns.MatchDialect), so a comment between
+// two keywords cannot carry a statement past its hold.
 //
 // Delegates to CompiledApprovalPatterns.Match, the same code the
 // validate-patterns API endpoint calls — so a "test patterns" panel built on
@@ -235,11 +249,59 @@ func (g *ApprovalGate) Match(sql string) (string, bool) {
 		return "", false
 	}
 
-	return g.compiled.Match(sql)
+	return g.compiled.MatchDialect(sql, g.dialect)
 }
 
-// NormalizeSQL is the canonical normalization applied before pattern matching:
-// a trim, and nothing else.
+// ApprovalDialect selects the comment syntax approval matching strips to build
+// its comment-free copy of a statement.
+type ApprovalDialect int
+
+const (
+	// ApprovalDialectStandard is Oracle, PostgreSQL and SQL Server: `/* … */`
+	// and `-- …` comments. It is the zero value, and what the
+	// validate-patterns API previews with.
+	ApprovalDialectStandard ApprovalDialect = iota
+	// ApprovalDialectMySQL adds `# …` line comments, and keeps the body of a
+	// `/*! … */` executable comment as text (MySQL runs it).
+	ApprovalDialectMySQL
+	// ApprovalDialectMongoDB matches extended-JSON text, which has no comments:
+	// only the trimmed raw text is tested.
+	ApprovalDialectMongoDB
+)
+
+// approvalMatchableSQL is the second text approval patterns are tested
+// against: comments stripped with the dialect's syntax (literals kept), then
+// every whitespace run collapsed to one space. It reports false when that copy
+// would be the trimmed raw text anyway, so the caller can skip a second pass.
+//
+// Like matchableSQL, it is a scratch copy: it never leaves this package's
+// matchers, and nothing relays or persists it.
+func approvalMatchableSQL(sql string, dialect ApprovalDialect) (string, bool) {
+	var syntax sqlCommentSyntax
+
+	switch dialect {
+	case ApprovalDialectMongoDB:
+		return "", false
+	case ApprovalDialectMySQL:
+		syntax = syntaxMySQL
+	case ApprovalDialectStandard:
+		syntax = syntaxStandard
+	default:
+		syntax = syntaxStandard
+	}
+
+	collapsed := strings.Join(strings.Fields(matchableSQL(sql, syntax)), " ")
+	if collapsed == NormalizeSQL(sql) {
+		return "", false
+	}
+
+	return collapsed, true
+}
+
+// NormalizeSQL is the normalization of the first text approval patterns are
+// matched against: a trim, and nothing else. MatchDialect also tests a second,
+// comment-stripped copy (approvalMatchableSQL), so comments cannot evade a
+// pattern; this one stays the statement as /queries displays it.
 //
 // Note the deliberate divergence from the static validators (IsWriteQuery,
 // IsDDLQuery, IsPasswordChangeQuery), which upper-case before their
@@ -274,8 +336,8 @@ type PatternCompileError struct {
 
 // CompiledApprovalPatterns is a set of RE2 approval-pattern sources compiled
 // once, ready to match SQL with exactly ApprovalGate.Match's semantics:
-// normalize with NormalizeSQL, then report the first pattern (in the order
-// given) that matches — patterns that failed to compile never match anything.
+// test the NormalizeSQL text and its comment-stripped copy, then report the
+// first pattern (in the order given) that matches either — patterns that failed to compile never match anything.
 //
 // This type is the single place that logic lives. NewApprovalGate uses it to
 // build the live per-session gate, and the grant-definition
@@ -351,17 +413,34 @@ func (c *CompiledApprovalPatterns) CompileErrors() []PatternCompileError {
 	return errs
 }
 
-// Match reports the first successfully-compiled pattern that matches sql
-// after NormalizeSQL, or false if none does.
+// Match is MatchDialect with the standard (Oracle, PostgreSQL, SQL Server)
+// comment syntax — what the validate-patterns API previews.
 func (c *CompiledApprovalPatterns) Match(sql string) (string, bool) {
+	return c.MatchDialect(sql, ApprovalDialectStandard)
+}
+
+// MatchDialect reports the first successfully-compiled pattern that matches
+// sql, or false if none does. A pattern matches when it matches either the
+// NormalizeSQL text (the statement as /queries shows it) or the
+// comment-stripped, whitespace-collapsed copy built with dialect's comment
+// syntax. Testing both can only add holds relative to the raw text alone: a
+// pattern written against what /queries shows keeps matching, and a comment
+// between keywords no longer evades it. A comment that merely contains the
+// pattern text still matches through the raw text, and is held.
+func (c *CompiledApprovalPatterns) MatchDialect(sql string, dialect ApprovalDialect) (string, bool) {
 	if c == nil {
 		return "", false
 	}
 
 	normalized := NormalizeSQL(sql)
+	stripped, hasStripped := approvalMatchableSQL(sql, dialect)
 
 	for _, e := range c.entries {
-		if e.Regexp != nil && e.Regexp.MatchString(normalized) {
+		if e.Regexp == nil {
+			continue
+		}
+
+		if e.Regexp.MatchString(normalized) || (hasStripped && e.Regexp.MatchString(stripped)) {
 			return e.Pattern, true
 		}
 	}

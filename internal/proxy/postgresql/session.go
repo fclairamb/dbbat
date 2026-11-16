@@ -575,7 +575,7 @@ func (s *Session) proxyMessages() error {
 	// per-statement cost of the (overwhelmingly common) no-pattern case is a
 	// single nil check on the hot path.
 	s.approvalGate = shared.NewApprovalGate(
-		s.approvalDeps, s.grant, s.connectionUID, s.user, s.database.Name,
+		s.approvalDeps, shared.ApprovalDialectStandard, s.grant, s.connectionUID, s.user, s.database.Name,
 	)
 	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, s.database.Name).
 		WithApprovals(s.approvalGate)

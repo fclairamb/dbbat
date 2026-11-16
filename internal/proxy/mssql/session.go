@@ -662,7 +662,7 @@ func (s *session) recordConnection(ctx context.Context) error {
 	s.guard.WithTermination(s.liveSession)
 
 	//nolint:contextcheck // the gate holds no context of its own; each Hold gets the caller's
-	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, s.grant, conn.UID, s.user, s.database.Name)
+	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, shared.ApprovalDialectStandard, s.grant, conn.UID, s.user, s.database.Name)
 	s.publisher = shared.NewStreamPublisher(s.server.approvalDeps, conn.UID, s.user, s.database.Name).
 		WithApprovals(s.approvalGate)
 	s.publisher.Connection(ctx, shared.ConnectionOpened)

@@ -473,7 +473,7 @@ func (s *Session) recordConnection() error {
 		dbName = s.database.Name
 	}
 
-	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, s.grant, conn.UID, s.user, dbName)
+	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, shared.ApprovalDialectMySQL, s.grant, conn.UID, s.user, dbName)
 	s.stream = shared.NewStreamPublisher(s.server.approvalDeps, conn.UID, s.user, dbName).
 		WithApprovals(s.approvalGate)
 	s.stream.Connection(s.ctx, shared.ConnectionOpened)
