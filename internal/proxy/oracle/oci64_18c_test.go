@@ -6,6 +6,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // The sqlplus 18.4 bundled in gvenzl/oracle-xe:18.4.0-slim speaks the 64-bit
@@ -269,4 +272,32 @@ func TestOCI64_18cLOBFetchKeepsEveryOrdinaryColumn(t *testing.T) {
 	// The 23ai field version reads the record tail at its 23ai width, so the
 	// describe itself refuses to walk and no row is offered a wrong layout.
 	assert.Empty(t, replay18cFetch(t, oci64OERShape(), frames[2], frames[3]))
+}
+
+// The refusal family on 18c: the INSERT stapled behind a tokenless close list
+// is decoded and refused under read_only, and the read behind the same kind of
+// list goes through, both read by the header length on the dialect the
+// session learned.
+func TestOCI64_18cCallBehindACloseListIsGated(t *testing.T) {
+	t.Parallel()
+
+	frames := recordedFrames(t, oci64_18cParseExecs)
+	require.GreaterOrEqual(t, len(frames), 4)
+
+	newSession := func() *session {
+		s := newTestSession(&store.Grant{
+			Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}},
+		})
+		s.clientWide64Encoding = true
+		s.clientConn = drainedPipe(t)
+
+		return s
+	}
+
+	insert := extractTTCPayload(frames[3])
+	require.ErrorIs(t, newSession().handlePiggybackExec(insert), shared.ErrReadOnlyViolation,
+		"read_only must refuse the 18c INSERT")
+
+	read := extractTTCPayload(frames[2])
+	require.NoError(t, newSession().handlePiggybackExec(read), "the DECODE probe is a read")
 }
