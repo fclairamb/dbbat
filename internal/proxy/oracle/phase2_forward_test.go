@@ -562,6 +562,7 @@ func TestLogonAlterSession_RecordedClientsForwardedUnchanged(t *testing.T) {
 // upstream, and the client gets ORA-01031 naming the reason.
 func TestSendUpstreamAuthPhase2_RefusedAlterSessionNeverLeaves(t *testing.T) {
 	t.Parallel()
+	skipUnderForcedSyntheticAuth(t)
 
 	upstream := &recordingConn{}
 	body := phase2WithAlterSession(t, "ALTER SESSION SET CONTAINER=PDB2\x00")
