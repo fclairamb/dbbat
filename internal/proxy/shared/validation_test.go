@@ -1579,3 +1579,19 @@ func TestIsDDLQuery_ExplainAnalyze(t *testing.T) {
 		assert.False(t, IsDDLQuery(sql), "should not be DDL: %s", sql)
 	}
 }
+
+func TestValidateOracleQuery_CallUnderBlockDDL(t *testing.T) {
+	t.Parallel()
+
+	fullWrite := &store.Grant{Definition: &store.GrantDefinition{}}
+	blockDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
+
+	for _, sql := range []string{"CALL pkg.run()", "call pkg.run()", "/* hi */ call pkg.run()"} {
+		require.ErrorIs(t, ValidateOracleQuery(sql, blockDDL), ErrDDLProcedureCall, "block_ddl: %s", sql)
+		require.NoError(t, ValidateOracleQuery(sql, fullWrite), "full write: %s", sql)
+	}
+
+	for _, sql := range []string{"SELECT 1 FROM dual", "BEGIN DBMS_OUTPUT.ENABLE; END;"} {
+		require.NoError(t, ValidateOracleQuery(sql, blockDDL), "block_ddl: %s", sql)
+	}
+}

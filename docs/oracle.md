@@ -548,6 +548,7 @@ COMMIT), so on this protocol the text **is** the control.
 | an anonymous block (`BEGIN …`, `DECLARE …`, behind an optional `<<label>>`) whose body contains `INSERT`, `UPDATE`, `DELETE` or `MERGE` as a bare word | refused (`shared.ErrReadOnlyViolation`) |
 | a `WITH` statement containing one of those words — including 12c's `WITH FUNCTION … PRAGMA AUTONOMOUS_TRANSACTION` | refused (`shared.ErrReadOnlyViolation`), by the shared CTE rule every protocol gets |
 | `CALL …` | refused (`shared.ErrReadOnlyProcedureCall`): what a procedure does is in the database, not in the statement |
+| `CALL …` under `block_ddl` | refused (`shared.ErrDDLProcedureCall`), for the same reason. An anonymous block that calls a procedure (`BEGIN pkg.proc; END;`) stays out of reach under both controls: a DDL-less database account is the real guarantee |
 | a block with no such word — `BEGIN DBMS_OUTPUT.ENABLE(NULL); END;`, `SELECT … INTO` | allowed, as before |
 
 The words are matched outside literals and quoted identifiers, and not after a

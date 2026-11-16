@@ -880,6 +880,12 @@ func validateOracleStatement(matchable string, grant *store.Grant) error {
 		}
 	}
 
+	// A called procedure can run DDL the text checks never see (the block form
+	// `BEGIN p; END;` stays out of reach, as under read_only).
+	if grant.ShouldBlockDDL() && startsWithKeyword(matchable, "CALL", syntaxStandard) {
+		return ErrDDLProcedureCall
+	}
+
 	for _, pattern := range oracleBlockedPatterns {
 		if pattern.MatchString(matchable) {
 			return ErrOraclePatternBlocked
