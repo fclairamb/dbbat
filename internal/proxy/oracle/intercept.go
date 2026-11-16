@@ -809,6 +809,16 @@ func (s *session) learnRefCursorIDs(ttcPayload []byte) {
 // flushPendingQuery completes any outstanding query that hasn't been finalized.
 // Called before starting a new query to ensure the previous one is persisted.
 //
+// This is why the single pendingQuery slot cannot lose a statement, unlike the
+// SQL Server proxy before it serialized pipelined requests: a statement never
+// overwrites the one in the slot, it first writes it to the history. A client
+// that pipelines (sends the next call before the previous one's response) still
+// gets every statement logged. What it does not get is accurate accounting: the
+// flushed statement is recorded with no result and a duration that stops when
+// the next call arrived, and the response that was its own is then credited to
+// the next statement (rows, error, duration). That attribution gap is tracked in
+// specs/todos/2026-11-16-09-oracle-pipelined-call-accounting.md.
+//
 // Callers hold trackerMu.
 func (s *session) flushPendingQuery() {
 	if s.tracker.pendingQuery == nil {
