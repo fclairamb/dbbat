@@ -821,7 +821,7 @@ func validateSSLMode(mode string) string {
 	return "ssl_mode must be one of: " + strings.Join(upstream.SSLModes(), ", ")
 }
 
-// validateOracleSSLMode refuses the ssl_modes an Oracle row cannot honour: the
+// validateOracleSSLMode refuses the ssl_modes an Oracle row cannot honor: the
 // proxy relays the client's TNS Connect over a plain socket whatever the row
 // says, so require/verify-* would be a fail-open setting (and a green
 // connectivity check would prove more than a real session does).

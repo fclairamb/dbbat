@@ -131,7 +131,7 @@ const (
 	// refused ORA-12514 even though this row itself checks out.
 	CodeOracleServiceNameConflict Code = "oracle_service_name_conflict"
 	// CodeOracleUpstreamNotEncrypted is a *warning* code: the Oracle row's
-	// ssl_mode asks for TLS (require/verify-*), this check honoured it, but the
+	// ssl_mode asks for TLS (require/verify-*), this check honored it, but the
 	// proxy never encrypts the upstream leg of a real session.
 	CodeOracleUpstreamNotEncrypted Code = "oracle_upstream_not_encrypted"
 )
