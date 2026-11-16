@@ -308,6 +308,10 @@ type session struct {
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
+	// usage is this session's share of its grant's quota consumption, so the
+	// grant's quotas are one budget across all its sessions. Nil when the
+	// grant has no quota.
+	usage *cache.UsageHandle
 	// liveSession is signaled when an admin ends *this* session, keyed by the
 	// connection uid rather than by the grant.
 	liveSession *cache.SessionHandle
@@ -1751,6 +1755,11 @@ func (s *session) proxyMessages() error {
 	// relaying such a request from another replica — signals.
 	s.liveSession = s.store.Sessions().Register(s.connectionUID)
 
+	// And add it to its grant's shared consumption reading, so the grant's
+	// quotas are one budget across all its sessions. Released in cleanup.
+	s.usage = shared.RegisterGrantUsage(s.store.Usage(), s.grant, s.bytesFromClient, s.bytesToClient)
+	s.usage.SetConnection(s.connectionUID)
+
 	// Build the limit guard now that the grant is known, and run a watchdog to
 	// tear the session down if a limit is crossed (or the grant is revoked)
 	// while a query is blocked producing no traffic. The inline check in
@@ -1758,6 +1767,7 @@ func (s *session) proxyMessages() error {
 	// error frame.
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithUsage(s.usage).
 		WithTermination(s.liveSession).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
@@ -3885,6 +3895,7 @@ func (s *session) cleanup() {
 	}
 
 	s.store.Sessions().Deregister(s.connectionUID, s.liveSession)
+	s.usage.Release()
 
 	if s.dump != nil {
 		if err := s.dump.Close(); err != nil {

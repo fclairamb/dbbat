@@ -135,6 +135,10 @@ type session struct {
 	terminationMu sync.Mutex
 	termination   store.Termination
 	revocation    *cache.RevocationHandle
+	// usage is this session's share of its grant's quota consumption, so the
+	// grant's quotas are one budget across all its sessions. Nil when the
+	// grant has no quota.
+	usage *cache.UsageHandle
 	// liveSession is signaled when an admin ends *this* session. Registered in
 	// recordConnection rather than next to the revocation handle, because it is
 	// keyed by the connection uid, which does not exist until the row does.
@@ -288,6 +292,7 @@ func (s *session) chargeGrant(bytesTransferred int64) {
 
 	if s.grant != nil {
 		s.grant.QueryCount++
+		s.usage.AddQueries(1)
 		s.grant.BytesTransferred += bytesTransferred
 	}
 }
@@ -298,7 +303,7 @@ func (s *session) checkGrantQuotas() error {
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 
-	return checkQuotas(s.grant)
+	return checkQuotas(s.grant, s.usage)
 }
 
 // newSession prepares a session over an accepted connection.
@@ -410,8 +415,12 @@ func (s *session) Run(ctx context.Context) error {
 	// Resolve the per-statement limit once, next to the grant it comes from.
 	s.statementLimit = s.server.statementTimeouts.For(ctx, s.grant)
 
+	// Share the grant's quota consumption with its other sessions.
+	s.usage = shared.RegisterGrantUsage(s.server.store.Usage(), s.grant, s.bytesFromClient, s.bytesToClient)
+
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithUsage(s.usage).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
 	defer s.deregisterRevocation()
@@ -602,6 +611,8 @@ func (s *session) deregisterRevocation() {
 		s.server.store.Sessions().Deregister(s.connection.UID, s.liveSession)
 	}
 
+	s.usage.Release()
+
 	if s.grant == nil || s.revocation == nil {
 		return
 	}
@@ -675,6 +686,9 @@ func (s *session) recordConnection(ctx context.Context) error {
 	// watchdog starts, so attaching to the already-built guard races nothing.
 	s.liveSession = s.server.store.Sessions().Register(conn.UID)
 	s.guard.WithTermination(s.liveSession)
+
+	// The quota refresh reads this connection from memory, not the store.
+	s.usage.SetConnection(conn.UID)
 
 	//nolint:contextcheck // the gate holds no context of its own; each Hold gets the caller's
 	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, shared.ApprovalDialectStandard, s.grant, conn.UID, s.user, s.database.Name)

@@ -123,7 +123,7 @@ func (s *Session) handleClientOpMsg(m *message) error {
 		return s.rejectCommand(m, cmd, body, moreToCome, shared.ErrGrantRevoked)
 	}
 
-	if qerr := checkQuotas(s.grant); qerr != nil {
+	if qerr := checkQuotas(s.grant, s.usage); qerr != nil {
 		return s.rejectCommand(m, cmd, body, moreToCome, qerr)
 	}
 

@@ -1333,6 +1333,7 @@ func (s *session) recordBlockedQuery(sql string, binds []string, refusal error) 
 	// does on the three protocols that already recorded refusals.
 	if s.grant != nil {
 		s.grant.QueryCount++
+		s.usage.AddQueries(1)
 	}
 }
 
@@ -1431,6 +1432,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 	// Update local grant state for in-session quota checks
 	if s.grant != nil {
 		s.grant.QueryCount++
+		s.usage.AddQueries(1)
 		s.grant.BytesTransferred += bytesTransferred
 	}
 }
@@ -1579,11 +1581,14 @@ func (s *session) checkQuotas() error {
 		return shared.ErrGrantExpired
 	}
 
-	if maxQueries := s.grant.MaxQueryCounts(); maxQueries != nil && s.grant.QueryCount >= *maxQueries {
+	// The grant's consumption across all its sessions, not just this one's.
+	queries, bytes := shared.QuotaUsage(s.grant, s.usage)
+
+	if maxQueries := s.grant.MaxQueryCounts(); maxQueries != nil && queries >= *maxQueries {
 		return ErrQueryLimitExceed
 	}
 
-	if maxBytes := s.grant.MaxBytesTransferred(); maxBytes != nil && s.grant.BytesTransferred >= *maxBytes {
+	if maxBytes := s.grant.MaxBytesTransferred(); maxBytes != nil && bytes >= *maxBytes {
 		return ErrDataLimitExceed
 	}
 

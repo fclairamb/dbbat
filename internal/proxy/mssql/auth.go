@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -58,11 +59,11 @@ func (s *session) authenticate(ctx context.Context, login *Login7) error {
 
 	// A grant that is already over quota (or expired) must not open a session
 	// at all — the same check the per-statement path re-runs on every message.
-	return checkQuotas(grant)
+	return checkQuotas(grant, nil)
 }
 
 // checkQuotas verifies the grant's expiry and its count / byte quotas.
-func checkQuotas(grant *store.Grant) error {
+func checkQuotas(grant *store.Grant, usage *cache.UsageHandle) error {
 	if grant == nil {
 		return nil
 	}
@@ -71,11 +72,14 @@ func checkQuotas(grant *store.Grant) error {
 		return shared.ErrGrantExpired
 	}
 
-	if maxQueries := grant.MaxQueryCounts(); maxQueries != nil && grant.QueryCount >= *maxQueries {
+	// The grant's consumption across all its sessions, not just this one's.
+	queries, bytes := shared.QuotaUsage(grant, usage)
+
+	if maxQueries := grant.MaxQueryCounts(); maxQueries != nil && queries >= *maxQueries {
 		return ErrQueryLimitExceeded
 	}
 
-	if maxBytes := grant.MaxBytesTransferred(); maxBytes != nil && grant.BytesTransferred >= *maxBytes {
+	if maxBytes := grant.MaxBytesTransferred(); maxBytes != nil && bytes >= *maxBytes {
 		return ErrDataLimitExceeded
 	}
 
