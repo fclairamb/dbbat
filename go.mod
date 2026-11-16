@@ -219,3 +219,8 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+// go-ora v3.0.1 panics on the 41-byte Accept of Oracle 18c XE (issue #500,
+// sijms/go-ora#759). The fork is v3.0.1 plus upstream's unreleased fixes
+// 9197bc1 and 6596c8c; drop this once go-ora releases them.
+replace github.com/sijms/go-ora/v3 => github.com/fclairamb/go-ora/v3 v3.0.2-fclairamb.1
