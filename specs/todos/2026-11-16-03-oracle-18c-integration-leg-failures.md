@@ -104,6 +104,11 @@ Work family by family, each with a capture first:
   stays visible; it only runs nightly and doesn't gate PRs. Trade-off: a red nightly every night
   until the spec is done.
 
+## Resolved open questions
+
+- **Ship partial progress:** commit one fix per failure family; the spec is done only when the whole 18c leg is green. (autopilot: recommended answer)
+- **`continue-on-error` on the 18c leg:** do not add it; keep the nightly red until fixed. (autopilot: recommended answer)
+
 ## Closing the issue
 
 This spec closes #505. The implementing PR body **must** carry a `Closes #505` line so the
