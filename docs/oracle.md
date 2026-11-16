@@ -4803,7 +4803,26 @@ DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1 go test -tags integration -v -timeout 20m \
 The flag is read once, by the integration suite's `TestMain`; nothing in
 production writes it.
 
-Both runs — with and without the variable — must pass.
+Both runs — with and without the variable — must pass, JDBC tests included.
+
+#### The fallback covers JDBC thin clients
+
+JDBC thin (ojdbc11 23.26 and ojdbc6 11.2 alike) writes the login username in
+AUTH Phase 1 and Phase 2 **bare**: `user_id_len` is its only length, with no
+CLR length byte in front of it. go-ora and python-oracledb thin prefix it. The
+upstream reads the username the way the session's client negotiated, so the
+go-ora-shaped synthetic body (`06 SYSTEM`) on a JDBC session was read as the
+user `\x06SYSTE` followed by garbage: 23ai answered Phase 1 with ORA-03120, and
+dbbat reported that to the JDBC client as ORA-01017. Every JDBC test of the
+synthetic leg failed that way from the day the leg was added (#500).
+
+`clientSendsBareUsername` now reads the framing off the client's captured
+Phase 1, on the same anchor the rewrite path uses, and the thin builders write
+the username that way. Nothing else in the body had to change: with the
+username fixed, the go-ora KV set logs ojdbc11 and ojdbc6 in through 23ai
+(measured 2026-11-16). `synthetic_auth_bare_username_test.go` pins the
+synthetic JDBC preamble byte for byte against the rewrite of a captured ojdbc11
+Phase 1.
 
 #### The fallback covers wide/OCI clients too
 
