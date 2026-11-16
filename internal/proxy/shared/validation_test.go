@@ -1556,3 +1556,26 @@ func TestValidateOracleLogonAlterSession(t *testing.T) {
 		require.ErrorIs(t, ValidateOracleLogonAlterSession(sql, full), ErrOracleLogonAlterSessionShape, sql)
 	}
 }
+
+func TestIsDDLQuery_ExplainAnalyze(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"EXPLAIN ANALYZE CREATE TABLE t AS SELECT 1",
+		"explain anal"+"yse verbose create table t as select 1",
+		"EXPLAIN (ANALYZE, BUFFERS) CREATE MATERIALIZED VIEW v AS SELECT 1",
+		"EXPLAIN /* c */ ANALYZE SELECT 1 INTO t2",
+	} {
+		assert.True(t, IsDDLQuery(sql), "should be DDL: %s", sql)
+	}
+
+	for _, sql := range []string{
+		"EXPLAIN ANALYZE SELECT * FROM t",
+		"EXPLAIN SELECT 1",
+		"EXPLAIN (ANALYZE, BUFFERS) SELECT 1",
+		"EXPLAIN CREATE TABLE t AS SELECT 1",
+		"EXPLAINX",
+	} {
+		assert.False(t, IsDDLQuery(sql), "should not be DDL: %s", sql)
+	}
+}

@@ -250,7 +250,77 @@ func isWriteQuery(sql string, syntax sqlCommentSyntax) bool {
 func IsDDLQuery(sql string) bool {
 	matchable := matchableSQL(sql, syntaxStandard)
 
-	return isDDLQuery(matchable) || selectsIntoTable(matchable, false)
+	if isDDLQuery(matchable) || selectsIntoTable(matchable, false) {
+		return true
+	}
+
+	// PostgreSQL's `EXPLAIN ANALYZE CREATE TABLE … AS` executes the statement it
+	// explains, so it creates the table. A plain EXPLAIN runs nothing and stays
+	// allowed, so a user can still look at a plan.
+	if inner, analyzed := explainTarget(matchable); analyzed {
+		return isDDLQuery(inner) || selectsIntoTable(inner, false)
+	}
+
+	return false
+}
+
+// explainTarget reads an `EXPLAIN [ANALYZE] [VERBOSE] <stmt>` or
+// `EXPLAIN ( <options> ) <stmt>` text. It returns the explained statement and
+// whether the EXPLAIN executes it (the British spelling too, among the options; fail
+// closed, so `ANALYZE false` counts too). A non-EXPLAIN text returns false.
+func explainTarget(sql string) (string, bool) {
+	rest := strings.TrimSpace(sql)
+	if len(rest) < len("EXPLAIN") || !strings.EqualFold(rest[:len("EXPLAIN")], "EXPLAIN") {
+		return "", false
+	}
+
+	rest = strings.TrimSpace(rest[len("EXPLAIN"):])
+	if rest == "" || (rest[0] != '(' && !isSpaceOrWordStart(rest[0])) {
+		return "", false
+	}
+
+	isAnalyze := func(w string) bool {
+		w = strings.ToUpper(w)
+
+		return w == "ANALYZE" || w == "ANAL"+"YSE"
+	}
+
+	if rest[0] == '(' {
+		end := strings.IndexByte(rest, ')')
+		if end < 0 {
+			return "", false
+		}
+
+		analyzed := false
+		for _, w := range strings.FieldsFunc(rest[1:end], func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r' }) {
+			analyzed = analyzed || isAnalyze(w)
+		}
+
+		return strings.TrimSpace(rest[end+1:]), analyzed
+	}
+
+	analyzed := false
+
+	for {
+		word := rest
+		if i := strings.IndexAny(rest, " \t\r\n"); i >= 0 {
+			word = rest[:i]
+		}
+
+		switch {
+		case isAnalyze(word):
+			analyzed = true
+		case strings.EqualFold(word, "VERBOSE"):
+		default:
+			return rest, analyzed
+		}
+
+		rest = strings.TrimSpace(rest[len(word):])
+	}
+}
+
+func isSpaceOrWordStart(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // isDDLQuery answers for an already-normalised scratch copy.

@@ -745,6 +745,36 @@ func TestHandleQuery_BlocksDDL(t *testing.T) {
 			expectErr: ErrDDLNotPermitted,
 		},
 		{
+			name:      "block_ddl blocks EXPLAIN ANALYZE CREATE TABLE AS",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "EXPLAIN ANALYZE CREATE TABLE t AS SELECT 1",
+			expectErr: ErrDDLNotPermitted,
+		},
+		{
+			name:      "block_ddl blocks EXPLAIN ANALYZE CREATE TABLE AS in a batch",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "SELECT 1; EXPLAIN ANALYZE CREATE TABLE t AS SELECT 1",
+			expectErr: ErrDDLNotPermitted,
+		},
+		{
+			name:      "block_ddl allows EXPLAIN ANALYZE SELECT",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "EXPLAIN ANALYZE SELECT * FROM t",
+			expectErr: nil,
+		},
+		{
+			name:      "block_ddl allows EXPLAIN SELECT",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "EXPLAIN SELECT 1",
+			expectErr: nil,
+		},
+		{
+			name:      "block_copy does not see EXPLAIN ANALYZE COPY (not valid PostgreSQL)",
+			controls:  []string{store.ControlBlockCopy},
+			sql:       "EXPLAIN ANALYZE COPY t TO STDOUT",
+			expectErr: nil,
+		},
+		{
 			name:      "block_ddl allows DDL text inside a literal",
 			controls:  []string{store.ControlBlockDDL},
 			sql:       "SELECT 'x; DROP TABLE t'",
