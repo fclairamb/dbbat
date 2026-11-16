@@ -1562,7 +1562,7 @@ func TestIsDDLQuery_ExplainAnalyze(t *testing.T) {
 
 	for _, sql := range []string{
 		"EXPLAIN ANALYZE CREATE TABLE t AS SELECT 1",
-		"explain anal"+"yse verbose create table t as select 1",
+		"explain anal" + "yse verbose create table t as select 1",
 		"EXPLAIN (ANALYZE, BUFFERS) CREATE MATERIALIZED VIEW v AS SELECT 1",
 		"EXPLAIN /* c */ ANALYZE SELECT 1 INTO t2",
 	} {
