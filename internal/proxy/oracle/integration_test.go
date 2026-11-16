@@ -225,15 +225,15 @@ func TestIntegration_TNSCapture(t *testing.T) {
 	connectPayload := buildTNSConnect(oracleTestService())
 	connectPkt := encodeTNSPacket(TNSPacketTypeConnect, connectPayload)
 
-	_, err = conn.Write(connectPkt)
+	// Oracle 18c XE's listener answers this Connect with Resend first: the
+	// client is expected to send it again, which is what the proxy's own
+	// upstream dial does through the same helper.
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	resp, resends, err := exchangeConnect(conn, connectPkt)
 	require.NoError(t, err)
 
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	resp, err := readTNSPacket(conn)
-	require.NoError(t, err)
-
-	t.Logf("Oracle responded with packet type: %s (code=%d), payload length: %d",
-		resp.Type, resp.Type, len(resp.Payload))
+	t.Logf("Oracle responded with packet type: %s (code=%d), payload length: %d, after %d Resend(s)",
+		resp.Type, resp.Type, len(resp.Payload), resends)
 
 	assert.True(t,
 		resp.Type == TNSPacketTypeAccept ||
