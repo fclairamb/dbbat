@@ -874,7 +874,9 @@ func (s *session) authRefusalOERShape() (oerShape, int, byte) {
 		return shape, seq, callNumber
 	}
 
-	if s.authChallengeIsModern() {
+	// The two fields are Oracle 20c's: a server that predates it sends them to
+	// no client, whatever the challenge.
+	if s.authChallengeIsModern() && !shape.serverPredates(ttcFieldVersion20_1) {
 		shape.extraTailFields = oerModernExtraTailFields
 	}
 
@@ -1512,7 +1514,20 @@ func (s *session) clientChallengeTrailer(verifierType int) []byte {
 		}
 	}
 
-	return buildAuthChallengeEndMarker(verifierType, s.clientWideEncoding)
+	trailer := buildAuthChallengeEndMarker(verifierType, s.clientWideEncoding)
+
+	// The thin 18453 summary was captured off 23ai and ends with the two
+	// "fields added in Oracle Database 20c". A server older than 20c sends a
+	// thin client none: JDBC thin parses the summary to the field version it
+	// negotiated, leaves the two zeros in its read buffer and reads the first
+	// as the code of the next message — ORA-17401 `Protocol violation [0]` in
+	// doOAUTH, the 18c XE login failure. The 6949 summary carries no such pair.
+	if !s.clientWideEncoding && verifierType == VerifierType18453 &&
+		s.oerShapeSnapshot().serverPredates(ttcFieldVersion20_1) {
+		trailer = trailer[:len(trailer)-oerModernExtraTailFields]
+	}
+
+	return trailer
 }
 
 // o5LogonVerifierData holds decrypted O5LOGON verifier data for a user's API key.
@@ -3373,7 +3388,11 @@ func (s *session) nextOERFrame() (oerShape, int, byte) {
 	shape := s.oer.orDefault()
 	if !shape.tailLearned {
 		shape.fixedWidth = s.clientWideEncoding
-		shape.endOfResponse = s.clientWideEncoding
+		// OCI negotiates the end-of-response marker on 23ai even with the
+		// Accept's flag cleared, but no server below 23.4 can negotiate it at
+		// all: an 18c sqlplus reads the trailing 0x1d as an unknown message
+		// and drops the session (ORA-03113).
+		shape.endOfResponse = s.clientWideEncoding && !shape.serverPredates(ttcFieldVersion23_4)
 		shape.fixedWidth64 = s.clientWide64Encoding
 	}
 
