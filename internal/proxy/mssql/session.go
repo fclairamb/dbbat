@@ -102,11 +102,12 @@ type session struct {
 	// Wire-level byte counters for the client-facing socket. lastBytesSnapshot
 	// is what makes each query's bytes_transferred a delta rather than a total.
 	//
-	// statsMu guards lastBytesSnapshot and the in-session grant counters. TDS
-	// without MARS is strictly alternating, so the request pump (which records a
+	// statsMu guards lastBytesSnapshot and the in-session grant counters. The
+	// forward pump serializes requests, so the request pump (which records a
 	// blocked statement) and the response pump (which records a completed one)
-	// never really overlap — but nothing in the code *establishes* that, and an
-	// unsynchronized counter is a race whether or not it is ever observed.
+	// do not overlap — but only the turn bookkeeping below establishes that,
+	// and an unsynchronized counter is a race whether or not it is ever
+	// observed.
 	statsMu           sync.Mutex
 	bytesFromClient   *atomic.Int64
 	bytesToClient     *atomic.Int64
@@ -134,6 +135,10 @@ type session struct {
 	terminationMu sync.Mutex
 	termination   store.Termination
 	revocation    *cache.RevocationHandle
+	// usage is this session's share of its grant's quota consumption, so the
+	// grant's quotas are one budget across all its sessions. Nil when the
+	// grant has no quota.
+	usage *cache.UsageHandle
 	// liveSession is signaled when an admin ends *this* session. Registered in
 	// recordConnection rather than next to the revocation handle, because it is
 	// keyed by the connection uid, which does not exist until the row does.
@@ -167,11 +172,25 @@ type session struct {
 	attentionUpstreamDue bool
 
 	// pending is the statement whose response is currently being accounted
-	// for. TDS without MARS is strictly alternating, so one slot is enough;
-	// MARS is refused in PRELOGIN precisely because it would not be. The two
+	// for. One slot is enough because the forward pump serializes requests
+	// itself (see turnMu below) rather than trusting the client to alternate;
+	// MARS is refused in PRELOGIN because it would break that too. The two
 	// relay pumps hand it over, hence the mutex.
 	pendingMu sync.Mutex
 	pending   *pendingQuery
+
+	// turnMu guards whose turn it is on the upstream leg. requestDue says a
+	// request was claimed (it may be in interception, on an approval hold, or
+	// forwarded) and its response EOM has not been seen; attentionDue says an
+	// ATTENTION went upstream and its DONE_ATTN acknowledgement has not been
+	// seen. The forward pump sends the next request only once both are clear,
+	// so a client that pipelines requests cannot make one response be
+	// attributed to another request. turnFree is closed, and dropped, when the
+	// leg becomes free while the pump waits on it.
+	turnMu       sync.Mutex
+	requestDue   bool
+	attentionDue bool
+	turnFree     chan struct{}
 
 	// accountant walks the response token stream of the message currently
 	// arriving. Only the upstream→client pump ever touches it.
@@ -273,6 +292,7 @@ func (s *session) chargeGrant(bytesTransferred int64) {
 
 	if s.grant != nil {
 		s.grant.QueryCount++
+		s.usage.AddQueries(1)
 		s.grant.BytesTransferred += bytesTransferred
 	}
 }
@@ -283,7 +303,7 @@ func (s *session) checkGrantQuotas() error {
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 
-	return checkQuotas(s.grant)
+	return checkQuotas(s.grant, s.usage)
 }
 
 // newSession prepares a session over an accepted connection.
@@ -395,8 +415,12 @@ func (s *session) Run(ctx context.Context) error {
 	// Resolve the per-statement limit once, next to the grant it comes from.
 	s.statementLimit = s.server.statementTimeouts.For(ctx, s.grant)
 
+	// Share the grant's quota consumption with its other sessions.
+	s.usage = shared.RegisterGrantUsage(s.server.store.Usage(), s.grant, s.bytesFromClient, s.bytesToClient)
+
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithUsage(s.usage).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
 	defer s.deregisterRevocation()
@@ -587,6 +611,8 @@ func (s *session) deregisterRevocation() {
 		s.server.store.Sessions().Deregister(s.connection.UID, s.liveSession)
 	}
 
+	s.usage.Release()
+
 	if s.grant == nil || s.revocation == nil {
 		return
 	}
@@ -661,8 +687,11 @@ func (s *session) recordConnection(ctx context.Context) error {
 	s.liveSession = s.server.store.Sessions().Register(conn.UID)
 	s.guard.WithTermination(s.liveSession)
 
+	// The quota refresh reads this connection from memory, not the store.
+	s.usage.SetConnection(conn.UID)
+
 	//nolint:contextcheck // the gate holds no context of its own; each Hold gets the caller's
-	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, s.grant, conn.UID, s.user, s.database.Name)
+	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, shared.ApprovalDialectStandard, s.grant, conn.UID, s.user, s.database.Name)
 	s.publisher = shared.NewStreamPublisher(s.server.approvalDeps, conn.UID, s.user, s.database.Name).
 		WithApprovals(s.approvalGate)
 	s.publisher.Connection(ctx, shared.ConnectionOpened)

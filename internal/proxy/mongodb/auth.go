@@ -8,6 +8,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -110,7 +111,7 @@ func (s *Session) authorizeAndEstablish(responseTo int32, user *store.User, user
 
 	s.grant = grant
 
-	if err := checkQuotas(grant); err != nil {
+	if err := checkQuotas(grant, nil); err != nil {
 		_ = s.replyOpMsg(responseTo, errorDoc(codeAuthenticationFailed, codeNameAuthenticationFailed, err.Error()))
 		time.Sleep(authFailDelay)
 
@@ -147,8 +148,12 @@ func (s *Session) establishSession(responseTo int32, grant *store.Grant) error {
 			version.Version, s.user.Username, s.connUID, grant.DefinitionSlug())
 	}
 
+	// Share the grant's quota consumption with its other sessions.
+	s.usage = shared.RegisterGrantUsage(s.server.store.Usage(), grant, s.bytesFromClient, s.bytesToClient)
+
 	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithUsage(s.usage).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
 	if err := s.connectUpstream(); err != nil {
@@ -316,16 +321,19 @@ func isAPIKey(password string) bool {
 }
 
 // checkQuotas verifies the grant's expiry and count/byte quotas.
-func checkQuotas(grant *store.Grant) error {
+func checkQuotas(grant *store.Grant, usage *cache.UsageHandle) error {
 	if !grant.ExpiresAt.IsZero() && !time.Now().Before(grant.ExpiresAt) {
 		return shared.ErrGrantExpired
 	}
 
-	if maxQueries := grant.MaxQueryCounts(); maxQueries != nil && grant.QueryCount >= *maxQueries {
+	// The grant's consumption across all its sessions, not just this one's.
+	queries, bytes := shared.QuotaUsage(grant, usage)
+
+	if maxQueries := grant.MaxQueryCounts(); maxQueries != nil && queries >= *maxQueries {
 		return ErrQueryLimitExceeded
 	}
 
-	if maxBytes := grant.MaxBytesTransferred(); maxBytes != nil && grant.BytesTransferred >= *maxBytes {
+	if maxBytes := grant.MaxBytesTransferred(); maxBytes != nil && bytes >= *maxBytes {
 		return ErrDataLimitExceeded
 	}
 

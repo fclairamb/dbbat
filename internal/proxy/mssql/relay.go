@@ -44,11 +44,16 @@ type clientMessage struct {
 // clientReadAhead bounds how many complete client messages may sit between the
 // reader goroutine and the forward pump.
 //
-// It is only ever non-empty while a statement is parked on an approval hold —
-// TDS without MARS is strictly alternating otherwise — and it is bounded
-// because a parked session must not let a pipelining client make the proxy
-// allocate without limit. A client that fills it stops being read, which costs
-// nothing but the in-band cancel detection below.
+// It fills whenever the forward pump is not taking messages: while a statement
+// is parked on an approval hold, and while the pump waits for the upstream to
+// answer the previous request before it sends the next one (a client may
+// pipeline requests without waiting for their responses, and the proxy does not
+// let it: see claimUpstreamTurn). It is bounded because neither wait may let a
+// pipelining client make the proxy allocate without limit. A client that fills
+// it stops being read, which costs nothing but the in-band cancel detection
+// below. The pump's own backlog, while it waits for its turn, is bounded the
+// same way, so a pipelining client can have about twice clientReadAhead
+// messages buffered at the proxy in all.
 const clientReadAhead = 4
 
 // Names the per-session goroutines report themselves under when one of them
@@ -214,18 +219,174 @@ func (s *session) clientReadError() error {
 }
 
 // pumpClientToUpstream runs interception over each client message and forwards
-// what survives it.
+// what survives it, one request at a time.
+//
+// A request is not intercepted, let alone forwarded, until the upstream has
+// answered the previous one. TDS without MARS is request/response, but nothing
+// stops a client from sending its next request early, and the response
+// accounting keeps a single in-flight statement: a second request forwarded
+// early would overwrite the first, whose response would then be logged under
+// the second's text while the second went unlogged. Waiting here makes the
+// single slot correct by construction. ATTENTION is the exception: it is the
+// cancel for the request in flight, so it goes through at once.
 func (s *session) pumpClientToUpstream(ctx context.Context) error {
+	var (
+		backlog []clientMessage
+		msgs    = s.clientMsgs
+	)
+
 	for {
-		msg, ok := <-s.clientMsgs
-		if !ok {
-			return s.clientReadError()
+		var msg clientMessage
+
+		if len(backlog) > 0 {
+			msg = backlog[0]
+			backlog = backlog[1:]
+		} else {
+			// awaitUpstreamTurn hands back a nil queue once the reader has closed
+			// it. With the backlog drained there is nothing left to forward, and
+			// a receive on nil would park this pump for good, and relay with it.
+			if msgs == nil {
+				return s.clientReadError()
+			}
+
+			select {
+			case next, ok := <-msgs:
+				if !ok {
+					return s.clientReadError()
+				}
+
+				msg = next
+			case <-s.done:
+				return nil
+			}
+		}
+
+		if msg.msgType != packetTypeAttention {
+			var proceed bool
+
+			var err error
+
+			proceed, backlog, msgs, err = s.awaitUpstreamTurn(ctx, backlog, msgs)
+			if err != nil || !proceed {
+				return err
+			}
 		}
 
 		if err := s.forwardClientMessage(ctx, msg); err != nil {
 			return err
 		}
 	}
+}
+
+// awaitUpstreamTurn blocks until the upstream has answered everything it was
+// sent, then claims the turn for the next request.
+//
+// While it waits it keeps taking messages off the reader's queue, so that an
+// ATTENTION — the client canceling the request in flight — is forwarded at once
+// rather than queued behind the request that waits for that very response.
+// Other messages join the backlog, in order, up to clientReadAhead of them.
+//
+// It returns the backlog and the queue to read from next (nil once the reader
+// has closed it, so the backlog drains before the pump reports the read error),
+// and false when the session ended while it waited.
+func (s *session) awaitUpstreamTurn(
+	ctx context.Context, backlog []clientMessage, msgs chan clientMessage,
+) (bool, []clientMessage, chan clientMessage, error) {
+	for {
+		free, claimed := s.claimUpstreamTurn()
+		if claimed {
+			return true, backlog, msgs, nil
+		}
+
+		intake := msgs
+		if len(backlog) >= clientReadAhead {
+			intake = nil
+		}
+
+		select {
+		case <-free:
+		case <-s.done:
+			return false, backlog, msgs, nil
+		case next, ok := <-intake:
+			switch {
+			case !ok:
+				msgs = nil
+			case next.msgType == packetTypeAttention:
+				if err := s.forwardClientMessage(ctx, next); err != nil {
+					return false, backlog, msgs, err
+				}
+			default:
+				backlog = append(backlog, next)
+			}
+		}
+	}
+}
+
+// claimUpstreamTurn takes the upstream leg for a request if nothing is owed on
+// it. Otherwise it returns a channel closed when that changes.
+func (s *session) claimUpstreamTurn() (<-chan struct{}, bool) {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+
+	if !s.requestDue && !s.attentionDue {
+		s.requestDue = true
+
+		return nil, true
+	}
+
+	if s.turnFree == nil {
+		s.turnFree = make(chan struct{})
+	}
+
+	return s.turnFree, false
+}
+
+// releaseRequestTurn gives the turn back without waiting for a response: the
+// claimed request was answered by the proxy itself and never reached the
+// upstream.
+func (s *session) releaseRequestTurn() {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+
+	s.requestDue = false
+	s.wakeTurnLocked()
+}
+
+// noteAttentionSent records that an ATTENTION went upstream, which the server
+// answers with a DONE_ATTN the next request must not be sent ahead of: that
+// acknowledgement may arrive as a message of its own, and would otherwise be
+// taken for the next request's response.
+func (s *session) noteAttentionSent() {
+	s.turnMu.Lock()
+	s.attentionDue = true
+	s.turnMu.Unlock()
+}
+
+// noteResponseEnd records the end of a response message from the upstream.
+// Any response ends the request in flight; only one carrying DONE_ATTN ends a
+// pending cancel.
+func (s *session) noteResponseEnd(attentionAck bool) {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+
+	s.requestDue = false
+
+	if attentionAck {
+		s.attentionDue = false
+	}
+
+	s.wakeTurnLocked()
+}
+
+// wakeTurnLocked wakes a pump waiting for the turn, if the leg is now free.
+// Callers hold turnMu.
+func (s *session) wakeTurnLocked() {
+	if s.requestDue || s.attentionDue || s.turnFree == nil {
+		return
+	}
+
+	close(s.turnFree)
+	s.turnFree = nil
 }
 
 // forwardClientMessage runs interception over one client message and forwards
@@ -247,6 +408,13 @@ func (s *session) forwardClientMessage(ctx context.Context, msg clientMessage) e
 	// A non-nil payload is forwarded; nil means the hook answered the client on
 	// its own and nothing must reach the upstream.
 	if forward != nil {
+		// Marked before the write, not after: the acknowledgement can come back
+		// before this goroutine runs again, and a mark set after it would never
+		// be cleared.
+		if msg.msgType == packetTypeAttention {
+			s.noteAttentionSent()
+		}
+
 		s.upstreamWriteMu.Lock()
 		err := s.upstream.pkt.WriteMessageWithStatus(msg.msgType, forward, msg.status)
 		s.upstreamWriteMu.Unlock()
@@ -254,6 +422,9 @@ func (s *session) forwardClientMessage(ctx context.Context, msg clientMessage) e
 		if err != nil {
 			return err
 		}
+	} else if msg.msgType != packetTypeAttention {
+		// Answered by the proxy: no response is coming from the upstream.
+		s.releaseRequestTurn()
 	}
 
 	return s.forwardDeferredAttention()
@@ -292,6 +463,9 @@ func (s *session) writeUpstreamAttention() error {
 		return nil
 	}
 
+	// Before the write, for the reason given in forwardClientMessage.
+	s.noteAttentionSent()
+
 	return s.upstream.pkt.WriteMessage(packetTypeAttention, nil)
 }
 
@@ -303,6 +477,10 @@ func (s *session) writeUpstreamAttention() error {
 // first row.
 func (s *session) pumpUpstreamToClient(ctx context.Context) error {
 	start := true
+
+	// The tail of each response message, read for the DONE_ATTN that ends a
+	// cancel. See noteResponseEnd.
+	var tail messageTail
 
 	for {
 		hdr, payload, err := s.upstream.pkt.readPacket()
@@ -325,6 +503,20 @@ func (s *session) pumpUpstreamToClient(ctx context.Context) error {
 
 		if err != nil {
 			return err
+		}
+
+		// The turn is handed back only once the response has been accounted
+		// for (onServerPacket above took its pending statement) and reached the
+		// client, so the next request's pending statement can never be taken by
+		// this response.
+		if hdr.Type == packetTypeReply {
+			tail.record(payload)
+
+			if eom {
+				done, ok := tail.lastDone()
+				s.noteResponseEnd(ok && done.Status&doneAttn != 0)
+				tail.reset()
+			}
 		}
 
 		start = eom

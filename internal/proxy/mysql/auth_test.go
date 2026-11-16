@@ -80,7 +80,7 @@ func TestCheckQuotas(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := checkQuotas(tc.grant)
+			err := checkQuotas(tc.grant, nil)
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("checkQuotas() error = %v, want %v", err, tc.wantErr)
 			}

@@ -306,7 +306,7 @@ func gatedTestSession(patterns []string) (*session, *fakeApprovalStore, *approva
 		Registry:     registry,
 		Logger:       testLogger(),
 		PollInterval: 50 * time.Millisecond,
-	}, grant, s.connectionUID, nil, "orcl")
+	}, shared.ApprovalDialectStandard, grant, s.connectionUID, nil, "orcl")
 
 	return s, fake, registry
 }
@@ -440,7 +440,7 @@ func TestHandleJDBCExec_FailsClosedWhenTheHoldCannotBeRegistered(t *testing.T) {
 	s.approvalGate = shared.NewApprovalGate(shared.ApprovalDeps{
 		Enabled: true,
 		Logger:  testLogger(),
-	}, grant, s.connectionUID, nil, "orcl")
+	}, shared.ApprovalDialectStandard, grant, s.connectionUID, nil, "orcl")
 
 	err := s.handleJDBCExec(buildJDBCExec("DELETE FROM emp WHERE id = 1"))
 	require.ErrorIs(t, err, shared.ErrApprovalUnavailable)

@@ -78,3 +78,88 @@ func TestValidateMSSQLBatch_FullWriteGrantUntouched(t *testing.T) {
 	require.NoError(t, ValidateMSSQLBatch("SELECT 1; DELETE FROM t; DROP TABLE t", controlGrant()))
 	require.NoError(t, ValidateMSSQLBatch("SELECT 1; DELETE FROM t", controlGrant(store.ControlBlockDDL)))
 }
+
+// TestValidateMSSQLBatch_BlocksPasswordChange pins SQL Server's password-change
+// spellings, which carry no ALTER USER/ROLE prefix the shared classifier knows:
+// refused whatever the grant, because every dbbat session shares the one
+// upstream login. A full-write grant was the hole.
+func TestValidateMSSQLBatch_BlocksPasswordChange(t *testing.T) {
+	t.Parallel()
+
+	grants := map[string]*store.Grant{
+		"full write": controlGrant(),
+		"read_only":  controlGrant(store.ControlReadOnly),
+		"block_ddl":  controlGrant(store.ControlBlockDDL),
+	}
+	refused := []string{
+		"ALTER LOGIN l WITH PASSWORD = 'x'",
+		"ALTER LOGIN l WITH PASSWORD = 'x' OLD_PASSWORD = 'y'",
+		"ALTER LOGIN [my login] WITH PASSWORD = 0x0200AB HASHED",
+		"alter login l with password = 'x'",
+		"ALTER LOGIN l WITH NAME = l2, PASSWORD = 'x'",
+		"CREATE LOGIN l2 WITH PASSWORD = 'x'",
+		"ALTER USER u WITH PASSWORD = 'x'",
+		"CREATE USER u2 WITH PASSWORD = 'x'",
+		"ALTER/**/LOGIN l WITH PASSWORD = 'x'",
+		"ALTER LOGIN l /* c */ WITH -- c\n PASSWORD = 'x'",
+		"ALTER\nLOGIN l\nWITH\nPASSWORD = 'x'",
+		// The second statement of a batch, with and without a separator.
+		"SELECT 1; ALTER LOGIN l WITH PASSWORD = 'x'",
+		"SELECT 1\nALTER LOGIN l WITH PASSWORD = 'x'",
+		"DECLARE @p sysname = N'x' ALTER LOGIN l WITH PASSWORD = @p",
+		// A name left open while armed fails closed.
+		"ALTER LOGIN [open WITH PASSWORD = 'x'",
+	}
+
+	for name, grant := range grants {
+		for _, sql := range refused {
+			require.ErrorIs(t, ValidateMSSQLBatch(sql, grant), ErrPasswordChangeBlocked, "%s: %s", name, sql)
+		}
+	}
+
+	full := grants["full write"]
+	for _, sql := range []string{
+		"ALTER LOGIN l DISABLE",
+		"ALTER LOGIN l ENABLE; SELECT 1",
+		"ALTER USER u WITH DEFAULT_SCHEMA = s",
+		"CREATE LOGIN l2 FROM WINDOWS",
+		"CREATE USER u2 FROM LOGIN l2",
+		"SELECT password FROM t",
+		"SELECT [password] FROM users WHERE name = 'ALTER LOGIN'",
+		"ALTER TABLE t ADD password nvarchar(100)",
+		"ALTER LOGIN l DISABLE; SELECT password FROM t",
+		"SELECT 'ALTER LOGIN l WITH PASSWORD = x'",
+		"UPDATE t SET old_password = 'x'",
+	} {
+		require.NoError(t, ValidateMSSQLBatch(sql, full), "should allow: %s", sql)
+	}
+
+	// ALTER LOGIN without a password is still DDL: refused by the controls
+	// alone, exactly as before.
+	require.ErrorIs(t, ValidateMSSQLBatch("ALTER LOGIN l DISABLE", grants["read_only"]), ErrReadOnlyViolation)
+	require.ErrorIs(t, ValidateMSSQLBatch("ALTER LOGIN l DISABLE", grants["block_ddl"]), ErrDDLBlocked)
+}
+
+// TestValidateMSSQLBatch_BlocksPasswordChangeInDynamicSQL pins the unwrapped
+// payload: the SQL Server proxy runs ValidateMSSQLBatch over every statement
+// MSSQLDynamicSQL lifts out of the batch, so sp_executesql cannot carry one.
+func TestValidateMSSQLBatch_BlocksPasswordChangeInDynamicSQL(t *testing.T) {
+	t.Parallel()
+
+	full := controlGrant()
+
+	for _, sql := range []string{
+		"EXEC sp_executesql N'ALTER LOGIN l WITH PASSWORD = ''x'''",
+		"EXEC (N'ALTER LOGIN l WITH PASSWORD = ''x''')",
+		"SELECT 1; EXECUTE sys.sp_executesql N'CREATE LOGIN l2 WITH PASSWORD = ''x'''",
+	} {
+		// The batch's own text is a call with a literal: it reads clean.
+		require.NoError(t, ValidateMSSQLBatch(sql, full), sql)
+
+		dyn, readable := MSSQLDynamicSQL(sql)
+		err := ValidateDynamicSQL(dyn, readable, full, func(text string) error {
+			return ValidateMSSQLBatch(text, full)
+		})
+		require.ErrorIs(t, err, ErrPasswordChangeBlocked, sql)
+	}
+}

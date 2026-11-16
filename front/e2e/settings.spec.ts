@@ -153,11 +153,15 @@ test.describe("Settings — instance-wide statement timeout", () => {
     await authenticatedPage
       .getByTestId("limits-statement-timeout-input")
       .fill("");
+    // The previous save's toast is still on screen, so it cannot prove this
+    // save landed: wait for the PUT itself before reloading, or the reload
+    // cancels the request in flight.
+    const cleared = authenticatedPage.waitForResponse(
+      (r) =>
+        r.url().includes("/instance/limits") && r.request().method() === "PUT"
+    );
     await authenticatedPage.getByTestId("limits-save-button").click();
-
-    await expect(authenticatedPage.getByText(/limits saved/i).first()).toBeVisible({
-      timeout: 10000,
-    });
+    expect((await cleared).status()).toBe(204);
 
     await authenticatedPage.reload();
     await authenticatedPage.waitForLoadState("networkidle");

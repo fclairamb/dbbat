@@ -28,6 +28,7 @@ type Store struct {
 	authCache   *cache.AuthCache          // Optional auth cache for API key verification
 	revocations *cache.RevocationRegistry // In-process fan-out of grant revocations to live proxy sessions
 	sessions    *cache.SessionRegistry    // In-process fan-out of per-session terminations, keyed by connection uid
+	usage       *cache.UsageRegistry      // In-process per-grant consumption shared by the live sessions of a grant
 	instanceID  string                    // Identifies this process among the replicas sharing this store
 	runID       string                    // Identifies this *run*: minted here, never configurable
 
@@ -151,6 +152,7 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		storageDSN:  dsn,
 		revocations: cache.NewRevocationRegistry(),
 		sessions:    cache.NewSessionRegistry(),
+		usage:       cache.NewUsageRegistry(),
 		instanceID:  options.InstanceID,
 		// Minted here rather than taken from Options: the run id must identify
 		// one live process, and anything an operator can set — including
@@ -351,6 +353,16 @@ func (s *Store) Sessions() *cache.SessionRegistry {
 	}
 
 	return s.sessions
+}
+
+// Usage returns the process-wide per-grant consumption registry the quota
+// checks of live sessions read. Nil-safe like Revocations.
+func (s *Store) Usage() *cache.UsageRegistry {
+	if s == nil {
+		return nil
+	}
+
+	return s.usage
 }
 
 // migrationAdvisoryLockKey is the PostgreSQL advisory-lock key that serializes
