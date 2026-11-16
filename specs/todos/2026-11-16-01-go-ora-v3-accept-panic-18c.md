@@ -82,3 +82,7 @@ on the CI stack trace and the go-ora source.
 
 This spec covers part of #500 (the 18c leg). Issue #500 is already closed by the fix commits of
 2026-11-16 and this spec. The implementing PR body carries `Refs #500`.
+
+## Resolved open questions
+
+- Fork go-ora with a `replace` now and drop it once go-ora releases the fix. (autopilot: recommended answer)

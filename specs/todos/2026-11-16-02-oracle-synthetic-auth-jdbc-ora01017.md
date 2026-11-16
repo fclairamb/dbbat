@@ -87,3 +87,7 @@ skip under the flag, `skipUnderForcedSyntheticAuth`).
 This spec covers part of #500 (the synthetic-AUTH leg's JDBC tests). Issue #500 is already
 closed by the fix commits of 2026-11-16 and the specs. The implementing PR body carries
 `Refs #500`.
+
+## Resolved open questions
+
+- Measure first (step 1); if the cause is a missing value dbbat can compute, fix it; if it needs the client's own KV set, scope JDBC out of the synthetic fallback (step 3). (autopilot: recommended answer)
