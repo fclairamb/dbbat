@@ -127,12 +127,9 @@ func isGatedCall(pkt *TNSPacket) bool {
 		return false
 	}
 
-	switch TTCFunctionCode(pkt.Payload[ttcDataFlagsSize]) {
-	case TTCFuncPiggyback, TTCFuncOALL8, TTCFuncOFETCH:
-		return true
-	default:
-		return false
-	}
+	code := TTCFunctionCode(pkt.Payload[ttcDataFlagsSize])
+
+	return code == TTCFuncPiggyback || code == TTCFuncOALL8 || code == TTCFuncOFETCH
 }
 
 // readsAheadOf reports whether the client may be read past pkt while it is held.

@@ -128,7 +128,7 @@ func TestOCI64_18cRefCursorIDsMatchTheCursorsTheClientDrives(t *testing.T) {
 
 	want := []uint16{2, 3}
 
-	var learned []uint16
+	learned := make([]uint16, 0, len(want))
 
 	for i, payload := range recordedFrames(t, oci64_18cBindOutputs) {
 		ttc := extractTTCPayload(payload)
@@ -142,7 +142,7 @@ func TestOCI64_18cRefCursorIDsMatchTheCursorsTheClientDrives(t *testing.T) {
 
 	assert.Equal(t, want, learned)
 
-	var driven []uint16
+	driven := make([]uint16, 0, len(want))
 
 	for i, payload := range recordedFrames(t, oci64_18cRefCursorDrives) {
 		ttc := extractTTCPayload(payload)

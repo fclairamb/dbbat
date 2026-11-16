@@ -599,14 +599,10 @@ func usesWide64OpHeader(ttcPayload []byte) bool {
 	return bytes.Equal(ttcPayload[at:at+len(closeCursorsWideSentinel)], closeCursorsWideSentinel)
 }
 
-// wide64TokenBlockLen is the size of the block a 23ai server's 64-bit OCI op
-// header carries between the sequence byte and the op's own fields:
-// `[0x00][0x00][ub4 …][sb8 seq+1]`. It is the end-to-end call token the
-// server negotiates from TTC field version 23.1 on.
-const wide64TokenBlockLen = closeCursorsWide8HeaderLen - 3
-
 // hasWide64TokenBlock reports whether a 64-bit OCI op header carries the token
-// block, guarded the way it always was: the two zero bytes, and the "next
+// block a 23ai server negotiates from TTC field version 23.1 on — the 14 bytes
+// `[0x00][0x00][ub4 …][sb8 seq+1]` between the sequence byte and the op's own
+// fields — guarded the way it always was: the two zero bytes, and the "next
 // sequence" that must be this header's own sequence plus one.
 func hasWide64TokenBlock(ttcPayload []byte) bool {
 	if len(ttcPayload) < closeCursorsWide8HeaderLen {
