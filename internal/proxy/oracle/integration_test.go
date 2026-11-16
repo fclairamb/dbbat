@@ -308,7 +308,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 		MaxResultBytes: 1048576,
 	}
 
-	proxy := NewServer(dataStore, encryptionKey, nil, queryStorage, config.DumpConfig{}, slog.Default())
+	proxy := NewServer(dataStore, encryptionKey, nil, queryStorage, integrationDumpConfig(t), slog.Default())
 	go func() { _ = proxy.Start(":0") }()
 	defer func() { _ = proxy.Shutdown(ctx) }()
 
@@ -541,7 +541,7 @@ func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
 	_, plainKey, err := dataStore.CreateAPIKey(ctx, user.UID, "agent-key", nil, encryptionKey)
 	require.NoError(t, err)
 
-	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.Default())
+	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, integrationDumpConfig(t), slog.Default())
 	go func() { _ = proxy.Start("127.0.0.1:0") }()
 
 	defer func() { _ = proxy.Shutdown(ctx) }()
@@ -664,7 +664,7 @@ func TestIntegration_UpstreamProgramCarriesConnectionUID(t *testing.T) {
 	_, plainKey, err := dataStore.CreateAPIKey(ctx, user.UID, "agent-key", nil, encryptionKey)
 	require.NoError(t, err)
 
-	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.Default())
+	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, integrationDumpConfig(t), slog.Default())
 	go func() { _ = proxy.Start("127.0.0.1:0") }()
 
 	defer func() { _ = proxy.Shutdown(ctx) }()
