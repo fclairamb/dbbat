@@ -64,3 +64,7 @@ cannot meet (`2026-11-09-06`).
 - Refuse at the API (recommended), or only warn? Refusing is what every other
   protocol's fail-closed rule does. Existing rows are untouched by the API
   rule, and step 2 warns about them.
+
+## Resolved open questions
+
+- Refuse at the API (fail closed, like every other protocol); leave existing rows untouched and warn about them as in step 2. (autopilot: recommended answer)

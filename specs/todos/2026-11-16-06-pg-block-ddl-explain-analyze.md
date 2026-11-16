@@ -60,3 +60,7 @@ PLAN` does not execute, and SQL Server has no EXPLAIN. PostgreSQL only.
 - Should plain `EXPLAIN CREATE TABLE … AS` (no ANALYZE, nothing executed) be
   refused too? Recommended: no. Refuse only when ANALYZE is present, so a
   user can still look at a plan.
+
+## Resolved open questions
+
+- Do not refuse plain `EXPLAIN CREATE TABLE … AS` without ANALYZE: refuse only when ANALYZE is present. (autopilot: recommended answer)

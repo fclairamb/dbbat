@@ -81,3 +81,7 @@ different replicas) never see each other's consumption.
   byte quota be exact across replicas (which needs a store-side reservation
   per statement)? Recommended: the tick. It closes the N-times multiplier,
   and an exact reservation would put a store write on every statement.
+
+## Resolved open questions
+
+- Accept a cross-replica lag of about one refresh tick: do not add a store-side reservation per statement. (autopilot: recommended answer)
