@@ -407,6 +407,8 @@ var alterSessionAllowedParams = map[string]bool{
 	"NLS_CALENDAR":            true, // calendar system used to render dates
 	"NLS_SORT":                true, // linguistic collation for ORDER BY
 	"NLS_COMP":                true, // whether comparisons use NLS_SORT
+	"NLS_TIME_FORMAT":         true, // TIME rendering
+	"NLS_TIME_TZ_FORMAT":      true, // TIME WITH TIME ZONE rendering
 	// Session time zone: shifts how TIMESTAMP WITH LOCAL TIME ZONE values are
 	// rendered for this session. dbbat itself sets it on the upstream leg
 	// (upstream_auth_client_wide.go), so refusing it from a client would refuse

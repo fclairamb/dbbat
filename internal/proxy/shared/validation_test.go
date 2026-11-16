@@ -597,6 +597,15 @@ func TestIsAllowedAlterSession_Allows(t *testing.T) {
 		"ALTER SESSION SET NLS_LANGUAGE='AMERICAN' NLS_TERRITORY='AMERICA'  TIME_ZONE='+02:00'",
 		"ALTER SESSION SET NLS_DATE_FORMAT='DD-MON-YYYY HH24:MI:SS'",
 		"ALTER SESSION SET NLS_NUMERIC_CHARACTERS=',.'",
+		// The logon AUTH_ALTER_SESSION of the DB-bundled sqlplus 23.26
+		// (oracle/testdata/oci_bundled_auth_phase2.hex), whose TIME formats
+		// were missing from the list (fclairamb/dbbat#500).
+		"ALTER SESSION SET NLS_LANGUAGE= 'AMERICAN' NLS_TERRITORY= 'AMERICA' NLS_CURRENCY= '$' " +
+			"NLS_ISO_CURRENCY= 'AMERICA' NLS_NUMERIC_CHARACTERS= '.,' NLS_CALENDAR= 'GREGORIAN' " +
+			"NLS_DATE_FORMAT= 'DD-MON-RR' NLS_DATE_LANGUAGE= 'AMERICAN' NLS_SORT= 'BINARY' " +
+			"TIME_ZONE= '+00:00' NLS_COMP= 'BINARY' NLS_DUAL_CURRENCY= '$' " +
+			"NLS_TIME_FORMAT= 'HH.MI.SSXFF AM' NLS_TIMESTAMP_FORMAT= 'DD-MON-RR HH.MI.SSXFF AM' " +
+			"NLS_TIME_TZ_FORMAT= 'HH.MI.SSXFF AM TZR' NLS_TIMESTAMP_TZ_FORMAT= 'DD-MON-RR HH.MI.SSXFF AM TZR'",
 		// The _OPTIMIZER_ family rule, on a hint no recording carries.
 		`ALTER SESSION SET "_optimizer_use_feedback" = FALSE`,
 	}, alterSessionCorpusStatements...)

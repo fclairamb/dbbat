@@ -10,6 +10,21 @@ import (
 	"github.com/fclairamb/dbbat/internal/version"
 )
 
+// skipUnderForcedSyntheticAuth skips a unit test of the client-packet rewrite
+// when the integration run forces the synthetic AUTH fallback
+// (DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1, see synthetic_auth_integration_test.go):
+// that run turns the rewrite off for the whole package, so a test asserting
+// what the rewrite forwards would only be measuring the synthetic builders.
+// The per-push unit run never sets the flag and keeps covering the rewrite.
+func skipUnderForcedSyntheticAuth(t *testing.T) {
+	t.Helper()
+
+	if forceSyntheticUpstreamAuth {
+		t.Skip("exercises the AUTH client-packet rewrite, which " +
+			"DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1 turns off")
+	}
+}
+
 // widePhase1Payload builds a minimal wide/OCI-encoded AUTH Phase 1 TNS Data
 // payload: 2-byte data flags + a [03 76] piggyback header + a CLR-prefixed
 // username immediately followed by AUTH_TERMINAL / AUTH_PROGRAM_NM KV pairs
@@ -80,6 +95,7 @@ func TestWidePhase1Payload_IsWideEncoding(t *testing.T) {
 // wide-encoded client Phase 1 packet upstream.
 func TestSendUpstreamAuthPhase1RewritesProgramName_Wide(t *testing.T) {
 	t.Parallel()
+	skipUnderForcedSyntheticAuth(t)
 
 	clientPipe, serverPipe := net.Pipe()
 	defer func() { _ = clientPipe.Close() }()
@@ -140,6 +156,7 @@ func TestSendUpstreamAuthPhase1RewritesProgramName_Wide(t *testing.T) {
 // counterpart of TestSendUpstreamAuthPhase2RewritesProgramName.
 func TestSendUpstreamAuthPhase2RewritesProgramName_Wide(t *testing.T) {
 	t.Parallel()
+	skipUnderForcedSyntheticAuth(t)
 
 	clientPipe, serverPipe := net.Pipe()
 	defer func() { _ = clientPipe.Close() }()
