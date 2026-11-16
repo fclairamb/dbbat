@@ -52,6 +52,27 @@ func oracleTestImage() string {
 	return defaultOracleImage
 }
 
+// oracleTestImageMajor is the Oracle release the test image's tag names
+// (`gvenzl/oracle-xe:18.4.0-slim` is 18, `gvenzl/oracle-free:23-slim` 23), or
+// 0 when the tag does not open with a number.
+func oracleTestImageMajor() int {
+	img := oracleTestImage()
+
+	tag := img[strings.LastIndex(img, ":")+1:]
+	end := 0
+
+	for end < len(tag) && tag[end] >= '0' && tag[end] <= '9' {
+		end++
+	}
+
+	major, err := strconv.Atoi(tag[:end])
+	if err != nil {
+		return 0
+	}
+
+	return major
+}
+
 // oracleTestService returns the PDB service name exposed by the test image:
 // gvenzl's XE images serve XEPDB1, the Free (23ai) images FREEPDB1, and the
 // enterprise image is started below with ORACLE_PDB=ORCLPDB1.

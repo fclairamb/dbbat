@@ -544,13 +544,21 @@ func TestIntegration_BlockedStatementRefusesJDBCThin(t *testing.T) {
 	// The measurement the spec asked for, and the reason this test is not just a
 	// fourth copy of the python one: which summary-object tail JDBC's session
 	// negotiated. Two is what Oracle 23ai Free was measured sending it, the same
-	// as python-oracledb thin.
+	// as python-oracledb thin. Oracle 18c XE sends none: the two fields arrived
+	// with Oracle 20c (TTC field version 14), see docs/oracle.md.
 	require.Greater(t, len(shapes), learnedBefore,
 		"the JDBC session must have learned its OER shape from the upstream; "+
 			"without a sample dbbat would have answered from defaultOERShape")
-	assert.Equal(t, int64(2), shapes[learnedBefore],
+
+	wantTail := int64(2)
+	if major := oracleTestImageMajor(); major > 0 && major < 20 {
+		wantTail = 0
+	}
+
+	assert.Equal(t, wantTail, shapes[learnedBefore],
 		"JDBC thin was measured taking the same two-extra-field compressed tail as "+
-			"python-oracledb; a different value here is a fourth shape and belongs in docs/oracle.md")
+			"python-oracledb from 20c on, and none before; a different value here is a "+
+			"fourth shape and belongs in docs/oracle.md")
 
 	assert.Zero(t, env.probeRowCount(t), "the refused INSERT must never have reached upstream")
 	env.assertBlockedQueryLogged(t, "INSERT INTO dbbat_blocked_probe VALUES (99)", "read-only")
