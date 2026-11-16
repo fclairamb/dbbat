@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -249,4 +250,40 @@ func TestPipelinedCall_BreakBehindWaitingCallStillGoesThrough(t *testing.T) {
 	next, err := p.read(pipelineWait)
 	require.NoError(t, err)
 	assert.Contains(t, string(next.Payload), "SELECT 2 FROM DUAL")
+}
+
+// The tail of a statement too long for reassembly to read arrives as Data
+// packets of its own. They are the rest of the call in flight, not a new call,
+// so they go upstream at once: holding them for an answer the upstream gives
+// only once it has the whole message hung the session.
+func TestPipelinedCall_StatementTailIsNotHeld(t *testing.T) {
+	t.Parallel()
+
+	p := newPipelineProbe(t)
+
+	p.sendCall("SELECT 1 FROM DUAL", 1)
+	_, err := p.read(pipelineWait)
+	require.NoError(t, err)
+
+	tail := append([]byte{0, 0}, []byte(strings.Repeat("x", 64))...)
+	p.send(&TNSPacket{Type: TNSPacketTypeData, Payload: tail})
+
+	got, err := p.read(pipelineWait)
+	require.NoError(t, err, "the tail must not wait for the call's answer")
+	assert.Equal(t, tail, got.Payload)
+}
+
+func TestIsGatedCall_OnlyCallOpenersAreHeld(t *testing.T) {
+	t.Parallel()
+
+	data := func(b ...byte) *TNSPacket {
+		return &TNSPacket{Type: TNSPacketTypeData, Payload: append([]byte{0, 0}, b...)}
+	}
+
+	assert.True(t, isGatedCall(data(0x03, 0x5e, 0x01)), "an exec")
+	assert.True(t, isGatedCall(data(0x0e, 0x01)), "a legacy OALL8")
+	assert.True(t, isGatedCall(data(0x11, 0x69, 0x01)), "a call behind a close list")
+	assert.False(t, isGatedCall(data('x', 'x', 'x')), "statement text continuing a call")
+	assert.False(t, isGatedCall(data()), "an empty Data packet")
+	assert.False(t, isGatedCall(&TNSPacket{Type: TNSPacketTypeMarker, Payload: []byte{1, 0, 2}}), "a marker")
 }
