@@ -531,6 +531,25 @@ allowed bulk-load message still goes through the pipeline: the rows carry no
 statement to check, but they do consume the grant's quota and belong in the
 audit trail.
 
+### Password changes are refused whatever the grant
+
+Every dbbat session to a server logs in as one shared upstream login, so a
+proxied user who changes its password (with `ALTER ANY LOGIN`, which a shared
+admin-ish login often has) breaks dbbat's stored credential and every other
+user's next connection fails. `shared.ValidateMSSQLBatch` therefore refuses,
+under **every** grant, full write included, with
+`shared.ErrPasswordChangeBlocked`, any statement of the batch that is
+`ALTER LOGIN … WITH … PASSWORD`, `CREATE LOGIN … WITH PASSWORD`, or the
+contained-database `ALTER USER … WITH PASSWORD` / `CREATE USER … WITH PASSWORD`.
+The scan is the one the write/DDL keywords use: literals, quoted and bracketed
+identifiers, variables and `OLD_PASSWORD` are stepped over, and it runs on every
+dynamic payload the batch or an `sp_executesql` RPC carries. A bare `password`
+after an `ALTER LOGIN` / `ALTER USER` with no `;` between them is refused too,
+since T-SQL needs no separator: that fails closed. `ALTER LOGIN l DISABLE` is
+left to the grant controls (refused under `read_only` and `block_ddl`, allowed
+under full write). The LOGIN7 change-password field is refused at login
+(`Login7.Validate`). Not covered: the deprecated `sp_password` procedure.
+
 ### `USE <db>`, and what is deliberately not enforced next to it
 
 TDS pins nothing. The LOGIN7 database field sets the session's *initial* context,

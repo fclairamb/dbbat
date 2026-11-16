@@ -447,6 +447,27 @@ parameter fails the suite instead of quietly reintroducing the connect-time
 refusal. SQL Developer over the OCI driver is expected to send the same shapes;
 that is inference, not measurement — it is not in the corpus.
 
+### Password changes are refused whatever the grant
+
+Every dbbat session to a server logs in as one shared upstream account, so a
+proxied user who changes that account's password breaks dbbat's stored
+credential and every other user's next connection fails. Password changes are
+therefore refused under **every** grant, full write included, with
+`shared.ErrPasswordChangeBlocked`:
+
+- `ALTER USER … PASSWORD …` (the shared classifier, as on PostgreSQL);
+- `ALTER USER … IDENTIFIED …` and `CREATE USER … IDENTIFIED …`, Oracle's own
+  spelling, which carries no `PASSWORD` token: `IDENTIFIED BY <pw>` (a user may
+  change their own password without the old one under the default profile),
+  and `IDENTIFIED EXTERNALLY` / `IDENTIFIED GLOBALLY`, which change how the
+  account authenticates (`oraclePasswordChange`).
+
+The match runs on the comment-stripped scratch copy, at a statement start, and
+over every dynamic payload (`EXECUTE IMMEDIATE 'ALTER USER … IDENTIFIED BY …'`
+too). A column named `identified` in a `SELECT` or an `ALTER TABLE` stays
+allowed. The `IDENTIFIED` arm is Oracle-scoped (MySQL has its own,
+`mysqlPasswordChange`), so PostgreSQL's behaviour does not change.
+
 ### Dynamic SQL, and how far the checks reach into it
 
 `BEGIN EXECUTE IMMEDIATE 'DELETE FROM t'; END;` is a write whose first keyword is

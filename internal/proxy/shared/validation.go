@@ -753,6 +753,16 @@ var (
 	// oracleLockTable matches LOCK TABLE: not a write, but it blocks every writer
 	// for the length of the transaction (PostgreSQL refuses it read-only too).
 	oracleLockTable = regexp.MustCompile(`(?i)^\s*LOCK\s+TABLE\b`)
+	// oraclePasswordChange matches Oracle's own password-change spelling, which
+	// carries no PASSWORD token and so escapes isPasswordChangeQuery: `ALTER USER
+	// u IDENTIFIED BY pw` (a user may change their own without the old one under
+	// the default profile), `CREATE USER u IDENTIFIED BY pw`, and the
+	// `IDENTIFIED EXTERNALLY|GLOBALLY` forms that change how the account
+	// authenticates. Anchored on a statement start (first statement or after a
+	// `;`), so a column named `identified` in a SELECT or an ALTER TABLE stays
+	// allowed. The tail runs past `;` because a quoted user name may hold one: a
+	// later statement naming `identified` is refused too, which fails closed.
+	oraclePasswordChange = regexp.MustCompile(`(?is)(?:^|;)\s*(?:ALTER|CREATE)\s+USER\b.*\bIDENTIFIED\b`)
 )
 
 // validateOracleVerbs applies read_only and block_ddl to the Oracle verbs that
@@ -780,6 +790,12 @@ func validateOracleVerbs(matchable string, grant *store.Grant) error {
 // already-normalised statement, with no unwrapping — applied to the statement a
 // client sent and, unchanged, to the statement that statement would execute.
 func validateOracleStatement(matchable string, grant *store.Grant) error {
+	// Every dbbat session to a server shares one upstream account: changing
+	// its password locks every other user out. Refused whatever the grant.
+	if oraclePasswordChange.MatchString(matchable) {
+		return ErrPasswordChangeBlocked
+	}
+
 	if err := validateQuery(matchable, syntaxStandard, grant); err != nil {
 		return err
 	}

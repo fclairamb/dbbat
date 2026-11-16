@@ -1601,3 +1601,32 @@ func TestApprovalHoldPositiveControls(t *testing.T) {
 	_, err = sess.holdIfNeeded(context.Background(), statement{text: batch, enforce: []string{batch}})
 	require.ErrorIs(t, err, shared.ErrApprovalUnavailable, "a SQLBatch DELETE must still be held")
 }
+
+// TestPasswordChangeRefusedUnderFullWrite pins the password-change block on
+// both statement paths: a SQLBatch (alone, second in the batch, and wrapped in
+// EXEC sp_executesql) and the sp_executesql RPC a driver sends. The grant
+// carries no control at all: every dbbat session shares the upstream login.
+func TestPasswordChangeRefusedUnderFullWrite(t *testing.T) {
+	t.Parallel()
+
+	session := sessionWithGrant(t, grantWithControls())
+
+	for _, sql := range []string{
+		"ALTER LOGIN l WITH PASSWORD = 'x'",
+		"SELECT 1\nALTER LOGIN l WITH PASSWORD = 'x'",
+		"EXEC sp_executesql N'ALTER LOGIN l WITH PASSWORD = ''x'''",
+	} {
+		require.ErrorIs(t, session.validateStatement(sql), shared.ErrPasswordChangeBlocked, sql)
+	}
+
+	requests, err := parseRPC(rpcByID(spExecuteSQL, nvarcharMaxParam("", "ALTER LOGIN l WITH PASSWORD = 'x'")))
+	require.NoError(t, err)
+
+	st := session.describeRPC(requests)
+	require.NoError(t, st.refusal)
+	require.ErrorIs(t, session.validate(st), shared.ErrPasswordChangeBlocked)
+
+	// Without a password the statement is the grant controls' business: a
+	// full-write grant allows it, as before.
+	require.NoError(t, session.validateStatement("ALTER LOGIN l DISABLE"))
+}
