@@ -34,18 +34,30 @@ ledger. Absolute figures stay in the private notes.
 - Sessions are one-shot scripts and agents, not people holding a console
   open: median 2 statements and 0.1 s, 45% have exactly one statement, p99 is
   42 statements.
-- A few hundred sessions a day. Statement volume is tiny, tens of megabytes a
-  month. Storage pressure can only come from `query_rows`.
+- A few hundred sessions a day.
 - 1% of the sessions carry 89% of the bytes.
-- The table sizes are **not measured yet**: that needs SQL on the store, not
-  the API. They decide question 1 below.
+
+Table sizes, read from the store itself:
+
+- `query_rows` is 96% of the database. `queries` is 4%. `connections` and
+  `audit_log` together are under 1%.
+- The store grows by several gigabytes a month, nearly all of it captured
+  rows. Nothing has ever been deleted from it.
+- 30% of the statements capture rows. Among those: median 2 rows, p90 about
+  100, p99 several thousand. 1% of them hold 83% of the rows, 10% hold 99%.
+- A captured row weighs about 320 bytes in PostgreSQL for about 115 bytes of
+  data (median 31). The rest is per-row overhead: two 32-byte MACs, a uid, the
+  tuple header, the indexes.
+
+So archival is about result rows. Archiving statements alone would move 4% of
+the data.
 
 Objects produced by each possible unit, relative to one per connection:
 
 | Unit | Objects | Statements per object |
 |---|---|---|
 | One per connection | 1 | 4 |
-| One per server and sweep (hourly) | 7.5 times fewer | 32 |
+| One per server and hour | 7.5 times fewer | 32 |
 | One per server and day | 13 times fewer | 55 |
 
 ## Decisions
@@ -137,7 +149,14 @@ compaction job can roll objects up later. It is not in this design.
 | `row_number` | int32 | |
 | `row_data` | JSON string | Canonical form. Every statement has its own columns, so this stays one JSON column |
 | `row_size_bytes` | int64 | |
-| `prev_mac`, `mac` | binary | |
+| `mac` | binary | |
+
+`rows` has no `prev_mac` column. A row chain is always whole in a file
+(retention deletes a statement with all its rows), so `prev_mac` is the `mac`
+of the row before, and the keyed genesis for the first one. It matters: a MAC
+is 32 bytes that do not compress, and the median row carries 31 bytes of data.
+`queries` keeps `prev_mac`, because a session can lose its oldest statements
+to the delete window before it closes, and its files are small anyway.
 
 File key-value metadata on both: `dbbat.schema_version`, `dbbat.version`,
 `dbbat.connection` (the connection row as JSON, including `query_chain_mac`,
@@ -192,7 +211,7 @@ The resolver reads soft-deleted servers too, so their sessions keep the window
 the server had. `ssh` and `kubernetes` rows have no sessions and no retention
 fields.
 
-### 6. Clocks and sweep cadence
+### 6. Clocks and the sweeper
 
 - **Archival**: `disconnected_at + archive_after`. Open sessions are never
   archived.
@@ -204,17 +223,37 @@ fields.
   connection sweep uses `max(connection window, resolved delete window)` and
   skips any row with a live archive.
 
-The sweep runs every hour today. A window of seconds needs a faster one, so
-the interval follows the policy:
+The hourly ticker of `retention.go` goes away. One goroutine per process (the
+sweeper) runs a pass when it is woken, and it is woken:
 
-```
-interval = clamp(shortest positive window anywhere / 4, 5s, 1h)
-```
+- at startup;
+- after each connection close: the one call site in `main.go` that wraps
+  `Store.CloseConnection`, and the crash reconcile when it closes orphans;
+- after a retention policy edit (instance, server group, server, group
+  membership).
 
-recomputed each turn from the instance values and one `min()` over the four
-columns. Windows of days keep the hourly sweep. A 60-second window is swept
-every 15 seconds. The parameter is exact to the second; enforcement lags by at
-most one interval.
+The wake-up is a non-blocking send on a channel of size 1. Any number of
+closes during a pass collapse into one more pass, and two passes never run at
+once in a process. Passes are at least one second apart, the resolution of the
+windows, so a storm of closes costs one pass a second.
+
+A close alone is not enough: the session that just closed is due in
+`archive_after`, not now, and nothing else may close in between. So each pass
+ends by reading the earliest deadline still ahead among closed sessions
+(next archival, next archive deletion, next statement deletion) and arms one
+timer for it. The sweeper sleeps until that timer or the next wake-up,
+whichever comes first.
+
+The timer is capped at one hour. That cap is the backstop for what the events
+do not cover:
+
+- a replica that closed a session and died before its timer fired (another
+  replica has no event for it);
+- statements of sessions still open, deleted at `executed_at + delete_after`
+  as today, which no close announces.
+
+On a single replica with closed sessions, enforcement is exact to about a
+second. An idle instance does one cheap pass an hour, as it does today.
 
 ### 7. Bucket
 
@@ -231,13 +270,23 @@ most one interval.
 
 ### 8. Archiver
 
-New package `internal/archive`. It runs as phases of the retention sweep
-(`retention.go`), which gains jitter:
+New package `internal/archive`. It runs as phases of a sweeper pass
+(`retention.go`):
 
 1. Archive due connections.
 2. Delete due archives.
 3. Delete due statements still in PostgreSQL.
 4. Delete due ledger rows.
+
+A pass is bounded (a number of connections and a number of bytes) and wakes
+the sweeper again when it stopped on its bound. The first pass after archival
+is switched on meets the whole history, tens of gigabytes on the measured
+instance, and must not hold the store for hours.
+
+PostgreSQL does not give the freed space back to the disk. After the backlog
+is archived, `query_rows` stays at its old size on disk and is reused from
+within. Shrinking it is `VACUUM FULL` or `pg_repack`, the operator's call:
+`docs/archive.md` says so.
 
 Per connection:
 
@@ -256,7 +305,7 @@ Per connection:
    `DELETE FROM queries WHERE connection_id = ?` (rows cascade).
 
 A crash anywhere leaves the statements in PostgreSQL. The lease expires, the
-next sweep redoes the connection, the objects are overwritten at the same key
+next pass redoes the connection, the objects are overwritten at the same key
 and a second audit entry is appended. The latest `connection.archived` entry
 is authoritative.
 
@@ -343,9 +392,10 @@ Each phase ships on its own and becomes one spec in `specs/todos/`.
 0. **Spike, one hour.** Write both schemas with `parquet-go`, read them with
    DuckDB, check that UUID, decimal, timestamp and JSON columns come out
    right and that the MAC inputs round-trip bit-exact. Note the size of a
-   two-statement file.
+   two-statement file, and the size of a 100,000-row `rows` file with and
+   without the `mac` column (question 1).
 1. **Per-level retention, delete only.** Columns, resolver, store parameters,
-   adaptive sweep interval, sweep per resolved window, ledger rule, verifier
+   the triggered sweeper, sweep per resolved window, ledger rule, verifier
    excuse per server, API and UI. No bucket involved.
 2. **Archiver.** `DBB_ARCHIVE_URL`, `internal/archive` (schema, writer, claim,
    audit entries, failure alert), the archive and archive-delete phases, the
@@ -356,11 +406,13 @@ With nothing configured, behaviour is exactly today's.
 
 ## Open questions
 
-1. **Archive result rows, or only statements?** Rows are the sensitive part
-   and, by every indication, the bulk. The audit value is mostly in the
-   statements. An instance switch (`DBB_ARCHIVE_ROWS`, default on) would let a
-   deployment keep statements for a year and drop rows at archival. Needs the
-   table sizes to decide.
+1. **Keep the per-row `mac` in the `rows` file?** Settled first: rows are
+   archived, always, with no switch, since they are 96% of the data. What is
+   left is their MAC. With the key, a verifier can recompute a whole row chain
+   from the row data and compare its head to `row_chain_mac`, which the
+   `queries` file carries. The per-row `mac` only says which row broke, and it
+   is likely more than half of the file. Recommended: keep it in `v1` and let
+   the spike measure what it costs.
 2. **Several server groups on one server.** Recommended: keep the longest. The
    alternative, the shortest delete window, suits a privacy rule ("PII
    servers: 30 days") better than an audit rule ("prod: 1 year").
