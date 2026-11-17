@@ -3,11 +3,14 @@
 ## [0.32.3](https://github.com/fclairamb/dbbat/compare/v0.32.2...v0.32.3) (2026-11-17)
 
 
+### Security
+
+* **proxy:** fixes from the 2026-11-16 security scan: approval evasion, audit gaps, password changes and shared quotas ([#501](https://github.com/fclairamb/dbbat/issues/501)) ([c4e076a](https://github.com/fclairamb/dbbat/commit/c4e076a040b0a7e4ebda2568ea4e235d831f1ff3))
+
 ### Bug Fixes
 
-* **oracle:** Oracle 18c XE support — JDBC thin login, sqlplus refusals, TNS Resend ([#507](https://github.com/fclairamb/dbbat/issues/507)) ([f7df79f](https://github.com/fclairamb/dbbat/commit/f7df79f0533545933c7aec41de7c6026e2161e52))
-* **oracle:** repair the nightly integration suite (MongoDB, 23ai sqlplus, go-ora 18c panic, JDBC synthetic AUTH) ([#502](https://github.com/fclairamb/dbbat/issues/502)) ([8ee5a89](https://github.com/fclairamb/dbbat/commit/8ee5a89148f99deedac309b50dcd8658c10531f7))
-* **proxy:** security scan 2026-11-16 — approval evasion, audit gaps, password changes, shared quotas ([#501](https://github.com/fclairamb/dbbat/issues/501)) ([c4e076a](https://github.com/fclairamb/dbbat/commit/c4e076a040b0a7e4ebda2568ea4e235d831f1ff3))
+* **oracle:** Oracle 18c XE support: JDBC thin login, sqlplus refusals and TNS Resend handling ([#507](https://github.com/fclairamb/dbbat/issues/507)) ([f7df79f](https://github.com/fclairamb/dbbat/commit/f7df79f0533545933c7aec41de7c6026e2161e52))
+* **oracle:** nightly integration suite repaired (MongoDB, 23ai sqlplus, go-ora 18c panic, JDBC synthetic AUTH) ([#502](https://github.com/fclairamb/dbbat/issues/502)) ([8ee5a89](https://github.com/fclairamb/dbbat/commit/8ee5a89148f99deedac309b50dcd8658c10531f7))
 
 ## [0.32.2](https://github.com/fclairamb/dbbat/compare/v0.32.1...v0.32.2) (2026-11-15)
 
