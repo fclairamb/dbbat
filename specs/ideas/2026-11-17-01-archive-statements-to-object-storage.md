@@ -159,6 +159,7 @@ directory names included.
 | `approval_status`, `approval_pattern`, `resolved_by`, `resolved_at`, `resolution_reason` | optional | |
 | `prev_mac`, `mac`, `row_chain_mac` | binary | |
 | `row_chain_len` | int64 | |
+| `rows_offset` | int64, optional | Position of the statement's first row in the `rows` file. Not in PostgreSQL: the archiver computes it while writing |
 
 `rows`, one row per captured result row, sorted by statement order then
 `row_number`:
@@ -339,7 +340,8 @@ Per connection:
    sizes, SHA-256 of each object, statement and row counts, and the policy
    that applied (duration and which level it came from).
 4. **Commit**, one transaction: set `archived_at`, `archive_key`,
-   `archive_queries_sha256`, `archive_rows_sha256` on the connection row and
+   `archive_queries_sha256`, `archive_rows_sha256`, `archive_queries_bytes`,
+   `archive_rows_bytes` on the connection row and
    `DELETE FROM queries WHERE connection_id = ?` (rows cascade).
 
 A crash anywhere leaves the statements in PostgreSQL. The lease expires, the
@@ -379,17 +381,58 @@ possible, since the MACs are there, and is deferred.
 
 ### 10. Reading
 
-In the first version dbbat does not serve archived statements itself:
+dbbat reads its own archive. An archived session looks the same in the UI as
+one still in PostgreSQL, with an Archived badge.
+
+**Why it is easy.** Each file is one ordered stream, and dbbat goes from a
+connection row straight to it:
+
+- The object key, its size and its SHA-256 are on the connection row
+  (`archive_key`, `archive_queries_bytes`, `archive_rows_bytes`, the two
+  hashes). No `LIST`, no index, no catalogue.
+- `queries` is sorted by `chain_seq`, so a page of statements is "row N to
+  N+K" of the file.
+- `rows` is sorted by statement, then `row_number`, and each statement in
+  `queries` carries `rows_offset`, the position of its first row in the `rows`
+  file. The rows of one statement are "row `rows_offset` to `rows_offset +
+  row_chain_len`".
+
+So both streams are read with one primitive, in `internal/archive`:
+
+```go
+// Read returns rows [offset, offset+limit) of one archive object.
+func Read[T any](ctx context.Context, b *blob.Bucket, key string, size int64, sha256 []byte, offset int64, limit int) ([]T, error)
+```
+
+- An object up to 8 MiB is fetched whole in one `GET`, checked against its
+  SHA-256, and read from memory. That is nearly every object.
+- A larger one is read through an `io.ReaderAt` over range requests
+  (`blob.NewRangeReader`) with `parquet.OpenFile` and `SeekToRow`. Tried with
+  `parquet-go` and `CGO_ENABLED=0` on a 100,000-row file: 5 reads and 11 kB to
+  open it, 8 reads and 72 kB to return 50 rows from the middle. A range read
+  is not checked against the hash; the download below is.
+- No cache. A page is one small request to the bucket.
+
+**API.** The handlers switch on `archived_at`, and return the same JSON either
+way:
 
 - `GET /connections/{uid}` gains `archived_at`, `archive_deleted_at` and
   `statements_location`: `store`, `archive` or `deleted`.
+- `GET /queries?connection_id=<uid>` reads the `queries` file when the
+  connection is archived. Same fields, same order, paged by position.
+- `GET /queries/{uid}` and `GET /queries/{uid}/rows` take the same
+  `connection_id` parameter. It is required for an archived statement: once
+  the row has left PostgreSQL, a statement uid alone does not say which file
+  holds it. The UI always has it.
 - `GET /connections/{uid}/archive/queries` and `/archive/rows` stream the raw
-  Parquet objects, like the dump download.
-- The connection page shows an Archived badge and the two downloads in place
-  of the statement feed. The statement list page says it covers PostgreSQL
-  only.
+  Parquet objects, like the dump download, hash checked.
+- A read that fails (object missing, hash mismatch, bucket down) is a 502 that
+  says which, never an empty list.
 
-Everything else goes through an engine pointed at the bucket:
+**What dbbat does not do.** The statement list across connections
+(`GET /queries` without `connection_id`) and its filters cover PostgreSQL
+only, and the page says so. Searching the whole archive goes through an engine
+pointed at the bucket:
 
 ```sql
 SELECT username, server_name, count(*) AS statements, sum(duration_ms) AS total_ms
@@ -415,7 +458,7 @@ GROUP BY ALL;
 
 ## Out of scope
 
-- Serving archived statements in the UI (pagination over Parquet).
+- Listing or searching statements across archived connections in dbbat.
 - Walking the chains inside the archive files (`audit verify --archive`).
 - Compaction of small files.
 - Archiving open sessions in pieces.
@@ -439,6 +482,9 @@ Each phase ships on its own and becomes one spec in `specs/todos/`.
    audit entries, failure alert), the archive and archive-delete phases, the
    verifier's two archive states, the badge and the downloads,
    `docs/archive.md` with DuckDB and Athena recipes.
+3. **Reading.** `archive.Read`, the three query endpoints switching on
+   `archived_at`, the connection page showing an archived session like a live
+   one.
 
 With nothing configured, behaviour is exactly today's.
 
@@ -449,8 +495,9 @@ With nothing configured, behaviour is exactly today's.
    left is their MAC. With the key, a verifier can recompute a whole row chain
    from the row data and compare its head to `row_chain_mac`, which the
    `queries` file carries. The per-row `mac` only says which row broke, and it
-   is likely more than half of the file. Recommended: keep it in `v1` and let
-   the spike measure what it costs.
+   is most of the file: on 100,000 synthetic rows, 39 bytes a row with it and
+   6.5 without. Real rows compress less, so the spike measures it on a real
+   session. Recommended: keep it in `v1` unless that confirms the same ratio.
 2. **Several server groups on one server.** Recommended: keep the longest. The
    alternative, the shortest delete window, suits a privacy rule ("PII
    servers: 30 days") better than an audit rule ("prod: 1 year").
