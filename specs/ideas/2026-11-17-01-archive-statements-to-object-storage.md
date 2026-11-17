@@ -118,6 +118,26 @@ compaction job can roll objects up later. It is not in this design.
 - Statements and result rows live under two prefixes on purpose, so IAM can
   give an analyst the statements without the data they returned.
 
+The same key is a valid path on a plain file system, so an archive can live in
+a directory (`DBB_ARCHIVE_URL=file:///var/lib/dbbat/archive`) or be copied out
+of a bucket with `aws s3 sync` and read in place:
+
+- A key uses only `a-z`, `0-9`, `-`, `=`, `.`, `_` and `/`. No `:`, no space,
+  no upper case (macOS and Windows file systems ignore case). `=` is legal on
+  ext4, XFS, APFS and NTFS. The archiver builds keys from a date and uids
+  only, never from a server name or a username, and a test pins the charset.
+- With that charset the `file://` driver maps a key to a path without
+  escaping anything, on Unix and on Windows.
+- The longest path component is 43 characters and the tree is three levels
+  deep, far below any file system limit.
+- A day directory holds one directory per server that had a session that day,
+  and a server directory holds that day's sessions of that server: hundreds of
+  entries at most, never one directory with a year of files.
+
+Checked on a local directory: DuckDB reads the tree with
+`hive_partitioning = true` and prunes on `date` and `server`, `=` in the
+directory names included.
+
 ### 4. Schema
 
 `queries`, one row per statement, sorted by `chain_seq`:
@@ -267,6 +287,24 @@ second. An idle instance does one cheap pass an hour, as it does today.
 - dbbat deletes archive objects itself, because a bucket lifecycle rule cannot
   express per-server windows.
 - Encryption is the bucket's (SSE-S3 or SSE-KMS).
+
+On `file://`, three things differ from a bucket, and dbbat handles them so the
+directory holds nothing but the `.parquet` files:
+
+- **No sidecar files.** The driver writes a `<name>.attrs` file next to each
+  object by default. dbbat opens the archive with `metadata=skip`: the hash
+  that matters is already sealed in the audit chain.
+- **Atomic writes on the same file system.** dbbat sets `no_tmp_dir`, so the
+  object is written as `<name>.<hex>.tmp` in its final directory and renamed.
+  A reader never sees a half-written `.parquet`, and the rename never crosses
+  a mount.
+- **No empty directories left behind.** After deleting an object, dbbat
+  removes its `server=` and `date=` directories when they are empty
+  (`os.Remove`, which refuses a directory that still has entries). A bucket
+  has no directories, so this only runs on `file://`.
+
+With several replicas the directory must be a shared volume. A local disk per
+replica would leave each download working on one replica only.
 
 ### 8. Archiver
 
