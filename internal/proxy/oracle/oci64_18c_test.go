@@ -6,6 +6,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // The sqlplus 18.4 bundled in gvenzl/oracle-xe:18.4.0-slim speaks the 64-bit
@@ -269,4 +272,99 @@ func TestOCI64_18cLOBFetchKeepsEveryOrdinaryColumn(t *testing.T) {
 	// The 23ai field version reads the record tail at its 23ai width, so the
 	// describe itself refuses to walk and no row is offered a wrong layout.
 	assert.Empty(t, replay18cFetch(t, oci64OERShape(), frames[2], frames[3]))
+}
+
+// The refusal family on 18c: the INSERT stapled behind a tokenless close list
+// is decoded and refused under read_only, and the read behind the same kind of
+// list goes through, both read by the header length on the dialect the
+// session learned.
+func TestOCI64_18cCallBehindACloseListIsGated(t *testing.T) {
+	t.Parallel()
+
+	frames := recordedFrames(t, oci64_18cParseExecs)
+	require.GreaterOrEqual(t, len(frames), 4)
+
+	newSession := func() *session {
+		s := newTestSession(&store.Grant{
+			Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}},
+		})
+		s.clientWide64Encoding = true
+		s.clientConn = drainedPipe(t)
+
+		return s
+	}
+
+	insert := extractTTCPayload(frames[3])
+	require.ErrorIs(t, newSession().handlePiggybackExec(insert), shared.ErrReadOnlyViolation,
+		"read_only must refuse the 18c INSERT")
+
+	read := extractTTCPayload(frames[2])
+	require.NoError(t, newSession().handlePiggybackExec(read), "the DECODE probe is a read")
+}
+
+// execLengthOf reads the statement length an exec declares, past the close
+// list a piggyback staples in front of it.
+func execLengthOf(t *testing.T, ttc []byte) int {
+	t.Helper()
+
+	body := ttc
+	if end, ok := closeCursorsEnd(ttc); ok {
+		body = ttc[end:]
+	}
+
+	length, ok := execSQLLength(body, true)
+	require.True(t, ok, "the exec header must declare its statement's length")
+
+	return length
+}
+
+// The 18c parse-execs go through the statement tagger the way the proxy hands
+// them over: the tag reaches the wire in front of the client's own text, the
+// PL/SQL BEGIN … END; calls included, and the 64-bit length field is
+// rewritten to the tagged statement's length.
+func TestOCI64_18cParseExecsAreTagged(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		"BEGIN DBMS_OUTPUT.DISABLE; END;",
+		"BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:1,NULL); END;",
+		"SELECT DECODE('A','A','1','2') FROM SYS.DUAL",
+		"INSERT INTO dbbat_blocked_probe VALUES (99)",
+	}
+	terminated := []int{0, 1, 0, 0}
+
+	frames := recordedFrames(t, oci64_18cParseExecs)
+	require.Len(t, frames, len(want)+1)
+
+	s := taggedSession(t, 8192)
+	s.clientWide64Encoding = true
+
+	for i, sql := range want {
+		ttc := extractTTCPayload(frames[i])
+		require.NotEmptyf(t, ttc, "frame %d", i)
+
+		// SET_MODULE declares its NUL terminator inside the length, so the
+		// field is one past the text there; the tag grows it by its own size.
+		before := execLengthOf(t, ttc)
+		require.Equalf(t, len(sql)+terminated[i], before, "frame %d declares its own text", i)
+
+		out, ok := s.rewriteStatementMessage(messageOf(ttc))
+		require.Truef(t, ok, "frame %d: the 18c session must certify and tag", i)
+		require.True(t, s.tagging.certified)
+
+		wire := upstreamTTC(t, out)
+
+		got, ok := decodeExecStatement(wire, true)
+		require.Truef(t, ok, "frame %d: the rewritten frame must still decode", i)
+		assert.Equalf(t, taggingTagPrefix+sql, got, "frame %d", i)
+
+		assert.Equalf(t, len(taggingTagPrefix)+before, execLengthOf(t, wire),
+			"frame %d: the length field declares the tagged statement", i)
+
+		if ids, err := decodeCloseCursors(ttc); err == nil {
+			gotIDs, err := decodeCloseCursors(wire)
+			require.NoErrorf(t, err, "frame %d: the close list survives the rewrite", i)
+			assert.Equalf(t, ids, gotIDs, "frame %d", i)
+		}
+	}
 }
