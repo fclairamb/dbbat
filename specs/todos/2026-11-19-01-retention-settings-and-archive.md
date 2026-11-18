@@ -414,6 +414,57 @@ read them back with `parquet-go` and with DuckDB, and check:
 
 Write the numbers into this spec.
 
+### Spike results (rows only, `parquet-go` v0.32.1, `CGO_ENABLED=0`)
+
+Done on 2026-11-19 with the `rows` schema of phase 5 (`internal/archive`,
+`TestSpikeFormat`). The `queries` file does not exist any more (rows only), so
+only `rows` was written.
+
+- **Types.** Read back with `parquet-go` and with DuckDB 2.0: `connection_uid`,
+  `query_uid` and `row_uid` come out as `UUID`, `row_data` as `JSON` (the
+  `json` tag), `row_number` as `INTEGER`, `row_size_bytes` as `BIGINT`. A tree
+  `v1/rows/date=2026-11-17/server=<uid>/<conn>.parquet` reads with
+  `read_parquet('v1/rows/**/*.parquet', hive_partitioning=true)` and `date` and
+  `server` appear as columns. No decimal or timestamp column is needed any more
+  (they belonged to `queries`).
+- **Bit-exactness.** `row_data` is written as the text PostgreSQL returns for
+  the `jsonb` column (`row_data::text`) and read back unchanged; the archive test
+  compares the JSON of every row. A finding: the row chain MAC covers the row
+  `uid` (`rowChainPayload(query_id, row.UID, row_number, row_data, size,
+  prev_mac)`), which the schema table above did not list. `rows` therefore has a
+  `row_uid` column, without which the chain could not be recomputed from the
+  file.
+- **Size.** A 3-row, 2-statement file is 2,068 bytes. 100,000 synthetic rows
+  (31-byte-ish JSON, random row uids) over 40 statements is 2,298,797 bytes,
+  **23.0 bytes a row** (about 6.5 without `row_uid` and `query_uid`; the uids
+  dominate, and are far smaller with time-ordered v7 uids). That is against about
+  320 bytes a row in PostgreSQL. A real session's 100,000-row file was not
+  measured: the instance data stays private.
+- **Reads.** An object up to 8 MiB is fetched whole and hash checked; the
+  range-read path (`SeekToRow` over `blob.NewRangeReader`) is implemented for
+  larger ones.
+
+### Adaptation to the resolved open question (rows only)
+
+Phases 5 and 6 were implemented for result rows only:
+
+- No `queries` file, no `connection_id` requirement on the statement
+  endpoints, no gap in the statement list, no archived state of the statement
+  chains. Statements stay in PostgreSQL until `delete_after`.
+- One object per connection that captured rows:
+  `v1/rows/date=.../server=.../<connection-uid>.parquet`. `rows_offset` is not a
+  column of a `queries` table that no longer leaves PostgreSQL: the offset of
+  each statement's first row travels in the file metadata
+  (`dbbat.query_offsets`), and `GET /queries/{uid}/rows` reads it from the file.
+- The connection row carries `archive_key`, `archive_rows_sha256`,
+  `archive_rows_bytes`, `archive_rows_count`, `archived_at`,
+  `archive_deleted_at`; `GET /connections/{uid}` reports `rows_location`.
+- Audit chain: a connection whose rows are archived is not a break; the
+  verifier skips its row chains and counts `chains_archived` (and
+  `chains_archive_deleted`). The statement chain is untouched, so the state
+  table asked for before coding phase 5 reduces to: statements chain as today;
+  row chain walked only while `archived_at` is NULL.
+
 ---
 
 ## Phase 5: archiver
