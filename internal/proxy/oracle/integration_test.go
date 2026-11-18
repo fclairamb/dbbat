@@ -362,6 +362,22 @@ func TestIntegration_ConcurrentSessions(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
+	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
+
+	// "DATABASE IS READY TO USE!" can come out before the listener serves the
+	// PDB reliably: ten connections dialled at once then lose one to an EOF
+	// (nightly run of 2026-11-18). Wait for a single session to get through
+	// first, so the test measures concurrency, not the container's start-up.
+	warm, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		return warm.PingContext(ctx) == nil
+	}, time.Minute, time.Second, "Oracle never accepted a first session")
+	_ = warm.Close()
+
 	var wg sync.WaitGroup
 	errs := make([]error, 10)
 
@@ -371,7 +387,6 @@ func TestIntegration_ConcurrentSessions(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 
-			dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 			db, err := sql.Open("oracle", dsn)
 			if err != nil {
 				errs[idx] = err
