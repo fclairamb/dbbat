@@ -91,6 +91,11 @@ Wrong means:
 - a `DBB_RETENTION_*` variable or a `retention.*` key that is not in the table
   above (`DBB_RETENTION_QUERY_DELETE_AFTER`). Today a mistyped name is
   silently unset;
+- a removed name that is still set, in the environment or in the file:
+  `DBB_QUERY_STORAGE_RETENTION` (`query_storage.retention`),
+  `DBB_CONNECTION_RETENTION` (`connection.retention`), `DBB_DUMP_RETENTION`
+  (`dump.retention`). The WARN gives the new name. The old value is never
+  read: this is a guard, not an alias;
 - a connection window shorter than the statement window (deleting a
   connection cascades to its statements);
 - a connection window set while statements are kept forever.
@@ -105,8 +110,9 @@ The last two rules exist today. The first two are new for dumps.
 - `envTransform`: one rule, `retention_<object>_<setting>` to
   `retention.<object>.<setting>`, with the object taken from a known list.
   The `connection_retention` entry of `envExactKeys` goes away.
-- `RetentionWindows` gains `Dumps`. Unknown keys are found in
-  `operatorLayer`, which holds what the operator set without the defaults.
+- `RetentionWindows` gains `Dumps`. Unknown keys and the three removed names
+  are found in `operatorLayer`, which holds what the operator set without the
+  defaults. The removed names are one small map, old key to new variable.
 - `retention.go` runs the dump sweep (`dump.CleanupOldFiles`) next to the
   other two. The five `runDumpCleanup` loops, their constants and their
   goroutine names go away.
@@ -128,22 +134,35 @@ The last two rules exist today. The first two are new for dumps.
   sets the window.
 - Each kind of mistake: all three windows are zero and the WARN names the
   culprit.
+- Each removed name, set in the environment and set in the file: all three
+  windows are zero and the WARN gives the new name.
 - Nothing set: statements and connections are never deleted, dumps at 24h.
 - A test greps the docs and the OpenAPI file for the three removed names.
+  They may appear in the changelog and in the guard's map, nowhere else.
 
 ## Breaking change
 
 PR title: `feat(config)!: uniform retention settings`.
 
-A deployment that still sets an old name gets no error. The variable is
-ignored:
+A deployment that still sets an old name starts, deletes nothing, and logs a
+WARN with the new name at every startup until it is renamed. Nothing is lost:
 
-- `DBB_QUERY_STORAGE_RETENTION` and `DBB_CONNECTION_RETENTION`: history is
-  kept forever. Nothing is lost.
-- `DBB_DUMP_RETENTION` longer than `24h`: capture files are deleted sooner
-  than configured. This is the one case that loses data.
+- statements and connections are kept, as if no window were set;
+- capture files are kept too. Without the guard, an old `DBB_DUMP_RETENTION`
+  longer than `24h` would be ignored and the files deleted at the `24h`
+  default, sooner than configured. With it, the spool grows until the
+  variable is renamed.
 
-The changelog lists the three renames and says so.
+The changelog lists the three renames.
+
+## Decisions taken
+
+- **`queries`, not `statements`.** The docs say "statements", but the table,
+  the API path and the config section say "queries".
+- **Dumps keep a `24h` default.** It is the one exception to "never", so a
+  spool that nobody watches does not fill the disk.
+- **A removed name is a mistake, not an alias.** The past is ignored (no old
+  value is read), but it is not allowed to delete data.
 
 ## Out of scope
 
@@ -152,14 +171,3 @@ The changelog lists the three renames and says so.
 - Uploaded captures. Their lifetime is the bucket's lifecycle rule.
 - `audit_log`, never deleted. OAuth states and stale instance rows have a
   fixed lifetime and no setting.
-
-## Open questions
-
-1. **Warn when a removed name is set?** Ten lines: at startup, if one of the
-   three old variables is present, WARN with the new name. It goes against
-   "ignore the past", and it covers the one case above that loses data.
-   Recommended: yes, for the dump variable at least.
-2. **`queries` or `statements`?** The docs say "statements", the table, the
-   API and the config say "queries". Recommended: `queries`.
-3. **Dumps: `24h` or never by default?** Never would make the rule have no
-   exception. Recommended: keep `24h`.
