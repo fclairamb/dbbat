@@ -773,6 +773,14 @@ so.
   different design of phases 5 and 6, not a variant of this one. Phases 1 to 4
   do not depend on the answer. Recommended: rows only.
 
+## Resolved open questions
+
+- **Archive result rows only?** Archive result rows only (autopilot: recommended answer).
+  Statements stay in PostgreSQL until `delete_after`. Phases 5 and 6 drop the
+  `queries` file, the `connection_id` requirement on the statement endpoints,
+  the gap in the statement list and the archived state of the statement
+  chains: only the `rows` file is written and read back.
+
 ## Out of scope
 
 - Searching the archive, in dbbat or with an engine pointed at the bucket.
