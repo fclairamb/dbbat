@@ -202,11 +202,13 @@ Storage, following what the statement timeout already does:
 - `servers.archive_after_seconds`, `servers.delete_after_seconds`: nullable
   integers.
 - `server_groups`: the same two columns.
-- Instance: store parameters `retention.archive_after` and
-  `retention.delete_after`, Go duration strings (`90s`, `36h`, `8760h`), which
-  win over the environment like `limits.statement_timeout`. Environment
-  defaults: new `DBB_ARCHIVE_AFTER` (default: never), and the existing
-  `DBB_QUERY_STORAGE_RETENTION` for deletion (default: never).
+- Instance: store parameters `retention.queries.archive_after` and
+  `retention.queries.delete_after`, Go duration strings (`90s`, `36h`,
+  `8760h`), which win over the environment like `limits.statement_timeout`.
+  Environment defaults: `DBB_RETENTION_QUERIES_ARCHIVE_AFTER` and
+  `DBB_RETENTION_QUERIES_DELETE_AFTER` (both default to never). The names
+  follow `specs/ideas/2026-11-18-01-uniform-retention-settings.md`, which
+  lands first.
 
 **Both are off by default.** Every value starts unset, and unset at every
 level resolves to never. A new instance, or one upgraded with nothing
@@ -310,7 +312,7 @@ UI while the process runs.
   statements stay in PostgreSQL until their delete window (forever when there
   is none), `GET /instance` reports `archive_enabled: false`, and the UI does
   not show the archive fields. The API answers 400 to an archive window, and
-  `DBB_ARCHIVE_AFTER` alone is ignored with a startup WARN.
+  `DBB_RETENTION_QUERIES_ARCHIVE_AFTER` alone is ignored with a startup WARN.
 - Removed after sessions were archived: nothing new is archived, and reading
   an archived session is a 502 saying the archive is not configured. The
   objects stay in the bucket.
@@ -499,6 +501,9 @@ so.
 ## Phasing
 
 Each phase ships on its own and becomes one spec in `specs/todos/`.
+
+Before any of them: the uniform retention settings
+(`specs/ideas/2026-11-18-01-uniform-retention-settings.md`).
 
 0. **Spike, one hour.** Write both schemas with `parquet-go`, read them with
    DuckDB, check that UUID, decimal, timestamp and JSON columns come out
