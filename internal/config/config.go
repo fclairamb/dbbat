@@ -901,9 +901,10 @@ type DumpConfig struct {
 	// default — keeps captures on local disk only, which is the historical
 	// behavior.
 	//
-	// The scheme selects the driver (gocloud.dev/blob): "s3://" for S3 and
-	// S3-compatible stores, "file://" for a local directory (useful in tests
-	// and for a mounted volume). Any path after the bucket is used as a key
+	// The scheme selects the driver: "s3://" for S3 and any S3-compatible
+	// store, "file://" for a local directory (useful in tests and for a
+	// mounted volume). There is no gs:// or azblob:// driver (see
+	// internal/bucket). Any path after the bucket is used as a key
 	// prefix. Requires Dir: captures are always spooled locally first and
 	// uploaded once complete.
 	UploadURL string `koanf:"upload_url"`
