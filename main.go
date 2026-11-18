@@ -17,6 +17,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/fclairamb/dbbat/internal/api"
+	"github.com/fclairamb/dbbat/internal/archive"
 	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
@@ -258,13 +259,14 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		// Seals the audit and query chains. The store keeps only an HKDF
 		// subkey of this; see docs/audit-chain.md.
 		EncryptionKey: cfg.EncryptionKey,
-		// Not what drives the sweep (startQueryRetentionSweep owns that) —
+		// Not what drives the sweep (startRetentionSweeper owns that) —
 		// what lets chain verification and the connection detail API tell a
 		// session retention emptied from one somebody emptied. The **query**
 		// window, resolved: the ledger window only decides whether the session
 		// row survives, and an incoherent pair resolves both to zero, which is
 		// also what the sweep does.
-		QueryRetention: cfg.RetentionWindows().Queries,
+		QueryRetention:   cfg.RetentionWindows().Queries,
+		ArchiveRetention: cfg.RetentionWindows().QueriesArchive,
 	}
 	if cfg.RunMode == config.RunModeTest {
 		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
@@ -374,8 +376,18 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader, logger)
 
-	// One retention sweep for the whole process (nil when disabled, the default).
-	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
+	// The archive bucket (nil when DBB_ARCHIVE_URL is unset, the default: archival
+	// does not exist).
+	archiver, err := archive.Open(ctx, cfg.ArchiveURL, dataStore, logger)
+	if err != nil {
+		return fmt.Errorf("failed to open the archive: %w", err)
+	}
+	apiServer.SetArchive(archiver)
+
+	// One retention sweeper for the whole process. It always exists: a window can
+	// be set from the UI while the process runs.
+	sweeper := startRetentionSweeper(ctx, cfg, dataStore, archiver, logger)
+	apiServer.SetRetentionWaker(sweeper.Wake)
 
 	// Expired OAuth/device/login-exchange states are purged whatever the
 	// retention settings: unauthenticated endpoints create them.
@@ -1771,7 +1783,8 @@ func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) erro
 		// what that window is — from the same configuration the sweep reads,
 		// through the same resolver, so a misconfigured pair excuses nothing
 		// here either.
-		QueryRetention: cfg.RetentionWindows().Queries,
+		QueryRetention:   cfg.RetentionWindows().Queries,
+		ArchiveRetention: cfg.RetentionWindows().QueriesArchive,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize store: %w", err)
@@ -2080,7 +2093,7 @@ func collectServers(
 	mongoServer *mongodb.Server,
 	mssqlServer *mssql.Server,
 	rowWriter *shared.RowWriter,
-	sweeper *queryRetentionSweeper,
+	sweeper *retentionSweeper,
 	oauthPurger *oauthStatePurger,
 	heartbeat *instanceHeartbeat,
 	dumpUploader *dump.Uploader,

@@ -61,6 +61,12 @@ type CreateDatabaseRequest struct {
 
 // UpdateDatabaseRequest represents the request to update a database
 type UpdateDatabaseRequest struct {
+	// ArchiveAfterSeconds and DeleteAfterSeconds are the server's retention
+	// windows. Tri-state: absent leaves the value alone, null inherits, a number
+	// sets it (0 means never).
+	ArchiveAfterSeconds store.OptionalSeconds `json:"archive_after_seconds"`
+	DeleteAfterSeconds  store.OptionalSeconds `json:"delete_after_seconds"`
+
 	// Name renames the server, subject to the same slug rule creation enforces
 	// (store.IsValidServerName). It is the one field clients actually type —
 	// the PostgreSQL/MySQL/MongoDB database name, the Oracle SERVICE_NAME — so
@@ -144,6 +150,13 @@ type DatabaseResponse struct {
 	// omitting it would make "cleared" indistinguishable from "unknown".
 	AccessApproverUserGroupUIDs []uuid.UUID `json:"access_approver_user_group_uids"`
 	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
+	// ArchiveAfterSeconds and DeleteAfterSeconds are the server's own retention
+	// windows: null inherits (server group, then instance), 0 never.
+	ArchiveAfterSeconds *int64 `json:"archive_after_seconds"`
+	DeleteAfterSeconds  *int64 `json:"delete_after_seconds"`
+	// EffectiveRetention is both windows resolved, with where each came from.
+	// Present on GET /servers/{uid} only.
+	EffectiveRetention *store.ResolvedRetention `json:"effective_retention,omitempty"`
 	// ConnectionTest is present only when the request set test_connection.
 	ConnectionTest *ConnectionTestResponse `json:"connection_test,omitempty"`
 	// OracleServiceNameConflict is present only on an Oracle row whose upstream
@@ -388,6 +401,13 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 	if currentUser.IsAdmin() {
 		resp := toDatabaseResponse(db)
 		s.attachOracleServiceNameConflict(c.Request.Context(), &resp)
+
+		if effective, err := s.effectiveRetention(c, db.UID); err != nil {
+			s.logger.WarnContext(c.Request.Context(), "failed to resolve effective retention", "error", err)
+		} else {
+			resp.EffectiveRetention = effective
+		}
+
 		successResponse(c, resp)
 
 		return
@@ -524,7 +544,15 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		return
 	}
 
+	if msg := s.validateRetentionSeconds(req.ArchiveAfterSeconds, req.DeleteAfterSeconds,
+		current.ArchiveAfterSeconds, current.DeleteAfterSeconds); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+		return
+	}
+
 	updates := store.ServerUpdate{
+		ArchiveAfter:      req.ArchiveAfterSeconds,
+		DeleteAfter:       req.DeleteAfterSeconds,
 		Name:              req.Name,
 		Description:       req.Description,
 		Host:              req.Host,
@@ -555,6 +583,11 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		s.writeUpdateServerError(c, err)
 
 		return
+	}
+
+	if req.ArchiveAfterSeconds.Set || req.DeleteAfterSeconds.Set {
+		// Policy edits apply to data already stored: wake the sweeper now.
+		s.wakeRetention()
 	}
 
 	// Log audit event
@@ -712,6 +745,9 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 
 		AccessApproverUserGroupUIDs: normalizeUUIDs(db.AccessApproverUserGroupUIDs),
 		QueryApproverUserGroupUIDs:  normalizeUUIDs(db.QueryApproverUserGroupUIDs),
+
+		ArchiveAfterSeconds: db.ArchiveAfterSeconds,
+		DeleteAfterSeconds:  db.DeleteAfterSeconds,
 	}
 }
 

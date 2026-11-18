@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/approval"
+	"github.com/fclairamb/dbbat/internal/archive"
 	"github.com/fclairamb/dbbat/internal/auth"
 	"github.com/fclairamb/dbbat/internal/auth/oidc"
 	"github.com/fclairamb/dbbat/internal/auth/slack"
@@ -54,7 +55,9 @@ type Server struct {
 	authFailureTracker *authFailureTracker
 	authCache          *cache.AuthCache
 	config             *config.Config
-	oauthProviders     map[string]auth.OAuthProvider
+	// retentionWake wakes the retention sweeper (see SetRetentionWaker).
+	retentionWake  func()
+	oauthProviders map[string]auth.OAuthProvider
 	// notifier is the outbound Slack client; nil when notifications are
 	// disabled (no bot token configured).
 	notifier *notify.SlackNotifier
@@ -79,6 +82,10 @@ type Server struct {
 	// only ever exist in the local spool.
 	dumpStorage *dump.Uploader
 
+	// archiver reads archived result rows back; nil when no archive bucket is
+	// configured (DBB_ARCHIVE_URL).
+	archiver *archive.Archiver
+
 	// mcp serves the Model Context Protocol endpoint. Built in setupRouter,
 	// nil when DBB_MCP_ENABLED is false — in which case the routes are not
 	// registered either.
@@ -93,6 +100,12 @@ type Server struct {
 // downloads can fall back to it when the capture is no longer (or never was) in
 // this replica's local spool. Called by the process wiring; nil is fine and
 // means local-only captures.
+func (s *Server) SetArchive(a *archive.Archiver) {
+	s.archiver = a
+}
+
+// SetDumpStorage installs the blob store holding uploaded session captures (see
+// SetArchive for the archive of result rows).
 func (s *Server) SetDumpStorage(uploader *dump.Uploader) {
 	s.dumpStorage = uploader
 }
@@ -553,6 +566,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Capture download is admin-only (narrowed from admin-or-viewer):
 			// the raw pcapng is byte-fidelity beyond what a viewer sees on the
 			// queries pages, including the auth handshake and every result row.
+			authenticated.GET("/connections/:uid/archive/rows", s.requireAdmin(), s.handleGetConnectionArchiveRows)
 			authenticated.GET("/connections/:uid/dump", s.requireAdmin(), s.handleGetConnectionDump)
 			authenticated.DELETE("/connections/:uid/dump", s.requireAdmin(), s.handleDeleteConnectionDump)
 			// Ending a live session is admin-only, and a POST on a sub-path
@@ -601,6 +615,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticated.GET("/instance", s.handleGetInstance)
 			authenticated.PUT("/instance/public", s.requireAdmin(), s.handleUpdateInstancePublic)
 			authenticated.PUT("/instance/limits", s.requireAdmin(), s.handleUpdateInstanceLimits)
+			authenticated.PUT("/instance/retention", s.requireAdmin(), s.handleUpdateInstanceRetention)
 			authenticated.PUT("/instance/tagging", s.requireAdmin(), s.handleUpdateInstanceTagging)
 
 			// Model Context Protocol endpoint (Streamable HTTP), for AI

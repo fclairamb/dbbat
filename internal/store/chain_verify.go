@@ -167,7 +167,15 @@ type RowChainsResult struct {
 	// Nothing sealed them, so they are reported rather than counted as
 	// verified — the same treatment pre-anchor audit rows get.
 	Unchained int64
-	Break     *ChainBreak
+	// Archived is how many captures were not walked because their connection's
+	// rows live in the archive bucket (archived_at set): not a break. Their
+	// object's SHA-256 is sealed in a connection.archived audit entry, and no
+	// bucket access is needed. ArchiveDeleted is the same for connections whose
+	// archive was deleted at its delete window (a connection.archive_deleted
+	// entry excuses the missing rows).
+	Archived       int64
+	ArchiveDeleted int64
+	Break          *ChainBreak
 }
 
 // OK reports whether every capture walked verified.
@@ -743,7 +751,7 @@ func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) 
 	// There is no head to compare against, so this is judged on its own terms
 	// rather than by the prefix rules below.
 	if result.Verified == 0 && conn.QueryChainLen > 0 {
-		s.checkEmptiedChain(result, conn)
+		s.checkEmptiedChain(ctx, result, conn)
 
 		return nil
 	}
@@ -925,8 +933,10 @@ func (s *Store) checkMissingStamp(result *QueryChainResult, conn Connection) {
 // session's `connection.opened` audit entry carries the connected_at the session
 // actually had, chained; comparing the two is what catches the backdating, and
 // nothing in this walk does that for you.
-func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
-	if s.retentionCouldEmpty(conn) {
+func (s *Store) checkEmptiedChain(ctx context.Context, result *QueryChainResult, conn Connection) {
+	window := s.DeleteWindowForConnection(ctx, conn.DatabaseID)
+
+	if s.statementsPastWindow(conn, window) {
 		// The whole chain is gone rather than just its oldest statements.
 		// Counted on its own, not as a truncated prefix: with a connection
 		// window longer than the query window this is the ordinary state of
@@ -938,23 +948,17 @@ func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
 		return
 	}
 
-	window := "DBB_RETENTION_QUERIES_DELETE_AFTER is disabled, so nothing legitimately deletes statements"
-	if s.queryRetention > 0 {
-		window = fmt.Sprintf(
+	explanation := "no retention window applies to this session's server, so nothing legitimately deletes statements"
+	if window > 0 {
+		explanation = fmt.Sprintf(
 			"the session connected at %s, inside the %s retention window, so the sweep cannot have reaped them",
-			conn.ConnectedAt.UTC().Format(time.RFC3339), s.queryRetention)
+			conn.ConnectedAt.UTC().Format(time.RFC3339), window)
 	}
 
 	result.Break = stampBreak(result, conn, fmt.Sprintf(
 		"the connection recorded %d statements and none survive: %s. "+
 			"The session's statements were removed",
-		conn.QueryChainLen, window))
-}
-
-// retentionCouldEmpty reports whether DBB_RETENTION_QUERIES_DELETE_AFTER can account
-// for a session having no statements left.
-func (s *Store) retentionCouldEmpty(conn Connection) bool {
-	return s.StatementsPastRetention(conn)
+		conn.QueryChainLen, explanation))
 }
 
 // StatementsPastRetention reports whether the configured query-history window
@@ -984,12 +988,19 @@ func (s *Store) retentionCouldEmpty(conn Connection) bool {
 // Note it is the **query** window that decides this, never the connection one:
 // the connection window only decides whether the ledger row itself still
 // exists.
-func (s *Store) StatementsPastRetention(conn Connection) bool {
-	if s.queryRetention <= 0 {
+//
+// The window is the one resolved for the connection's server (server, server
+// group, instance), by the same resolver the sweep uses.
+func (s *Store) StatementsPastRetention(ctx context.Context, conn Connection) bool {
+	return s.statementsPastWindow(conn, s.DeleteWindowForConnection(ctx, conn.DatabaseID))
+}
+
+func (s *Store) statementsPastWindow(conn Connection, window time.Duration) bool {
+	if window <= 0 {
 		return false
 	}
 
-	return conn.ConnectedAt.Before(time.Now().Add(-s.queryRetention))
+	return conn.ConnectedAt.Before(time.Now().Add(-window))
 }
 
 // checkLegacyStampedHead handles a session stamped in the unkeyed format: the
@@ -1114,6 +1125,13 @@ func (s *Store) VerifyRowChains(ctx context.Context, connectionUID *uuid.UUID) (
 
 	result.Unchained = unchained
 
+	archived, deleted, err := s.countArchivedCaptures(ctx, connectionUID)
+	if err != nil {
+		return result, err
+	}
+
+	result.Archived, result.ArchiveDeleted = archived, deleted
+
 	uids, err := s.capturedQueryUIDs(ctx, connectionUID)
 	if err != nil {
 		return result, err
@@ -1197,6 +1215,10 @@ func (s *Store) capturedQueryUIDs(ctx context.Context, connectionUID *uuid.UUID)
 		}).
 		Order("q.uid ASC")
 
+	// A connection whose rows were archived has none left in query_rows by
+	// design: it is counted apart (countArchivedCaptures), not walked.
+	q = q.Where("q.connection_id NOT IN (SELECT uid FROM connections WHERE archived_at IS NOT NULL)")
+
 	if connectionUID != nil {
 		q = q.Where("q.connection_id = ?", *connectionUID)
 	}
@@ -1206,6 +1228,29 @@ func (s *Store) capturedQueryUIDs(ctx context.Context, connectionUID *uuid.UUID)
 	}
 
 	return uids, nil
+}
+
+// countArchivedCaptures counts the captures (statements with a row chain head)
+// whose connection's rows were archived, split by whether the archive object
+// still exists.
+func (s *Store) countArchivedCaptures(ctx context.Context, connectionUID *uuid.UUID) (archived, deleted int64, err error) {
+	q := s.db.NewSelect().
+		TableExpr("queries AS q").
+		ColumnExpr("count(*) FILTER (WHERE c.archive_deleted_at IS NULL)").
+		ColumnExpr("count(*) FILTER (WHERE c.archive_deleted_at IS NOT NULL)").
+		Join("JOIN connections AS c ON c.uid = q.connection_id").
+		Where("c.archived_at IS NOT NULL").
+		Where("q.row_chain_mac IS NOT NULL")
+
+	if connectionUID != nil {
+		q = q.Where("c.uid = ?", *connectionUID)
+	}
+
+	if err := q.Scan(ctx, &archived, &deleted); err != nil {
+		return 0, 0, fmt.Errorf("failed to count archived captures: %w", err)
+	}
+
+	return archived, deleted, nil
 }
 
 // VerifyRowChain walks one capture's result-row chain.

@@ -266,6 +266,13 @@ type rowChainVerifyResponse struct {
 	// UnverifiablePreMigrationRows counts captured rows written before the row
 	// chain migration. Nothing sealed them and nothing can, after the fact.
 	UnverifiablePreMigrationRows int64 `json:"unverifiable_pre_migration_rows"`
+	// ChainsArchived counts the captures whose rows live in the archive bucket
+	// (not walked, not a break: the object's SHA-256 is sealed in a
+	// connection.archived entry). ChainsArchiveDeleted counts those whose
+	// archive was deleted at its delete window, excused by a
+	// connection.archive_deleted entry.
+	ChainsArchived       int64 `json:"chains_archived"`
+	ChainsArchiveDeleted int64 `json:"chains_archive_deleted"`
 	// HeadRowNumber and HeadMAC are only meaningful for a single capture, so
 	// they are reported for a query-scoped walk and omitted otherwise.
 	HeadRowNumber *int64          `json:"head_row_number,omitempty"`
@@ -527,6 +534,8 @@ func (s *Server) walkRowChains(ctx context.Context, connectionUID, queryUID *uui
 		Captures:                     result.Captures,
 		Rows:                         result.Verified,
 		UnverifiablePreMigrationRows: result.Unchained,
+		ChainsArchived:               result.Archived,
+		ChainsArchiveDeleted:         result.ArchiveDeleted,
 		Break:                        newChainBreakBody(result.Break),
 		CheckedAt:                    time.Now().UTC(),
 	}

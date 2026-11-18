@@ -219,7 +219,18 @@ func (s *Store) closeConnection(ctx context.Context, uid uuid.UUID, closedAt tim
 	// Best-effort and off this call's critical path — see notifyTermination.
 	s.notifyTermination(ctx, &closed[0], t)
 
+	if hook := s.connectionClosed.Load(); hook != nil {
+		(*hook)(closed[0].DatabaseID, closedAt)
+	}
+
 	return nil
+}
+
+// SetConnectionClosedHook installs the function called after every connection
+// this process closes, with its server and close instant. It must not block:
+// it wakes the retention sweeper.
+func (s *Store) SetConnectionClosedHook(hook func(serverUID uuid.UUID, closedAt time.Time)) {
+	s.connectionClosed.Store(&hook)
 }
 
 // queryChainHead returns the head this process holds for a connection's query

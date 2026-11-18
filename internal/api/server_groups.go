@@ -28,6 +28,14 @@ type CreateServerGroupRequest struct {
 	// clearing a list is a real policy change and has to be expressible.
 	AccessApproverUserGroupUIDs []uuid.UUID `json:"access_approver_user_group_uids"`
 	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
+
+	// ArchiveAfterSeconds and DeleteAfterSeconds are the group's retention
+	// windows, tri-state like a server's: absent leaves them alone, null
+	// inherits, a number sets them (0 means never). Several groups holding the
+	// same server resolve to the longest delete window and the shortest archive
+	// window.
+	ArchiveAfterSeconds store.OptionalSeconds `json:"archive_after_seconds"`
+	DeleteAfterSeconds  store.OptionalSeconds `json:"delete_after_seconds"`
 }
 
 // UpdateServerGroupRequest is the body for PATCH /server-groups/:uid. Same
@@ -292,6 +300,13 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 		return
 	}
 
+	if msg := s.validateRetentionSeconds(req.ArchiveAfterSeconds, req.DeleteAfterSeconds,
+		group.ArchiveAfterSeconds, group.DeleteAfterSeconds); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
 	group.Name = req.Name
 	group.Description = req.Description
 	// Live, like membership: this immediately changes who may decide grant
@@ -312,6 +327,20 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 		return
 	}
 
+	if err := s.store.SetServerGroupRetention(ctx, group.UID, req.ArchiveAfterSeconds, req.DeleteAfterSeconds); err != nil {
+		writeInternalError(c, s.logger, err, "failed to set server group retention")
+
+		return
+	}
+
+	if req.ArchiveAfterSeconds.Set {
+		group.ArchiveAfterSeconds = req.ArchiveAfterSeconds.Value
+	}
+
+	if req.DeleteAfterSeconds.Set {
+		group.DeleteAfterSeconds = req.DeleteAfterSeconds.Value
+	}
+
 	// A nil member_uids means "don't touch membership"; an explicit (even
 	// empty) list replaces it wholesale.
 	if req.MemberUIDs != nil {
@@ -321,6 +350,9 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 			return
 		}
 	}
+
+	// Membership and windows are policy: apply to stored data at the next pass.
+	s.wakeRetention()
 
 	currentUser := getCurrentUser(c)
 
@@ -509,6 +541,8 @@ func (s *Server) handleAddServerGroupMember(c *gin.Context) {
 		Details:     details,
 	})
 
+	s.wakeRetention()
+
 	successResponse(c, gin.H{
 		"message":             "member added",
 		"live_grants_widened": radius.Grants,
@@ -557,6 +591,8 @@ func (s *Server) handleRemoveServerGroupMember(c *gin.Context) {
 		PerformedBy: &currentUser.UID,
 		Details:     details,
 	})
+
+	s.wakeRetention()
 
 	successResponse(c, gin.H{"message": "member removed"})
 }

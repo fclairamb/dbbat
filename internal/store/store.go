@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -56,6 +57,15 @@ type Store struct {
 	// lets a reader tell a session retention emptied from one somebody emptied.
 	// See StatementsPastRetention.
 	queryRetention time.Duration
+
+	// archiveRetention is the configured DBB_RETENTION_QUERIES_ARCHIVE_AFTER,
+	// the instance-level archive window before the parameter overrides it.
+	archiveRetention time.Duration
+
+	// connectionClosed is called with the server of every connection this
+	// process closes (see SetConnectionClosedHook): it wakes the retention
+	// sweeper. Atomic: set after the store is shared.
+	connectionClosed atomic.Pointer[func(serverUID uuid.UUID, closedAt time.Time)]
 
 	// auditChain caches the head of the store-wide audit chain; queryChains
 	// caches one head per live connection; rowChains caches one head per query
@@ -119,6 +129,10 @@ type Options struct {
 	// still exists, never how many of its statements survive. Feeding it the
 	// longer of the two would excuse sessions nothing legitimately emptied.
 	QueryRetention time.Duration
+
+	// ArchiveRetention is DBB_RETENTION_QUERIES_ARCHIVE_AFTER, the instance
+	// archive window the retention.queries.archive_after parameter overrides.
+	ArchiveRetention time.Duration
 }
 
 // New creates a new Store instance and runs migrations
@@ -158,10 +172,11 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		// one live process, and anything an operator can set — including
 		// DBB_INSTANCE_ID — can end up shared by several replicas. UUIDv7 so
 		// it also sorts by start time, which makes a registry dump readable.
-		runID:          newUIDv7().String(),
-		queryChains:    newQueryChains(),
-		rowChains:      newQueryChains(),
-		queryRetention: options.QueryRetention,
+		runID:            newUIDv7().String(),
+		queryChains:      newQueryChains(),
+		rowChains:        newQueryChains(),
+		queryRetention:   options.QueryRetention,
+		archiveRetention: options.ArchiveRetention,
 	}
 
 	if len(options.EncryptionKey) > 0 {

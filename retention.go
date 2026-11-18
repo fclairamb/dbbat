@@ -6,52 +6,69 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/fclairamb/dbbat/internal/archive"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// queryHistorySweepInterval is how often the query-history retention sweep
-// runs. Retention is configured in hours or days, so an hourly sweep is ample —
-// and it matches the cadence of the dump-file cleanup.
-const queryHistorySweepInterval = 1 * time.Hour
+const (
+	// retentionSweepInterval is the backstop pass: it covers what events do not
+	// (a replica that died before its timer fired, statements of sessions still
+	// open, a window set through another replica).
+	retentionSweepInterval = 1 * time.Hour
 
-// goroutineNameQueryRetentionSweep is what a panic in one sweep is logged under.
-const goroutineNameQueryRetentionSweep = "query history retention sweep"
+	// retentionMinPassGap is the resolution of the windows: passes are at least
+	// this far apart, so a storm of closes costs one pass a second.
+	retentionMinPassGap = 1 * time.Second
 
-// queryRetentionSweeper deletes history past its retention window: statements
-// (and the result rows captured for them) on one window, the closed-session
-// ledger they hang off on another.
+	// retentionTimerHorizon: a close arms a timer only when the nearest window of
+	// its server is under this; longer windows are served by the hourly pass.
+	retentionTimerHorizon = 1 * time.Hour
+)
+
+// goroutineNameRetentionSweep is what a panic in one pass is logged under.
+const goroutineNameRetentionSweep = "retention sweep"
+
+// retentionSweeper deletes (and archives) history past its retention windows.
 //
-// There is exactly one sweeper per process, started next to the API server: the
-// data lives in the shared store, not in any one protocol, so the proxies do
-// not own a copy of this the way they each own a dump-file cleanup ticker.
-type queryRetentionSweeper struct {
+// One per process. It runs a pass when it is woken: at startup, after a
+// connection close, after a policy edit, and once an hour. A wake is a
+// non-blocking send on a channel of size 1, so any number of closes during a
+// pass collapse into one more pass and two passes never run at once.
+//
+// With no window set at any level it stays idle: no close wakes it and no pass
+// reads a session. It still has to exist, because a window can be set from the
+// UI while the process runs.
+type retentionSweeper struct {
 	store    *store.Store
-	dumpDir  string
+	cfg      *config.Config
+	archiver *archive.Archiver
 	logger   *slog.Logger
-	windows  config.RetentionWindows
+
+	wakeCh   chan struct{}
 	stop     chan struct{}
 	stopOnce sync.Once
+
+	// active is whether any window is set anywhere (env, parameter, group,
+	// server). Refreshed at startup, after a policy edit and hourly.
+	activeMu sync.RWMutex
+	active   bool
 }
 
-// startQueryRetentionSweep starts the retention sweeper and returns it, or
-// returns nil when both windows are disabled — which is the default. Disabled
-// means no goroutine and no ticker at all, not a sweep that finds nothing.
-//
-// An incoherent pair of windows lands here too: config.Config.RetentionWindows
-// reports it and zeroes both, so a retention typo keeps everything and warns
-// rather than deleting more than the operator asked for or refusing to start.
-func startQueryRetentionSweep(
+// startRetentionSweeper starts the sweeper. It always returns a sweeper.
+func startRetentionSweeper(
 	ctx context.Context,
 	cfg *config.Config,
 	dataStore *store.Store,
+	archiver *archive.Archiver,
 	logger *slog.Logger,
-) *queryRetentionSweeper {
+) *retentionSweeper {
 	windows := cfg.RetentionWindows()
 
-	// A WARN even when the windows are all zero: that is the guard's one voice.
 	if windows.Misconfiguration != "" {
 		logger.WarnContext(ctx, "Invalid retention settings, nothing is deleted",
 			slog.String("problem", windows.Misconfiguration))
@@ -61,75 +78,179 @@ func startQueryRetentionSweep(
 		logger.WarnContext(ctx, "DBB_RETENTION_QUERIES_ARCHIVE_AFTER is ignored: DBB_ARCHIVE_URL is not set")
 	}
 
-	if !windows.Enabled() {
-		logger.InfoContext(ctx, "History retention disabled, history is kept forever",
-			slog.String("hint", "set DBB_RETENTION_QUERIES_DELETE_AFTER (e.g. 720h) to enable; "+
-				"DBB_RETENTION_CONNECTIONS_DELETE_AFTER (e.g. 8760h) keeps the session ledger longer"))
-
-		return nil
+	s := &retentionSweeper{
+		store:    dataStore,
+		cfg:      cfg,
+		archiver: archiver,
+		logger:   logger,
+		wakeCh:   make(chan struct{}, 1),
+		stop:     make(chan struct{}),
 	}
 
-	sweeper := &queryRetentionSweeper{
-		store:   dataStore,
-		dumpDir: cfg.Dump.Dir,
-		logger:  logger,
-		windows: windows,
-		stop:    make(chan struct{}),
-	}
+	dataStore.SetConnectionClosedHook(s.onConnectionClosed)
 
-	go sweeper.run(ctx)
+	go s.run(ctx)
 
-	logger.InfoContext(ctx, "History retention enabled",
-		slog.Duration("query_retention", windows.Queries),
-		slog.Duration("connection_retention", windows.Connections),
-		slog.Bool("connections_kept_forever", windows.Connections <= 0),
-		slog.Duration("sweep_interval", queryHistorySweepInterval))
+	logger.InfoContext(ctx, "Retention sweeper started",
+		slog.Duration("queries_delete_after", windows.Queries),
+		slog.Duration("queries_archive_after", windows.QueriesArchive),
+		slog.Duration("connections_delete_after", windows.Connections),
+		slog.Duration("dumps_delete_after", windows.Dumps),
+		slog.Bool("archive_enabled", archiver != nil))
 
-	return sweeper
+	return s
 }
 
-// run sweeps once at startup — so newly configured retention applies without
-// waiting a full interval — then on every tick until shutdown.
-//
-// Each sweep runs under safe.RunMaintenance, per turn, exactly as the five
-// proxies' dump-retention sweeps do. This is a goroutine of its own, so no
-// recover reaches it: a panic in CleanupOldQueryRows would otherwise end the
-// process and every live session on it. Per turn rather than around the loop,
-// because a retention sweep that silently stopped running looks exactly like
-// health from the outside while the history grows without bound.
-func (s *queryRetentionSweeper) run(ctx context.Context) {
-	s.guardedSweep(ctx)
+// Wake asks for a pass. Never blocks.
+func (s *retentionSweeper) Wake() {
+	select {
+	case s.wakeCh <- struct{}{}:
+	default:
+	}
+}
 
-	ticker := time.NewTicker(queryHistorySweepInterval)
+// onConnectionClosed wakes the sweeper after a close, and arms a timer at the
+// nearest window of that session's server when it is under an hour: the session
+// that just closed is due in archive_after, not now, and nothing else may close
+// in between.
+func (s *retentionSweeper) onConnectionClosed(serverUID uuid.UUID, _ time.Time) {
+	if !s.isActive() {
+		return
+	}
+
+	s.Wake()
+
+	go safe.RunMaintenance(context.Background(), s.logger, goroutineNameRetentionSweep, func() {
+		s.armTimer(context.Background(), serverUID)
+	})
+}
+
+func (s *retentionSweeper) armTimer(ctx context.Context, serverUID uuid.UUID) {
+	instance, err := s.store.InstanceRetention(ctx)
+	if err != nil {
+		return
+	}
+
+	resolved, err := s.store.ResolveRetentionByServers(ctx, []uuid.UUID{serverUID}, instance)
+	if err != nil {
+		return
+	}
+
+	r := resolved[serverUID]
+
+	nearest := time.Duration(0)
+
+	for _, d := range []time.Duration{r.Archive.Duration, r.Delete.Duration} {
+		if d > 0 && (nearest == 0 || d < nearest) {
+			nearest = d
+		}
+	}
+
+	if nearest > 0 && nearest < retentionTimerHorizon {
+		time.AfterFunc(nearest+retentionMinPassGap, s.Wake)
+	}
+}
+
+func (s *retentionSweeper) isActive() bool {
+	s.activeMu.RLock()
+	defer s.activeMu.RUnlock()
+
+	return s.active
+}
+
+// refreshActive re-reads whether any window is set anywhere.
+func (s *retentionSweeper) refreshActive(ctx context.Context) bool {
+	w := s.cfg.RetentionWindows()
+	active := w.Queries > 0 || w.Connections > 0 || w.QueriesArchive > 0
+
+	if !active {
+		set, err := s.store.AnyRetentionPolicySet(ctx)
+		if err != nil {
+			s.logger.WarnContext(ctx, "failed to read the retention policy", slog.Any("error", err))
+
+			return s.isActive()
+		}
+
+		active = set
+	}
+
+	s.activeMu.Lock()
+	s.active = active
+	s.activeMu.Unlock()
+
+	return active
+}
+
+func (s *retentionSweeper) run(ctx context.Context) {
+	ticker := time.NewTicker(retentionSweepInterval)
 	defer ticker.Stop()
+
+	s.pass(ctx)
 
 	for {
 		select {
+		case <-s.wakeCh:
+			// Passes are at least a second apart.
+			select {
+			case <-time.After(retentionMinPassGap):
+			case <-s.stop:
+				return
+			}
+
+			s.pass(ctx)
 		case <-ticker.C:
-			s.guardedSweep(ctx)
+			s.pass(ctx)
 		case <-s.stop:
+			return
+		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-// guardedSweep is one sweep with a panic recover around it.
-func (s *queryRetentionSweeper) guardedSweep(ctx context.Context) {
-	safe.RunMaintenance(ctx, s.logger, goroutineNameQueryRetentionSweep, func() {
+// pass is one sweep, under safe.RunMaintenance: a panic must not take the
+// process down and must not retire retention for its lifetime either.
+func (s *retentionSweeper) pass(ctx context.Context) {
+	safe.RunMaintenance(ctx, s.logger, goroutineNameRetentionSweep, func() {
 		s.sweep(ctx)
 	})
 }
 
-func (s *queryRetentionSweeper) sweep(ctx context.Context) {
-	s.sweepDumps(ctx)
+func (s *retentionSweeper) sweep(ctx context.Context) {
+	windows := s.cfg.RetentionWindows()
 
-	if s.windows.Queries <= 0 && s.windows.Connections <= 0 {
+	s.sweepDumps(ctx, windows)
+
+	if !s.refreshActive(ctx) {
 		return
 	}
 
-	result, err := s.store.CleanupOldQueryRows(ctx, s.windows.Queries, s.windows.Connections)
+	// 1. Archive due connections. 2. Delete due archives.
+	more := false
+
+	if s.archiver != nil {
+		more = s.sweepArchive(ctx)
+	}
+
+	// 3, 4. Delete due statements and ledger rows, per resolved window.
+	instance, err := s.store.InstanceRetention(ctx)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "history retention sweep failed",
+		s.logger.ErrorContext(ctx, "retention sweep failed", slog.Any("error", err))
+
+		return
+	}
+
+	if s.archiver == nil {
+		instance.Archive = store.RetentionWindow{}
+	}
+
+	result, err := s.store.CleanupRetention(ctx, store.SweepPolicy{
+		Instance:       instance,
+		Connections:    windows.Connections,
+		ArchiveEnabled: s.archiver != nil,
+	})
+	if err != nil {
+		s.logger.ErrorContext(ctx, "retention sweep failed",
 			slog.Any("error", err),
 			slog.Int64("queries_deleted", result.Queries),
 			slog.Int64("connections_deleted", result.Connections))
@@ -140,19 +261,38 @@ func (s *queryRetentionSweeper) sweep(ctx context.Context) {
 	if result.Queries > 0 || result.Connections > 0 {
 		s.logger.InfoContext(ctx, "deleted history past retention",
 			slog.Int64("queries", result.Queries),
-			slog.Int64("connections", result.Connections),
-			slog.Duration("query_retention", s.windows.Queries),
-			slog.Duration("connection_retention", s.windows.Connections))
+			slog.Int64("connections", result.Connections))
+	}
+
+	if more {
+		s.Wake()
 	}
 }
 
+// sweepArchive runs the archive phases and reports whether a bound stopped them.
+func (s *retentionSweeper) sweepArchive(ctx context.Context) bool {
+	res, err := s.archiver.Pass(ctx)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "archive pass failed", slog.Any("error", err))
+	}
+
+	if res.Archived > 0 || res.Deleted > 0 {
+		s.logger.InfoContext(ctx, "archive pass",
+			slog.Int("archived", res.Archived),
+			slog.Int("archives_deleted", res.Deleted),
+			slog.Bool("bounded", res.Bounded))
+	}
+
+	return res.Bounded
+}
+
 // sweepDumps deletes local capture files past their window.
-func (s *queryRetentionSweeper) sweepDumps(ctx context.Context) {
-	if s.dumpDir == "" || s.windows.Dumps <= 0 {
+func (s *retentionSweeper) sweepDumps(ctx context.Context, w config.RetentionWindows) {
+	if s.cfg.Dump.Dir == "" || w.Dumps <= 0 {
 		return
 	}
 
-	deleted, err := dump.CleanupOldFiles(s.dumpDir, s.windows.Dumps)
+	deleted, err := dump.CleanupOldFiles(s.cfg.Dump.Dir, w.Dumps)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "dump cleanup failed", slog.Any("error", err))
 	} else if deleted > 0 {
@@ -160,10 +300,10 @@ func (s *queryRetentionSweeper) sweepDumps(ctx context.Context) {
 	}
 }
 
-// Shutdown stops the sweeper. It never waits for an in-flight sweep: the batched
-// delete makes progress row by row, so an interrupted run simply resumes at the
-// next start.
-func (s *queryRetentionSweeper) Shutdown(context.Context) error {
+// Shutdown stops the sweeper. It never waits for an in-flight pass: the batched
+// deletes make progress row by row, so an interrupted run resumes at the next
+// start.
+func (s *retentionSweeper) Shutdown(context.Context) error {
 	s.stopOnce.Do(func() {
 		close(s.stop)
 	})

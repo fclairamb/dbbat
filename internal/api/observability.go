@@ -271,7 +271,8 @@ func (s *Server) handleGetConnection(c *gin.Context) {
 		Connection:         conn,
 		Dump:               s.dumpMetadata(c, uid),
 		Grant:              s.grantSummary(c, conn),
-		StatementsRetained: !s.store.StatementsPastRetention(*conn),
+		RowsLocation:       rowsLocation(conn),
+		StatementsRetained: !s.store.StatementsPastRetention(c.Request.Context(), *conn),
 		TerminatedBy:       s.terminationRequester(c, conn),
 	})
 }
@@ -320,6 +321,11 @@ type connectionDetailResponse struct {
 
 	Dump  DumpMetadata  `json:"dump"`
 	Grant *GrantSummary `json:"grant"`
+
+	// RowsLocation says where this session's captured result rows are: "store"
+	// (PostgreSQL), "archive" (the archive bucket) or "deleted" (the archive
+	// object was deleted at its delete window).
+	RowsLocation string `json:"rows_location"`
 
 	// StatementsRetained is false when DBB_RETENTION_QUERIES_DELETE_AFTER can account
 	// for this session having fewer statements in the store than it ran — i.e.
@@ -632,6 +638,10 @@ func (s *Server) handleGetQueryRows(c *gin.Context) {
 			return
 		}
 		limit = val
+	}
+
+	if _, handled := s.archivedQueryRows(c, uid, cursor, limit); handled {
+		return
 	}
 
 	result, err := s.store.GetQueryRows(c.Request.Context(), uid, cursor, limit)
