@@ -918,7 +918,7 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
 			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, "+
 			"dump_key, grant_uid, terminate_requested_at, terminate_requested_by, terminate_reason, "+
-			"query_chain_mac, query_chain_len, query_chain_stamp_version").
+			"query_chain_mac, query_chain_len, query_chain_stamp_version, archived_at, archive_deleted_at").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {
@@ -955,7 +955,7 @@ func (s *Store) GetConnectionsByUIDs(ctx context.Context, uids []uuid.UUID) (map
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
 			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, "+
 			"dump_key, grant_uid, terminate_requested_at, terminate_requested_by, terminate_reason, "+
-			"query_chain_mac, query_chain_len, query_chain_stamp_version").
+			"query_chain_mac, query_chain_len, query_chain_stamp_version, archived_at, archive_deleted_at").
 		Where("uid IN (?)", bun.List(uids)).
 		Scan(ctx)
 	if err != nil {

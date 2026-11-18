@@ -516,7 +516,7 @@ func (s *Store) CleanupRetention(ctx context.Context, policy SweepPolicy) (Sweep
 		}
 
 		if policy.Connections > 0 && g.delete > 0 {
-			n, err := s.deleteConnectionsPastWindow(ctx, g.servers, max(policy.Connections, g.delete), now)
+			n, err := s.deleteConnectionsPastWindow(ctx, g, max(policy.Connections, g.delete), now, policy.ArchiveEnabled)
 			result.Connections += n
 
 			if err != nil {
@@ -549,7 +549,7 @@ func (s *Store) deleteStatementsPastWindow(
 		// Due for archival but not archived: keep the rows the archive has not
 		// taken yet, whatever the delete window says.
 		sb.WriteString(`
-		AND NOT (c.disconnected_at IS NOT NULL AND c.archived_at IS NULL AND c.disconnected_at < ?)`)
+		AND NOT (` + archivePending("c") + `)`)
 
 		args = append(args, now.Add(-g.archive))
 	}
@@ -561,15 +561,39 @@ func (s *Store) deleteStatementsPastWindow(
 	return s.deleteBatches(ctx, sb.String(), args)
 }
 
+// archivePending is the SQL condition (one `?`: the archive cutoff) for "closed
+// before the cutoff, rows still in PostgreSQL, so due for archival and not
+// archived". Deleting such a connection, or its statements, would destroy rows
+// a failing bucket has not taken yet.
+func archivePending(alias string) string {
+	return alias + `.disconnected_at IS NOT NULL AND ` + alias + `.archived_at IS NULL AND ` +
+		alias + `.disconnected_at < ? AND EXISTS (
+			SELECT 1 FROM queries q2 JOIN query_rows qr ON qr.query_id = q2.uid
+			WHERE q2.connection_id = ` + alias + `.uid)`
+}
+
 func (s *Store) deleteConnectionsPastWindow(
-	ctx context.Context, servers []uuid.UUID, window time.Duration, now time.Time,
+	ctx context.Context, g *windowGroup, window time.Duration, now time.Time, archiveEnabled bool,
 ) (int64, error) {
-	return s.deleteBatches(ctx, `DELETE FROM connections WHERE uid IN (
-		SELECT uid FROM connections
-		WHERE database_id IN (?) AND disconnected_at IS NOT NULL AND disconnected_at < ?
-		AND (archived_at IS NULL OR archive_deleted_at IS NOT NULL)
+	query := `DELETE FROM connections WHERE uid IN (
+		SELECT c.uid FROM connections c
+		WHERE c.database_id IN (?) AND c.disconnected_at IS NOT NULL AND c.disconnected_at < ?
+		AND (c.archived_at IS NULL OR c.archive_deleted_at IS NOT NULL)`
+
+	args := []any{bun.List(g.servers), now.Add(-window)}
+
+	if archiveEnabled && g.archive > 0 {
+		query += `
+		AND NOT (` + archivePending("c") + `)`
+
+		args = append(args, now.Add(-g.archive))
+	}
+
+	query += `
 		LIMIT ?
-	)`, []any{bun.List(servers), now.Add(-window)})
+	)`
+
+	return s.deleteBatches(ctx, query, args)
 }
 
 // deleteBatches runs a LIMIT-ed delete (the batch size is the last argument)
