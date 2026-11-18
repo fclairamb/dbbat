@@ -13,6 +13,12 @@ later. Two parameters drive it:
 Both are durations with one-second resolution, and both resolve at three
 levels: the instance, a server group, a server.
 
+Both are optional and off by default. An instance with nothing configured
+archives nothing and deletes nothing.
+
+The archive has one use: showing, later, what a session exchanged with the
+database. dbbat reads it one session at a time. Nothing searches it.
+
 ## Why
 
 Today retention is one instance-wide window (`DBB_QUERY_STORAGE_RETENTION`),
@@ -97,9 +103,9 @@ A file per server and day was considered and dropped. It would cut objects by
 wait for the day to end. And the number it improves is small to begin with
 (a few hundred objects a day). The files are tiny either way.
 
-The known cost: a scan across a year opens more than 100,000 small objects.
-Filtering on `date` and `server` prunes from the path. If that gets slow, a
-compaction job can roll objects up later. It is not in this design.
+The number of objects costs nothing at read time. Nothing scans the archive:
+dbbat opens the objects of one connection, and finds them from the connection
+row.
 
 ### 3. Layout
 
@@ -108,15 +114,15 @@ compaction job can roll objects up later. It is not in this design.
 <prefix>/v1/rows/date=2026-11-17/server=<server-uid>/<connection-uid>.parquet
 ```
 
-- Table first, then hive partitions, so an engine can glob one table and prune
-  on `date` and `server` from the path alone.
+- Table first, then one directory per day and one per server. dbbat never
+  lists them. The names are for a person browsing the bucket.
 - `date` is the UTC date of `disconnected_at`. A retry overwrites the same
   object.
 - `server` is the uid. Names are editable; the name at archival time is a
   column inside the file.
 - `v1` is the schema version.
-- Statements and result rows live under two prefixes on purpose, so IAM can
-  give an analyst the statements without the data they returned.
+- Statements and result rows are two objects, so listing the statements of a
+  session never downloads the data they returned.
 
 The same key is a valid path on a plain file system, so an archive can live in
 a directory (`DBB_ARCHIVE_URL=file:///var/lib/dbbat/archive`) or be copied out
@@ -200,7 +206,18 @@ Storage, following what the statement timeout already does:
   `retention.delete_after`, Go duration strings (`90s`, `36h`, `8760h`), which
   win over the environment like `limits.statement_timeout`. Environment
   defaults: new `DBB_ARCHIVE_AFTER` (default: never), and the existing
-  `DBB_QUERY_STORAGE_RETENTION` for deletion.
+  `DBB_QUERY_STORAGE_RETENTION` for deletion (default: never).
+
+**Both are off by default.** Every value starts unset, and unset at every
+level resolves to never. A new instance, or one upgraded with nothing
+configured, archives nothing and deletes nothing. No migration and no default
+sets a window.
+
+- Deletion starts when a delete window is set at some level.
+- Archival needs two things: `DBB_ARCHIVE_URL` and an archive window. One
+  without the other does nothing.
+- The two are independent. Delete without archiving, archive without ever
+  deleting, both, or neither.
 
 Three states per value: `NULL` (or unset) inherits, `0` means never and
 overrides what is below, a positive value is the duration. The smallest
@@ -276,14 +293,27 @@ do not cover:
 On a single replica with closed sessions, enforcement is exact to about a
 second. An idle instance does one cheap pass an hour, as it does today.
 
+With no window set at any level, the sweeper is off. It reads the policy (one
+small query: is any window set, at any level?) at startup, after a policy
+edit, and once an hour, so a replica learns of a window set through another
+replica. While the answer is no, a connection close does not wake it and no
+pass reads a session. Today the sweep goroutine is not even started when no
+retention is set. It has to exist now, because a window can be set from the
+UI while the process runs.
+
 ### 7. Bucket
 
 - `DBB_ARCHIVE_URL`, a `gocloud.dev/blob` URL (`s3://bucket/prefix`,
   `file://`), opened with the same helper `internal/dump/upload.go` uses. It
   may be the dump bucket with another prefix.
-- Unset: archival is inert everywhere, statements stay in PostgreSQL until
-  their delete window, `GET /instance` reports `archive_enabled: false` and the
-  UI disables the archive fields.
+- Unset, the default: archival does not exist. No archive pass runs,
+  statements stay in PostgreSQL until their delete window (forever when there
+  is none), `GET /instance` reports `archive_enabled: false`, and the UI does
+  not show the archive fields. The API answers 400 to an archive window, and
+  `DBB_ARCHIVE_AFTER` alone is ignored with a startup WARN.
+- Removed after sessions were archived: nothing new is archived, and reading
+  an archived session is a 502 saying the archive is not configured. The
+  objects stay in the bucket.
 - Needs `PutObject`, `GetObject`, `DeleteObject`. No `ListBucket`.
 - dbbat deletes archive objects itself, because a bucket lifecycle rule cannot
   express per-server windows.
@@ -429,17 +459,14 @@ way:
 - A read that fails (object missing, hash mismatch, bucket down) is a 502 that
   says which, never an empty list.
 
-**What dbbat does not do.** The statement list across connections
-(`GET /queries` without `connection_id`) and its filters cover PostgreSQL
-only, and the page says so. Searching the whole archive goes through an engine
-pointed at the bucket:
+**The archive is not searched.** It answers one question: what did this
+session exchange with the database. The way in is the connection list, which
+stays in PostgreSQL with its filters (user, server, server group, grant). Pick
+a session, read its statements and their results.
 
-```sql
-SELECT username, server_name, count(*) AS statements, sum(duration_ms) AS total_ms
-FROM read_parquet('s3://bucket/dbbat/v1/queries/**/*.parquet', hive_partitioning = true)
-WHERE date >= '2026-10-01' AND sql_text ILIKE '%customers%'
-GROUP BY ALL;
-```
+The statement list across connections (`GET /queries` without
+`connection_id`) and its text search cover PostgreSQL only, and the page says
+so.
 
 ### 11. API and UI
 
@@ -452,13 +479,16 @@ GROUP BY ALL;
 - `GET /servers/{uid}` returns `effective_retention`: both resolved values and
   where each came from (`server`, `server_group` with the uids, `instance`).
 - 400 on a negative value, or on `archive >= delete` set at the same level.
-- Settings page: a Retention card. Server and server-group dialogs: two
-  duration fields whose placeholder shows the inherited value and its source.
+- Settings page: a Retention card. Server and server-group dialogs: duration
+  fields whose placeholder shows the inherited value and its source. An empty
+  field with nothing to inherit reads "Never". The archive field is there only
+  when `archive_enabled` is true.
 - `data-testid` on every new element.
 
 ## Out of scope
 
-- Listing or searching statements across archived connections in dbbat.
+- Searching the archive, in dbbat or with an engine pointed at the bucket. It
+  is read one session at a time.
 - Walking the chains inside the archive files (`audit verify --archive`).
 - Compaction of small files.
 - Archiving open sessions in pieces.
@@ -481,12 +511,13 @@ Each phase ships on its own and becomes one spec in `specs/todos/`.
 2. **Archiver.** `DBB_ARCHIVE_URL`, `internal/archive` (schema, writer, claim,
    audit entries, failure alert), the archive and archive-delete phases, the
    verifier's two archive states, the badge and the downloads,
-   `docs/archive.md` with DuckDB and Athena recipes.
+   `docs/archive.md`.
 3. **Reading.** `archive.Read`, the three query endpoints switching on
    `archived_at`, the connection page showing an archived session like a live
    one.
 
-With nothing configured, behaviour is exactly today's.
+With nothing configured, behaviour is exactly today's: nothing is archived and
+nothing is deleted. Each phase has a test for that.
 
 ## Open questions
 
@@ -497,7 +528,8 @@ With nothing configured, behaviour is exactly today's.
    `queries` file carries. The per-row `mac` only says which row broke, and it
    is most of the file: on 100,000 synthetic rows, 39 bytes a row with it and
    6.5 without. Real rows compress less, so the spike measures it on a real
-   session. Recommended: keep it in `v1` unless that confirms the same ratio.
+   session. Recommended: drop it. The file's SHA-256 is sealed in the audit
+   chain, and nothing outside dbbat reads these files.
 2. **Several server groups on one server.** Recommended: keep the longest. The
    alternative, the shortest delete window, suits a privacy rule ("PII
    servers: 30 days") better than an audit rule ("prod: 1 year").
@@ -505,3 +537,9 @@ With nothing configured, behaviour is exactly today's.
    same `delete_after`? Recommended: yes, as a follow-up.
 4. **A preview before lowering a delete window.** A count of the connections
    that become due would make a typo visible before the sweep acts on it.
+5. **Archive result rows only?** Statements are 4% of the store. Keeping them
+   in PostgreSQL until `delete_after` removes the `queries` file and its
+   schema, the `connection_id` requirement on the statement endpoints, the gap
+   in the statement list, and the archived state of the statement chains in
+   the verifier. Only the results of a statement would come from the bucket.
+   Recommended: yes. It rewrites sections 2, 3, 4, 8, 9 and 10.
