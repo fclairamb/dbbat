@@ -264,7 +264,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		// window, resolved: the ledger window only decides whether the session
 		// row survives, and an incoherent pair resolves both to zero, which is
 		// also what the sweep does.
-		QueryRetention: cfg.RetentionWindows().Query,
+		QueryRetention: cfg.RetentionWindows().Queries,
 	}
 	if cfg.RunMode == config.RunModeTest {
 		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
@@ -1771,7 +1771,7 @@ func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) erro
 		// what that window is — from the same configuration the sweep reads,
 		// through the same resolver, so a misconfigured pair excuses nothing
 		// here either.
-		QueryRetention: cfg.RetentionWindows().Query,
+		QueryRetention: cfg.RetentionWindows().Queries,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize store: %w", err)
@@ -1836,11 +1836,11 @@ func verifyQueryChains(
 		slog.Int64("connections", result.Connections),
 		slog.Int64("statements", result.Verified),
 		// A chain missing its oldest statements is what
-		// DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session,
+		// DBB_RETENTION_QUERIES_DELETE_AFTER leaves behind on a long-lived session,
 		// so it is counted rather than treated as tampering.
 		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated),
 		// And a session with *no* statement left is what a
-		// DBB_CONNECTION_RETENTION longer than the statement window leaves
+		// DBB_RETENTION_CONNECTIONS_DELETE_AFTER longer than the statement window leaves
 		// behind on every closed session between the two: by design, and
 		// counted apart so it cannot drown the number above.
 		slog.Int64("chains_emptied_by_retention", result.Emptied))

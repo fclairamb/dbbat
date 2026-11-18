@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -28,6 +29,7 @@ const goroutineNameQueryRetentionSweep = "query history retention sweep"
 // not own a copy of this the way they each own a dump-file cleanup ticker.
 type queryRetentionSweeper struct {
 	store    *store.Store
+	dumpDir  string
 	logger   *slog.Logger
 	windows  config.RetentionWindows
 	stop     chan struct{}
@@ -49,23 +51,27 @@ func startQueryRetentionSweep(
 ) *queryRetentionSweeper {
 	windows := cfg.RetentionWindows()
 
-	if !windows.Enabled() {
-		if windows.Misconfiguration != "" {
-			logger.WarnContext(ctx, "Invalid history retention, history is kept forever",
-				slog.String("problem", windows.Misconfiguration),
-				slog.String("query_retention", cfg.QueryStorage.Retention),
-				slog.String("connection_retention", cfg.Connection.Retention))
-		}
+	// A WARN even when the windows are all zero: that is the guard's one voice.
+	if windows.Misconfiguration != "" {
+		logger.WarnContext(ctx, "Invalid retention settings, nothing is deleted",
+			slog.String("problem", windows.Misconfiguration))
+	}
 
+	if cfg.Retention.Queries.ArchiveAfter != "" && cfg.ArchiveURL == "" {
+		logger.WarnContext(ctx, "DBB_RETENTION_QUERIES_ARCHIVE_AFTER is ignored: DBB_ARCHIVE_URL is not set")
+	}
+
+	if !windows.Enabled() {
 		logger.InfoContext(ctx, "History retention disabled, history is kept forever",
-			slog.String("hint", "set DBB_QUERY_STORAGE_RETENTION (e.g. 720h) to enable; "+
-				"DBB_CONNECTION_RETENTION (e.g. 8760h) keeps the session ledger longer"))
+			slog.String("hint", "set DBB_RETENTION_QUERIES_DELETE_AFTER (e.g. 720h) to enable; "+
+				"DBB_RETENTION_CONNECTIONS_DELETE_AFTER (e.g. 8760h) keeps the session ledger longer"))
 
 		return nil
 	}
 
 	sweeper := &queryRetentionSweeper{
 		store:   dataStore,
+		dumpDir: cfg.Dump.Dir,
 		logger:  logger,
 		windows: windows,
 		stop:    make(chan struct{}),
@@ -74,9 +80,9 @@ func startQueryRetentionSweep(
 	go sweeper.run(ctx)
 
 	logger.InfoContext(ctx, "History retention enabled",
-		slog.Duration("query_retention", windows.Query),
-		slog.Duration("connection_retention", windows.Connection),
-		slog.Bool("connections_kept_forever", windows.Connection <= 0),
+		slog.Duration("query_retention", windows.Queries),
+		slog.Duration("connection_retention", windows.Connections),
+		slog.Bool("connections_kept_forever", windows.Connections <= 0),
 		slog.Duration("sweep_interval", queryHistorySweepInterval))
 
 	return sweeper
@@ -115,7 +121,13 @@ func (s *queryRetentionSweeper) guardedSweep(ctx context.Context) {
 }
 
 func (s *queryRetentionSweeper) sweep(ctx context.Context) {
-	result, err := s.store.CleanupOldQueryRows(ctx, s.windows.Query, s.windows.Connection)
+	s.sweepDumps(ctx)
+
+	if s.windows.Queries <= 0 && s.windows.Connections <= 0 {
+		return
+	}
+
+	result, err := s.store.CleanupOldQueryRows(ctx, s.windows.Queries, s.windows.Connections)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "history retention sweep failed",
 			slog.Any("error", err),
@@ -129,8 +141,22 @@ func (s *queryRetentionSweeper) sweep(ctx context.Context) {
 		s.logger.InfoContext(ctx, "deleted history past retention",
 			slog.Int64("queries", result.Queries),
 			slog.Int64("connections", result.Connections),
-			slog.Duration("query_retention", s.windows.Query),
-			slog.Duration("connection_retention", s.windows.Connection))
+			slog.Duration("query_retention", s.windows.Queries),
+			slog.Duration("connection_retention", s.windows.Connections))
+	}
+}
+
+// sweepDumps deletes local capture files past their window.
+func (s *queryRetentionSweeper) sweepDumps(ctx context.Context) {
+	if s.dumpDir == "" || s.windows.Dumps <= 0 {
+		return
+	}
+
+	deleted, err := dump.CleanupOldFiles(s.dumpDir, s.windows.Dumps)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "dump cleanup failed", slog.Any("error", err))
+	} else if deleted > 0 {
+		s.logger.InfoContext(ctx, "dump cleanup", slog.Int("deleted", deleted))
 	}
 }
 

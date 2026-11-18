@@ -225,7 +225,7 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 // connection it belongs to.
 //
 // The chain is per connection rather than global on purpose: retention
-// (DBB_QUERY_STORAGE_RETENTION) deletes whole connections, which would sever a
+// (DBB_RETENTION_QUERIES_DELETE_AFTER) deletes whole connections, which would sever a
 // single global chain on its first sweep. Per connection, a reaped connection
 // takes its own chain with it and every surviving connection still verifies.
 //
@@ -1080,10 +1080,10 @@ type RetentionSweepResult struct {
 // is opt-in: a zero or negative duration skips that half of the sweep, and both
 // at zero is a no-op — the default is to keep everything forever.
 //
-//   - queryOlderThan (DBB_QUERY_STORAGE_RETENTION) governs statements and their
+//   - queryOlderThan (DBB_RETENTION_QUERIES_DELETE_AFTER) governs statements and their
 //     captured rows: the bulk of the store, and the part that can hold customer
 //     data.
-//   - connectionOlderThan (DBB_CONNECTION_RETENTION) governs the session ledger:
+//   - connectionOlderThan (DBB_RETENTION_CONNECTIONS_DELETE_AFTER) governs the session ledger:
 //     one small row per session saying who connected from where, to which
 //     database, under which grant. Configuration guarantees it is never shorter
 //     than the query window (see config.Config.RetentionWindows), because

@@ -370,7 +370,7 @@ a supported server never send them — dbbat advertises `maxWireVersion` 21. The
 
 When `DBB_DUMP_DIR` is set, the post-auth (plaintext, TLS-terminated) framed
 traffic is captured per session using `dump.ProtocolMongo`. Dumps are pruned per
-`DBB_DUMP_RETENTION`.
+`DBB_RETENTION_DUMPS_DELETE_AFTER`.
 
 ## Known Limitations
 

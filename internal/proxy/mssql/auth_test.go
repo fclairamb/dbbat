@@ -164,9 +164,8 @@ func newAuthFixtureWith(t *testing.T, opts fixtureOptions) *authFixture {
 	dumpConfig := config.DumpConfig{}
 	if dumpDir != "" {
 		dumpConfig = config.DumpConfig{
-			Dir:       dumpDir,
-			MaxSize:   config.DefaultDumpMaxSize,
-			Retention: config.DefaultDumpRetention,
+			Dir:     dumpDir,
+			MaxSize: config.DefaultDumpMaxSize,
 		}
 	}
 

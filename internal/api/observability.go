@@ -321,12 +321,12 @@ type connectionDetailResponse struct {
 	Dump  DumpMetadata  `json:"dump"`
 	Grant *GrantSummary `json:"grant"`
 
-	// StatementsRetained is false when DBB_QUERY_STORAGE_RETENTION can account
+	// StatementsRetained is false when DBB_RETENTION_QUERIES_DELETE_AFTER can account
 	// for this session having fewer statements in the store than it ran — i.e.
 	// the session started before the statement cutoff.
 	//
-	// It exists because DBB_CONNECTION_RETENTION can outlive
-	// DBB_QUERY_STORAGE_RETENTION, which makes "a closed session whose
+	// It exists because DBB_RETENTION_CONNECTIONS_DELETE_AFTER can outlive
+	// DBB_RETENTION_QUERIES_DELETE_AFTER, which makes "a closed session whose
 	// statement feed is empty" the *normal* state of every session between the
 	// two windows. Without this the UI cannot tell that from a session that
 	// genuinely ran nothing, and the `queries` counter on the row is a lifetime

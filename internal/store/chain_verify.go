@@ -34,7 +34,7 @@ import (
 //     checkMissingStamp).
 //
 // One thing is not a break, and is reported separately: a chain whose *prefix*
-// is missing. On the queries side that is what DBB_QUERY_STORAGE_RETENTION does
+// is missing. On the queries side that is what DBB_RETENTION_QUERIES_DELETE_AFTER does
 // to a long-lived session, so treating it as tampering would cry wolf on every
 // deployment that sets a retention. Everything after the truncation is still
 // verified; what is lost is only the proof that the removed prefix existed. On
@@ -104,13 +104,13 @@ type QueryChainResult struct {
 	Verified int64
 	// TruncatedPrefix is true when the chain does not start at 1 but something
 	// still survives — the expected shape for a connection whose *oldest*
-	// statements were reaped by DBB_QUERY_STORAGE_RETENTION.
+	// statements were reaped by DBB_RETENTION_QUERIES_DELETE_AFTER.
 	TruncatedPrefix bool
 	// EmptiedByRetention is true when *no* statement of the session survives
 	// and the query window accounts for it (see checkEmptiedChain).
 	//
 	// Deliberately disjoint from TruncatedPrefix rather than the extreme of it:
-	// with DBB_CONNECTION_RETENTION longer than DBB_QUERY_STORAGE_RETENTION,
+	// with DBB_RETENTION_CONNECTIONS_DELETE_AFTER longer than DBB_RETENTION_QUERIES_DELETE_AFTER,
 	// every closed session between the two windows is in this state by design,
 	// so folding it into the truncated count would drown the thing an operator
 	// actually watches — a chain that lost only part of itself.
@@ -889,7 +889,7 @@ func (s *Store) checkMissingStamp(result *QueryChainResult, conn Connection) {
 //
 // Two things produce it, and they are indistinguishable from `queries` alone:
 //
-//  1. DBB_QUERY_STORAGE_RETENTION reaped every statement of a session whose
+//  1. DBB_RETENTION_QUERIES_DELETE_AFTER reaped every statement of a session whose
 //     connection row survived the same sweep. That happens to a long-lived
 //     session — pooled or idle — that went quiet well before it closed, or that
 //     is still open (the sweep never reaps an open connection row, only its
@@ -913,7 +913,7 @@ func (s *Store) checkMissingStamp(result *QueryChainResult, conn Connection) {
 // statement left in the store), because a young or quiet store has its oldest
 // surviving statement a few minutes back, which would excuse nearly every
 // session. The cost of that choice is one caveat: raising or disabling
-// DBB_QUERY_STORAGE_RETENTION moves the cutoff backwards, so sessions the
+// DBB_RETENTION_QUERIES_DELETE_AFTER moves the cutoff backwards, so sessions the
 // *previous* setting legitimately emptied can start reading as breaks. Lowering
 // it never can.
 //
@@ -938,7 +938,7 @@ func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
 		return
 	}
 
-	window := "DBB_QUERY_STORAGE_RETENTION is disabled, so nothing legitimately deletes statements"
+	window := "DBB_RETENTION_QUERIES_DELETE_AFTER is disabled, so nothing legitimately deletes statements"
 	if s.queryRetention > 0 {
 		window = fmt.Sprintf(
 			"the session connected at %s, inside the %s retention window, so the sweep cannot have reaped them",
@@ -951,7 +951,7 @@ func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
 		conn.QueryChainLen, window))
 }
 
-// retentionCouldEmpty reports whether DBB_QUERY_STORAGE_RETENTION can account
+// retentionCouldEmpty reports whether DBB_RETENTION_QUERIES_DELETE_AFTER can account
 // for a session having no statements left.
 func (s *Store) retentionCouldEmpty(conn Connection) bool {
 	return s.StatementsPastRetention(conn)
@@ -1041,7 +1041,7 @@ func (s *Store) stampedPrefixMAC(
 			conn.QueryChainLen, result.HeadSeq)), nil
 	}
 
-	// Below the oldest survivor: DBB_QUERY_STORAGE_RETENTION reaped the
+	// Below the oldest survivor: DBB_RETENTION_QUERIES_DELETE_AFTER reaped the
 	// statement the stamp sealed. Nothing left to check it against.
 	if conn.QueryChainLen < result.FirstSeq {
 		return nil, nil, nil

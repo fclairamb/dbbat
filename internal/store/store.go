@@ -49,8 +49,8 @@ type Store struct {
 	// never written anywhere. Empty disables chaining. See chain.go.
 	chainKey []byte
 
-	// queryRetention is the configured DBB_QUERY_STORAGE_RETENTION — the
-	// *statement* window, never the ledger window DBB_CONNECTION_RETENTION
+	// queryRetention is the configured DBB_RETENTION_QUERIES_DELETE_AFTER — the
+	// *statement* window, never the ledger window DBB_RETENTION_CONNECTIONS_DELETE_AFTER
 	// governs. The sweep itself takes both windows as arguments
 	// (CleanupOldQueryRows), so this is not what drives deletion; it is what
 	// lets a reader tell a session retention emptied from one somebody emptied.
@@ -108,14 +108,14 @@ type Options struct {
 	EncryptionKey []byte
 
 	// QueryRetention is the configured query-history retention window
-	// (DBB_QUERY_STORAGE_RETENTION), zero when retention is disabled — the
+	// (DBB_RETENTION_QUERIES_DELETE_AFTER), zero when retention is disabled — the
 	// default. Chain verification needs it to judge a session whose statements
 	// are *all* gone: retention can only account for that when the session ran
 	// entirely before the retention cutoff. Zero therefore means "nothing
 	// legitimately deletes statements here", which is the strictest reading.
 	//
 	// It is emphatically the **query** window, not the connection one: the
-	// ledger window (DBB_CONNECTION_RETENTION) decides whether the session row
+	// ledger window (DBB_RETENTION_CONNECTIONS_DELETE_AFTER) decides whether the session row
 	// still exists, never how many of its statements survive. Feeding it the
 	// longer of the two would excuse sessions nothing legitimately emptied.
 	QueryRetention time.Duration

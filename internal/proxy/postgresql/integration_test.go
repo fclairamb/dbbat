@@ -317,9 +317,8 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	dumpCfg := config.DumpConfig{}
 	if dumpDir != "" {
 		dumpCfg = config.DumpConfig{
-			Dir:       dumpDir,
-			MaxSize:   config.DefaultDumpMaxSize,
-			Retention: config.DefaultDumpRetention,
+			Dir:     dumpDir,
+			MaxSize: config.DefaultDumpMaxSize,
 		}
 	}
 

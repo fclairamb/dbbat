@@ -18,7 +18,7 @@ Captures are **disabled by default**. Set `DBB_DUMP_DIR` to enable, optionally t
 |----------|-------------|---------|
 | `DBB_DUMP_DIR` | Directory for `.pcapng` files. Empty = disabled. | _disabled_ |
 | `DBB_DUMP_MAX_SIZE` | Max bytes per session file. When the next packet would exceed this, it's silently skipped; the file stays a valid pcapng. | `10485760` (10 MB) |
-| `DBB_DUMP_RETENTION` | Auto-delete captures older than this Go duration (`24h`, `7d`, `1h30m`, …). Applies to local captures only. | `24h` |
+| `DBB_RETENTION_DUMPS_DELETE_AFTER` | Auto-delete captures older than this Go duration (`24h`, `7d`, `1h30m`, …). Applies to local captures only. | `24h` |
 | `DBB_DUMP_UPLOAD_URL` | Blob bucket finished captures are uploaded to, e.g. `s3://my-bucket/captures`. Empty = keep captures on local disk. | _disabled_ |
 
 ```bash
@@ -26,7 +26,7 @@ docker run -d \
   -e DBB_DSN=... \
   -e DBB_DUMP_DIR=/var/dbbat/dumps \
   -e DBB_DUMP_MAX_SIZE=33554432 \
-  -e DBB_DUMP_RETENTION=72h \
+  -e DBB_RETENTION_DUMPS_DELETE_AFTER=72h \
   -v dbbat-dumps:/var/dbbat/dumps \
   ghcr.io/fclairamb/dbbat
 ```
@@ -58,7 +58,7 @@ the object key is recorded on the connection row.
   volume. There is no `gs://` or `azblob://` driver, see
   [Other clouds](#other-clouds).
 - Objects are keyed `<prefix>/YYYY/MM/DD/<instance-id>/<connection-uid>.pcapng`.
-- **`DBB_DUMP_RETENTION` does not apply to the bucket.** dbbat never expires an
+- **`DBB_RETENTION_DUMPS_DELETE_AFTER` does not apply to the bucket.** dbbat never expires an
   object it uploaded; configure a bucket lifecycle policy instead.
 - Captures are never streamed to the bucket mid-session, so a pod that dies
   mid-session loses that session's capture. In exchange, a crash always leaves a

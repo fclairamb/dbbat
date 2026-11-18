@@ -150,11 +150,11 @@ detail page.
 ## Retention
 
 By default DBBat keeps query history forever — it is an audit trail, so nothing
-is deleted unless you ask for it. Set `DBB_QUERY_STORAGE_RETENTION` (or
-`query_storage.retention`) to a Go duration to enable a sweep:
+is deleted unless you ask for it. Set `DBB_RETENTION_QUERIES_DELETE_AFTER` (or
+`retention.queries.delete_after`) to a Go duration to enable a sweep:
 
 ```bash
-DBB_QUERY_STORAGE_RETENTION=720h   # 30 days
+DBB_RETENTION_QUERIES_DELETE_AFTER=720h   # 30 days
 ```
 
 The sweep runs once at startup and then hourly, deleting in batches:
@@ -175,8 +175,8 @@ delete are not the same kind of data.
 
 | Variable | Deletes | Default |
 |---|---|---|
-| `DBB_QUERY_STORAGE_RETENTION` | Statements and their captured result rows | `0` — keep forever |
-| `DBB_CONNECTION_RETENTION` | Closed connections (cascading to any statements they still have) | Unset — inherit the query window |
+| `DBB_RETENTION_QUERIES_DELETE_AFTER` | Statements and their captured result rows | Unset or `0` — keep forever |
+| `DBB_RETENTION_CONNECTIONS_DELETE_AFTER` | Closed connections (cascading to any statements they still have) | Unset or `0` — keep forever |
 
 Statements and captured rows are the bulk of the store, and captured rows can
 hold customer data, so they are what an operator wants to expire after 30 or 90
@@ -185,15 +185,13 @@ which database, under which grant, when — the ledger a security review asks fo
 a year later, and it costs almost nothing to keep.
 
 ```bash
-DBB_QUERY_STORAGE_RETENTION=720h    # 30 days of statements
-DBB_CONNECTION_RETENTION=8760h      # a year of sessions
+DBB_RETENTION_QUERIES_DELETE_AFTER=720h    # 30 days of statements
+DBB_RETENTION_CONNECTIONS_DELETE_AFTER=8760h      # a year of sessions
 ```
 
-`DBB_CONNECTION_RETENTION=0` with a query window set keeps the session ledger
-**forever** while statements still expire.
-
-Leaving `DBB_CONNECTION_RETENTION` unset makes it inherit the query window, so
-upgrading dbbat sweeps exactly what it swept before.
+Leaving `DBB_RETENTION_CONNECTIONS_DELETE_AFTER` unset (or `0`) keeps the session
+ledger **forever** while statements still expire. There is no inheritance: the
+ledger is small and it is the evidence.
 
 The connection window must be **greater than or equal to** the query window:
 deleting a session cascades to its statements, so a shorter one would delete
@@ -228,12 +226,12 @@ process, so a replica that crashes while the rest of the deployment stays up is
 reclaimed without waiting for an unrelated restart. See
 [`DBB_INSTANCE_ID`](/docs/configuration) for the registry and the grace period.
 
-Set `DBB_QUERY_STORAGE_RETENTION` to `0` (the default), or leave it unset, to
+Set `DBB_RETENTION_QUERIES_DELETE_AFTER` to `0` (the default), or leave it unset, to
 keep history forever. An unparseable value also leaves retention off and logs a
 warning at startup, rather than falling back to some other period.
 
 Note this is separate from [session packet dumps](/docs/features/session-dumps),
-which have their own `DBB_DUMP_RETENTION` (default `24h`).
+which have their own `DBB_RETENTION_DUMPS_DELETE_AFTER` (default `24h`).
 
 ## Connection Tracking
 

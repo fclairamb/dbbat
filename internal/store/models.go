@@ -520,7 +520,7 @@ type Connection struct {
 
 	// QueryChainLen is the head's chain_seq — which, chain_seq being dense from
 	// 1, is the number of statements the session logged. Deliberately not a
-	// count of *surviving* statements: DBB_QUERY_STORAGE_RETENTION reaps the
+	// count of *surviving* statements: DBB_RETENTION_QUERIES_DELETE_AFTER reaps the
 	// oldest statements of a long-lived session, and a stamp that moved with
 	// them would report a break on every truncated session.
 	QueryChainLen int64 `bun:"query_chain_len,notnull,default:0" json:"-"`
