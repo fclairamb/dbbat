@@ -117,6 +117,10 @@ var (
 
 	// O5LOGON and TTC auth errors.
 	ErrDecryptedPasswordTooShort = errors.New("decrypted password too short")
+	// ErrSpeedyKeyMismatch: a client that sent no AUTH_PASSWORD did not prove it
+	// holds the key either (no AUTH_PBKDF2_SPEEDY_KEY, a verifier type without
+	// one, or one that does not match the stored verifier).
+	ErrSpeedyKeyMismatch         = errors.New("AUTH_PBKDF2_SPEEDY_KEY does not match the verifier")
 	ErrNoCombinedKeyCandidate    = errors.New("no combined-key candidate available")
 	ErrCiphertextNotAligned      = errors.New("ciphertext is not a multiple of block size")
 	ErrInvalidPadding            = errors.New("invalid PKCS7 padding")

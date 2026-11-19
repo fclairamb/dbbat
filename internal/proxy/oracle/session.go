@@ -1203,41 +1203,18 @@ func (s *session) readPhase2Packet() (*TNSPacket, error) {
 //
 // Two paths:
 //   - encPassword == "" (SQLcl / JDBC thin 23c+): the client doesn't send the
-//     password text, so candidates CANNOT be disambiguated. Deterministic
-//     rule: assume the most-recently-created active key with user-salt
-//     verifiers (candidates are ordered created_at DESC, so verifiers[0]).
-//     Proof of knowledge is implicit — if the wrong key were typed, the
-//     client fails to validate our AUTH_SVR_RESPONSE marker and disconnects.
+//     password text. It must then prove the key with AUTH_PBKDF2_SPEEDY_KEY
+//     (verifier 18453 only), checked against each candidate's verifier — see
+//     O5LogonServer.VerifySpeedyKey. The AUTH_SVR_RESPONSE marker is not a
+//     proof: the client checks it, and a client can skip the check.
 //   - encPassword non-empty (go-ora, python-oracledb thin, sqlplus): for each
 //     candidate, derive that candidate's view of the combined key (the
 //     challenge ciphertext decrypted under ITS verifier — see
 //     CloneForCandidate), attempt AUTH_PASSWORD decryption, and accept only a
 //     plaintext that verifies as a real API key.
-func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifiers []*o5LogonVerifierData, clientSessKey, encPassword, encChallenge string) (*store.APIKey, error) {
+func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifiers []*o5LogonVerifierData, clientSessKey, encPassword, encSpeedyKey, encChallenge string) (*store.APIKey, error) {
 	if encPassword == "" {
-		primary := verifiers[0]
-		s.logger.InfoContext(s.ctx, "AUTH Phase 2: empty AUTH_PASSWORD — cannot disambiguate candidates; assuming most-recently-created key",
-			slog.String("key_id", primary.apiKeyID.String()),
-			slog.String("key_prefix", primary.keyPrefix),
-			slog.Int("candidates", len(verifiers)))
-
-		// Derive the combined key the way the client did so the AUTH_SVR_RESPONSE
-		// patch can run. Without this, dbbat forwards the upstream's
-		// AUTH_SVR_RESPONSE verbatim — that ciphertext is encrypted under
-		// dbbat's upstream-side combined key, so JDBC's client-side decrypt
-		// returns garbage and fails the "SERVER_TO_CLIENT" marker check with
-		// ORA-17401.
-		if err := o5.DeriveCombinedKey(clientSessKey); err != nil {
-			s.logger.WarnContext(s.ctx, "AUTH Phase 2: failed to derive combined key for empty-password path",
-				slog.Any("error", err))
-		}
-
-		apiKey, err := s.store.GetAPIKeyByID(s.ctx, primary.apiKeyID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load API key by ID: %w", err)
-		}
-
-		return apiKey, nil
+		return s.resolveAPIKeyFromSpeedyKey(o5, verifiers, clientSessKey, encSpeedyKey, encChallenge)
 	}
 
 	for i, verifier := range verifiers {
@@ -1313,6 +1290,54 @@ func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifiers []*o5Logo
 	}
 
 	return nil, fmt.Errorf("%w: no candidate key decrypted AUTH_PASSWORD (%d tried)",
+		ErrAPIKeyVerification, len(verifiers))
+}
+
+// resolveAPIKeyFromSpeedyKey authenticates a client that sent no AUTH_PASSWORD:
+// the candidate whose verifier its AUTH_PBKDF2_SPEEDY_KEY matches is the key it
+// holds. No match, or no speedy key at all, is a failed login.
+func (s *session) resolveAPIKeyFromSpeedyKey(o5 *O5LogonServer, verifiers []*o5LogonVerifierData, clientSessKey, encSpeedyKey, encChallenge string) (*store.APIKey, error) {
+	for i, verifier := range verifiers {
+		cand := o5
+
+		if i > 0 {
+			if len(verifier.decryptedVerifier18453) == 0 {
+				continue
+			}
+
+			clone, err := o5.CloneForCandidate(verifier.salt18453, verifier.decryptedVerifier18453, encChallenge)
+			if err != nil {
+				continue
+			}
+
+			cand = clone
+		}
+
+		if err := cand.VerifySpeedyKey(clientSessKey, encSpeedyKey); err != nil {
+			s.logger.DebugContext(s.ctx, "AUTH Phase 2: candidate did not match AUTH_PBKDF2_SPEEDY_KEY",
+				slog.String("key_prefix", verifier.keyPrefix), slog.Any("error", err))
+
+			continue
+		}
+
+		apiKey, err := s.store.GetAPIKeyByID(s.ctx, verifier.apiKeyID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load API key by ID: %w", err)
+		}
+
+		// The AUTH OK's AUTH_SVR_RESPONSE is re-encrypted under the key the
+		// client derived.
+		o5.CombinedKey = cand.CombinedKey
+
+		s.logger.InfoContext(s.ctx, "AUTH Phase 2: API key authenticated by speedy key",
+			slog.String("key_prefix", apiKey.KeyPrefix),
+			slog.Int("candidate_index", i),
+			slog.Int("candidates", len(verifiers)))
+
+		return apiKey, nil
+	}
+
+	return nil, fmt.Errorf("%w: no AUTH_PASSWORD and no candidate key matched AUTH_PBKDF2_SPEEDY_KEY (%d tried)",
 		ErrAPIKeyVerification, len(verifiers))
 }
 
@@ -1452,7 +1477,9 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.String("client_sesskey", clientSessKey),
 		slog.String("enc_password", encPassword))
 
-	apiKey, err := s.resolveAPIKeyFromPhase2(o5, verifiers, clientSessKey, encPassword, encSessKey)
+	encSpeedyKey := parseAuthPhase2SpeedyKey(phase2Pkt.Payload, s.clientBigClrChunks)
+
+	apiKey, err := s.resolveAPIKeyFromPhase2(o5, verifiers, clientSessKey, encPassword, encSpeedyKey, encSessKey)
 	if err != nil {
 		// The refusal the user most often meets: none of the candidates matched,
 		// because the key they typed never had a verifier to be a candidate with.
