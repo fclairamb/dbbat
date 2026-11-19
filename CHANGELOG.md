@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.33.0](https://github.com/fclairamb/dbbat/compare/v0.32.3...v0.33.0) (2026-11-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* uniform retention settings, windows per server, rows archive to object storage ([#512](https://github.com/fclairamb/dbbat/issues/512))
+
+### Features
+
+* uniform retention settings, windows per server, rows archive to object storage ([#512](https://github.com/fclairamb/dbbat/issues/512)) ([9a3608b](https://github.com/fclairamb/dbbat/commit/9a3608bd4003f459013558904cce431f3426cd47))
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/go-sql-driver/mysql to v1.10.2 ([#510](https://github.com/fclairamb/dbbat/issues/510)) ([02cd01b](https://github.com/fclairamb/dbbat/commit/02cd01b894f194c93883354ed377b80b87b164d6))
+* **deps:** update module github.com/microsoft/go-mssqldb to v1.12.0 ([#514](https://github.com/fclairamb/dbbat/issues/514)) ([0610af2](https://github.com/fclairamb/dbbat/commit/0610af278055ca707c352776b2a145d7a237bda2))
+
 ## [0.32.3](https://github.com/fclairamb/dbbat/compare/v0.32.2...v0.32.3) (2026-11-17)
 
 
