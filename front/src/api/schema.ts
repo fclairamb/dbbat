@@ -2211,6 +2211,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/instance/retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update the instance-level retention windows
+         * @description Writes the `retention.queries.*` parameters, which win over DBB_RETENTION_QUERIES_ARCHIVE_AFTER and DBB_RETENTION_QUERIES_DELETE_AFTER. Admin-only. Values are Go durations with one-second resolution; empty clears the parameter (the environment applies), "0" means never. 400 on a malformed, negative or sub-second value, on `archive_after` >= `delete_after`, and on an archive window while no archive bucket (DBB_ARCHIVE_URL) is configured. A server group or server window overrides this level. Lowering a delete window destroys data at the next sweep; the change is audited.
+         */
+        put: operations["updateInstanceRetention"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/connections/{uid}/archive/rows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download the archived result rows of a connection
+         * @description The raw Parquet object holding the captured result rows the connection moved to the archive bucket, SHA-256 checked against the value sealed in the audit chain. 404 when the connection has no live archive, 502 when the object is missing, corrupted or the archive is not configured. Admin-only.
+         */
+        get: operations["getConnectionArchiveRows"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/instance/limits": {
         parameters: {
             query?: never;
@@ -7922,6 +7962,69 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
+        };
+    };
+    updateInstanceRetention: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @example 24h */
+                    archive_after?: string;
+                    /** @example 8760h */
+                    delete_after?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Settings saved */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getConnectionArchiveRows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Parquet file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/vnd.apache.parquet": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Archive read failed (object missing, hash mismatch or archive not configured) */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     updateInstanceLimits: {
