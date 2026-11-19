@@ -29,6 +29,7 @@ require (
 	github.com/microsoft/go-mssqldb v1.12.0
 	github.com/moby/moby/api v1.57.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
+	github.com/parquet-go/parquet-go v0.32.1
 	github.com/sijms/go-ora/v3 v3.0.1
 	github.com/slack-go/slack v0.36.0
 	github.com/stretchr/testify v1.12.1
@@ -41,7 +42,7 @@ require (
 	github.com/uptrace/bun/driver/pgdriver v1.3.0
 	github.com/urfave/cli/v3 v3.14.0
 	github.com/xdg-go/scram v1.4.0
-	go.mongodb.org/mongo-driver/v2 v2.10.0
+	go.mongodb.org/mongo-driver/v2 v2.10.1
 	gocloud.dev v0.49.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/oauth2 v0.38.0
@@ -160,7 +161,6 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/parquet-go/bitpack v1.0.3 // indirect
 	github.com/parquet-go/jsonlite v1.5.5 // indirect
-	github.com/parquet-go/parquet-go v0.32.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/pierrec/lz4/v4 v4.1.33 // indirect
 	github.com/pingcap/errors v0.11.5-0.20260310054046-9c8b3586e4b2 // indirect
