@@ -3157,7 +3157,7 @@ all five protocols.
 
 ## Known Limitations
 
-- **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
+- **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) are authenticated by their `AUTH_PBKDF2_SPEEDY_KEY`, which also tells dbbat which of the user's keys they hold.
 - **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the re-execution frames that are real (the SQL-less `OALL8`, the `03/0x4e|0x04` piggyback, and the `03 5e` declaring no statement in either the thin header — ojdbc6's — or either OCI one — sqlplus driving a cursor, in the 4-byte dialect's header or the 64-bit dialect's) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), in **both** encodings — the compressed one thin clients speak and the fixed-width OCI one (`describeColumnLayoutWide`), chosen by the session's own learned shape — so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions on sqlplus and SQL*Developer as well. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
@@ -5040,10 +5040,13 @@ remain candidates:
   `AUTH_PASSWORD` is trial-decrypted, and only a plaintext that passes
   `VerifyAPIKey` authenticates. Works for both 6949 and 18453/customHash.
 - **Phase 2 with empty `AUTH_PASSWORD`** (SQLcl / JDBC thin 23c+): the client
-  never sends the password text, so candidates cannot be disambiguated. dbbat
-  deterministically assumes the **most-recently-created** active user-salt key
-  (logged as `empty AUTH_PASSWORD — cannot disambiguate candidates`); proof of
-  knowledge stays implicit via the `AUTH_SVR_RESPONSE` marker check.
+  never sends the password text and proves the key with
+  `AUTH_PBKDF2_SPEEDY_KEY` instead, as a real server requires. dbbat decrypts it
+  under each candidate's combined key and accepts the candidate whose 18453
+  verifier equals `SHA-512(speedy key ‖ salt)[:32]`
+  (`O5LogonServer.VerifySpeedyKey`). No speedy key, a 6949 challenge, or no
+  matching candidate is a failed login. The `AUTH_SVR_RESPONSE` marker is not a
+  proof: the client checks it, and a hostile client simply does not.
 - **Legacy keys** (created before the scheme, `user_salt` absent): unchanged
   fallback — the first verifier-bearing key is the single candidate, no forced
   rotation. Creating any new key upgrades the user to multi-key login.
