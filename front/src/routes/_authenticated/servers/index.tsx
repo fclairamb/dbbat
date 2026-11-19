@@ -5,6 +5,8 @@ import {
   useDatabaseConnection,
   useCreateDatabase,
   useUpdateDatabase,
+  useInstance,
+  useDatabase as useDatabaseDetail,
   useDeleteDatabase,
   useTunnelServers,
   useTestServerConnection,
@@ -16,6 +18,11 @@ import {
   type ServerReferences,
   type UpdateDatabaseRequest,
 } from "@/api";
+import {
+  RetentionFields,
+  formatSeconds,
+  type RetentionSeconds,
+} from "@/components/shared/RetentionDuration";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -1746,6 +1753,21 @@ function EditDatabaseForm({
   const [listable, setListable] = useState(server.listable ?? true);
   const [viaUid, setViaUid] = useState(server.via_uid || "");
   const [testAfterSave, setTestAfterSave] = useState(false);
+  const { data: instance } = useInstance();
+  const { data: detail } = useDatabaseDetail(server.uid);
+  const [archiveAfter, setArchiveAfter] = useState<RetentionSeconds>(
+    server.archive_after_seconds ?? null,
+  );
+  const [deleteAfter, setDeleteAfter] = useState<RetentionSeconds>(
+    server.delete_after_seconds ?? null,
+  );
+  const eff =
+    detail && "effective_retention" in detail
+      ? detail.effective_retention
+      : undefined;
+  const inheritNote = eff
+    ? `Inherited today: archive ${formatSeconds(eff.archive.seconds)} (${eff.archive.source || "unset"}), delete ${formatSeconds(eff.delete.seconds)} (${eff.delete.source || "unset"}).`
+    : undefined;
 
   const { data: tunnelServers } = useTunnelServers();
 
@@ -1830,6 +1852,13 @@ function EditDatabaseForm({
         // Distinct from an omitted via_uid, which would leave the tunnel alone.
         update.clear_via_uid = true;
       }
+    }
+
+    if (archiveAfter !== (server.archive_after_seconds ?? null)) {
+      update.archive_after_seconds = archiveAfter;
+    }
+    if (deleteAfter !== (server.delete_after_seconds ?? null)) {
+      update.delete_after_seconds = deleteAfter;
     }
 
     updateServer.mutate(update);
@@ -1992,6 +2021,16 @@ function EditDatabaseForm({
               onCheckedChange={setListable}
             />
           </div>
+          <RetentionFields
+            archive={archiveAfter}
+            onArchiveChange={setArchiveAfter}
+            del={deleteAfter}
+            onDeleteChange={setDeleteAfter}
+            originalDelete={server.delete_after_seconds}
+            archiveEnabled={instance?.resolved_retention?.archive_enabled ?? false}
+            testIdPrefix="database-edit"
+            inheritNote={inheritNote}
+          />
           {/* The check runs against the row *as saved*, which is the only
               version worth checking — hence a flag on the PUT rather than a
               second call the admin has to remember to make. */}

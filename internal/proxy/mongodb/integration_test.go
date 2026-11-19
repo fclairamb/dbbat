@@ -332,7 +332,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, dumpDir, sslMode string
 
 	dumpCfg := config.DumpConfig{}
 	if dumpDir != "" {
-		dumpCfg = config.DumpConfig{Dir: dumpDir, MaxSize: config.DefaultDumpMaxSize, Retention: config.DefaultDumpRetention}
+		dumpCfg = config.DumpConfig{Dir: dumpDir, MaxSize: config.DefaultDumpMaxSize}
 	}
 
 	proxy, err := NewServer(dataStore, encKey, queryStorage, dumpCfg, nil, config.MongoConfig{}, slog.Default())

@@ -219,7 +219,18 @@ func (s *Store) closeConnection(ctx context.Context, uid uuid.UUID, closedAt tim
 	// Best-effort and off this call's critical path — see notifyTermination.
 	s.notifyTermination(ctx, &closed[0], t)
 
+	if hook := s.connectionClosed.Load(); hook != nil {
+		(*hook)(closed[0].DatabaseID, closedAt)
+	}
+
 	return nil
+}
+
+// SetConnectionClosedHook installs the function called after every connection
+// this process closes, with its server and close instant. It must not block:
+// it wakes the retention sweeper.
+func (s *Store) SetConnectionClosedHook(hook func(serverUID uuid.UUID, closedAt time.Time)) {
+	s.connectionClosed.Store(&hook)
 }
 
 // queryChainHead returns the head this process holds for a connection's query
@@ -508,14 +519,36 @@ func noLiveOwner() string {
 // connection at a time — see writeConnectionAudit for why the audit write must
 // not be able to roll a completed reconcile back.
 func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *bun.UpdateQuery) (int64, error) {
-	var uids []uuid.UUID
+	var (
+		uids    []uuid.UUID
+		servers []uuid.UUID
+	)
+
+	// Scanned as rows, not a slice of structs: the two columns are all the
+	// reconcile needs back.
+	var closedRows []struct {
+		UID        uuid.UUID `bun:"uid"`
+		DatabaseID uuid.UUID `bun:"database_id"`
+	}
+
+	split := func() {
+		uids = make([]uuid.UUID, 0, len(closedRows))
+		servers = make([]uuid.UUID, 0, len(closedRows))
+
+		for _, r := range closedRows {
+			uids = append(uids, r.UID)
+			servers = append(servers, r.DatabaseID)
+		}
+	}
 
 	if !s.ChainEnabled() {
-		if err := scope(s.orphanCloseQuery(s.db)).Returning("uid").Scan(ctx, &uids); err != nil {
+		if err := scope(s.orphanCloseQuery(s.db)).Returning("uid, database_id").Scan(ctx, &closedRows); err != nil {
 			return 0, fmt.Errorf("failed to close orphaned connections: %w", err)
 		}
 
+		split()
 		s.recordReconciledCloses(ctx, uids)
+		s.wakeRetention(servers)
 
 		return int64(len(uids)), nil
 	}
@@ -523,11 +556,13 @@ func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *
 	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// Reset per attempt: RunInTx does not retry, but a partially filled
 		// slice from a failed statement must not survive into the audit pass.
-		uids = nil
+		closedRows = nil
 
-		if err := scope(s.orphanCloseQuery(tx)).Returning("uid").Scan(ctx, &uids); err != nil {
+		if err := scope(s.orphanCloseQuery(tx)).Returning("uid, database_id").Scan(ctx, &closedRows); err != nil {
 			return fmt.Errorf("failed to close orphaned connections: %w", err)
 		}
+
+		split()
 
 		if len(uids) == 0 {
 			return nil
@@ -540,8 +575,32 @@ func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *
 	}
 
 	s.recordReconciledCloses(ctx, uids)
+	s.wakeRetention(servers)
 
 	return int64(len(uids)), nil
+}
+
+// wakeRetention tells the retention sweeper that the reconcile closed sessions
+// on these servers, once per server: they are now due their windows like any
+// session closed by CloseConnection.
+func (s *Store) wakeRetention(servers []uuid.UUID) {
+	hook := s.connectionClosed.Load()
+	if hook == nil {
+		return
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(servers))
+	now := time.Now()
+
+	for _, id := range servers {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+
+		seen[id] = struct{}{}
+
+		(*hook)(id, now)
+	}
 }
 
 // orphanCloseQuery builds the reconcile's UPDATE, minus the scope predicate its
@@ -907,7 +966,7 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
 			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, "+
 			"dump_key, grant_uid, terminate_requested_at, terminate_requested_by, terminate_reason, "+
-			"query_chain_mac, query_chain_len, query_chain_stamp_version").
+			"query_chain_mac, query_chain_len, query_chain_stamp_version, archived_at, archive_deleted_at").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {
@@ -944,7 +1003,7 @@ func (s *Store) GetConnectionsByUIDs(ctx context.Context, uids []uuid.UUID) (map
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
 			"disconnected_at, queries, bytes_transferred, termination_reason, instance_id, upstream_tls, "+
 			"dump_key, grant_uid, terminate_requested_at, terminate_requested_by, terminate_reason, "+
-			"query_chain_mac, query_chain_len, query_chain_stamp_version").
+			"query_chain_mac, query_chain_len, query_chain_stamp_version, archived_at, archive_deleted_at").
 		Where("uid IN (?)", bun.List(uids)).
 		Scan(ctx)
 	if err != nil {

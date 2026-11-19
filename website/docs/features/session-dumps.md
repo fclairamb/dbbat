@@ -18,7 +18,7 @@ Captures are **disabled by default**. Set `DBB_DUMP_DIR` to enable, optionally t
 |----------|-------------|---------|
 | `DBB_DUMP_DIR` | Directory for `.pcapng` files. Empty = disabled. | _disabled_ |
 | `DBB_DUMP_MAX_SIZE` | Max bytes per session file. When the next packet would exceed this, it's silently skipped; the file stays a valid pcapng. | `10485760` (10 MB) |
-| `DBB_DUMP_RETENTION` | Auto-delete captures older than this Go duration (`24h`, `7d`, `1h30m`, …). Applies to local captures only. | `24h` |
+| `DBB_RETENTION_DUMPS_DELETE_AFTER` | Auto-delete captures older than this Go duration (`24h`, `7d`, `1h30m`, …). Applies to local captures only. | `24h` |
 | `DBB_DUMP_UPLOAD_URL` | Blob bucket finished captures are uploaded to, e.g. `s3://my-bucket/captures`. Empty = keep captures on local disk. | _disabled_ |
 
 ```bash
@@ -26,7 +26,7 @@ docker run -d \
   -e DBB_DSN=... \
   -e DBB_DUMP_DIR=/var/dbbat/dumps \
   -e DBB_DUMP_MAX_SIZE=33554432 \
-  -e DBB_DUMP_RETENTION=72h \
+  -e DBB_RETENTION_DUMPS_DELETE_AFTER=72h \
   -v dbbat-dumps:/var/dbbat/dumps \
   ghcr.io/fclairamb/dbbat
 ```
@@ -55,9 +55,10 @@ the object key is recorded on the connection row.
 
 - The scheme selects the driver: `s3://` for S3 and S3-compatible stores
   (credentials come from the standard AWS chain), and `file://` for a mounted
-  volume. `gs://` and `azblob://` work too.
+  volume. There is no `gs://` or `azblob://` driver, see
+  [Other clouds](#other-clouds).
 - Objects are keyed `<prefix>/YYYY/MM/DD/<instance-id>/<connection-uid>.pcapng`.
-- **`DBB_DUMP_RETENTION` does not apply to the bucket.** dbbat never expires an
+- **`DBB_RETENTION_DUMPS_DELETE_AFTER` does not apply to the bucket.** dbbat never expires an
   object it uploaded; configure a bucket lifecycle policy instead.
 - Captures are never streamed to the bucket mid-session, so a pod that dies
   mid-session loses that session's capture. In exchange, a crash always leaves a
@@ -113,3 +114,25 @@ This drops the connection metadata (database, user, service name, upstream addre
 - Blocks are flushed as they're written, and pcapng has no end-of-file marker, so a capture is readable while the session is still running and a partial capture stays valid.
 - The `max_size` limit is enforced per file. There's no global cap, so monitor the capture directory growth and rely on `retention` for cleanup.
 - For TLS-terminated MySQL connections, the tap sits **after** auth termination, so the capture sees plaintext command-phase traffic.
+
+## Other clouds
+
+dbbat links two bucket drivers and nothing else: `s3://` (AWS S3 and every
+S3-compatible store: MinIO, Ceph, Cloudflare R2, Scaleway...) and `file://`
+(a directory). A `gs://` or `azblob://` URL stops dbbat at startup. Add
+`use_path_style=true` to the URL for stores that need path-style addressing.
+
+- **Google Cloud Storage** speaks the S3 API on its XML endpoint, with an HMAC
+  key as the access key and secret:
+
+  ```
+  s3://bucket/prefix?endpoint=https://storage.googleapis.com&region=auto&request_checksum_calculation=when_required&response_checksum_validation=when_required
+  ```
+
+  The two checksum options keep recent AWS SDKs from sending checksums some
+  S3-compatible stores reject. This URL has not been verified against a real
+  bucket by the dbbat project: test an upload, a download and a delete before
+  relying on it (the region to sign with is reported as `auto` or `us-east-1`).
+- **Azure Blob Storage** has no S3 API. It works only behind a gateway that
+  speaks S3 in front of it (S3Proxy is the open-source one); dbbat then sees an
+  ordinary S3 endpoint. dbbat does not test this.

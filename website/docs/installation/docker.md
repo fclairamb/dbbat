@@ -90,7 +90,7 @@ docker run -d \
   -p 5433:5433 -p 1522:1522 -p 3307:3307 -p 27018:27018 -p 1434:1434 -p 4200:4200 \
   -e DBB_DSN="postgres://user:pass@host:5432/dbbat" \
   -e DBB_DUMP_DIR="/var/dbbat/dumps" \
-  -e DBB_DUMP_RETENTION="72h" \
+  -e DBB_RETENTION_DUMPS_DELETE_AFTER="72h" \
   -v dbbat-dumps:/var/dbbat/dumps \
   ghcr.io/fclairamb/dbbat
 ```

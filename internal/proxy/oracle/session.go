@@ -1753,7 +1753,6 @@ const (
 	goroutineNameQueryRecord     = "oracle query record"
 	goroutineNameQueryCompletion = "oracle query completion"
 	goroutineNameVerifierUpgrade = "oracle api key verifier upgrade"
-	goroutineNameDumpRetention   = "oracle dump retention sweep"
 )
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.

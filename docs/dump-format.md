@@ -358,7 +358,7 @@ Two consequences worth stating plainly:
   cannot be appended to, so a live stream would mean multipart uploads and an
   invisible, incomplete upload on a crash. The trade is that a capture is lost
   if the pod dies mid-session — an accepted limitation.
-- **`DBB_DUMP_RETENTION` applies to the local spool only.** dbbat never expires
+- **`DBB_RETENTION_DUMPS_DELETE_AFTER` applies to the local spool only.** dbbat never expires
   an object it uploaded and never LISTs the bucket looking for one. Remote
   retention is the bucket's own lifecycle policy, and configuring it is part of
   deploying with an upload URL.

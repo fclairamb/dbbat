@@ -28,6 +28,14 @@ type CreateServerGroupRequest struct {
 	// clearing a list is a real policy change and has to be expressible.
 	AccessApproverUserGroupUIDs []uuid.UUID `json:"access_approver_user_group_uids"`
 	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
+
+	// ArchiveAfterSeconds and DeleteAfterSeconds are the group's retention
+	// windows, tri-state like a server's: absent leaves them alone, null
+	// inherits, a number sets them (0 means never). Several groups holding the
+	// same server resolve to the longest delete window and the shortest archive
+	// window.
+	ArchiveAfterSeconds store.OptionalSeconds `json:"archive_after_seconds"`
+	DeleteAfterSeconds  store.OptionalSeconds `json:"delete_after_seconds"`
 }
 
 // UpdateServerGroupRequest is the body for PATCH /server-groups/:uid. Same
@@ -126,6 +134,12 @@ func (s *Server) handleCreateServerGroup(c *gin.Context) {
 		return
 	}
 
+	if msg := s.validateRetentionSeconds(req.ArchiveAfterSeconds, req.DeleteAfterSeconds, nil, nil); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
 	created, err := s.store.CreateServerGroup(ctx, &store.ServerGroup{
 		Name:                        req.Name,
 		Description:                 req.Description,
@@ -145,6 +159,10 @@ func (s *Server) handleCreateServerGroup(c *gin.Context) {
 		return
 	}
 
+	if !s.applyGroupRetention(c, created, req.ArchiveAfterSeconds, req.DeleteAfterSeconds) {
+		return
+	}
+
 	if len(req.MemberUIDs) > 0 {
 		if err := s.store.SetServerGroupMembers(ctx, created.UID, req.MemberUIDs); err != nil {
 			writeInternalError(c, s.logger, err, "failed to set server group members")
@@ -159,7 +177,11 @@ func (s *Server) handleCreateServerGroup(c *gin.Context) {
 		"member_uids":                     req.MemberUIDs,
 		"access_approver_user_group_uids": created.AccessApproverUserGroupUIDs,
 		"query_approver_user_group_uids":  created.QueryApproverUserGroupUIDs,
+		"archive_after_seconds":           created.ArchiveAfterSeconds,
+		"delete_after_seconds":            created.DeleteAfterSeconds,
 	})
+
+	s.wakeRetention()
 
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
 		EventType:   "server_group.created",
@@ -312,6 +334,10 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 		return
 	}
 
+	if !s.applyGroupRetention(c, group, req.ArchiveAfterSeconds, req.DeleteAfterSeconds) {
+		return
+	}
+
 	// A nil member_uids means "don't touch membership"; an explicit (even
 	// empty) list replaces it wholesale.
 	if req.MemberUIDs != nil {
@@ -322,6 +348,9 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 		}
 	}
 
+	// Membership and windows are policy: apply to stored data at the next pass.
+	s.wakeRetention()
+
 	currentUser := getCurrentUser(c)
 
 	details, _ := json.Marshal(map[string]any{
@@ -330,6 +359,8 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 		"member_uids":                     req.MemberUIDs,
 		"access_approver_user_group_uids": group.AccessApproverUserGroupUIDs,
 		"query_approver_user_group_uids":  group.QueryApproverUserGroupUIDs,
+		"archive_after_seconds":           group.ArchiveAfterSeconds,
+		"delete_after_seconds":            group.DeleteAfterSeconds,
 	})
 
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
@@ -509,6 +540,8 @@ func (s *Server) handleAddServerGroupMember(c *gin.Context) {
 		Details:     details,
 	})
 
+	s.wakeRetention()
+
 	successResponse(c, gin.H{
 		"message":             "member added",
 		"live_grants_widened": radius.Grants,
@@ -557,6 +590,8 @@ func (s *Server) handleRemoveServerGroupMember(c *gin.Context) {
 		PerformedBy: &currentUser.UID,
 		Details:     details,
 	})
+
+	s.wakeRetention()
 
 	successResponse(c, gin.H{"message": "member removed"})
 }

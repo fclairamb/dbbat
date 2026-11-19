@@ -34,7 +34,7 @@ import (
 //     checkMissingStamp).
 //
 // One thing is not a break, and is reported separately: a chain whose *prefix*
-// is missing. On the queries side that is what DBB_QUERY_STORAGE_RETENTION does
+// is missing. On the queries side that is what DBB_RETENTION_QUERIES_DELETE_AFTER does
 // to a long-lived session, so treating it as tampering would cry wolf on every
 // deployment that sets a retention. Everything after the truncation is still
 // verified; what is lost is only the proof that the removed prefix existed. On
@@ -104,13 +104,13 @@ type QueryChainResult struct {
 	Verified int64
 	// TruncatedPrefix is true when the chain does not start at 1 but something
 	// still survives — the expected shape for a connection whose *oldest*
-	// statements were reaped by DBB_QUERY_STORAGE_RETENTION.
+	// statements were reaped by DBB_RETENTION_QUERIES_DELETE_AFTER.
 	TruncatedPrefix bool
 	// EmptiedByRetention is true when *no* statement of the session survives
 	// and the query window accounts for it (see checkEmptiedChain).
 	//
 	// Deliberately disjoint from TruncatedPrefix rather than the extreme of it:
-	// with DBB_CONNECTION_RETENTION longer than DBB_QUERY_STORAGE_RETENTION,
+	// with DBB_RETENTION_CONNECTIONS_DELETE_AFTER longer than DBB_RETENTION_QUERIES_DELETE_AFTER,
 	// every closed session between the two windows is in this state by design,
 	// so folding it into the truncated count would drown the thing an operator
 	// actually watches — a chain that lost only part of itself.
@@ -167,7 +167,15 @@ type RowChainsResult struct {
 	// Nothing sealed them, so they are reported rather than counted as
 	// verified — the same treatment pre-anchor audit rows get.
 	Unchained int64
-	Break     *ChainBreak
+	// Archived is how many captures were not walked because their connection's
+	// rows live in the archive bucket (archived_at set): not a break. Their
+	// object's SHA-256 is sealed in a connection.archived audit entry, and no
+	// bucket access is needed. ArchiveDeleted is the same for connections whose
+	// archive was deleted at its delete window (a connection.archive_deleted
+	// entry excuses the missing rows).
+	Archived       int64
+	ArchiveDeleted int64
+	Break          *ChainBreak
 }
 
 // OK reports whether every capture walked verified.
@@ -743,7 +751,7 @@ func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) 
 	// There is no head to compare against, so this is judged on its own terms
 	// rather than by the prefix rules below.
 	if result.Verified == 0 && conn.QueryChainLen > 0 {
-		s.checkEmptiedChain(result, conn)
+		s.checkEmptiedChain(ctx, result, conn)
 
 		return nil
 	}
@@ -889,7 +897,7 @@ func (s *Store) checkMissingStamp(result *QueryChainResult, conn Connection) {
 //
 // Two things produce it, and they are indistinguishable from `queries` alone:
 //
-//  1. DBB_QUERY_STORAGE_RETENTION reaped every statement of a session whose
+//  1. DBB_RETENTION_QUERIES_DELETE_AFTER reaped every statement of a session whose
 //     connection row survived the same sweep. That happens to a long-lived
 //     session — pooled or idle — that went quiet well before it closed, or that
 //     is still open (the sweep never reaps an open connection row, only its
@@ -913,7 +921,7 @@ func (s *Store) checkMissingStamp(result *QueryChainResult, conn Connection) {
 // statement left in the store), because a young or quiet store has its oldest
 // surviving statement a few minutes back, which would excuse nearly every
 // session. The cost of that choice is one caveat: raising or disabling
-// DBB_QUERY_STORAGE_RETENTION moves the cutoff backwards, so sessions the
+// DBB_RETENTION_QUERIES_DELETE_AFTER moves the cutoff backwards, so sessions the
 // *previous* setting legitimately emptied can start reading as breaks. Lowering
 // it never can.
 //
@@ -925,8 +933,10 @@ func (s *Store) checkMissingStamp(result *QueryChainResult, conn Connection) {
 // session's `connection.opened` audit entry carries the connected_at the session
 // actually had, chained; comparing the two is what catches the backdating, and
 // nothing in this walk does that for you.
-func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
-	if s.retentionCouldEmpty(conn) {
+func (s *Store) checkEmptiedChain(ctx context.Context, result *QueryChainResult, conn Connection) {
+	window := s.DeleteWindowForConnection(ctx, conn.DatabaseID)
+
+	if s.statementsPastWindow(conn, window) {
 		// The whole chain is gone rather than just its oldest statements.
 		// Counted on its own, not as a truncated prefix: with a connection
 		// window longer than the query window this is the ordinary state of
@@ -938,23 +948,17 @@ func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
 		return
 	}
 
-	window := "DBB_QUERY_STORAGE_RETENTION is disabled, so nothing legitimately deletes statements"
-	if s.queryRetention > 0 {
-		window = fmt.Sprintf(
+	explanation := "no retention window applies to this session's server, so nothing legitimately deletes statements"
+	if window > 0 {
+		explanation = fmt.Sprintf(
 			"the session connected at %s, inside the %s retention window, so the sweep cannot have reaped them",
-			conn.ConnectedAt.UTC().Format(time.RFC3339), s.queryRetention)
+			conn.ConnectedAt.UTC().Format(time.RFC3339), window)
 	}
 
 	result.Break = stampBreak(result, conn, fmt.Sprintf(
 		"the connection recorded %d statements and none survive: %s. "+
 			"The session's statements were removed",
-		conn.QueryChainLen, window))
-}
-
-// retentionCouldEmpty reports whether DBB_QUERY_STORAGE_RETENTION can account
-// for a session having no statements left.
-func (s *Store) retentionCouldEmpty(conn Connection) bool {
-	return s.StatementsPastRetention(conn)
+		conn.QueryChainLen, explanation))
 }
 
 // StatementsPastRetention reports whether the configured query-history window
@@ -984,12 +988,19 @@ func (s *Store) retentionCouldEmpty(conn Connection) bool {
 // Note it is the **query** window that decides this, never the connection one:
 // the connection window only decides whether the ledger row itself still
 // exists.
-func (s *Store) StatementsPastRetention(conn Connection) bool {
-	if s.queryRetention <= 0 {
+//
+// The window is the one resolved for the connection's server (server, server
+// group, instance), by the same resolver the sweep uses.
+func (s *Store) StatementsPastRetention(ctx context.Context, conn Connection) bool {
+	return s.statementsPastWindow(conn, s.DeleteWindowForConnection(ctx, conn.DatabaseID))
+}
+
+func (s *Store) statementsPastWindow(conn Connection, window time.Duration) bool {
+	if window <= 0 {
 		return false
 	}
 
-	return conn.ConnectedAt.Before(time.Now().Add(-s.queryRetention))
+	return conn.ConnectedAt.Before(time.Now().Add(-window))
 }
 
 // checkLegacyStampedHead handles a session stamped in the unkeyed format: the
@@ -1041,7 +1052,7 @@ func (s *Store) stampedPrefixMAC(
 			conn.QueryChainLen, result.HeadSeq)), nil
 	}
 
-	// Below the oldest survivor: DBB_QUERY_STORAGE_RETENTION reaped the
+	// Below the oldest survivor: DBB_RETENTION_QUERIES_DELETE_AFTER reaped the
 	// statement the stamp sealed. Nothing left to check it against.
 	if conn.QueryChainLen < result.FirstSeq {
 		return nil, nil, nil
@@ -1113,6 +1124,13 @@ func (s *Store) VerifyRowChains(ctx context.Context, connectionUID *uuid.UUID) (
 	}
 
 	result.Unchained = unchained
+
+	archived, deleted, err := s.countArchivedCaptures(ctx, connectionUID)
+	if err != nil {
+		return result, err
+	}
+
+	result.Archived, result.ArchiveDeleted = archived, deleted
 
 	uids, err := s.capturedQueryUIDs(ctx, connectionUID)
 	if err != nil {
@@ -1197,6 +1215,10 @@ func (s *Store) capturedQueryUIDs(ctx context.Context, connectionUID *uuid.UUID)
 		}).
 		Order("q.uid ASC")
 
+	// A connection whose rows were archived has none left in query_rows by
+	// design: it is counted apart (countArchivedCaptures), not walked.
+	q = q.Where("q.connection_id NOT IN (SELECT uid FROM connections WHERE archived_at IS NOT NULL)")
+
 	if connectionUID != nil {
 		q = q.Where("q.connection_id = ?", *connectionUID)
 	}
@@ -1206,6 +1228,31 @@ func (s *Store) capturedQueryUIDs(ctx context.Context, connectionUID *uuid.UUID)
 	}
 
 	return uids, nil
+}
+
+// countArchivedCaptures counts the captures (statements with a row chain head)
+// whose connection's rows were archived, split by whether the archive object
+// still exists.
+func (s *Store) countArchivedCaptures(ctx context.Context, connectionUID *uuid.UUID) (int64, int64, error) {
+	var archived, deleted int64
+
+	q := s.db.NewSelect().
+		TableExpr("queries AS q").
+		ColumnExpr("count(*) FILTER (WHERE c.archive_deleted_at IS NULL)").
+		ColumnExpr("count(*) FILTER (WHERE c.archive_deleted_at IS NOT NULL)").
+		Join("JOIN connections AS c ON c.uid = q.connection_id").
+		Where("c.archived_at IS NOT NULL").
+		Where("q.row_chain_mac IS NOT NULL")
+
+	if connectionUID != nil {
+		q = q.Where("c.uid = ?", *connectionUID)
+	}
+
+	if err := q.Scan(ctx, &archived, &deleted); err != nil {
+		return 0, 0, fmt.Errorf("failed to count archived captures: %w", err)
+	}
+
+	return archived, deleted, nil
 }
 
 // VerifyRowChain walks one capture's result-row chain.

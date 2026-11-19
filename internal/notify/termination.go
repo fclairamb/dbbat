@@ -233,3 +233,25 @@ func terminationReasonText(ev store.TerminationEvent) string {
 		return EscapeSlackText(ev.Reason)
 	}
 }
+
+// NotifyArchiveFailure posts one Slack message to the default channel saying
+// the archive bucket has been failing for a while. The archiver calls it at
+// most once per outage (it re-arms after the next successful pass), which is
+// the coalescing: an outage is one message, not one per hourly pass.
+//
+// Best-effort like every other notice: a failed post is logged and swallowed.
+func (n *SlackNotifier) NotifyArchiveFailure(ctx context.Context, cause error) {
+	if n == nil || n.channel == "" {
+		return
+	}
+
+	text := fmt.Sprintf(
+		":warning: dbbat cannot reach its archive bucket (DBB_ARCHIVE_URL). Closed sessions are not being archived, "+
+			"and their statements are kept in PostgreSQL past their delete window until the bucket works again.\nLast error: %s",
+		cause,
+	)
+
+	if _, _, err := n.client.PostMessageContext(ctx, n.channel, slack.MsgOptionText(text, false)); err != nil {
+		n.log.WarnContext(ctx, "slack archive failure post failed", slog.Any("error", err))
+	}
+}
