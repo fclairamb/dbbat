@@ -5,6 +5,8 @@ import (
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha512"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -280,6 +282,61 @@ func (s *O5LogonServer) DeriveCombinedKey(encClientSessKey string) error {
 	s.CombinedKey = candidates[0]
 
 	return nil
+}
+
+// speedyKeyLen is the length of the PBKDF2 "speedy key" a verifier-18453
+// client derives from its password (one HMAC-SHA512 block).
+const speedyKeyLen = sha512.Size
+
+// VerifySpeedyKey proves, on the server, that a client which sent no
+// AUTH_PASSWORD holds the key behind this verifier.
+//
+// A verifier-18453 client sends AUTH_PBKDF2_SPEEDY_KEY: 16 random bytes and its
+// speedy key, encrypted under the combined key. Only a holder of the password
+// can produce a speedy key whose SHA-512 with the salt is the stored verifier
+// key, which is the check a real Oracle server makes. The AUTH_SVR_RESPONSE
+// marker is no substitute: the client checks it, so a client that skips the
+// check proves nothing.
+//
+// On success the negotiated combined key is stored on the receiver, like
+// DecryptPassword does. Verifier 6949 has no speedy key and is always refused.
+func (s *O5LogonServer) VerifySpeedyKey(encClientSessKey, encSpeedyKey string) error {
+	if s.verifierType != VerifierType18453 || encSpeedyKey == "" {
+		return ErrSpeedyKeyMismatch
+	}
+
+	encClientSessKeyBytes, err := hex.DecodeString(encClientSessKey)
+	if err != nil {
+		return fmt.Errorf("decode client session key: %w", err)
+	}
+
+	clientSessionKey, err := s.decryptSessionKey(encClientSessKeyBytes)
+	if err != nil {
+		return fmt.Errorf("decrypt client session key: %w", err)
+	}
+
+	encSpeedy, err := hex.DecodeString(encSpeedyKey)
+	if err != nil {
+		return fmt.Errorf("decode speedy key: %w", err)
+	}
+
+	for _, key := range s.combinedKeyCandidates(clientSessionKey) {
+		plain, err := aesCBCDecryptZeroIV(key, encSpeedy, false)
+		if err != nil || len(plain) < o5LogonPasswordPrefixLen+speedyKeyLen {
+			continue
+		}
+
+		speedy := plain[o5LogonPasswordPrefixLen : o5LogonPasswordPrefixLen+speedyKeyLen]
+
+		hash := sha512.Sum512(append(append([]byte{}, speedy...), s.salt...))
+		if subtle.ConstantTimeCompare(hash[:32], s.verifierKey) == 1 {
+			s.CombinedKey = key
+
+			return nil
+		}
+	}
+
+	return ErrSpeedyKeyMismatch
 }
 
 // CloneForCandidate returns an O5LogonServer configured like s (verifier type,
