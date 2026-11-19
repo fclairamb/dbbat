@@ -311,7 +311,7 @@ type UserLastConnection struct {
 // never has. Absence from this response is therefore exact.
 //
 // It reads "last connection *still on record*", not "last connection ever":
-// connection rows are deletable and DBB_QUERY_STORAGE_RETENTION's sibling
+// connection rows are deletable and DBB_RETENTION_QUERIES_DELETE_AFTER's sibling
 // sweeps reap them, so a user whose sessions have all aged out reports as
 // never having connected. That is the correct reading of the stored evidence,
 // and the reason the column is labeled from the record rather than from

@@ -3,6 +3,7 @@ package oracle
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -562,6 +563,7 @@ func TestLogonAlterSession_RecordedClientsForwardedUnchanged(t *testing.T) {
 // upstream, and the client gets ORA-01031 naming the reason.
 func TestSendUpstreamAuthPhase2_RefusedAlterSessionNeverLeaves(t *testing.T) {
 	t.Parallel()
+	skipUnderForcedSyntheticAuth(t)
 
 	upstream := &recordingConn{}
 	body := phase2WithAlterSession(t, "ALTER SESSION SET CONTAINER=PDB2\x00")
@@ -620,4 +622,66 @@ func (c *recordingConn) Write(b []byte) (int, error) {
 	c.written += len(b)
 
 	return len(b), nil
+}
+
+// TestLogonAlterSession_BundledSQLPlusLongFormReadable replays the AUTH Phase 2
+// the DB-bundled sqlplus 23.26 sends (fclairamb/dbbat#500): its 489-byte
+// AUTH_ALTER_SESSION is in the wide long form, whose chunk lengths are ub4 LE.
+// Read as compressed ints, it refused every sqlplus login against 23ai with
+// "truncated value". The rewrite must still forward the pair verbatim.
+func TestLogonAlterSession_BundledSQLPlusLongFormReadable(t *testing.T) {
+	t.Parallel()
+
+	body := recordedFrames(t, "testdata/oci_bundled_auth_phase2.hex")[0]
+	require.True(t, payloadUsesWideKVEncoding(body))
+
+	for grantName, grant := range logonGrants() {
+		applied, err := gatePhase2(body, grant, true)
+		require.NoError(t, err, grantName)
+		require.Len(t, applied, 1, grantName)
+		require.True(t, strings.HasPrefix(applied[0], "ALTER SESSION SET NLS_LANGUAGE= 'AMERICAN'"), applied[0])
+		require.Contains(t, applied[0], "NLS_TIME_TZ_FORMAT=", "the whole 489-byte value, not a prefix")
+	}
+
+	keyAt := bytes.Index(body, []byte(authKeyAlterSession))
+	require.Positive(t, keyAt)
+
+	pair := body[keyAt : keyAt+len(authKeyAlterSession)+4+1+4+489+4+4]
+
+	out, err := rewriteAuthPhase2(body, "UPSTREAM_USER", &upstreamAuthSecrets{
+		encClientSessKey: "NEWSESS", encPassword: "NEWPWD",
+	}, true)
+	require.NoError(t, err)
+	require.True(t, bytes.Contains(out, pair), "AUTH_ALTER_SESSION forwarded verbatim")
+}
+
+// TestReadCLRWide pins the wide long form, and that it stays fail-closed: a
+// chunk running past the buffer or a missing terminator is unreadable.
+func TestReadCLRWide(t *testing.T) {
+	t.Parallel()
+
+	long := func(chunks ...[]byte) []byte {
+		out := []byte{0xFE}
+		for _, c := range chunks {
+			out = binary.LittleEndian.AppendUint32(out, uint32(len(c)))
+			out = append(out, c...)
+		}
+
+		return out
+	}
+
+	ab := append(long([]byte("ab"), []byte("cde")), 0, 0, 0, 0)
+	got, n := readCLRWide(append(ab, 0x99), true)
+	require.Equal(t, "abcde", string(got))
+	require.Equal(t, len(ab), n)
+
+	got, n = readCLRWide([]byte{3, 'x', 'y', 'z'}, true)
+	require.Equal(t, "xyz", string(got))
+	require.Equal(t, 4, n)
+
+	_, n = readCLRWide(long([]byte("ab")), true)
+	require.Zero(t, n, "no terminating chunk")
+
+	_, n = readCLRWide([]byte{0xFE, 9, 0, 0, 0, 'a'}, true)
+	require.Zero(t, n, "chunk past the buffer")
 }

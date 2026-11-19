@@ -165,7 +165,7 @@ column anyone with write access can rewrite. The one place that matters inside
 verification is the retention excuse of [A session emptied of every
 statement](#a-session-emptied-of-every-statement), which reads `connected_at`:
 backdating it buys the excuse, and only on a deployment that actually sets
-`DBB_QUERY_STORAGE_RETENTION` — with retention off, the default, `queryRetention
+`DBB_RETENTION_QUERIES_DELETE_AFTER` — with retention off, the default, `queryRetention
 <= 0` and no session is excused at all, so there is nothing to buy.
 
 **Two writes, not fatal ones.** A failed audit write is logged and the session
@@ -197,7 +197,7 @@ like every other.
 ### `queries` — one chain per connection
 
 The wire audit is where the compliance value peaks, but the table is
-high-volume and `DBB_QUERY_STORAGE_RETENTION` deletes from it. A single global
+high-volume and `DBB_RETENTION_QUERIES_DELETE_AFTER` deletes from it. A single global
 chain would break the first time retention ran. So each statement's MAC covers
 the previous statement **on the same connection**, and:
 
@@ -460,23 +460,23 @@ no stamp and is still skipped.
 That leaves the judgment. A stamped session with zero surviving statements has
 two possible causes, and `queries` alone cannot tell them apart:
 
-1. `DBB_QUERY_STORAGE_RETENTION` reaped them all while the session's own row
+1. `DBB_RETENTION_QUERIES_DELETE_AFTER` reaped them all while the session's own row
    survived. Three ways that happens, and the third is now the common one:
    a session that went quiet long before it closed — a pooled connection, an
    idle `psql` — keeps its row because the connection sweep only reaps rows
    whose `disconnected_at` is already past *its* cutoff; a session still
    **open**, which the sweep never reaps however old; and, since the two
    windows were split, **every closed session between them** when
-   `DBB_CONNECTION_RETENTION` is set longer than `DBB_QUERY_STORAGE_RETENTION`.
+   `DBB_RETENTION_CONNECTIONS_DELETE_AFTER` is set longer than `DBB_RETENTION_QUERIES_DELETE_AFTER`.
    Under a 30-day statement window and a one-year ledger window, eleven months
    of sessions are in this state at any time, by design.
 2. Someone deleted them.
 
 What separates them is time, and the only thing that says where the line runs is
 the configured retention window itself, which the store is given at startup
-(`store.Options.QueryRetention`, from the same `DBB_QUERY_STORAGE_RETENTION` the
+(`store.Options.QueryRetention`, from the same `DBB_RETENTION_QUERIES_DELETE_AFTER` the
 sweep reads). It is the **statement** window and never the ledger window:
-`DBB_CONNECTION_RETENTION` decides whether the connection row still exists, not
+`DBB_RETENTION_CONNECTIONS_DELETE_AFTER` decides whether the connection row still exists, not
 how many of its statements survive, so feeding the longer of the two here would
 excuse sessions nothing legitimately emptied. The sweep deletes by
 `executed_at < now - retention`, and every statement of a session ran at or
@@ -503,7 +503,7 @@ Two consequences worth stating plainly:
   deleted. And `connected_at` is itself a plain column on an unchained table, so
   an attacker who can `DELETE FROM queries` can equally
   `UPDATE connections SET connected_at` to buy the excuse. That is only worth
-  anything where the excuse exists: with `DBB_QUERY_STORAGE_RETENTION` unset —
+  anything where the excuse exists: with `DBB_RETENTION_QUERIES_DELETE_AFTER` unset —
   the default — nothing is excused and the backdating buys nothing. Where a
   retention *is* set, the session's `connection.opened` entry carries the
   `connected_at` it really had, chained; comparing the two is what catches the
@@ -512,7 +512,7 @@ Two consequences worth stating plainly:
   (say, the oldest statement left in the store), because a young or quiet store
   has its oldest surviving statement minutes old, which would excuse nearly
   every session. The cost is one caveat: **raising or disabling
-  `DBB_QUERY_STORAGE_RETENTION` moves the cutoff backwards**, so sessions the
+  `DBB_RETENTION_QUERIES_DELETE_AFTER` moves the cutoff backwards**, so sessions the
   previous setting legitimately emptied can start reading as breaks. Lowering it
   never can.
 
@@ -774,10 +774,10 @@ A `--queries` run reports the same way, plus a count that is *not* a failure:
 ```
 
 Neither count is a failure. `chains_with_retention_truncated_prefix` is what
-`DBB_QUERY_STORAGE_RETENTION` leaves behind on a long-lived session that still
+`DBB_RETENTION_QUERIES_DELETE_AFTER` leaves behind on a long-lived session that still
 has statements left — housekeeping, and everything after the truncation is
 still verified. `chains_emptied_by_retention` is the sessions that window
-emptied completely: under a `DBB_CONNECTION_RETENTION` longer than the
+emptied completely: under a `DBB_RETENTION_CONNECTIONS_DELETE_AFTER` longer than the
 statement window, that is simply how many closed sessions have aged out of
 statement history while their ledger row is kept, and it is expected to be
 large. The two are separate numbers precisely so the second cannot hide the

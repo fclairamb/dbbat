@@ -465,7 +465,7 @@ func newMutuProbeUser(t *testing.T, dataStore *store.Store, username string, gra
 	}
 
 	body := buildClientAuthPhase1((&session{}).syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq),
-		strings.ToUpper(username), defaultDriverIdentity(), logonModeNoNewPass, false)
+		strings.ToUpper(username), defaultDriverIdentity(), logonModeNoNewPass, false, false)
 
 	pkt := &TNSPacket{
 		Type:    TNSPacketTypeData,

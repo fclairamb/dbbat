@@ -823,8 +823,8 @@ export function useCreateGrantDefinition(options?: {
       }
       return response.data;
     },
-    onSuccess: (def) => {
-      queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
+    onSuccess: async (def) => {
+      await queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
       options?.onSuccess?.(def);
     },
     onError: options?.onError,
@@ -853,12 +853,16 @@ export function useUpdateGrantDefinition(options?: {
       }
       return response.data;
     },
-    onSuccess: (def) => {
-      queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
+    onSuccess: async (def) => {
+      // Await the refetch before the caller closes its dialog: re-opening the
+      // editor right away must prefill from the saved row, not a stale cache.
       // Grant requests embed the live version of their definition, so an edit
       // (which archives the current version and inserts a successor) changes
       // what every request against that lineage renders.
-      queryClient.invalidateQueries({ queryKey: ["grant-requests"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["grant-definitions"] }),
+        queryClient.invalidateQueries({ queryKey: ["grant-requests"] }),
+      ]);
       options?.onSuccess?.(def);
     },
     onError: options?.onError,
@@ -1599,6 +1603,29 @@ export function useInstance() {
       }
       return response.data;
     },
+  });
+}
+
+export function useUpdateInstanceRetention(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { archive_after: string; delete_after: string }) => {
+      const response = await apiClient.PUT("/instance/retention", { body });
+      if (response.error) {
+        throw new Error(
+          (response.error as { message?: string }).message ||
+            "Failed to save retention"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["instance"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
   });
 }
 

@@ -338,7 +338,7 @@ func TestGetActiveGrant_ReselectsAfterTheWinnerExpires(t *testing.T) {
 
 	// A: full write, so it wins the initial selection, but short-lived.
 	shortLived := newTestGrant(t, ctx, s, writeDef, user.UID, database.UID, admin.UID,
-		now.Add(-time.Minute), now.Add(700*time.Millisecond))
+		now.Add(-time.Minute), now.Add(4*time.Second))
 
 	// B: read-only, lower priority, but outlives A.
 	longLived := newTestGrant(t, ctx, s, readOnlyDef, user.UID, database.UID, admin.UID,
@@ -356,7 +356,7 @@ func TestGetActiveGrant_ReselectsAfterTheWinnerExpires(t *testing.T) {
 	// Let A lapse. Selection is a plain `expires_at > NOW()` filter, so this
 	// needs real time to pass — the margin is generous enough to absorb clock
 	// skew between the test process and Postgres.
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(4500 * time.Millisecond)
 
 	reconnected, err := s.GetActiveGrant(ctx, user.UID, database.UID)
 	if err != nil {

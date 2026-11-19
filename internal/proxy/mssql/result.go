@@ -73,8 +73,55 @@ type resultAccountant struct {
 	handle    int64
 	haveHandl bool
 
-	tail    [doneTokenLen]byte
-	tailLen int
+	tail messageTail
+}
+
+// messageTail keeps the last doneTokenLen bytes of a response message as it
+// streams past a packet at a time, which is exactly its final DONE-family
+// token.
+type messageTail struct {
+	buf [doneTokenLen]byte
+	len int
+}
+
+// record folds one packet's payload into the tail.
+func (t *messageTail) record(payload []byte) {
+	if len(payload) >= doneTokenLen {
+		t.len = copy(t.buf[:], payload[len(payload)-doneTokenLen:])
+
+		return
+	}
+
+	keep := min(t.len, doneTokenLen-len(payload))
+	copy(t.buf[:], t.buf[t.len-keep:t.len])
+	copy(t.buf[keep:], payload)
+	t.len = keep + len(payload)
+}
+
+// lastDone decodes the DONE-family token the message ended on, if it ended on
+// one.
+func (t *messageTail) lastDone() (doneToken, bool) {
+	if t.len < doneTokenLen {
+		return doneToken{}, false
+	}
+
+	switch t.buf[0] {
+	case tokenDone, tokenDoneProc, tokenDoneInProc:
+	default:
+		return doneToken{}, false
+	}
+
+	done, err := parseDoneBody(t.buf[1:])
+	if err != nil {
+		return doneToken{}, false
+	}
+
+	return done, true
+}
+
+// reset forgets the tail, at the start of the next message.
+func (t *messageTail) reset() {
+	t.len = 0
 }
 
 // newResultAccountant starts accounting for one response message.
@@ -154,16 +201,7 @@ func (a *resultAccountant) desync(ctx context.Context, err error) {
 // recordTail keeps the last doneTokenLen bytes of the message, which is exactly
 // its final DONE-family token.
 func (a *resultAccountant) recordTail(payload []byte) {
-	if len(payload) >= doneTokenLen {
-		a.tailLen = copy(a.tail[:], payload[len(payload)-doneTokenLen:])
-
-		return
-	}
-
-	keep := min(a.tailLen, doneTokenLen-len(payload))
-	copy(a.tail[:], a.tail[a.tailLen-keep:a.tailLen])
-	copy(a.tail[keep:], payload)
-	a.tailLen = keep + len(payload)
+	a.tail.record(payload)
 }
 
 // consumeToken advances past one token, returning how many bytes it took.
@@ -580,18 +618,9 @@ func (a *resultAccountant) finish(ctx context.Context) {
 
 // readTailDone decodes the DONE token sitting at the end of the message.
 func (a *resultAccountant) readTailDone() {
-	if a.tailLen < doneTokenLen {
-		return
-	}
-
-	switch a.tail[0] {
-	case tokenDone, tokenDoneInProc:
-	default:
-		return
-	}
-
-	done, err := parseDoneBody(a.tail[1:])
-	if err != nil || !done.HasCount {
+	// The backstop reads DONE and DONEINPROC only, never DONEPROC.
+	done, ok := a.tail.lastDone()
+	if !ok || a.tail.buf[0] == tokenDoneProc || !done.HasCount {
 		return
 	}
 
@@ -600,6 +629,11 @@ func (a *resultAccountant) readTailDone() {
 }
 
 // setPending registers the statement whose response is about to arrive.
+//
+// One slot is enough because the forward pump never sends a request while the
+// previous one is still unanswered: see claimUpstreamTurn in relay.go. Without
+// that, a pipelining client's second request would overwrite the first here,
+// and the first's response would be logged under the second's text.
 func (s *session) setPending(pending *pendingQuery) {
 	s.pendingMu.Lock()
 	s.pending = pending

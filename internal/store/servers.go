@@ -602,6 +602,12 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 // update query. Password and SSH-secret columns are handled by the caller,
 // which needs the encryption key.
 func applyServerColumnUpdates(q *bun.UpdateQuery, updates ServerUpdate) *bun.UpdateQuery {
+	if updates.ArchiveAfter.Set {
+		q = q.Set("archive_after_seconds = ?", updates.ArchiveAfter.Value)
+	}
+	if updates.DeleteAfter.Set {
+		q = q.Set("delete_after_seconds = ?", updates.DeleteAfter.Value)
+	}
 	if updates.Name != nil {
 		q = q.Set("name = ?", *updates.Name)
 	}

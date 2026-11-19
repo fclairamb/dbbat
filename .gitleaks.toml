@@ -52,3 +52,14 @@ identifier, not a literal.
 paths = ['''internal/proxy/oracle/session\.go''']
 regexes = ['''clientCombinedKey''']
 matchCondition = "AND"
+
+[[allowlists]]
+description = """
+A Go constant expression in the Oracle TTC decoder (a byte length named after
+the protocol's call token), not a secret. It was added, then removed as unused,
+on PR #507; gitleaks scans a PR's whole history, so the commit that added it
+stays in range.
+"""
+paths = ['''internal/proxy/oracle/ttc_decode\.go''']
+regexes = ['''wide64TokenBlockLen = closeCursorsWide8HeaderLen''']
+matchCondition = "AND"

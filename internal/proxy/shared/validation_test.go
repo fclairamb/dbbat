@@ -597,6 +597,15 @@ func TestIsAllowedAlterSession_Allows(t *testing.T) {
 		"ALTER SESSION SET NLS_LANGUAGE='AMERICAN' NLS_TERRITORY='AMERICA'  TIME_ZONE='+02:00'",
 		"ALTER SESSION SET NLS_DATE_FORMAT='DD-MON-YYYY HH24:MI:SS'",
 		"ALTER SESSION SET NLS_NUMERIC_CHARACTERS=',.'",
+		// The logon AUTH_ALTER_SESSION of the DB-bundled sqlplus 23.26
+		// (oracle/testdata/oci_bundled_auth_phase2.hex), whose TIME formats
+		// were missing from the list (fclairamb/dbbat#500).
+		"ALTER SESSION SET NLS_LANGUAGE= 'AMERICAN' NLS_TERRITORY= 'AMERICA' NLS_CURRENCY= '$' " +
+			"NLS_ISO_CURRENCY= 'AMERICA' NLS_NUMERIC_CHARACTERS= '.,' NLS_CALENDAR= 'GREGORIAN' " +
+			"NLS_DATE_FORMAT= 'DD-MON-RR' NLS_DATE_LANGUAGE= 'AMERICAN' NLS_SORT= 'BINARY' " +
+			"TIME_ZONE= '+00:00' NLS_COMP= 'BINARY' NLS_DUAL_CURRENCY= '$' " +
+			"NLS_TIME_FORMAT= 'HH.MI.SSXFF AM' NLS_TIMESTAMP_FORMAT= 'DD-MON-RR HH.MI.SSXFF AM' " +
+			"NLS_TIME_TZ_FORMAT= 'HH.MI.SSXFF AM TZR' NLS_TIMESTAMP_TZ_FORMAT= 'DD-MON-RR HH.MI.SSXFF AM TZR'",
 		// The _OPTIMIZER_ family rule, on a hint no recording carries.
 		`ALTER SESSION SET "_optimizer_use_feedback" = FALSE`,
 	}, alterSessionCorpusStatements...)
@@ -1554,5 +1563,44 @@ func TestValidateOracleLogonAlterSession(t *testing.T) {
 		"ALTER SYSTEM SET X=1",
 	} {
 		require.ErrorIs(t, ValidateOracleLogonAlterSession(sql, full), ErrOracleLogonAlterSessionShape, sql)
+	}
+}
+
+func TestIsDDLQuery_ExplainAnalyze(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"EXPLAIN ANALYZE CREATE TABLE t AS SELECT 1",
+		"explain anal" + "yse verbose create table t as select 1",
+		"EXPLAIN (ANALYZE, BUFFERS) CREATE MATERIALIZED VIEW v AS SELECT 1",
+		"EXPLAIN /* c */ ANALYZE SELECT 1 INTO t2",
+	} {
+		assert.True(t, IsDDLQuery(sql), "should be DDL: %s", sql)
+	}
+
+	for _, sql := range []string{
+		"EXPLAIN ANALYZE SELECT * FROM t",
+		"EXPLAIN SELECT 1",
+		"EXPLAIN (ANALYZE, BUFFERS) SELECT 1",
+		"EXPLAIN CREATE TABLE t AS SELECT 1",
+		"EXPLAINX",
+	} {
+		assert.False(t, IsDDLQuery(sql), "should not be DDL: %s", sql)
+	}
+}
+
+func TestValidateOracleQuery_CallUnderBlockDDL(t *testing.T) {
+	t.Parallel()
+
+	fullWrite := &store.Grant{Definition: &store.GrantDefinition{}}
+	blockDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
+
+	for _, sql := range []string{"CALL pkg.run()", "call pkg.run()", "/* hi */ call pkg.run()"} {
+		require.ErrorIs(t, ValidateOracleQuery(sql, blockDDL), ErrDDLProcedureCall, "block_ddl: %s", sql)
+		require.NoError(t, ValidateOracleQuery(sql, fullWrite), "full write: %s", sql)
+	}
+
+	for _, sql := range []string{"SELECT 1 FROM dual", "BEGIN DBMS_OUTPUT.ENABLE; END;"} {
+		require.NoError(t, ValidateOracleQuery(sql, blockDDL), "block_ddl: %s", sql)
 	}
 }

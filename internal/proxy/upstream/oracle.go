@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"net"
 	"time"
 
@@ -15,6 +16,12 @@ import (
 // transport, and a caller that silently dialed on its own would bypass the SSH
 // tunnel entirely.
 var ErrOracleConnectorShape = errors.New("go-ora connector does not expose a dialer hook")
+
+// ErrOracleDriverPanic is what a panic inside go-ora becomes. go-ora v3.0.1
+// indexed past the end of Oracle 18c XE's 41-byte Accept (issue #500); a
+// driver bug of that kind must fail one connection attempt, not take the
+// process down with it.
+var ErrOracleDriverPanic = errors.New("the Oracle driver could not parse the server's reply")
 
 // OracleConfig is everything an Oracle login needs from a server row.
 type OracleConfig struct {
@@ -61,7 +68,45 @@ func ConnectOracle(ctx context.Context, dial DialFunc, cfg OracleConfig) (driver
 
 	connector.Dialer(oracleDialer(dial))
 
-	return connector.Connect(ctx)
+	return RecoveringOracleConnector(connector).Connect(ctx)
+}
+
+// RecoveringOracleConnector wraps a go-ora connector so a panic raised while
+// connecting comes back as an ErrOracleDriverPanic error. Every go-ora login in
+// dbbat goes through it: ConnectOracle here, and the MCP executor's
+// database/sql pool.
+func RecoveringOracleConnector(c driver.Connector) driver.Connector {
+	return recoveringConnector{Connector: c}
+}
+
+// recoveringConnector is the driver.Connector RecoveringOracleConnector returns.
+type recoveringConnector struct {
+	driver.Connector
+}
+
+// Connect runs the wrapped Connect, turning a panic into an error.
+func (c recoveringConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	var (
+		conn driver.Conn
+		err  error
+	)
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if conn != nil {
+					_ = conn.Close()
+				}
+
+				conn = nil
+				err = fmt.Errorf("%w: %v", ErrOracleDriverPanic, r)
+			}
+		}()
+
+		conn, err = c.Connector.Connect(ctx)
+	}()
+
+	return conn, err
 }
 
 // oracleDSN renders the go-ora connect string for a server row. Split out from

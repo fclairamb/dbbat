@@ -518,15 +518,15 @@ func TestThinSyntheticAuthLeg_ShortValues_ByteIdentical(t *testing.T) {
 
 	h1 := sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
 	assert.Equal(t,
-		buildClientAuthPhase1(h1, "SYSTEM", ident, logonModeNoNewPass, false),
-		buildClientAuthPhase1(h1, "SYSTEM", ident, logonModeNoNewPass, true),
+		buildClientAuthPhase1(h1, "SYSTEM", ident, logonModeNoNewPass, false, false),
+		buildClientAuthPhase1(h1, "SYSTEM", ident, logonModeNoNewPass, true, false),
 		"today's thin synthetic Phase 1 must be byte-identical in both CLR forms")
 
 	h2 := sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq)
 	mode2 := uint32(logonModeNoNewPass | logonModeUserAndPass)
-	body2 := buildClientAuthPhase2(h2, "SYSTEM", ident, sec, mode2, true)
+	body2 := buildClientAuthPhase2(h2, "SYSTEM", ident, sec, mode2, true, false)
 	assert.Equal(t,
-		buildClientAuthPhase2(h2, "SYSTEM", ident, sec, mode2, false),
+		buildClientAuthPhase2(h2, "SYSTEM", ident, sec, mode2, false, false),
 		body2,
 		"today's thin synthetic Phase 2 must be byte-identical in both CLR forms")
 
@@ -545,11 +545,11 @@ func TestThinSyntheticAuthLeg_ShortValues_ByteIdentical(t *testing.T) {
 	// the long form. A maximum-length one must still land verbatim in both forms.
 	maxIdent := strings.Repeat("U", 128)
 	assert.Equal(t,
-		buildClientAuthPhase1(h1, maxIdent, ident, logonModeNoNewPass, false),
-		buildClientAuthPhase1(h1, maxIdent, ident, logonModeNoNewPass, true),
+		buildClientAuthPhase1(h1, maxIdent, ident, logonModeNoNewPass, false, false),
+		buildClientAuthPhase1(h1, maxIdent, ident, logonModeNoNewPass, true, false),
 		"a 128-byte identifier stays on the short form in both CLR forms")
 	assert.Contains(t,
-		string(buildClientAuthPhase1(h1, maxIdent, ident, logonModeNoNewPass, true)),
+		string(buildClientAuthPhase1(h1, maxIdent, ident, logonModeNoNewPass, true, false)),
 		string(ttcClr([]byte(maxIdent))),
 		"the username must still be written with ttcClr, contiguous and unchunked")
 }
@@ -582,7 +582,7 @@ func TestThinSyntheticAuthLeg_LongValue_RoundTrip(t *testing.T) {
 		pairs := authPhase1Pairs(ident)
 		preamble := thinSyntheticPhase1PreambleLen(header, "SYSTEM", logonModeNoNewPass)
 
-		body := buildClientAuthPhase1(header, "SYSTEM", ident, logonModeNoNewPass, true)
+		body := buildClientAuthPhase1(header, "SYSTEM", ident, logonModeNoNewPass, true, false)
 
 		decoded := decodeKVPairs(t, body[preamble:], len(pairs), true)
 		assert.Equal(t, longHost, decoded["AUTH_TERMINAL"])
@@ -597,7 +597,7 @@ func TestThinSyntheticAuthLeg_LongValue_RoundTrip(t *testing.T) {
 
 		// The pre-fix write side, on the same identity: single-byte chunk lengths,
 		// which the upstream that advertised the capability cannot parse back.
-		legacy := buildClientAuthPhase1(header, "SYSTEM", ident, logonModeNoNewPass, false)
+		legacy := buildClientAuthPhase1(header, "SYSTEM", ident, logonModeNoNewPass, false, false)
 		require.NotEqual(t, legacy, body,
 			"past the short-form limit the two encodings must differ or the fix is inert")
 
@@ -614,7 +614,7 @@ func TestThinSyntheticAuthLeg_LongValue_RoundTrip(t *testing.T) {
 		pairs := authPhase2Pairs(ident, sec, false)
 		preamble := thinSyntheticPhase2PreambleLen(header, "SYSTEM", mode, len(pairs))
 
-		body := buildClientAuthPhase2(header, "SYSTEM", ident, sec, mode, true)
+		body := buildClientAuthPhase2(header, "SYSTEM", ident, sec, mode, true, false)
 
 		decoded := decodeKVPairs(t, body[preamble:], len(pairs), true)
 		assert.Equal(t, longSpeedyKey, decoded["AUTH_PBKDF2_SPEEDY_KEY"],
@@ -627,7 +627,7 @@ func TestThinSyntheticAuthLeg_LongValue_RoundTrip(t *testing.T) {
 
 		assert.NotContains(t, string(body), longSpeedyKey)
 
-		legacy := buildClientAuthPhase2(header, "SYSTEM", ident, sec, mode, false)
+		legacy := buildClientAuthPhase2(header, "SYSTEM", ident, sec, mode, false, false)
 		require.NotEqual(t, legacy, body,
 			"past the short-form limit the two encodings must differ or the fix is inert")
 	})

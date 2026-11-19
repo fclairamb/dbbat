@@ -220,14 +220,14 @@ type queryChainVerifyResponse struct {
 	// Statements is how many chained statements were checked across them.
 	Statements int64 `json:"statements"`
 	// ChainsWithTruncatedPrefix counts chains missing their oldest statements
-	// but still holding some. That is what DBB_QUERY_STORAGE_RETENTION leaves
+	// but still holding some. That is what DBB_RETENTION_QUERIES_DELETE_AFTER leaves
 	// behind on a long-lived session, so it is reported rather than treated as
 	// tampering.
 	ChainsWithTruncatedPrefix int64 `json:"chains_with_truncated_prefix"`
 	// ChainsEmptiedByRetention counts sessions with no statement left at all,
 	// accounted for by the same window. Reported apart from the count above
-	// rather than folded into it: with DBB_CONNECTION_RETENTION longer than
-	// DBB_QUERY_STORAGE_RETENTION every closed session between the two windows
+	// rather than folded into it: with DBB_RETENTION_CONNECTIONS_DELETE_AFTER longer than
+	// DBB_RETENTION_QUERIES_DELETE_AFTER every closed session between the two windows
 	// is in this state by design, so one number would drown the other.
 	ChainsEmptiedByRetention int64 `json:"chains_emptied_by_retention"`
 	// There is deliberately no unkeyed-stamp counter. A session carrying the
@@ -266,6 +266,13 @@ type rowChainVerifyResponse struct {
 	// UnverifiablePreMigrationRows counts captured rows written before the row
 	// chain migration. Nothing sealed them and nothing can, after the fact.
 	UnverifiablePreMigrationRows int64 `json:"unverifiable_pre_migration_rows"`
+	// ChainsArchived counts the captures whose rows live in the archive bucket
+	// (not walked, not a break: the object's SHA-256 is sealed in a
+	// connection.archived entry). ChainsArchiveDeleted counts those whose
+	// archive was deleted at its delete window, excused by a
+	// connection.archive_deleted entry.
+	ChainsArchived       int64 `json:"chains_archived"`
+	ChainsArchiveDeleted int64 `json:"chains_archive_deleted"`
 	// HeadRowNumber and HeadMAC are only meaningful for a single capture, so
 	// they are reported for a query-scoped walk and omitted otherwise.
 	HeadRowNumber *int64          `json:"head_row_number,omitempty"`
@@ -527,6 +534,8 @@ func (s *Server) walkRowChains(ctx context.Context, connectionUID, queryUID *uui
 		Captures:                     result.Captures,
 		Rows:                         result.Verified,
 		UnverifiablePreMigrationRows: result.Unchained,
+		ChainsArchived:               result.Archived,
+		ChainsArchiveDeleted:         result.ArchiveDeleted,
 		Break:                        newChainBreakBody(result.Break),
 		CheckedAt:                    time.Now().UTC(),
 	}

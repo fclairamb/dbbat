@@ -493,6 +493,20 @@ func (s *Store) ListGrants(ctx context.Context, filter GrantFilter) ([]Grant, er
 // overlapping grants attribute traffic separately instead of double-counting
 // it — see TestGrantCounters_StampedConnectionExcludedFromOtherGrantsWindow.
 func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error {
+	queryCount, bytesTransferred, err := s.grantCounters(ctx, g, nil)
+	if err != nil {
+		return err
+	}
+
+	g.QueryCount = queryCount
+	g.BytesTransferred = bytesTransferred
+
+	return nil
+}
+
+// grantCounters is populateGrantCounters' aggregate, minus the connections in
+// exclude.
+func (s *Store) grantCounters(ctx context.Context, g *AccessGrant, exclude []uuid.UUID) (int64, int64, error) {
 	upper := g.ExpiresAt
 	if g.RevokedAt != nil && g.RevokedAt.Before(upper) {
 		upper = *g.RevokedAt
@@ -518,26 +532,72 @@ func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error
 			g.UID, g.UserID, g.ServerGroupUID, g.DatabaseID, g.ServerGroupUID).
 		Where("q.executed_at >= ?", g.StartsAt).
 		Where("q.executed_at < ?", upper).
+		Apply(excludeConnections("c.uid", exclude)).
 		Scan(ctx, &queryCount)
 	if err != nil {
-		return fmt.Errorf("failed to aggregate grant query count: %w", err)
+		return 0, 0, fmt.Errorf("failed to aggregate grant query count: %w", err)
 	}
 
-	bytesTransferred, err := s.grantBytesTransferred(ctx, g)
+	bytesTransferred, err := s.grantBytesTransferred(ctx, g, exclude)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 
-	g.QueryCount = queryCount
-	g.BytesTransferred = bytesTransferred
-	return nil
+	return queryCount, bytesTransferred, nil
+}
+
+// excludeConnections leaves the listed connections out of an aggregate. A
+// no-op for an empty list.
+func excludeConnections(column string, exclude []uuid.UUID) func(*bun.SelectQuery) *bun.SelectQuery {
+	return func(q *bun.SelectQuery) *bun.SelectQuery {
+		if len(exclude) == 0 {
+			return q
+		}
+
+		return q.Where("? NOT IN (?)", bun.Ident(column), bun.List(exclude))
+	}
+}
+
+// GrantUsage reads a grant's consumption (statements, bytes) from the store,
+// leaving out the connections in exclude: the ones a replica counts in memory
+// (cache.UsageRegistry). It is the cache.UsageFetcher the heartbeat's refresh
+// uses, which is how one replica sees the others' traffic.
+func (s *Store) GrantUsage(ctx context.Context, grantUID uuid.UUID, exclude []uuid.UUID) (int64, int64, error) {
+	g := new(AccessGrant)
+
+	err := s.db.NewSelect().Model(g).Where("uid = ?", grantUID).Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, ErrGrantNotFound
+		}
+
+		return 0, 0, fmt.Errorf("failed to get grant: %w", err)
+	}
+
+	return s.grantCounters(ctx, g, exclude)
+}
+
+// GrantUsageRefreshInterval is how often each replica re-reads, from the
+// store, the consumption of the grants its live sessions hold. It bounds how
+// late a replica sees another replica's traffic on a shared grant quota (plus
+// the statements still in flight there). Five seconds keeps that window short
+// for one or two small aggregates per active quota-bearing grant.
+const GrantUsageRefreshInterval = 5 * time.Second
+
+// RefreshGrantUsage re-reads, from the store, the consumption of every grant
+// with a live quota-bearing session on this replica. Run by the heartbeat
+// every GrantUsageRefreshInterval.
+func (s *Store) RefreshGrantUsage(ctx context.Context) error {
+	return s.Usage().Refresh(ctx, s.GrantUsage)
 }
 
 // grantBytesTransferred is the grant's cumulative transfer across every
 // connection attributed to it, under the attribution rules populateGrantCounters
 // documents. It is the one definition of "bytes under this grant": the quota
 // and the byte soft limit (SweepGrantBytes) both read it.
-func (s *Store) grantBytesTransferred(ctx context.Context, g *AccessGrant) (int64, error) {
+//
+// exclude leaves those connections out (nil for none).
+func (s *Store) grantBytesTransferred(ctx context.Context, g *AccessGrant, exclude []uuid.UUID) (int64, error) {
 	upper := g.ExpiresAt
 	if g.RevokedAt != nil && g.RevokedAt.Before(upper) {
 		upper = *g.RevokedAt
@@ -553,6 +613,7 @@ func (s *Store) grantBytesTransferred(ctx context.Context, g *AccessGrant) (int6
 			g.UID, g.UserID, g.ServerGroupUID, g.DatabaseID, g.ServerGroupUID).
 		Where("connected_at >= ?", g.StartsAt).
 		Where("connected_at < ?", upper).
+		Apply(excludeConnections("uid", exclude)).
 		Scan(ctx, &bytesTransferred)
 	if err != nil {
 		return 0, fmt.Errorf("failed to aggregate grant bytes transferred: %w", err)

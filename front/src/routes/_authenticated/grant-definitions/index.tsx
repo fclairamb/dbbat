@@ -1196,6 +1196,15 @@ function DefinitionDialog({
               </div>
             </div>
           </div>
+          <p
+            className="text-xs text-muted-foreground"
+            data-testid="grant-definition-quota-help"
+          >
+            Each grant gets one budget, shared by all its sessions at once on
+            every database it covers: parallel connections draw on the same
+            quota. Sessions on other dbbat instances are seen within about
+            five seconds.
+          </p>
           <div className="space-y-2">
             <Label htmlFor="def-notify-channel">Slack channel</Label>
             <Select value={notifyChannel} onValueChange={setNotifyChannel}>

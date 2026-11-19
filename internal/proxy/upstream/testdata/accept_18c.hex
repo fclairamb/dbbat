@@ -1,0 +1,11 @@
+# Oracle 18c XE TNS Accept, 41 bytes (0x29), protocol version 315.
+# Constructed, not captured: the 18c XE image is amd64-only and could not be run
+# on the arm64 dev machine. The layout follows the CI stack trace of issue #500
+# (newAcceptPacketFromData({..., 0x29, 0x40})) and go-ora's parser: 8-byte
+# header, version, options, 16-bit SDU/TDU, NT characteristics, data length 0,
+# data offset 41, ACFL0/ACFL1, 32-bit SDU/TDU at [32:40], one trailing byte, and
+# no fast-auth negotiation flags at [41:45].
+0029 0000 0200 0000
+013b 0801 2000 ffff 7f08 0000 0029 0101
+0000 0000 0000 0000
+0000 2000 0000 ffff 00

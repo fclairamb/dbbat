@@ -30,9 +30,9 @@ func TestMaintenanceLoopPanicsDoNotEndTheProcess(t *testing.T) {
 	t.Run("query retention sweep", func(t *testing.T) {
 		t.Parallel()
 
-		sweeper := &queryRetentionSweeper{logger: logger, stop: make(chan struct{})}
+		sweeper := &retentionSweeper{logger: logger, stop: make(chan struct{})}
 
-		sweeper.guardedSweep(ctx)
+		sweeper.pass(ctx)
 	})
 
 	t.Run("heartbeat loop units", func(t *testing.T) {

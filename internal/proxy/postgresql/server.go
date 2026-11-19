@@ -11,13 +11,11 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -188,8 +186,6 @@ func (s *Server) Start(addr string) error {
 	if s.dumpConfig.Dir != "" {
 		if err := os.MkdirAll(s.dumpConfig.Dir, dump.DirPerm); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to create dump directory", slog.String("dir", s.dumpConfig.Dir), slog.Any("error", err))
-		} else {
-			go s.runDumpCleanup()
 		}
 	}
 
@@ -343,41 +339,6 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		}
 
 		s.logger.ErrorContext(s.ctx, "Session error", slog.Any("error", err), slog.Any("remote_addr", clientConn.RemoteAddr()))
-	}
-}
-
-const dumpCleanupInterval = 1 * time.Hour
-
-// goroutineNameDumpRetention is what a panic in a retention sweep is logged under.
-const goroutineNameDumpRetention = "postgresql dump retention sweep"
-
-// runDumpCleanup periodically cleans up old dump files.
-func (s *Server) runDumpCleanup() {
-	retention, err := time.ParseDuration(s.dumpConfig.Retention)
-	if err != nil {
-		retention = 24 * time.Hour
-	}
-
-	ticker := time.NewTicker(dumpCleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// One turn under the guard rather than the whole loop: a panic in a
-			// sweep must not take the process down, and must not retire retention
-			// for the life of the process either. See safe.RunMaintenance.
-			safe.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
-				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
-				if err != nil {
-					s.logger.ErrorContext(s.ctx, "dump cleanup failed", slog.Any("error", err))
-				} else if deleted > 0 {
-					s.logger.InfoContext(s.ctx, "cleaned up old dumps", slog.Int("deleted", deleted))
-				}
-			})
-		case <-s.shutdown:
-			return
-		}
 	}
 }
 

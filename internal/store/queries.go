@@ -66,6 +66,21 @@ func storableSQLText(s string) string {
 	return storableText(s)
 }
 
+// storableError repairs an upstream-chosen error message for the `error`
+// column. The text comes from the upstream server (on SQL Server a client can
+// pick it with THROW / RAISERROR), so a NUL in it must not make the insert
+// fail and drop an executed statement from the history. The chain MAC does not
+// cover this column.
+func storableError(s *string) *string {
+	if s == nil {
+		return nil
+	}
+
+	repaired := storableText(*s)
+
+	return &repaired
+}
+
 // storableParameters repairs the decoded parameter values before they are
 // marshaled to the `parameters` jsonb column, where a NUL (encoded as \u0000)
 // would make the whole insert fail. Raw holds base64 and is left alone. The
@@ -162,7 +177,7 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 		ExecutedAt:   query.ExecutedAt,
 		DurationMs:   query.DurationMs,
 		RowsAffected: query.RowsAffected,
-		Error:        query.Error,
+		Error:        storableError(query.Error),
 		// COPY metadata, set by the protocols that recognize a bulk transfer
 		// (PostgreSQL today). Nil for every other statement.
 		CopyFormat:    query.CopyFormat,
@@ -210,7 +225,7 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 // connection it belongs to.
 //
 // The chain is per connection rather than global on purpose: retention
-// (DBB_QUERY_STORAGE_RETENTION) deletes whole connections, which would sever a
+// (DBB_RETENTION_QUERIES_DELETE_AFTER) deletes whole connections, which would sever a
 // single global chain on its first sweep. Per connection, a reaped connection
 // takes its own chain with it and every surviving connection still verifies.
 //
@@ -795,7 +810,7 @@ func (s *Store) UpdateQueryCompletion(
 	}
 
 	if queryError != nil {
-		q = q.Set("error = ?", *queryError)
+		q = q.Set("error = ?", *storableError(queryError))
 	}
 
 	_, err := q.Exec(ctx)
@@ -1065,10 +1080,10 @@ type RetentionSweepResult struct {
 // is opt-in: a zero or negative duration skips that half of the sweep, and both
 // at zero is a no-op — the default is to keep everything forever.
 //
-//   - queryOlderThan (DBB_QUERY_STORAGE_RETENTION) governs statements and their
+//   - queryOlderThan (DBB_RETENTION_QUERIES_DELETE_AFTER) governs statements and their
 //     captured rows: the bulk of the store, and the part that can hold customer
 //     data.
-//   - connectionOlderThan (DBB_CONNECTION_RETENTION) governs the session ledger:
+//   - connectionOlderThan (DBB_RETENTION_CONNECTIONS_DELETE_AFTER) governs the session ledger:
 //     one small row per session saying who connected from where, to which
 //     database, under which grant. Configuration guarantees it is never shorter
 //     than the query window (see config.Config.RetentionWindows), because

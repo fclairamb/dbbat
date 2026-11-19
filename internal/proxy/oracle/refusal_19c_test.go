@@ -460,6 +460,10 @@ func (p *oracle19cProbe) expectForwarded(ttc []byte) {
 		"the connection that carried a refusal must still forward the next statement")
 	assert.Equal(p.t, ttc, extractTTCPayload(pkt.Payload),
 		"an allowed statement must travel unchanged after a refusal")
+
+	// No upstream leg runs in this probe: stand in for it answering the call, as
+	// a real server does before the client sends its next one.
+	p.session.noteUpstreamResponse()
 }
 
 // expectCleanEOF closes the client socket and requires the relay to end on it
