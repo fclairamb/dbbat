@@ -597,6 +597,15 @@ func TestIsAllowedAlterSession_Allows(t *testing.T) {
 		"ALTER SESSION SET NLS_LANGUAGE='AMERICAN' NLS_TERRITORY='AMERICA'  TIME_ZONE='+02:00'",
 		"ALTER SESSION SET NLS_DATE_FORMAT='DD-MON-YYYY HH24:MI:SS'",
 		"ALTER SESSION SET NLS_NUMERIC_CHARACTERS=',.'",
+		// The logon AUTH_ALTER_SESSION of the DB-bundled sqlplus 23.26
+		// (oracle/testdata/oci_bundled_auth_phase2.hex), whose TIME formats
+		// were missing from the list (fclairamb/dbbat#500).
+		"ALTER SESSION SET NLS_LANGUAGE= 'AMERICAN' NLS_TERRITORY= 'AMERICA' NLS_CURRENCY= '$' " +
+			"NLS_ISO_CURRENCY= 'AMERICA' NLS_NUMERIC_CHARACTERS= '.,' NLS_CALENDAR= 'GREGORIAN' " +
+			"NLS_DATE_FORMAT= 'DD-MON-RR' NLS_DATE_LANGUAGE= 'AMERICAN' NLS_SORT= 'BINARY' " +
+			"TIME_ZONE= '+00:00' NLS_COMP= 'BINARY' NLS_DUAL_CURRENCY= '$' " +
+			"NLS_TIME_FORMAT= 'HH.MI.SSXFF AM' NLS_TIMESTAMP_FORMAT= 'DD-MON-RR HH.MI.SSXFF AM' " +
+			"NLS_TIME_TZ_FORMAT= 'HH.MI.SSXFF AM TZR' NLS_TIMESTAMP_TZ_FORMAT= 'DD-MON-RR HH.MI.SSXFF AM TZR'",
 		// The _OPTIMIZER_ family rule, on a hint no recording carries.
 		`ALTER SESSION SET "_optimizer_use_feedback" = FALSE`,
 	}, alterSessionCorpusStatements...)
@@ -1283,6 +1292,38 @@ func TestValidateMySQLQuery_ReadOnlyPin(t *testing.T) {
 	}
 }
 
+// TestValidateMySQLQuery_CallUnderBlockDDL: a stored procedure body can run
+// any DDL, so a block_ddl grant refuses CALL as PostgreSQL does, with an error
+// naming that control. read_only keeps its own error; a full-write grant runs it.
+func TestValidateMySQLQuery_CallUnderBlockDDL(t *testing.T) {
+	t.Parallel()
+
+	blockDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
+	ro := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+	open := &store.Grant{Definition: &store.GrantDefinition{}}
+
+	for _, sql := range []string{
+		"CALL do_migration()",
+		"call rebuild_schema",
+		"SELECT 1; CALL p()",
+		"/* x */ CALL p()",
+		"-- hi\nCALL migrate()",
+	} {
+		require.ErrorIs(t, ValidateMySQLQuery(sql, blockDDL), ErrDDLProcedureCall, sql)
+		require.ErrorIs(t, ValidateMySQLQuery(sql, ro), ErrReadOnlyProcedureCall, sql)
+		require.NoError(t, ValidateMySQLQuery(sql, open), sql)
+	}
+
+	// An identifier starting with or named call is not a CALL statement.
+	for _, sql := range []string{
+		"SELECT call_count FROM t",
+		"SELECT * FROM calls",
+		"SELECT `call` FROM t",
+	} {
+		require.NoError(t, ValidateMySQLQuery(sql, blockDDL), sql)
+	}
+}
+
 // TestSelectInto_IsAWriteAndDDL is the regression test for SELECT … INTO
 // <table>: it creates a table and fills it, yet it starts with SELECT, so the
 // prefix-shaped classifiers read it as a read. PostgreSQL text goes through
@@ -1447,6 +1488,51 @@ func TestValidateOracleQuery_RefusesRenamePurgeFlashbackComment(t *testing.T) {
 	assert.True(t, IsDDLQuery("COMMENT ON TABLE t IS 'x'"))
 }
 
+// TestValidateOracleQuery_RefusesAuditAnalyzeLock is the regression test for the
+// Oracle dictionary verbs (AUDIT, NOAUDIT, ANALYZE, ASSOCIATE/DISASSOCIATE
+// STATISTICS) and LOCK TABLE, which start with none of the shared keywords.
+func TestValidateOracleQuery_RefusesAuditAnalyzeLock(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"AUDIT SELECT ON t",
+		"NOAUDIT ALL",
+		"ANALYZE TABLE t COMPUTE STATISTICS",
+		"ANALYZE TABLE t VALIDATE STRUCTURE",
+		"ASSOCIATE STATISTICS WITH COLUMNS t.a USING s",
+		"DISASSOCIATE STATISTICS FROM COLUMNS t.a",
+		"/* x */ audit all",
+		"-- x\nanalyze index i compute statistics",
+		"BEGIN EXECUTE IMMEDIATE 'NOAUDIT ALL'; END;",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			t.Parallel()
+
+			require.ErrorIs(t, ValidateOracleQuery(sql, controlGrant(store.ControlReadOnly)), ErrReadOnlyViolation)
+			require.ErrorIs(t, ValidateOracleQuery(sql, controlGrant(store.ControlBlockDDL)), ErrDDLBlocked)
+			require.NoError(t, ValidateOracleQuery(sql, &store.Grant{Definition: &store.GrantDefinition{}}))
+		})
+	}
+
+	// LOCK TABLE is not DDL: read_only only.
+	lock := "LOCK TABLE t IN EXCLUSIVE MODE"
+	require.ErrorIs(t, ValidateOracleQuery(lock, controlGrant(store.ControlReadOnly)), ErrReadOnlyViolation)
+	require.NoError(t, ValidateOracleQuery(lock, controlGrant(store.ControlBlockDDL)))
+
+	// Positive controls: columns named audit_at / lock_id stay reads.
+	for _, sql := range []string{
+		"SELECT audit_at, lock_id FROM t",
+		"SELECT analyze_flag FROM t WHERE lock_id = 1",
+	} {
+		require.NoError(t, ValidateOracleQuery(sql, controlGrant(store.ControlReadOnly)), sql)
+		require.NoError(t, ValidateOracleQuery(sql, controlGrant(store.ControlBlockDDL)), sql)
+	}
+
+	// Other dialects keep ANALYZE and LOCK: monitoring tools run them.
+	assert.False(t, IsWriteQuery("ANALYZE t"))
+	assert.False(t, IsDDLQuery("LOCK TABLE t IN SHARE MODE"))
+}
+
 // TestValidateOracleLogonAlterSession: the logon statement gets the mid-session
 // gate plus the one-ALTER-SESSION shape rule.
 func TestValidateOracleLogonAlterSession(t *testing.T) {
@@ -1477,5 +1563,44 @@ func TestValidateOracleLogonAlterSession(t *testing.T) {
 		"ALTER SYSTEM SET X=1",
 	} {
 		require.ErrorIs(t, ValidateOracleLogonAlterSession(sql, full), ErrOracleLogonAlterSessionShape, sql)
+	}
+}
+
+func TestIsDDLQuery_ExplainAnalyze(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"EXPLAIN ANALYZE CREATE TABLE t AS SELECT 1",
+		"explain anal" + "yse verbose create table t as select 1",
+		"EXPLAIN (ANALYZE, BUFFERS) CREATE MATERIALIZED VIEW v AS SELECT 1",
+		"EXPLAIN /* c */ ANALYZE SELECT 1 INTO t2",
+	} {
+		assert.True(t, IsDDLQuery(sql), "should be DDL: %s", sql)
+	}
+
+	for _, sql := range []string{
+		"EXPLAIN ANALYZE SELECT * FROM t",
+		"EXPLAIN SELECT 1",
+		"EXPLAIN (ANALYZE, BUFFERS) SELECT 1",
+		"EXPLAIN CREATE TABLE t AS SELECT 1",
+		"EXPLAINX",
+	} {
+		assert.False(t, IsDDLQuery(sql), "should not be DDL: %s", sql)
+	}
+}
+
+func TestValidateOracleQuery_CallUnderBlockDDL(t *testing.T) {
+	t.Parallel()
+
+	fullWrite := &store.Grant{Definition: &store.GrantDefinition{}}
+	blockDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
+
+	for _, sql := range []string{"CALL pkg.run()", "call pkg.run()", "/* hi */ call pkg.run()"} {
+		require.ErrorIs(t, ValidateOracleQuery(sql, blockDDL), ErrDDLProcedureCall, "block_ddl: %s", sql)
+		require.NoError(t, ValidateOracleQuery(sql, fullWrite), "full write: %s", sql)
+	}
+
+	for _, sql := range []string{"SELECT 1 FROM dual", "BEGIN DBMS_OUTPUT.ENABLE; END;"} {
+		require.NoError(t, ValidateOracleQuery(sql, blockDDL), "block_ddl: %s", sql)
 	}
 }

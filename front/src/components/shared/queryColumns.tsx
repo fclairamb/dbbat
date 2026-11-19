@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import type { Query, User } from "@/api";
 import type { Column } from "@/components/shared/DataTable";
+import { UnverifiedBadge } from "@/components/shared/UnverifiedBadge";
 import { Badge } from "@/components/ui/badge";
 import { ApprovalStatusBadge } from "@/components/shared/ApprovalStatusBadge";
 import { formatDistanceToNow } from "date-fns";
@@ -34,6 +35,10 @@ export function buildQueryColumns({
           <span className="font-mono text-xs break-all line-clamp-2">
             {q.sql_text}
           </span>
+          <UnverifiedBadge
+            chained={q.chained}
+            testId={`query-unverified-badge-${q.uid}`}
+          />
         </div>
       ),
     },

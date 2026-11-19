@@ -46,7 +46,8 @@ func TestPlanFor(t *testing.T) {
 		{name: "allow tries plaintext then TLS", mode: SSLModeAllow, want: []bool{false, true}},
 		{name: "prefer tries TLS then plaintext", mode: SSLModePrefer, want: []bool{true, false}},
 		{name: "empty defaults to prefer", mode: "", want: []bool{true, false}},
-		{name: "unknown mode defaults to prefer", mode: "sure-why-not", want: []bool{true, false}},
+		{name: "unknown mode fails closed to require", mode: "sure-why-not", want: []bool{true}},
+		{name: "typo of verify-full fails closed to require", mode: "verify-ful", want: []bool{true}},
 		{name: "require is TLS only, unverified", mode: SSLModeRequire, want: []bool{true}},
 		{name: "verify-ca is TLS only, verified", mode: SSLModeVerifyCA, want: []bool{true}, wantVerified: true},
 		{name: "verify-full is TLS only, verified", mode: SSLModeVerifyFull, want: []bool{true}, wantVerified: true},
@@ -145,5 +146,21 @@ func assertTLSConfig(t *testing.T, plan Plan, host string, wantVerified bool) {
 
 	if cfg.ServerName != "" {
 		t.Fatalf("ServerName = %q, want empty for an unverified attempt", cfg.ServerName)
+	}
+}
+
+func TestIsKnownSSLMode(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range append(SSLModes(), "") {
+		if !IsKnownSSLMode(mode) {
+			t.Errorf("IsKnownSSLMode(%q) = false, want true", mode)
+		}
+	}
+
+	for _, mode := range []string{"verify-ful", "verifyfull", "PREFER", "on"} {
+		if IsKnownSSLMode(mode) {
+			t.Errorf("IsKnownSSLMode(%q) = true, want false", mode)
+		}
 	}
 }

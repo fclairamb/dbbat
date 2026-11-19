@@ -130,6 +130,10 @@ const (
 	// host differently, so a client connecting with the shared service name is
 	// refused ORA-12514 even though this row itself checks out.
 	CodeOracleServiceNameConflict Code = "oracle_service_name_conflict"
+	// CodeOracleUpstreamNotEncrypted is a *warning* code: the Oracle row's
+	// ssl_mode asks for TLS (require/verify-*), this check honored it, but the
+	// proxy never encrypts the upstream leg of a real session.
+	CodeOracleUpstreamNotEncrypted Code = "oracle_upstream_not_encrypted"
 )
 
 // Warning is a non-fatal configuration problem noticed while checking a row.
@@ -217,9 +221,30 @@ func (c *Checker) Check(ctx context.Context, srv *store.Server) Result {
 
 	res := c.check(ctx, dialer, srv)
 	res.Warnings = append(res.Warnings, c.oracleServiceNameWarnings(ctx, srv)...)
+	res.Warnings = append(res.Warnings, oracleSSLModeWarnings(srv)...)
 	res.DurationMs = time.Since(start).Milliseconds()
 
 	return res
+}
+
+// oracleSSLModeWarnings reports an Oracle row whose ssl_mode asks for TLS. The
+// API refuses to store such a mode now; rows saved earlier keep working, and
+// this says what the green check does not prove.
+func oracleSSLModeWarnings(srv *store.Server) []Warning {
+	if srv == nil || srv.Protocol != store.ProtocolOracle {
+		return nil
+	}
+
+	switch srv.SSLMode {
+	case "require", "verify-ca", "verify-full":
+		return []Warning{{
+			Code: CodeOracleUpstreamNotEncrypted,
+			Message: "ssl_mode=" + srv.SSLMode + ": the proxy does not encrypt the upstream leg; " +
+				"this check did. Real sessions reach the Oracle server in plaintext.",
+		}}
+	}
+
+	return nil
 }
 
 // oracleServiceNameLister is the optional half of the resolver: a store can tell

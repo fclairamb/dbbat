@@ -340,6 +340,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/oidc/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start linking an SSO identity to the current account
+         * @description Starts the provider's authorization flow with a state row bound to the
+         *     calling user. The callback attaches the returned identity to that user
+         *     (it never logs anyone in), refuses an identity already linked to
+         *     another user with 409, records `user.identity_linked` with
+         *     `method: session`, and redirects the browser to the profile page.
+         *     Web session only: API keys are refused.
+         */
+        post: operations["linkOidcIdentity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/slack/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start linking an SSO identity to the current account
+         * @description Starts the provider's authorization flow with a state row bound to the
+         *     calling user. The callback attaches the returned identity to that user
+         *     (it never logs anyone in), refuses an identity already linked to
+         *     another user with 409, records `user.identity_linked` with
+         *     `method: session`, and redirects the browser to the profile page.
+         *     Web session only: API keys are refused.
+         */
+        post: operations["linkSlackIdentity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/device/consent": {
         parameters: {
             query?: never;
@@ -488,6 +538,43 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/me/identities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the SSO identities linked to the current user */
+        get: operations["listMyIdentities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/me/identities/{provider}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Unlink an SSO identity from the current user
+         * @description Audited as `user.identity_unlinked`. Web session only.
+         */
+        delete: operations["unlinkMyIdentity"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1418,12 +1505,12 @@ export interface paths {
          *
          *     Where a capture lives depends on the deployment. Without
          *     `DBB_DUMP_UPLOAD_URL` it stays on the local disk of the replica that
-         *     recorded it and is reaped once older than `DBB_DUMP_RETENTION` (24h by
+         *     recorded it and is reaped once older than `DBB_RETENTION_DUMPS_DELETE_AFTER` (24h by
          *     default). With an upload URL configured, the finished capture is moved
          *     to blob storage (S3 or any gocloud.dev-supported bucket) when the
          *     session closes, and this endpoint streams it back from there — so any
          *     replica can serve it, and how long it survives is the bucket's own
-         *     lifecycle policy rather than `DBB_DUMP_RETENTION`.
+         *     lifecycle policy rather than `DBB_RETENTION_DUMPS_DELETE_AFTER`.
          *
          *     **Requires admin role.** This endpoint used to be reachable by admin
          *     or viewer roles; as of this change it is admin-only. A capture is the
@@ -1444,7 +1531,7 @@ export interface paths {
          *     undone, and it covers the capture wherever it currently lives: the
          *     local spool, the configured blob store (`DBB_DUMP_UPLOAD_URL`), or
          *     both while an upload is in flight. Local captures are also removed
-         *     automatically once they are older than `DBB_DUMP_RETENTION`; uploaded
+         *     automatically once they are older than `DBB_RETENTION_DUMPS_DELETE_AFTER`; uploaded
          *     ones are only expired by the bucket's lifecycle policy.
          *
          *     As with the download, `404 Not Found` covers both dumps being
@@ -1813,12 +1900,12 @@ export interface paths {
          *     that chain's head.
          *
          *     `chains_with_truncated_prefix` counts chains missing their oldest
-         *     statements — what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a
+         *     statements — what `DBB_RETENTION_QUERIES_DELETE_AFTER` leaves behind on a
          *     long-lived session. That is expected housekeeping, not tampering, and
          *     everything after the truncation is still verified.
          *     `chains_emptied_by_retention` counts the sessions that window emptied
          *     *entirely*, which is the ordinary state of every closed session between
-         *     `DBB_QUERY_STORAGE_RETENTION` and a longer `DBB_CONNECTION_RETENTION`.
+         *     `DBB_RETENTION_QUERIES_DELETE_AFTER` and a longer `DBB_RETENTION_CONNECTIONS_DELETE_AFTER`.
          *     A session emptied while it was too young for the sweep to have reached
          *     it is a **break** rather than either count, because the stamp on the
          *     connection row still attests to statements that are gone.
@@ -2117,6 +2204,46 @@ export interface paths {
          * @description Atomically upserts all public.* parameters. Admin-only.
          */
         put: operations["updateInstancePublic"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/instance/retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update the instance-level retention windows
+         * @description Writes the `retention.queries.*` parameters, which win over DBB_RETENTION_QUERIES_ARCHIVE_AFTER and DBB_RETENTION_QUERIES_DELETE_AFTER. Admin-only. Values are Go durations with one-second resolution; empty clears the parameter (the environment applies), "0" means never. 400 on a malformed, negative or sub-second value, on `archive_after` >= `delete_after`, and on an archive window while no archive bucket (DBB_ARCHIVE_URL) is configured. A server group or server window overrides this level. Lowering a delete window destroys data at the next sweep; the change is audited.
+         */
+        put: operations["updateInstanceRetention"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/connections/{uid}/archive/rows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download the archived result rows of a connection
+         * @description The raw Parquet object holding the captured result rows the connection moved to the archive bucket, SHA-256 checked against the value sealed in the audit chain. 404 when the connection has no live archive, 502 when the object is missing, corrupted or the archive is not configured. Admin-only.
+         */
+        get: operations["getConnectionArchiveRows"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -2476,6 +2603,16 @@ export interface components {
              *     immediately, including for statements already parked.
              */
             query_approver_user_group_uids: string[];
+            /**
+             * Format: int64
+             * @description Archive window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never, a positive value is the duration.
+             */
+            archive_after_seconds?: number | null;
+            /**
+             * Format: int64
+             * @description Delete window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never, a positive value is the duration.
+             */
+            delete_after_seconds?: number | null;
             /** Format: uuid */
             readonly created_by?: string | null;
             /** Format: date-time */
@@ -2528,6 +2665,16 @@ export interface components {
              *     `access_approver_user_group_uids`.
              */
             query_approver_user_group_uids?: string[];
+            /**
+             * Format: int64
+             * @description Archive window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never, a positive value is the duration.
+             */
+            archive_after_seconds?: number | null;
+            /**
+             * Format: int64
+             * @description Delete window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never, a positive value is the duration.
+             */
+            delete_after_seconds?: number | null;
         };
         UpdateUserRequest: {
             /** @description New password */
@@ -2606,6 +2753,18 @@ export interface components {
             access_approver_user_group_uids: string[];
             /** @description User groups allowed to release **approval holds** on statements against this server, under the same fallback chain. Neither approver kind implies the other. */
             query_approver_user_group_uids: string[];
+            /**
+             * Format: int64
+             * @description Archive window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never, a positive value is the duration.
+             */
+            archive_after_seconds?: number | null;
+            /**
+             * Format: int64
+             * @description Delete window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never, a positive value is the duration.
+             */
+            delete_after_seconds?: number | null;
+            /** @description Both windows resolved with their source. Present on GET /servers/{uid} only. */
+            effective_retention?: components["schemas"]["ResolvedRetention"];
             /** @description Present only when the create/update request set `test_connection: true` */
             connection_test?: components["schemas"]["ConnectionTestResult"];
             /** @description Present only on an Oracle row whose `oracle_service_name` is also claimed by rows pointing at a **different** `host:port`. Nothing is wrong with the row itself — it dials and logs in fine — but a client connecting with the shared service name instead of the dbbat server name is refused ORA-12514, because the proxy compares candidate upstreams as text and two spellings of one machine read as two machines. */
@@ -2846,6 +3005,16 @@ export interface components {
              *     live at decision time.
              */
             query_approver_user_group_uids?: string[];
+            /**
+             * Format: int64
+             * @description Archive window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never, a positive value is the duration.
+             */
+            archive_after_seconds?: number | null;
+            /**
+             * Format: int64
+             * @description Delete window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never, a positive value is the duration.
+             */
+            delete_after_seconds?: number | null;
             /**
              * @description Optional; defaults to false when omitted. When true, the API dials the updated row
              *     once and returns the staged outcome as `connection_test` in the response.
@@ -3678,6 +3847,19 @@ export interface components {
             /** @description The one-time code handed to the browser by the OAuth callback */
             code: string;
         };
+        OAuthLinkResponse: {
+            authorize_url: string;
+        };
+        Identity: {
+            provider: string;
+            email?: string;
+            display_name?: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        IdentitiesResponse: {
+            identities: components["schemas"]["Identity"][];
+        };
         LoginExchangeResponse: {
             /** @description The web session token (web_...), delivered exactly once */
             access_token: string;
@@ -3735,6 +3917,16 @@ export interface components {
              */
             disconnected_at?: string | null;
             /**
+             * Format: date-time
+             * @description When the captured result rows moved to the archive bucket (absent until then)
+             */
+            archived_at?: string;
+            /**
+             * Format: date-time
+             * @description When the archive object was deleted at its delete window (absent until then)
+             */
+            archive_deleted_at?: string;
+            /**
              * Format: int64
              * @description Number of queries executed
              */
@@ -3774,13 +3966,18 @@ export interface components {
             /** @description The grant named by `grant_uid`, or null when `grant_uid` is null or the grant it names could not be resolved. */
             grant: components["schemas"]["GrantSummary"] | null;
             /**
-             * @description False when `DBB_QUERY_STORAGE_RETENTION` can account for this
+             * @description Where the captured result rows are: PostgreSQL (`store`), the archive bucket (`archive`) or deleted with the archive (`deleted`).
+             * @enum {string}
+             */
+            rows_location?: "store" | "archive" | "deleted";
+            /**
+             * @description False when `DBB_RETENTION_QUERIES_DELETE_AFTER` can account for this
              *     session having fewer statements in the store than it ran — i.e.
              *     the session started before the statement cutoff, so the sweep
              *     could have reaped some or all of them.
              *
-             *     It exists because `DBB_CONNECTION_RETENTION` can be longer than
-             *     `DBB_QUERY_STORAGE_RETENTION`: every closed session between the
+             *     It exists because `DBB_RETENTION_CONNECTIONS_DELETE_AFTER` can be longer than
+             *     `DBB_RETENTION_QUERIES_DELETE_AFTER`: every closed session between the
              *     two windows keeps its ledger row and loses its statements, so
              *     an empty statement list is the expected state rather than a
              *     session that ran nothing. The `queries` counter on the row is a
@@ -3887,6 +4084,8 @@ export interface components {
             results_truncated?: boolean;
             /** @description True when dbbat lost result rows it meant to keep: the batched row writer's queue was full (storage fell behind the proxy) or a batch insert failed. Deliberately distinct from `results_truncated` — truncation is an expected, configured prefix, a drop is dbbat failing to keep up — and the two are never conflated. Rows are never held back from the client to keep the capture complete. */
             results_dropped?: boolean;
+            /** @description False when the row carries no chain position (`chain_seq` is NULL): nothing vouches for it. Expected for rows written before the chain anchor or by a store without an encryption key; any other unchained row may be forged. Run `dbbat audit verify` to check. */
+            chained?: boolean;
             /**
              * @description Approval-hold state. Absent for the overwhelming majority of queries (no approval pattern matched). `pending` means the statement is parked mid-flight waiting for a human and has NOT run. `abandoned` means the client gave up (disconnect, cancel, grant expiry, shutdown) before anyone decided — nothing ran, and it is deliberately distinct from `denied`. There is no `timeout` value: a hold has no clock of its own.
              * @enum {string|null}
@@ -4001,6 +4200,8 @@ export interface components {
              * @description Event timestamp
              */
             created_at: string;
+            /** @description False when the row carries no chain position (`chain_seq` is NULL): nothing vouches for it. Expected for rows written before the chain anchor or by a store without an encryption key; any other unchained row may be forged. Run `dbbat audit verify` to check. */
+            chained?: boolean;
         };
         /**
          * @description When one user last opened a proxy session, as returned by
@@ -4168,7 +4369,7 @@ export interface components {
             /**
              * Format: int64
              * @description Chains missing their oldest statements but still holding some —
-             *     what DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived
+             *     what DBB_RETENTION_QUERIES_DELETE_AFTER leaves behind on a long-lived
              *     session. Expected housekeeping, not tampering; everything after the
              *     truncation is still verified.
              */
@@ -4176,9 +4377,9 @@ export interface components {
             /**
              * Format: int64
              * @description Sessions with no statement left at all, accounted for by
-             *     DBB_QUERY_STORAGE_RETENTION. Counted apart from
+             *     DBB_RETENTION_QUERIES_DELETE_AFTER. Counted apart from
              *     `chains_with_truncated_prefix` rather than folded into it: with
-             *     DBB_CONNECTION_RETENTION set longer than the statement window,
+             *     DBB_RETENTION_CONNECTIONS_DELETE_AFTER set longer than the statement window,
              *     every closed session between the two windows is in this state by
              *     design, so one number would drown the other. An emptied session the
              *     statement window cannot account for is a **break** instead of a
@@ -4357,10 +4558,42 @@ export interface components {
             resolved: components["schemas"]["ResolvedEndpoints"];
             resolved_limits: components["schemas"]["ResolvedInstanceLimits"];
             resolved_tagging: components["schemas"]["ResolvedInstanceTagging"];
+            /** @description Only present for admin callers */
+            retention?: components["schemas"]["InstanceRetention"];
+            resolved_retention: components["schemas"]["ResolvedInstanceRetention"];
             /** @description Keys of `DBB_SLACK_NOTIFY_CHANNELS` a grant definition's `notify_channel` may name, besides the reserved `none`. */
             notify_channels?: string[];
             /** @description Only present for admin callers */
             tagging?: components["schemas"]["InstanceTagging"];
+        };
+        /** @description The raw retention.queries.* parameters, Go durations, empty when unset. */
+        InstanceRetention: {
+            archive_after: string;
+            delete_after: string;
+        };
+        ResolvedInstanceRetention: {
+            /** Format: int64 */
+            archive_after_seconds: number;
+            /** @description "parameter", "env" or empty */
+            archive_after_source: string;
+            /** Format: int64 */
+            delete_after_seconds: number;
+            /** @description "parameter", "env" or empty */
+            delete_after_source: string;
+            /** @description True when DBB_ARCHIVE_URL is set. */
+            archive_enabled: boolean;
+        };
+        RetentionWindow: {
+            /** Format: int64 */
+            seconds: number;
+            /** @description "server", "server_group", "instance", or empty when nothing sets a window */
+            source: string;
+            server_group_uids?: string[];
+            instance_source?: string;
+        };
+        ResolvedRetention: {
+            archive: components["schemas"]["RetentionWindow"];
+            delete: components["schemas"]["RetentionWindow"];
         };
         /** @description Raw operator-configured statement-tagging settings (the `tagging.*` parameter group), before the environment-variable fallback is applied. Admin-only on GET /instance; the body of PUT /instance/tagging. */
         InstanceTagging: {
@@ -4619,6 +4852,9 @@ export type DeviceAuthorizationResponse = components['schemas']['DeviceAuthoriza
 export type DeviceTokenRequest = components['schemas']['DeviceTokenRequest'];
 export type DeviceTokenResponse = components['schemas']['DeviceTokenResponse'];
 export type LoginExchangeRequest = components['schemas']['LoginExchangeRequest'];
+export type OAuthLinkResponse = components['schemas']['OAuthLinkResponse'];
+export type Identity = components['schemas']['Identity'];
+export type IdentitiesResponse = components['schemas']['IdentitiesResponse'];
 export type LoginExchangeResponse = components['schemas']['LoginExchangeResponse'];
 export type OAuthError = components['schemas']['OAuthError'];
 export type DeviceConsentInfo = components['schemas']['DeviceConsentInfo'];
@@ -4647,6 +4883,10 @@ export type SetParameterRequest = components['schemas']['SetParameterRequest'];
 export type PublicEndpoints = components['schemas']['PublicEndpoints'];
 export type ResolvedEndpoints = components['schemas']['ResolvedEndpoints'];
 export type InstanceInfo = components['schemas']['InstanceInfo'];
+export type InstanceRetention = components['schemas']['InstanceRetention'];
+export type ResolvedInstanceRetention = components['schemas']['ResolvedInstanceRetention'];
+export type RetentionWindow = components['schemas']['RetentionWindow'];
+export type ResolvedRetention = components['schemas']['ResolvedRetention'];
 export type InstanceTagging = components['schemas']['InstanceTagging'];
 export type UpdateInstanceTagging = components['schemas']['UpdateInstanceTagging'];
 export type ResolvedInstanceTagging = components['schemas']['ResolvedInstanceTagging'];
@@ -5082,6 +5322,54 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    linkOidcIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The URL to send the browser to */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthLinkResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    linkSlackIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The URL to send the browser to */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthLinkResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     getDeviceConsent: {
         parameters: {
             query: {
@@ -5275,6 +5563,52 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listMyIdentities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Linked identities */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentitiesResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    unlinkMyIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Identity unlinked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -7721,6 +8055,69 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
+        };
+    };
+    updateInstanceRetention: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @example 24h */
+                    archive_after?: string;
+                    /** @example 8760h */
+                    delete_after?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Settings saved */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getConnectionArchiveRows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Parquet file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/vnd.apache.parquet": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Archive read failed (object missing, hash mismatch or archive not configured) */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     updateInstanceLimits: {

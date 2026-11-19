@@ -46,11 +46,20 @@ type pendingQuery struct {
 	syncEpoch uint64
 
 	// Result capture state
-	columnNames   []string // From RowDescription
-	columnOIDs    []uint32 // Type OIDs for decoding
-	capturedBytes int64    // Total bytes captured
-	rowNumber     int      // Current row counter
-	truncated     bool     // True if limits exceeded
+	columnNames []string // From RowDescription
+	columnOIDs  []uint32 // Type OIDs for decoding
+	// resultFormats are the result format codes of the Bind that created the
+	// portal (empty = all text, one = applies to every column), so binary
+	// columns are decoded with their OID rather than read as text.
+	resultFormats []int16
+	// stmtName and portalName identify what the Execute runs, so a
+	// RowDescription answering a Describe sent in the same batch can be
+	// attributed to it.
+	stmtName      string
+	portalName    string
+	capturedBytes int64 // Total bytes captured
+	rowNumber     int   // Current row counter
+	truncated     bool  // True if limits exceeded
 
 	// rowSink streams captured rows to the shared batching writer instead of
 	// holding the whole capture in RAM until the query ends. Created on the
@@ -80,8 +89,26 @@ type preparedStatement struct {
 
 // portalState tracks a portal with its bound parameters.
 type portalState struct {
-	stmtName   string
-	parameters *store.QueryParameters
+	stmtName      string
+	parameters    *store.QueryParameters
+	resultFormats []int16
+}
+
+// columnMeta is the result column metadata a RowDescription carried.
+type columnMeta struct {
+	names []string
+	oids  []uint32
+}
+
+// describeTarget is the object a pending Describe asked about, so the
+// RowDescription (or NoData) answering it can be filed under the right name.
+type describeTarget struct {
+	portal bool
+	name   string
+	// epoch is the client sync epoch the Describe was sent in; entries from a
+	// batch the upstream has closed (an error discarded the Describe) are
+	// dropped at the ReadyForQuery.
+	epoch uint64
 }
 
 // copyState tracks a COPY operation in progress.
@@ -108,6 +135,15 @@ type extendedQueryState struct {
 	// ParameterDescription. The server answers describes in order, so the head
 	// of the queue names the statement the next ParameterDescription belongs to.
 	pendingDescribes []string
+
+	// describeQueue is the FIFO of every Describe (statement or portal) still
+	// awaiting its RowDescription/NoData answer. stmtColumns and portalColumns
+	// remember the answers, by statement and portal name, so a later Execute
+	// whose upstream leg sends no RowDescription still gets column names and
+	// type OIDs. All guarded by mu.
+	describeQueue []describeTarget
+	stmtColumns   map[string]*columnMeta
+	portalColumns map[string]*columnMeta
 
 	// errorUntilSync mirrors PostgreSQL's own extended-protocol error state:
 	// once a message in a batch fails, every following message is discarded
@@ -172,6 +208,7 @@ type Session struct {
 	upstreamTLS           bool                    // Whether the proxy→upstream leg ended up encrypted
 	guard                 *shared.LimitGuard      // Mid-stream time/bandwidth limit enforcement
 	revocation            *cache.RevocationHandle // Signaled when this session's grant is revoked mid-flight
+	usage                 *cache.UsageHandle      // This session's share of its grant's quota consumption (nil: no quota)
 	liveSession           *cache.SessionHandle    // Signaled when an admin ends *this* session (POST /connections/{uid}/terminate)
 
 	// queryTagging is this session's tagging decision, taken once at auth:
@@ -195,6 +232,13 @@ type Session struct {
 	// preAuthTimeout bounds SSL negotiation, startup and authentication
 	// together. Zero means shared.PreAuthTimeout.
 	preAuthTimeout time.Duration
+
+	// queuedSimpleQueries holds the simple Queries a pipelining client sent
+	// while currentQuery was still waiting for its ReadyForQuery, oldest
+	// first. currentQuery is always the oldest staged simple Query; each one
+	// moves up when the one before it completes (completeSimpleQuery).
+	// Guarded by bookMu.
+	queuedSimpleQueries []*pendingQuery
 
 	// clientSyncEpoch counts the client messages that each earn exactly one
 	// upstream ReadyForQuery: every forwarded Sync and every forwarded simple
@@ -518,6 +562,11 @@ func (s *Session) proxyMessages() error {
 	// relaying such a request from another replica — signals.
 	s.liveSession = s.store.Sessions().Register(s.connectionUID)
 
+	// And add it to its grant's shared consumption reading, so the grant's
+	// quotas are one budget across all its sessions. Released in cleanup.
+	s.usage = shared.RegisterGrantUsage(s.store.Usage(), s.grant, s.bytesFromClient, s.bytesToClient)
+	s.usage.SetConnection(s.connectionUID)
+
 	// Build the limit guard once the grant is known, then run a watchdog that
 	// tears the session down if a limit is crossed (or the grant is revoked)
 	// while a query is blocked producing no traffic (the inline check in
@@ -525,6 +574,7 @@ func (s *Session) proxyMessages() error {
 	// error frame).
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithUsage(s.usage).
 		WithTermination(s.liveSession).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
@@ -532,7 +582,7 @@ func (s *Session) proxyMessages() error {
 	// per-statement cost of the (overwhelmingly common) no-pattern case is a
 	// single nil check on the hot path.
 	s.approvalGate = shared.NewApprovalGate(
-		s.approvalDeps, s.grant, s.connectionUID, s.user, s.database.Name,
+		s.approvalDeps, shared.ApprovalDialectStandard, s.grant, s.connectionUID, s.user, s.database.Name,
 	)
 	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, s.database.Name).
 		WithApprovals(s.approvalGate)
@@ -1175,6 +1225,10 @@ func (s *Session) reconcilePendingQueries() {
 
 	ready := s.upstreamReadyEpoch
 
+	// logQuery persists s.currentQuery; a simple Query staged behind these
+	// entries keeps its slot.
+	staged := s.currentQuery
+
 	kept := s.extendedState.pendingQueries[:0]
 
 	for _, q := range s.extendedState.pendingQueries {
@@ -1199,7 +1253,7 @@ func (s *Session) reconcilePendingQueries() {
 	}
 
 	s.extendedState.pendingQueries = kept
-	s.currentQuery = nil
+	s.currentQuery = staged
 }
 
 // oldestPendingQuery returns the statement the statement clock is parked on:
@@ -1238,18 +1292,100 @@ func (s *Session) oldestPendingQuery() *pendingQuery {
 //
 // Callers hold bookMu (see proxyUpstreamToClient).
 func (s *Session) captureRowDescription(msg *pgproto3.RowDescription) {
-	query := s.getCurrentPendingQuery()
-	if query == nil {
+	meta := &columnMeta{
+		names: make([]string, len(msg.Fields)),
+		oids:  make([]uint32, len(msg.Fields)),
+	}
+
+	for i, field := range msg.Fields {
+		meta.names[i] = string(field.Name)
+		meta.oids[i] = field.DataTypeOID
+	}
+
+	target, described := s.popDescribe()
+	if !described {
+		// A simple Query: no Describe, the RowDescription belongs to the
+		// statement being answered.
+		if query := s.getCurrentPendingQuery(); query != nil {
+			query.columnNames, query.columnOIDs = meta.names, meta.oids
+		}
+
 		return
 	}
 
-	query.columnNames = make([]string, len(msg.Fields))
-	query.columnOIDs = make([]uint32, len(msg.Fields))
+	// Remember it for the Executes that will come without a RowDescription.
+	s.extendedState.mu.Lock()
+	if target.portal {
+		if s.extendedState.portalColumns == nil {
+			s.extendedState.portalColumns = map[string]*columnMeta{}
+		}
 
-	for i, field := range msg.Fields {
-		query.columnNames[i] = string(field.Name)
-		query.columnOIDs[i] = field.DataTypeOID
+		s.extendedState.portalColumns[target.name] = meta
+	} else {
+		if s.extendedState.stmtColumns == nil {
+			s.extendedState.stmtColumns = map[string]*columnMeta{}
+		}
+
+		s.extendedState.stmtColumns[target.name] = meta
 	}
+	s.extendedState.mu.Unlock()
+
+	// An Execute queued in the same batch, before this answer arrived, still
+	// has no metadata: seed it.
+	for _, q := range s.extendedState.pendingQueries {
+		if q.columnNames != nil {
+			continue
+		}
+
+		if (target.portal && q.portalName == target.name) || (!target.portal && q.stmtName == target.name) {
+			q.columnNames, q.columnOIDs = meta.names, meta.oids
+		}
+	}
+}
+
+// popDescribe removes the oldest outstanding Describe: the server answers
+// each with exactly one RowDescription or NoData, in order.
+//
+// Callers hold bookMu.
+func (s *Session) popDescribe() (describeTarget, bool) {
+	if s.extendedState == nil {
+		return describeTarget{}, false
+	}
+
+	s.extendedState.mu.Lock()
+	defer s.extendedState.mu.Unlock()
+
+	if len(s.extendedState.describeQueue) == 0 {
+		return describeTarget{}, false
+	}
+
+	target := s.extendedState.describeQueue[0]
+	s.extendedState.describeQueue = s.extendedState.describeQueue[1:]
+
+	return target, true
+}
+
+// dropStaleDescribes forgets Describes whose batch the upstream has closed
+// without answering them (an earlier error discarded them).
+//
+// Callers hold bookMu.
+func (s *Session) dropStaleDescribes() {
+	if s.extendedState == nil {
+		return
+	}
+
+	s.extendedState.mu.Lock()
+	defer s.extendedState.mu.Unlock()
+
+	kept := s.extendedState.describeQueue[:0]
+
+	for _, d := range s.extendedState.describeQueue {
+		if d.epoch >= s.upstreamReadyEpoch {
+			kept = append(kept, d)
+		}
+	}
+
+	s.extendedState.describeQueue = kept
 }
 
 // captureDataRow records one upstream result row against the pending query,
@@ -1291,7 +1427,7 @@ func (s *Session) captureDataRow(msg *pgproto3.DataRow) {
 		return
 	}
 
-	row := s.convertDataRow(msg.Values, query.columnNames, query.columnOIDs)
+	row := s.convertDataRow(msg.Values, query.columnNames, query.columnOIDs, query.resultFormats...)
 
 	query.capturedBytes += rowSize
 	query.rowNumber++
@@ -1413,6 +1549,9 @@ func (s *Session) proxyUpstreamToClient() error {
 		case *pgproto3.RowDescription:
 			s.captureRowDescription(m)
 
+		case *pgproto3.NoData:
+			s.popDescribe()
+
 		case *pgproto3.CommandComplete, *pgproto3.ErrorResponse,
 			*pgproto3.EmptyQueryResponse, *pgproto3.PortalSuspended:
 			s.noteTerminator(&simple, m)
@@ -1474,6 +1613,7 @@ func (s *Session) proxyUpstreamToClient() error {
 			// the backstop that bounds any future gap of the kind that killed
 			// the idle DataGrip session.
 			s.reconcilePendingQueries()
+			s.dropStaleDescribes()
 		}
 
 		// Whatever the message did to the bookkeeping, the set of statements
@@ -1586,6 +1726,11 @@ func (s *Session) completeSimpleQuery(res *simpleQueryResult) {
 
 		s.logQuery(res.rowsAffected, res.queryError, bytesTransferred)
 		s.currentQuery = nil
+
+		// A pipelining client may have sent further simple Queries before
+		// this one was answered: the next one is the statement upstream
+		// answers now, and waits for its own ReadyForQuery.
+		s.promoteQueuedSimpleQuery()
 	}
 
 	// Whatever this exchange left behind is over with it: a terminator
@@ -1595,6 +1740,37 @@ func (s *Session) completeSimpleQuery(res *simpleQueryResult) {
 	s.copyState = nil
 	res.rowsAffected = nil
 	res.queryError = nil
+}
+
+// stageSimpleQuery stages a forwarded simple Query for logging. The slot is
+// currentQuery, unless a previous simple Query still waits for its
+// ReadyForQuery (a client pipelining several Queries in one flush): then it
+// queues behind it instead of overwriting it, which left every Query but the
+// last of the flush unlogged.
+//
+// Callers hold bookMu.
+func (s *Session) stageSimpleQuery(q *pendingQuery) {
+	if s.currentQuery == nil {
+		s.currentQuery = q
+
+		return
+	}
+
+	s.queuedSimpleQueries = append(s.queuedSimpleQueries, q)
+}
+
+// promoteQueuedSimpleQuery moves the oldest queued simple Query into the
+// currentQuery slot once that slot is free.
+//
+// Callers hold bookMu.
+func (s *Session) promoteQueuedSimpleQuery() {
+	if s.currentQuery != nil || len(s.queuedSimpleQueries) == 0 {
+		return
+	}
+
+	s.currentQuery = s.queuedSimpleQueries[0]
+	s.queuedSimpleQueries[0] = nil
+	s.queuedSimpleQueries = s.queuedSimpleQueries[1:]
 }
 
 // receiveFromUpstream reads the next upstream message for the relay, and is
@@ -1836,6 +2012,7 @@ func (s *Session) cleanup() {
 	}
 
 	s.store.Sessions().Deregister(s.connectionUID, s.liveSession)
+	s.usage.Release()
 
 	if s.dumpWriter != nil {
 		if err := s.dumpWriter.Close(); err != nil {

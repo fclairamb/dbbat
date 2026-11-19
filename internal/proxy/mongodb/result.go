@@ -378,6 +378,7 @@ func (s *Session) recordQueryWith(
 
 	if s.grant != nil {
 		s.grant.QueryCount++
+		s.usage.AddQueries(1)
 		s.grant.BytesTransferred += bytesTransferred
 	}
 }

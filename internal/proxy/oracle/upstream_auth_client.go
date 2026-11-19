@@ -285,7 +285,8 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 		header := s.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
 
 		return s.writeUpstreamData(
-			buildClientAuthPhase1(header, username, identity, mode, s.clientBigClrChunks), thinAuthDataFlags)
+			buildClientAuthPhase1(header, username, identity, mode, s.clientBigClrChunks, s.clientSendsBareUsername()),
+			thinAuthDataFlags)
 	}
 
 	if forceSyntheticUpstreamAuth ||
@@ -362,7 +363,8 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 		header := s.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq)
 
 		return s.writeUpstreamData(
-			buildClientAuthPhase2(header, username, identity, sec, mode, s.clientBigClrChunks), thinAuthDataFlags)
+			buildClientAuthPhase2(header, username, identity, sec, mode, s.clientBigClrChunks, s.clientSendsBareUsername()),
+			thinAuthDataFlags)
 	}
 
 	if forceSyntheticUpstreamAuth ||
@@ -965,6 +967,54 @@ func (s *session) syntheticAuthHeader(sub, seq byte) []byte {
 	return header
 }
 
+// clientSendsBareUsername reports whether the client's captured thin AUTH
+// Phase 1 writes the login username bare, with no CLR length prefix in front of
+// it. JDBC thin does (ojdbc11 23.26 and ojdbc6 11.2 alike); go-ora and
+// python-oracledb thin prefix it.
+//
+// The upstream reads the username the way this session's client negotiated it,
+// not the way dbbat would like to write it. A CLR-prefixed username sent on a
+// JDBC session is read as user_id_len bytes starting at the prefix, so the
+// upstream sees `\x06SYSTE` as the user and the stray `M` as the first KV
+// count: it answers Phase 1 with ORA-03120 (measured on 23ai Free, 2026-11-16).
+// That is why the synthetic AUTH fallback could never log a JDBC client in.
+//
+// The rule is read off the same anchor the rewrite path splices on
+// (locateAnchoredUsername): the username is CLR-prefixed when the byte before it
+// equals its length. Wide (OCI) bodies have their own builders, and no capture
+// at all means the go-ora form, as before.
+func (s *session) clientSendsBareUsername() bool {
+	if s.clientAuthPhase1Pkt == nil || len(s.clientAuthPhase1Pkt.Payload) <= ttcDataFlagsSize {
+		return false
+	}
+
+	return thinPhase1UsernameIsBare(s.clientAuthPhase1Pkt.Payload[ttcDataFlagsSize:])
+}
+
+// thinPhase1UsernameIsBare is clientSendsBareUsername on a Phase 1 body (after
+// the data flags). A body it cannot read reports false: the CLR-prefixed form.
+func thinPhase1UsernameIsBare(body []byte) bool {
+	if payloadUsesWideKVEncoding(body) {
+		return false
+	}
+
+	start, end, ok := locateAnchoredUsername(body)
+	if !ok {
+		return false
+	}
+
+	return start == 0 || int(body[start-1]) != end-start
+}
+
+// thinUsernameField frames a thin AUTH username: CLR-prefixed, or bare.
+func thinUsernameField(username []byte, bare bool) []byte {
+	if bare {
+		return username
+	}
+
+	return ttcClr(username)
+}
+
 // buildClientAuthPhase1 returns the TTC body for an AUTH Phase 1 message.
 // Layout matches go-ora v3's doAuth:
 //
@@ -979,7 +1029,12 @@ func (s *session) syntheticAuthHeader(sub, seq byte) []byte {
 // limit, so it can never reach the long form and the two encodings cannot
 // disagree about it. Every KV value goes through ttcKeyValChunked instead — a
 // hostname in AUTH_TERMINAL / AUTH_MACHINE has no such cap.
-func buildClientAuthPhase1(header []byte, username string, ident driverIdentity, mode uint32, bigChunks bool) []byte {
+//
+// bareUsername writes the username without its CLR length prefix, the way JDBC
+// thin does (see clientSendsBareUsername); user_id_len is then its only length.
+func buildClientAuthPhase1(
+	header []byte, username string, ident driverIdentity, mode uint32, bigChunks, bareUsername bool,
+) []byte {
 	buf := make([]byte, 0, 256)
 	buf = append(buf, header...)
 	buf = append(buf, 0x01)
@@ -987,7 +1042,7 @@ func buildClientAuthPhase1(header []byte, username string, ident driverIdentity,
 	buf = append(buf, ttcCompressedUint(uint64(len(username)))...)
 	buf = append(buf, ttcCompressedUint(uint64(mode))...)
 	buf = append(buf, 0x01, 0x01, 0x05, 0x01, 0x01)
-	buf = append(buf, ttcClr([]byte(username))...)
+	buf = append(buf, thinUsernameField([]byte(username), bareUsername)...)
 
 	for _, p := range authPhase1Pairs(ident) {
 		buf = append(buf, ttcKeyValChunked(p.key, p.value, p.flag, bigChunks)...)
@@ -1004,7 +1059,12 @@ func buildClientAuthPhase1(header []byte, username string, ident driverIdentity,
 // header is the TTC function header from syntheticAuthHeader; bigChunks is the
 // session's negotiated CLR long form and the username stays on ttcClr for the
 // same reason — see buildClientAuthPhase1.
-func buildClientAuthPhase2(header []byte, username string, ident driverIdentity, sec *upstreamAuthSecrets, mode uint32, bigChunks bool) []byte {
+//
+// bareUsername is the client's username framing, as on buildClientAuthPhase1.
+func buildClientAuthPhase2(
+	header []byte, username string, ident driverIdentity, sec *upstreamAuthSecrets, mode uint32,
+	bigChunks, bareUsername bool,
+) []byte {
 	pairs := authPhase2Pairs(ident, sec, false)
 
 	buf := make([]byte, 0, 512)
@@ -1025,7 +1085,7 @@ func buildClientAuthPhase2(header []byte, username string, ident driverIdentity,
 	buf = append(buf, 0x01, 0x01)
 
 	if len(usernameBytes) > 0 {
-		buf = append(buf, ttcClr(usernameBytes)...)
+		buf = append(buf, thinUsernameField(usernameBytes, bareUsername)...)
 	}
 
 	for _, p := range pairs {

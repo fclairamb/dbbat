@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -28,6 +29,7 @@ type Store struct {
 	authCache   *cache.AuthCache          // Optional auth cache for API key verification
 	revocations *cache.RevocationRegistry // In-process fan-out of grant revocations to live proxy sessions
 	sessions    *cache.SessionRegistry    // In-process fan-out of per-session terminations, keyed by connection uid
+	usage       *cache.UsageRegistry      // In-process per-grant consumption shared by the live sessions of a grant
 	instanceID  string                    // Identifies this process among the replicas sharing this store
 	runID       string                    // Identifies this *run*: minted here, never configurable
 
@@ -48,13 +50,22 @@ type Store struct {
 	// never written anywhere. Empty disables chaining. See chain.go.
 	chainKey []byte
 
-	// queryRetention is the configured DBB_QUERY_STORAGE_RETENTION — the
-	// *statement* window, never the ledger window DBB_CONNECTION_RETENTION
+	// queryRetention is the configured DBB_RETENTION_QUERIES_DELETE_AFTER — the
+	// *statement* window, never the ledger window DBB_RETENTION_CONNECTIONS_DELETE_AFTER
 	// governs. The sweep itself takes both windows as arguments
 	// (CleanupOldQueryRows), so this is not what drives deletion; it is what
 	// lets a reader tell a session retention emptied from one somebody emptied.
 	// See StatementsPastRetention.
 	queryRetention time.Duration
+
+	// archiveRetention is the configured DBB_RETENTION_QUERIES_ARCHIVE_AFTER,
+	// the instance-level archive window before the parameter overrides it.
+	archiveRetention time.Duration
+
+	// connectionClosed is called with the server of every connection this
+	// process closes (see SetConnectionClosedHook): it wakes the retention
+	// sweeper. Atomic: set after the store is shared.
+	connectionClosed atomic.Pointer[func(serverUID uuid.UUID, closedAt time.Time)]
 
 	// auditChain caches the head of the store-wide audit chain; queryChains
 	// caches one head per live connection; rowChains caches one head per query
@@ -107,17 +118,21 @@ type Options struct {
 	EncryptionKey []byte
 
 	// QueryRetention is the configured query-history retention window
-	// (DBB_QUERY_STORAGE_RETENTION), zero when retention is disabled — the
+	// (DBB_RETENTION_QUERIES_DELETE_AFTER), zero when retention is disabled — the
 	// default. Chain verification needs it to judge a session whose statements
 	// are *all* gone: retention can only account for that when the session ran
 	// entirely before the retention cutoff. Zero therefore means "nothing
 	// legitimately deletes statements here", which is the strictest reading.
 	//
 	// It is emphatically the **query** window, not the connection one: the
-	// ledger window (DBB_CONNECTION_RETENTION) decides whether the session row
+	// ledger window (DBB_RETENTION_CONNECTIONS_DELETE_AFTER) decides whether the session row
 	// still exists, never how many of its statements survive. Feeding it the
 	// longer of the two would excuse sessions nothing legitimately emptied.
 	QueryRetention time.Duration
+
+	// ArchiveRetention is DBB_RETENTION_QUERIES_ARCHIVE_AFTER, the instance
+	// archive window the retention.queries.archive_after parameter overrides.
+	ArchiveRetention time.Duration
 }
 
 // New creates a new Store instance and runs migrations
@@ -151,15 +166,17 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		storageDSN:  dsn,
 		revocations: cache.NewRevocationRegistry(),
 		sessions:    cache.NewSessionRegistry(),
+		usage:       cache.NewUsageRegistry(),
 		instanceID:  options.InstanceID,
 		// Minted here rather than taken from Options: the run id must identify
 		// one live process, and anything an operator can set — including
 		// DBB_INSTANCE_ID — can end up shared by several replicas. UUIDv7 so
 		// it also sorts by start time, which makes a registry dump readable.
-		runID:          newUIDv7().String(),
-		queryChains:    newQueryChains(),
-		rowChains:      newQueryChains(),
-		queryRetention: options.QueryRetention,
+		runID:            newUIDv7().String(),
+		queryChains:      newQueryChains(),
+		rowChains:        newQueryChains(),
+		queryRetention:   options.QueryRetention,
+		archiveRetention: options.ArchiveRetention,
 	}
 
 	if len(options.EncryptionKey) > 0 {
@@ -351,6 +368,16 @@ func (s *Store) Sessions() *cache.SessionRegistry {
 	}
 
 	return s.sessions
+}
+
+// Usage returns the process-wide per-grant consumption registry the quota
+// checks of live sessions read. Nil-safe like Revocations.
+func (s *Store) Usage() *cache.UsageRegistry {
+	if s == nil {
+		return nil
+	}
+
+	return s.usage
 }
 
 // migrationAdvisoryLockKey is the PostgreSQL advisory-lock key that serializes

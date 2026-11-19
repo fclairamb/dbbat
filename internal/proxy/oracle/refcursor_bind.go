@@ -76,7 +76,7 @@ func refCursorIDsInBindOutput(shape oerShape, ttcPayload []byte) []uint16 {
 	// differs and why it cannot be reached from here. Asked of the session's
 	// learned shape, like everything else in this file.
 	if shape.fixedWidth64 {
-		return refCursorIDsInBindOutputWide64(ttcPayload)
+		return refCursorIDsInBindOutputWide64(ttcPayload, shape.serverPredates(ttcFieldVersion23_1))
 	}
 
 	wide := shape.fixedWidth

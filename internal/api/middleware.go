@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
@@ -100,10 +101,10 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 	// Look up user
 	user, err := s.store.GetUserByUsername(c.Request.Context(), username)
 	if err != nil {
-		// Record failure AFTER credential verification fails
-		s.noteAuthFailure(c, username)
+		// Record the failure AFTER credential verification fails; past the
+		// username ceiling this is a 429, as for POST /auth/login.
 		c.Header("WWW-Authenticate", `Basic realm="DBBat"`)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
+		s.failAuth(c, username, "invalid credentials")
 		c.Abort()
 		return
 	}
@@ -117,15 +118,16 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 		valid, err = verifyPasswordDirect(user.PasswordHash, password)
 	}
 	if err != nil || !valid {
-		// Record failure AFTER credential verification fails
-		s.noteAuthFailure(c, username)
+		// Record the failure AFTER credential verification fails; past the
+		// username ceiling this is a 429, as for POST /auth/login.
 		c.Header("WWW-Authenticate", `Basic realm="DBBat"`)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
+		s.failAuth(c, username, "invalid credentials")
 		c.Abort()
 		return
 	}
 
-	// Reset failure count on successful login
+	// Reset failure count on successful login; a success during a guessing
+	// burst is audited and lifts the username ceiling, as for POST /auth/login.
 	s.noteAuthSuccess(c, username)
 
 	// Same rule as POST /auth/login: a password that was never changed — the
@@ -205,6 +207,19 @@ func (s *Server) requireWebSessionOrBasicAuth() gin.HandlerFunc {
 	}
 }
 
+// requireWebSession middleware ensures the request carries a web session: not
+// an API key, and not Basic Auth either.
+func (s *Server) requireWebSession() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if getAuthMethod(c) != authMethodWebSession {
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "this operation requires a web session")
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // getAuthMethod returns the authentication method used for the current request
 func getAuthMethod(c *gin.Context) string {
 	method, exists := c.Get(contextKeyAuthMethod)
@@ -266,11 +281,13 @@ const (
 	authFailureCleanupInterval = 5 * time.Minute
 
 	// authUsernameCeiling failures against one username within
-	// authUsernameCeilingWindow, summed over every source address, block that
-	// username everywhere until the window ends. High enough that it takes
-	// several addresses to reach it (one address is held to about a dozen
-	// failures an hour by the per-source backoff), so it is a backstop
-	// against distributed guessing and not a lockout lever.
+	// authUsernameCeilingWindow, summed over every source address, put that
+	// username under a guessing burst until the window ends: every wrong
+	// password, from any source, is answered 429 rather than 401, so the
+	// failure feedback stops being useful at scale. The password is still
+	// checked, and a correct one is let through and lifts the ceiling, so the
+	// burst is a backstop against distributed guessing and not a lockout
+	// lever.
 	authUsernameCeiling       = 100
 	authUsernameCeilingWindow = time.Hour
 )
@@ -335,7 +352,9 @@ func (t *authFailureTracker) sweep(now time.Time) {
 }
 
 // checkRateLimit reports whether username may attempt a password check from
-// ip. Returns (allowed, retryAfter in seconds).
+// ip, under the per-source backoff. Returns (allowed, retryAfter in seconds).
+// The username-wide ceiling is not consulted here: it never stops the
+// password from being checked (see ceilingRetryAfter).
 func (t *authFailureTracker) checkRateLimit(username, ip string) (bool, int) {
 	now := time.Now()
 
@@ -345,20 +364,7 @@ func (t *authFailureTracker) checkRateLimit(username, ip string) (bool, int) {
 	if exists {
 		recordCopy = *record
 	}
-	ceiling, ceilingExists := t.ceilings[username]
-	var ceilingCopy ceilingRecord
-	if ceilingExists {
-		ceilingCopy = *ceiling
-	}
 	t.mu.RUnlock()
-
-	// The username-wide ceiling first: it applies to every source.
-	if ceilingExists && ceilingCopy.count >= authUsernameCeiling {
-		blockedUntil := ceilingCopy.windowStart.Add(authUsernameCeilingWindow)
-		if now.Before(blockedUntil) {
-			return false, retryAfterSeconds(blockedUntil.Sub(now))
-		}
-	}
 
 	if !exists {
 		return true, 0
@@ -381,6 +387,32 @@ func (t *authFailureTracker) checkRateLimit(username, ip string) (bool, int) {
 	}
 
 	return true, 0
+}
+
+// ceilingRetryAfter returns the seconds left in username's guessing burst, or
+// 0 when the username is under its ceiling. During a burst a wrong password
+// is answered 429 with this Retry-After, from every source.
+func (t *authFailureTracker) ceilingRetryAfter(username string) int {
+	now := time.Now()
+
+	t.mu.RLock()
+	ceiling, exists := t.ceilings[username]
+	var ceilingCopy ceilingRecord
+	if exists {
+		ceilingCopy = *ceiling
+	}
+	t.mu.RUnlock()
+
+	if !exists || ceilingCopy.count < authUsernameCeiling {
+		return 0
+	}
+
+	blockedUntil := ceilingCopy.windowStart.Add(authUsernameCeilingWindow)
+	if !now.Before(blockedUntil) {
+		return 0
+	}
+
+	return retryAfterSeconds(blockedUntil.Sub(now))
 }
 
 // retryAfterSeconds rounds a remaining block to whole seconds, at least one.
@@ -425,19 +457,36 @@ func (t *authFailureTracker) recordFailure(username, ip string) bool {
 	return ceiling.count == authUsernameCeiling
 }
 
-// resetFailures clears the backoff of username from ip, on a successful
-// login. The username-wide ceiling is left alone: it counts guesses made
-// against the account, and one correct password from one address says
-// nothing about the others.
-func (t *authFailureTracker) resetFailures(username, ip string) {
+// resetFailures clears, on a successful login, the backoff of username from
+// ip and the username-wide ceiling: whoever holds the password has nothing
+// left to guess, so a burst against the account ends with its owner's next
+// correct login. The backoff of the other sources is left alone. It returns
+// the number of failures the ceiling had counted when it was reached, or 0
+// when no guessing burst was active, so the caller can audit the success.
+func (t *authFailureTracker) resetFailures(username, ip string) int {
+	now := time.Now()
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.failures, authFailureKey{username: username, ip: ip})
+
+	ceiling, exists := t.ceilings[username]
+	if !exists {
+		return 0
+	}
+	delete(t.ceilings, username)
+
+	if ceiling.count >= authUsernameCeiling && now.Before(ceiling.windowStart.Add(authUsernameCeilingWindow)) {
+		return ceiling.count
+	}
+
+	return 0
 }
 
-// checkAuthThrottle applies the failure tracker before a password check. It
-// writes the 429 and returns false when the attempt is throttled. Test mode
-// skips the check, as it always has.
+// checkAuthThrottle applies the per-source backoff before a password check.
+// It writes the 429 and returns false when the attempt is throttled. Test
+// mode skips the check, as it always has. The username-wide ceiling is
+// applied after the check, by failAuth, and only to wrong passwords.
 func (s *Server) checkAuthThrottle(c *gin.Context, username string) bool {
 	if s.isTestMode() {
 		return true
@@ -451,8 +500,30 @@ func (s *Server) checkAuthThrottle(c *gin.Context, username string) bool {
 	return allowed
 }
 
+// failAuth answers a failed credential check: it records the failure, then
+// writes a 401 INVALID_CREDENTIALS with message, or a 429 when the username is in a
+// guessing burst (past its ceiling before this attempt). The burst status is
+// read before the failure is recorded, so the attempt that reaches the
+// ceiling still gets its 401. Test mode skips the ceiling, as it skips the
+// backoff.
+func (s *Server) failAuth(c *gin.Context, username, message string) {
+	retryAfter := 0
+	if !s.isTestMode() {
+		retryAfter = s.authFailureTracker.ceilingRetryAfter(username)
+	}
+
+	s.noteAuthFailure(c, username)
+
+	if retryAfter > 0 {
+		writeRateLimited(c, retryAfter)
+		return
+	}
+
+	writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, message)
+}
+
 // noteAuthFailure records a failed password check and, when it brings the
-// username to the per-username ceiling, logs and audits the lockout.
+// username to the per-username ceiling, logs and audits the guessing burst.
 func (s *Server) noteAuthFailure(c *gin.Context, username string) {
 	ip := c.ClientIP()
 	if !s.authFailureTracker.recordFailure(username, ip) {
@@ -460,7 +531,7 @@ func (s *Server) noteAuthFailure(c *gin.Context, username string) {
 	}
 
 	ctx := c.Request.Context()
-	s.logger.WarnContext(ctx, "username reached the login failure ceiling; password login blocked for every source",
+	s.logger.WarnContext(ctx, "username reached the login failure ceiling; wrong passwords are refused from every source",
 		slog.String("username", username),
 		slog.String("client_ip", ip),
 		slog.Int("failures", authUsernameCeiling),
@@ -484,7 +555,7 @@ func (s *Server) noteAuthFailure(c *gin.Context, username string) {
 		EventType: store.AuditEventAuthFailureCeiling,
 		Details:   details,
 	}
-	if user, err := s.store.GetUserByUsername(ctx, username); err == nil {
+	if user := s.throttleKeyUser(ctx, username); user != nil {
 		event.UserID = &user.UID
 	}
 
@@ -493,9 +564,63 @@ func (s *Server) noteAuthFailure(c *gin.Context, username string) {
 	}
 }
 
-// noteAuthSuccess clears the caller's backoff after a correct password.
+// noteAuthSuccess clears the caller's backoff and the username's ceiling
+// after a correct password. A success that ends an active guessing burst is
+// logged and audited, so the signal survives the burst being lifted.
 func (s *Server) noteAuthSuccess(c *gin.Context, username string) {
-	s.authFailureTracker.resetFailures(username, c.ClientIP())
+	ip := c.ClientIP()
+	failures := s.authFailureTracker.resetFailures(username, ip)
+	if failures == 0 {
+		return
+	}
+
+	ctx := c.Request.Context()
+	s.logger.WarnContext(ctx, "correct password during an active guessing burst; login failure ceiling lifted",
+		slog.String("username", username),
+		slog.String("client_ip", ip),
+		slog.Int("failures", failures))
+
+	if s.store == nil {
+		return
+	}
+
+	details, err := json.Marshal(map[string]any{
+		"username":  username,
+		"failures":  failures,
+		"client_ip": ip,
+	})
+	if err != nil {
+		return
+	}
+
+	event := &store.AuditEvent{
+		EventType: store.AuditEventAuthSuccessDuringCeiling,
+		Details:   details,
+	}
+	if user := s.throttleKeyUser(ctx, username); user != nil {
+		event.UserID = &user.UID
+	}
+
+	if err := s.store.LogAuditEvent(ctx, event); err != nil {
+		s.logger.ErrorContext(ctx, "failed to audit a login during a guessing burst", slog.Any("error", err))
+	}
+}
+
+// throttleKeyUser resolves a throttle key to its user, for the audit trail.
+// The key is a username, except for PUT /users/:uid/password without one,
+// which throttles on the target UID. It returns nil when no user matches.
+func (s *Server) throttleKeyUser(ctx context.Context, key string) *store.User {
+	if user, err := s.store.GetUserByUsername(ctx, key); err == nil {
+		return user
+	}
+
+	if uid, err := uuid.Parse(key); err == nil {
+		if user, err := s.store.GetUserByUID(ctx, uid); err == nil {
+			return user
+		}
+	}
+
+	return nil
 }
 
 // isTestMode returns true if the server is running in test mode

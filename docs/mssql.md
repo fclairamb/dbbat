@@ -351,6 +351,17 @@ on an encrypted client leg too. The channel is bounded because a parked session
 must not let a pipelining client make the proxy allocate without limit; a client
 that fills it simply stops being read.
 
+**Requests are serialized at the proxy.** TDS without MARS is request/response,
+but nothing stops a client from sending its next request before the previous
+response has arrived. The response accounting keeps a single in-flight
+statement, so the forward pump does not intercept or forward a request until the
+upstream has answered the previous one (its response EOM), nor until an
+`ATTENTION` it forwarded has been acknowledged with a `DONE_ATTN`. Otherwise a
+second request would overwrite the first, whose response would be logged under
+the second statement's text while the second went unlogged. `ATTENTION` itself
+is never held back: it is the cancel for the request in flight, so the pump
+forwards it at once, ahead of any request queued behind it.
+
 The same goroutine is why this proxy has no `shared.WatchedConn` underneath its
 client socket, unlike the other four: the socket is being read at all times, so
 a FIN is noticed the moment it lands.
@@ -520,6 +531,25 @@ allowed bulk-load message still goes through the pipeline: the rows carry no
 statement to check, but they do consume the grant's quota and belong in the
 audit trail.
 
+### Password changes are refused whatever the grant
+
+Every dbbat session to a server logs in as one shared upstream login, so a
+proxied user who changes its password (with `ALTER ANY LOGIN`, which a shared
+admin-ish login often has) breaks dbbat's stored credential and every other
+user's next connection fails. `shared.ValidateMSSQLBatch` therefore refuses,
+under **every** grant, full write included, with
+`shared.ErrPasswordChangeBlocked`, any statement of the batch that is
+`ALTER LOGIN … WITH … PASSWORD`, `CREATE LOGIN … WITH PASSWORD`, or the
+contained-database `ALTER USER … WITH PASSWORD` / `CREATE USER … WITH PASSWORD`.
+The scan is the one the write/DDL keywords use: literals, quoted and bracketed
+identifiers, variables and `OLD_PASSWORD` are stepped over, and it runs on every
+dynamic payload the batch or an `sp_executesql` RPC carries. A bare `password`
+after an `ALTER LOGIN` / `ALTER USER` with no `;` between them is refused too,
+since T-SQL needs no separator: that fails closed. `ALTER LOGIN l DISABLE` is
+left to the grant controls (refused under `read_only` and `block_ddl`, allowed
+under full write). The LOGIN7 change-password field is refused at login
+(`Login7.Validate`). Not covered: the deprecated `sp_password` procedure.
+
 ### `USE <db>`, and what is deliberately not enforced next to it
 
 TDS pins nothing. The LOGIN7 database field sets the session's *initial* context,
@@ -578,7 +608,7 @@ laxer rule set for dynamic SQL would turn every control into a suggestion:
 | dynamic SQL nested inside dynamic SQL | **refused** (`shared.ErrDynamicSQLNotCheckable`) rather than unwrapped further |
 | a statement argument that cannot be located at all | **refused**, same error |
 | `EXEC(@sql)`, `EXEC sp_executesql @sql`, `@stmt = @sql`, `EXEC('USE ' + @db)`, `EXEC sp_prepare @h OUT, NULL, @sql, 1` | **refused under `read_only`/`block_ddl` only** (`shared.ErrDynamicSQLOpaque`) — see below |
-| `EXEC dbo.some_proc`, `EXEC dbo.p @a = 1` | an ordinary procedure call, not dynamic SQL: opaque, and already failed closed under a restrictive grant on the RPC path |
+| `EXEC dbo.some_proc`, `EXEC dbo.p @a = 1` | an ordinary procedure call, not dynamic SQL: opaque, and failed closed under a restrictive grant (`ErrOpaqueProcedureBlocked`) on both the RPC and the SQLBatch path, including `EXEC sp_cursor …` written as batch text and a call inside an `sp_executesql` payload. `EXEC sp_executesql …` and the other SQL-carrying procedures are checked on their statement instead |
 | `EXEC(…) AT <linked_server>` | **out of scope and unenforced** — see below |
 
 Which parameter names can carry the statement is **one list**

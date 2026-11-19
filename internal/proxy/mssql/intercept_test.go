@@ -249,6 +249,36 @@ func TestSQLBatchEnforcement(t *testing.T) {
 			name: "a password change is always blocked",
 			sql:  "ALTER USER [bob] WITH PASSWORD = 'x'", wantErr: shared.ErrPasswordChangeBlocked,
 		},
+		{
+			name: "EXEC of a procedure is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "EXEC dbo.Recalc", wantErr: ErrOpaqueProcedureBlocked,
+		},
+		{
+			name: "EXECUTE of a procedure is blocked by block_ddl", controls: []string{store.ControlBlockDDL},
+			sql: "SELECT 1; execute [dbo].[Recalc] @a = 1", wantErr: ErrOpaqueProcedureBlocked,
+		},
+		{
+			name: "EXEC sp_cursor is blocked by read_only", controls: []string{store.ControlReadOnly},
+			sql: "EXEC sp_cursor 7, 1, 1, N'', N'x'", wantErr: ErrOpaqueProcedureBlocked,
+		},
+		{
+			name: "EXEC of a procedure inside sp_executesql is blocked", controls: []string{store.ControlReadOnly},
+			sql: "EXEC sp_executesql N'EXEC dbo.Recalc'", wantErr: ErrOpaqueProcedureBlocked,
+		},
+		{name: "EXEC of a procedure is allowed under a full-write grant", sql: "EXEC dbo.Recalc"},
+		{name: "EXEC sp_cursor is allowed under a full-write grant", sql: "EXEC sp_cursor 7, 1, 1, N'', N'x'"},
+		{
+			name: "EXEC sp_executesql of a read stays allowed", controls: []string{store.ControlReadOnly},
+			sql: "EXEC sp_executesql N'SELECT 1'",
+		},
+		{
+			name: "EXEC @rc = sys.sp_executesql of a read stays allowed", controls: []string{store.ControlReadOnly},
+			sql: "EXEC @rc = sys.sp_executesql N'SELECT 1'",
+		},
+		{
+			name: "EXEC inside a literal or comment is not a call", controls: []string{store.ControlReadOnly},
+			sql: "SELECT 'EXEC dbo.Recalc' /* EXEC dbo.Recalc */",
+		},
 	}
 
 	for _, tc := range tests {
@@ -986,7 +1016,7 @@ func TestArmWindowCancelLosingLeavesTheNextRefusalIntact(t *testing.T) {
 	// The approved statement runs, and the cancel that lost is put back on the
 	// upstream leg behind it — the fake answers both.
 	assert.Equal(t, buildDoneToken(0, 1), client.readReply(t), "the released statement's answer must reach the client")
-	assert.Equal(t, buildDoneToken(0, 1), client.readReply(t), "the re-emitted cancel is answered too")
+	assert.Equal(t, buildAttentionAck(), client.readReply(t), "the re-emitted cancel is answered too")
 
 	require.Eventually(t, func() bool { return len(fixture.fake.receivedRequests()) == 2 },
 		15*time.Second, 20*time.Millisecond)
@@ -1524,7 +1554,7 @@ func approvalSession(t *testing.T) *session {
 	}
 
 	sess := sessionWithGrant(t, grant)
-	sess.approvalGate = shared.NewApprovalGate(shared.ApprovalDeps{Enabled: true}, grant, uuid.New(), nil, "prod")
+	sess.approvalGate = shared.NewApprovalGate(shared.ApprovalDeps{Enabled: true}, shared.ApprovalDialectStandard, grant, uuid.New(), nil, "prod")
 
 	return sess
 }
@@ -1570,4 +1600,33 @@ func TestApprovalHoldPositiveControls(t *testing.T) {
 
 	_, err = sess.holdIfNeeded(context.Background(), statement{text: batch, enforce: []string{batch}})
 	require.ErrorIs(t, err, shared.ErrApprovalUnavailable, "a SQLBatch DELETE must still be held")
+}
+
+// TestPasswordChangeRefusedUnderFullWrite pins the password-change block on
+// both statement paths: a SQLBatch (alone, second in the batch, and wrapped in
+// EXEC sp_executesql) and the sp_executesql RPC a driver sends. The grant
+// carries no control at all: every dbbat session shares the upstream login.
+func TestPasswordChangeRefusedUnderFullWrite(t *testing.T) {
+	t.Parallel()
+
+	session := sessionWithGrant(t, grantWithControls())
+
+	for _, sql := range []string{
+		"ALTER LOGIN l WITH PASSWORD = 'x'",
+		"SELECT 1\nALTER LOGIN l WITH PASSWORD = 'x'",
+		"EXEC sp_executesql N'ALTER LOGIN l WITH PASSWORD = ''x'''",
+	} {
+		require.ErrorIs(t, session.validateStatement(sql), shared.ErrPasswordChangeBlocked, sql)
+	}
+
+	requests, err := parseRPC(rpcByID(spExecuteSQL, nvarcharMaxParam("", "ALTER LOGIN l WITH PASSWORD = 'x'")))
+	require.NoError(t, err)
+
+	st := session.describeRPC(requests)
+	require.NoError(t, st.refusal)
+	require.ErrorIs(t, session.validate(st), shared.ErrPasswordChangeBlocked)
+
+	// Without a password the statement is the grant controls' business: a
+	// full-write grant allows it, as before.
+	require.NoError(t, session.validateStatement("ALTER LOGIN l DISABLE"))
 }

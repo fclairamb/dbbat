@@ -200,6 +200,14 @@ func (s *Session) completeInFlightLocked(primary *pendingQuery, primaryErr, othe
 		entries = append(entries, s.currentQuery)
 	}
 
+	// Simple Queries a pipelining client sent behind currentQuery reached
+	// upstream too; none of them may be left unlogged.
+	for _, q := range s.queuedSimpleQueries {
+		if q != nil && !slices.Contains(entries, q) {
+			entries = append(entries, q)
+		}
+	}
+
 	bytesFor := func(q *pendingQuery) int64 {
 		if q == answered {
 			return bytesTransferred
@@ -222,6 +230,7 @@ func (s *Session) completeInFlightLocked(primary *pendingQuery, primaryErr, othe
 	s.logQuery(nil, &primaryErr, bytesFor(primary))
 
 	s.currentQuery = nil
+	s.queuedSimpleQueries = nil
 	s.copyState = nil
 
 	if s.extendedState != nil {

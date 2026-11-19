@@ -388,7 +388,29 @@ func (s *session) validateStatement(sql string) error {
 
 	inner, readable := shared.MSSQLDynamicSQL(sql)
 
+	// A procedure called by name — in the batch or in a dynamic payload — has a
+	// body dbbat cannot see: the same fail-closed answer as the RPC path.
+	if readable && grantRestricts(s.grant) && s.callsProcedure(inner) {
+		return ErrOpaqueProcedureBlocked
+	}
+
 	return shared.ValidateDynamicSQL(inner, readable, s.grant, s.checkStatement)
+}
+
+// callsProcedure reports whether the batch, or any dynamic payload it carries,
+// invokes a stored procedure by name.
+func (s *session) callsProcedure(dyn shared.DynamicSQL) bool {
+	if dyn.Procedure {
+		return true
+	}
+
+	for _, payload := range dyn.Payloads {
+		if inner, ok := shared.MSSQLDynamicSQL(payload); ok && inner.Procedure {
+			return true
+		}
+	}
+
+	return false
 }
 
 // checkStatement is the static controls over one statement's own text, with no
@@ -589,6 +611,13 @@ func (s *session) resolveHoldCanceled(uid uuid.UUID) bool {
 		return false
 	}
 
+	// heldMu is held across Resolve: the moment the decision is delivered the
+	// parked session wakes and asks takeAttentionAck, and it must find the mark
+	// set, not race the reader for it (it would answer an error, not the ack).
+	// Resolve never blocks and never calls back into the session.
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
 	if !s.server.approvalDeps.Registry.Resolve(approval.Decision{
 		QueryUID: uid,
 		Status:   store.ApprovalAbandoned,
@@ -598,9 +627,7 @@ func (s *session) resolveHoldCanceled(uid uuid.UUID) bool {
 		return false
 	}
 
-	s.heldMu.Lock()
 	s.attentionAckDue = true
-	s.heldMu.Unlock()
 
 	return true
 }

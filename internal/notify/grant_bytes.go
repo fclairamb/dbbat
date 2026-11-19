@@ -52,7 +52,7 @@ func grantBytesText(ev store.GrantBytesEvent, publicURL string, now time.Time) s
 
 	database := "(unknown)"
 	if ev.Database != nil {
-		database = ev.Database.Name
+		database = EscapeSlackText(ev.Database.Name)
 	}
 
 	text := fmt.Sprintf(

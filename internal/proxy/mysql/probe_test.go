@@ -100,6 +100,11 @@ func TestBareTCPProbeIsQuiet(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool { return srv.Addr() != nil }, 5*time.Second, 10*time.Millisecond)
+	// Start publishes the listener before it logs "listening": wait for that
+	// line so reset() cannot run ahead of it and leave it in the capture.
+	require.Eventually(t, func() bool {
+		return logs.has(slog.LevelInfo, "MySQL proxy server listening")
+	}, 5*time.Second, 10*time.Millisecond)
 
 	logs.reset()
 
@@ -139,6 +144,11 @@ func TestTruncatedHandshakeStaysLoud(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool { return srv.Addr() != nil }, 5*time.Second, 10*time.Millisecond)
+	// Start publishes the listener before it logs "listening": wait for that
+	// line so reset() cannot run ahead of it and leave it in the capture.
+	require.Eventually(t, func() bool {
+		return logs.has(slog.LevelInfo, "MySQL proxy server listening")
+	}, 5*time.Second, 10*time.Millisecond)
 
 	logs.reset()
 

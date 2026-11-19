@@ -182,7 +182,7 @@ func startOracleThroughProxyWith(t *testing.T, opts oracleFixtureOptions) *oracl
 		bindAddr = "0.0.0.0:0"
 	}
 
-	proxy := NewServer(dataStore, encryptionKey, nil, opts.queryStorage, config.DumpConfig{}, slog.New(logs))
+	proxy := NewServer(dataStore, encryptionKey, nil, opts.queryStorage, integrationDumpConfig(t), slog.New(logs))
 	proxy.SetStatementTagging(opts.statementTagging)
 
 	go func() { _ = proxy.Start(bindAddr) }()
@@ -1241,4 +1241,29 @@ END;`)
 	// inside the procedure, which never crossed the wire.
 	assert.Contains(t, env.logs.sqlsFor(logMsgReexecGated), truncateSQL(markRefCursorStatement(call), 200),
 		"a REF cursor drive is gated against the call it came back from, and says so")
+}
+
+// integrationDumpEnv names a directory every session the fixture proxies is
+// recorded into, one subdirectory per test. It is how a leg that cannot run on
+// the developer's machine (the amd64-only 18c XE image) hands back the bytes a
+// fix has to be written against: the integration workflow's
+// `capture_dumps` input sets it and uploads the directory as an artifact.
+// dbbat's own capture records both directions, synthesized refusals included,
+// in the pcapng format loadTestDump reads.
+const integrationDumpEnv = "ORACLE_TEST_DUMP_DIR"
+
+// integrationDumpConfig is the fixture's DumpConfig: disabled unless
+// integrationDumpEnv is set.
+func integrationDumpConfig(t *testing.T) config.DumpConfig {
+	t.Helper()
+
+	root := os.Getenv(integrationDumpEnv)
+	if root == "" {
+		return config.DumpConfig{}
+	}
+
+	dir := filepath.Join(root, strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()))
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+
+	return config.DumpConfig{Dir: dir, MaxSize: 64 << 20}
 }

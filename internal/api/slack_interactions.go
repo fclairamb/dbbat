@@ -466,9 +466,9 @@ func threadReplyText(action notify.GrantAction, deciderSlackID string, decider *
 
 	switch {
 	case deciderSlackID != "":
-		who = "<@" + deciderSlackID + ">"
+		who = "<@" + notify.EscapeSlackText(deciderSlackID) + ">"
 	case decider != nil:
-		who = decider.Username
+		who = notify.EscapeSlackText(decider.Username)
 	}
 
 	switch action { //nolint:exhaustive // GrantActionCreated has no reply text (handled by default)

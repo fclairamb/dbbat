@@ -24,7 +24,7 @@ func TestMSSQLEncryptionOption(t *testing.T) {
 		{SSLModeRequire, []byte{MSSQLEncryptOn}},
 		{SSLModeVerifyCA, []byte{MSSQLEncryptOn}},
 		{SSLModeVerifyFull, []byte{MSSQLEncryptOn}},
-		{"typo", []byte{MSSQLEncryptOn, MSSQLEncryptNotSup}},
+		{"typo", []byte{MSSQLEncryptOn}}, // unknown fails closed to require
 	}
 
 	for _, tc := range cases {

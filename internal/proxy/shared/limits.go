@@ -168,7 +168,8 @@ type LimitGuard struct {
 	// baseBytes is the grant's already-consumed byte total at guard
 	// construction (before this session contributed anything). The live
 	// counters accumulate this session's bytes on top of it, so
-	// baseBytes + from + to is the grant's true running total at any instant.
+	// baseBytes + from + to is this session's view of the grant's running
+	// total; usage (below) adds what the grant's other sessions moved since.
 	//
 	// "The grant's" total, not "this database's": a grant bound to a server
 	// group covers every database in that group, and its quota is one budget
@@ -178,6 +179,13 @@ type LimitGuard struct {
 	// whichever databases of the group the user connects to.
 	baseBytes int64
 	maxBytes  *int64
+
+	// usage, when non-nil, is the session's share of its grant's consumption
+	// reading. Its OtherBytes — what the grant's other sessions moved since
+	// this one's snapshot, on this replica and, within one refresh, on the
+	// others — is added to baseBytes + from + to, so parallel sessions draw on
+	// one budget instead of each having its own.
+	usage *cache.UsageHandle
 
 	// expiresAt is the grant's end, stamped by the *store's* clock, and it is
 	// deliberately compared here against the *process's* (see now, below) —
@@ -253,6 +261,19 @@ func (g *LimitGuard) WithRevocation(revoked *atomic.Bool) *LimitGuard {
 	}
 
 	g.revoked = revoked
+
+	return g
+}
+
+// WithUsage attaches the session's share of its grant's consumption reading
+// (RegisterGrantUsage), so the byte quota counts the grant's other sessions
+// too. A nil handle is a no-op. Returns the guard for fluent construction.
+func (g *LimitGuard) WithUsage(usage *cache.UsageHandle) *LimitGuard {
+	if g == nil {
+		return g
+	}
+
+	g.usage = usage
 
 	return g
 }
@@ -389,7 +410,7 @@ func (g *LimitGuard) Check() error {
 		return ErrGrantRevoked
 	}
 
-	if g.maxBytes != nil && g.baseBytes+g.liveBytes() >= *g.maxBytes {
+	if g.maxBytes != nil && g.baseBytes+g.liveBytes()+g.usage.OtherBytes() >= *g.maxBytes {
 		return ErrByteQuotaExceeded
 	}
 

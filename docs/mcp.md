@@ -416,7 +416,7 @@ should not answer, not even with a `403`.
 Related settings that shape what an agent can do, all pre-existing:
 `DBB_APPROVAL_ENABLED`, `DBB_APPROVAL_SLACK_DELAY`, `DBB_LISTEN_PG`,
 `DBB_LISTEN_MYSQL`, `DBB_LISTEN_ORA`, `DBB_LISTEN_MONGO`, `DBB_LISTEN_MSSQL`,
-`DBB_QUERY_STORAGE_RETENTION`.
+`DBB_RETENTION_QUERIES_DELETE_AFTER`.
 
 ---
 

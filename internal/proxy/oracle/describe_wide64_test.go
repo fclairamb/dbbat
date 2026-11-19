@@ -306,7 +306,26 @@ func TestOCI64RowHeaderPatternIsUniqueInTheCorpus(t *testing.T) {
 	// flag carries 0x02 instead of 0x22, matched here because the reading is
 	// masked. Widening the flag adds exactly that one hit to the corpus and
 	// nothing else — no describe, no 4-byte payload, no compressed one.
+	//
+	// The oci64_18c_* fixtures are the same scripts recorded against Oracle 18c
+	// XE, and they match at the same places: every row-carrying describe and
+	// fetch, nothing else. Each 18c recording also carries the DECODE probe
+	// sqlplus 18.4 runs after login, one more single-row describe.
 	assert.Equal(t, []hit{
+		{fixture: "testdata/oci64_18c_describe.hex", frame: 0, count: 1},
+		{fixture: "testdata/oci64_18c_describe.hex", frame: 1, count: 1},
+		{fixture: "testdata/oci64_18c_describe.hex", frame: 2, count: 8},
+		{fixture: "testdata/oci64_18c_lob.hex", frame: 0, count: 1},
+		{fixture: "testdata/oci64_18c_lob.hex", frame: 1, count: 1},
+		{fixture: "testdata/oci64_18c_lob.hex", frame: 3, count: 13},
+		{fixture: "testdata/oci64_18c_long.hex", frame: 0, count: 1},
+		{fixture: "testdata/oci64_18c_long.hex", frame: 1, count: 1},
+		{fixture: "testdata/oci64_18c_long.hex", frame: 3, count: 4},
+		{fixture: "testdata/oci64_18c_long.hex", frame: 4, count: 4},
+		{fixture: "testdata/oci64_18c_long.hex", frame: 6, count: 4},
+		{fixture: "testdata/oci64_18c_sevencols.hex", frame: 0, count: 1},
+		{fixture: "testdata/oci64_18c_sevencols.hex", frame: 1, count: 1},
+		{fixture: "testdata/oci64_18c_sevencols.hex", frame: 2, count: 7},
 		{fixture: oci64Describes, frame: 0, count: 1},
 		{fixture: oci64Describes, frame: 1, count: 8},
 		{fixture: oci64LOBFrames, frame: 0, count: 1},

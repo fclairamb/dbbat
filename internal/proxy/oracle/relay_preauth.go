@@ -586,34 +586,16 @@ func dialUpstreamWithRedirect(s *session, addr string, connectPkt *TNSPacket) (n
 		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream connected",
 			slog.String("addr", currentAddr), slog.Int("redirects", redirects))
 
-		if _, err := conn.Write(currentConnect); err != nil {
-			_ = conn.Close()
-
-			return nil, nil, fmt.Errorf("forward Connect to upstream %s: %w", currentAddr, err)
-		}
-
-		pkt, err := readTNSPacket(conn)
+		pkt, resends, err := exchangeConnect(conn, currentConnect)
 		if err != nil {
 			_ = conn.Close()
 
-			return nil, nil, fmt.Errorf("read upstream response from %s: %w", currentAddr, err)
+			return nil, nil, fmt.Errorf("connect to upstream %s: %w", currentAddr, err)
 		}
 
-		if pkt.Type == TNSPacketTypeResend {
-			s.logger.DebugContext(s.ctx, "pre-auth relay: upstream requested Resend, re-sending Connect")
-
-			if _, err := conn.Write(currentConnect); err != nil {
-				_ = conn.Close()
-
-				return nil, nil, fmt.Errorf("resend Connect to upstream: %w", err)
-			}
-
-			pkt, err = readTNSPacket(conn)
-			if err != nil {
-				_ = conn.Close()
-
-				return nil, nil, fmt.Errorf("read upstream Accept after Resend: %w", err)
-			}
+		if resends > 0 {
+			s.logger.DebugContext(s.ctx, "pre-auth relay: upstream requested Resend, re-sent Connect",
+				slog.Int("resends", resends))
 		}
 
 		//nolint:exhaustive // pre-auth only expects Accept or Redirect; everything else is rejected via default.
@@ -641,6 +623,40 @@ func dialUpstreamWithRedirect(s *session, addr string, connectPkt *TNSPacket) (n
 	}
 
 	return nil, nil, fmt.Errorf("%w: %d", ErrUpstreamTooManyRedirects, maxRedirects)
+}
+
+// maxConnectResends bounds how many times a listener may answer a Connect with
+// Resend before dbbat gives up on it. A listener asks again once in the cases
+// measured (Oracle 18c XE does, 23ai does not); the bound only stops a peer that
+// asks forever from holding the pre-auth slot.
+const maxConnectResends = 3
+
+// ErrTooManyConnectResends reports a listener that kept answering Resend.
+var ErrTooManyConnectResends = errors.New("upstream kept answering the Connect with Resend")
+
+// exchangeConnect writes a TNS Connect and returns the listener's answer,
+// re-sending the same Connect each time the listener answers Resend (up to
+// maxConnectResends). The returned packet is never a Resend; resends is how
+// many were followed.
+func exchangeConnect(conn net.Conn, connect []byte) (*TNSPacket, int, error) {
+	for resends := 0; ; resends++ {
+		if _, err := conn.Write(connect); err != nil {
+			return nil, resends, fmt.Errorf("write Connect: %w", err)
+		}
+
+		pkt, err := readTNSPacket(conn)
+		if err != nil {
+			return nil, resends, fmt.Errorf("read Connect answer: %w", err)
+		}
+
+		if pkt.Type != TNSPacketTypeResend {
+			return pkt, resends, nil
+		}
+
+		if resends >= maxConnectResends {
+			return nil, resends, fmt.Errorf("%w: %d times", ErrTooManyConnectResends, resends+1)
+		}
+	}
 }
 
 // parseRedirect extracts the new host/port and the updated connect descriptor from

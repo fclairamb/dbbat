@@ -4,6 +4,7 @@ import {
   useInstance,
   useUpdateInstancePublic,
   useUpdateInstanceLimits,
+  useUpdateInstanceRetention,
   useUpdateInstanceTagging,
   useParameters,
   useUpdateParameter,
@@ -13,6 +14,10 @@ import {
   type InstanceInfo,
   type PublicEndpoints,
 } from "@/api";
+import {
+  DeleteWindowWarning,
+  formatSeconds,
+} from "@/components/shared/RetentionDuration";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -104,6 +109,7 @@ function SettingsPage() {
       />
       <LocalListenersSection />
       <LimitsSection />
+      <RetentionSection />
       <TaggingSection />
       <PublicAdvertisementSection />
       <RawParametersSection />
@@ -193,6 +199,116 @@ function LimitsForm({
           disabled={updateLimits.isPending}
         >
           {updateLimits.isPending ? "Saving..." : "Save limits"}
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RetentionSection() {
+  const { data: instance } = useInstance();
+
+  return (
+    <RetentionForm
+      key={instance ? "loaded" : "init"}
+      archiveAfter={instance?.retention?.archive_after ?? ""}
+      deleteAfter={instance?.retention?.delete_after ?? ""}
+      resolved={instance?.resolved_retention}
+    />
+  );
+}
+
+function describeWindow(seconds: number, source: string): string {
+  if (seconds <= 0) return "never";
+  const origin =
+    source === "parameter"
+      ? "from this setting"
+      : source === "env"
+        ? "from the environment"
+        : "";
+  return `${formatSeconds(seconds)} ${origin}`.trim();
+}
+
+function RetentionForm({
+  archiveAfter,
+  deleteAfter,
+  resolved,
+}: {
+  archiveAfter: string;
+  deleteAfter: string;
+  resolved?: InstanceInfo["resolved_retention"];
+}) {
+  const update = useUpdateInstanceRetention({
+    onSuccess: () => toast.success("Retention saved"),
+    onError: (e) => toast.error(e.message),
+  });
+  const [archive, setArchive] = useState(archiveAfter);
+  const [del, setDel] = useState(deleteAfter);
+  const archiveEnabled = resolved?.archive_enabled ?? false;
+  // A non-empty, non-zero delete window that differs from what is stored can
+  // destroy data already in the store at the next sweep.
+  const destructive = del !== deleteAfter && del !== "" && del !== "0";
+
+  return (
+    <Card data-testid="retention-section">
+      <CardHeader>
+        <CardTitle>Retention</CardTitle>
+        <CardDescription>
+          How long closed sessions stay in PostgreSQL and in the archive. Go
+          durations (<code className="text-xs">720h</code>); empty falls back to
+          the environment, <code className="text-xs">0</code> means never. A
+          server group or a server can override both. Nothing is archived or
+          deleted until a window is set.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor="retention-archive-after">Archive after</Label>
+          <Input
+            id="retention-archive-after"
+            data-testid="retention-archive-after-input"
+            placeholder="e.g. 168h"
+            value={archive}
+            disabled={!archiveEnabled}
+            onChange={(e) => setArchive(e.target.value)}
+          />
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="retention-archive-after-effective"
+          >
+            {archiveEnabled
+              ? `Currently in effect: ${describeWindow(resolved?.archive_after_seconds ?? 0, resolved?.archive_after_source ?? "")}.`
+              : "No archive bucket is configured (DBB_ARCHIVE_URL): nothing is archived."}
+          </p>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="retention-delete-after">Delete after</Label>
+          <Input
+            id="retention-delete-after"
+            data-testid="retention-delete-after-input"
+            placeholder="e.g. 8760h"
+            value={del}
+            onChange={(e) => setDel(e.target.value)}
+          />
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="retention-delete-after-effective"
+          >
+            Currently in effect:{" "}
+            {describeWindow(
+              resolved?.delete_after_seconds ?? 0,
+              resolved?.delete_after_source ?? "",
+            )}
+            .
+          </p>
+        </div>
+        {destructive && <DeleteWindowWarning testId="retention-delete-warning" />}
+        <Button
+          data-testid="retention-save-button"
+          onClick={() => update.mutate({ archive_after: archive, delete_after: del })}
+          disabled={update.isPending}
+        >
+          {update.isPending ? "Saving..." : "Save retention"}
         </Button>
       </CardContent>
     </Card>

@@ -36,10 +36,12 @@ account locked out for its owner. Two more limits sit on top:
 
 - `POST /auth/login` and `PUT /auth/password` are rate limited per address before any credential is
   checked (the anonymous limit, `DBB_RATE_LIMIT_*`), against spraying many usernames from one source.
-- A coarse ceiling of **100 failures per hour per username**, from all addresses together, blocks
-  password login for that username everywhere until the hour is over. It is a backstop against
-  guessing spread over many addresses, and reaching it is logged at WARN and written to the audit
-  log as `auth.failure_ceiling`.
+- A coarse ceiling of **100 failures per hour per username**, from all addresses together, turns
+  every further wrong password for that username into a `429`, from any address, until the hour is
+  over. It is a backstop against guessing spread over many addresses, not a lockout: the password is
+  still checked, the right one logs in and lifts the ceiling. Reaching the ceiling is logged at WARN
+  and written to the audit log as `auth.failure_ceiling`; a correct login that lifts it is audited as
+  `auth.success_during_failure_ceiling`.
 
 This prevents brute-force attacks while allowing legitimate users to recover from typos.
 
@@ -172,6 +174,13 @@ Because the rules live on the definition and definitions are immutably versioned
 Grant time windows and byte quotas are checked continuously while data flows, not only at the boundary between commands. A single long query that streams past its remaining time or byte budget is cut off partway through its result set rather than being allowed to run to completion.
 
 Bytes already transferred by such an aborted query are still persisted, so quota accounting stays accurate even when the query never finished.
+
+### Quotas are shared across sessions
+
+A grant's `max_query_counts` and `max_bytes_transferred` are one budget per grant, not one per connection. Opening several connections in parallel under the same grant does not multiply it: every session of the grant draws on the same total, and each one's checks (per statement and mid-stream) compare the grant's combined consumption with the limit.
+
+- **On one dbbat instance** the sessions of a grant add to a shared in-memory counter, so a session sees its siblings' statements and bytes immediately.
+- **Across instances** each one re-reads the grant's consumption from the store every 5 seconds. A session can therefore overshoot by what the grant's sessions on *other* instances moved during the last refresh interval, plus the statements still running there (a statement counts once it completes). This bound is deliberate: an exact cross-instance count would need a store write before every statement.
 
 The same applies to revocation: revoking a grant does not merely refuse new connections — sessions already established under that grant are torn down.
 

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,13 +17,7 @@ import (
 	"gocloud.dev/blob"
 	"gocloud.dev/gcerrors"
 
-	// Blank imports register the blob drivers dbbat supports. "file" is not
-	// only for tests: it is also how a capture archive on a mounted volume is
-	// configured, and it is what makes the whole upload path exercisable
-	// without any cloud dependency.
-	_ "gocloud.dev/blob/fileblob"
-	_ "gocloud.dev/blob/s3blob"
-
+	"github.com/fclairamb/dbbat/internal/bucket"
 	"github.com/fclairamb/dbbat/internal/safe"
 )
 
@@ -51,7 +44,7 @@ var (
 
 	// ErrNoScheme is returned for an upload URL with no scheme. The scheme is
 	// what selects the driver.
-	ErrNoScheme = errors.New("dump upload URL has no scheme (expected e.g. s3://bucket/prefix)")
+	ErrNoScheme = bucket.ErrNoScheme
 )
 
 // Upload queue and retry tuning. The queue is deliberately generous and the
@@ -136,12 +129,7 @@ func OpenUploader(ctx context.Context, opts UploaderOptions) (*Uploader, error) 
 		return nil, ErrNoRecorder
 	}
 
-	bucketURL, err := normalizeBucketURL(opts.URL)
-	if err != nil {
-		return nil, err
-	}
-
-	bucket, err := blob.OpenBucket(ctx, bucketURL)
+	bkt, err := bucket.Open(ctx, opts.URL)
 	if err != nil {
 		return nil, fmt.Errorf("open capture bucket: %w", err)
 	}
@@ -152,7 +140,7 @@ func OpenUploader(ctx context.Context, opts UploaderOptions) (*Uploader, error) 
 	}
 
 	u := &Uploader{
-		bucket:     bucket,
+		bucket:     bkt,
 		spoolDir:   opts.SpoolDir,
 		instanceID: sanitizeKeySegment(opts.InstanceID),
 		recorder:   opts.Recorder,
@@ -174,46 +162,6 @@ func OpenUploader(ctx context.Context, opts UploaderOptions) (*Uploader, error) 
 	}
 
 	return u, nil
-}
-
-// normalizeBucketURL turns the documented "s3://bucket/prefix" form into what
-// gocloud.dev actually understands.
-//
-// The s3 opener reads the bucket from the URL host and ignores the path
-// entirely, so a path-style prefix would be silently dropped — every capture
-// would land at the bucket root. gocloud does support prefixes, but only as a
-// "prefix" query parameter, so the path is folded into it here. Schemes whose
-// path *is* the location (file, mem) are passed through untouched.
-func normalizeBucketURL(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", fmt.Errorf("parse dump upload URL %q: %w", raw, err)
-	}
-
-	if u.Scheme == "" {
-		return "", fmt.Errorf("%q: %w", raw, ErrNoScheme)
-	}
-
-	if u.Scheme == "file" || u.Scheme == "mem" {
-		return raw, nil
-	}
-
-	prefix := strings.Trim(u.Path, "/")
-	if prefix == "" {
-		return raw, nil
-	}
-
-	q := u.Query()
-	// An explicit ?prefix= wins: it is the driver-native spelling, and
-	// combining the two would produce a prefix nobody wrote.
-	if q.Get("prefix") == "" {
-		q.Set("prefix", prefix+"/")
-	}
-
-	u.Path = ""
-	u.RawQuery = q.Encode()
-
-	return u.String(), nil
 }
 
 // sanitizeKeySegment keeps an instance id from introducing extra key segments

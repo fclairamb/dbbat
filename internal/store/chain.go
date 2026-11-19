@@ -365,7 +365,7 @@ const (
 // count is the head's chain_seq, not the number of surviving statements.
 // chain_seq is dense from 1, so it is the number of statements the session
 // logged — and unlike a survivor count it does not move when
-// DBB_QUERY_STORAGE_RETENTION reaps the oldest statements of a long-lived
+// DBB_RETENTION_QUERIES_DELETE_AFTER reaps the oldest statements of a long-lived
 // session. Sealing a survivor count would report a break on every
 // retention-truncated session, which is precisely what QueryChainResult
 // .TruncatedPrefix exists to avoid. (The row-chain stamp can seal a true count

@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.33.0](https://github.com/fclairamb/dbbat/compare/v0.32.3...v0.33.0) (2026-11-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **retention:** `DBB_QUERY_STORAGE_RETENTION`, `DBB_CONNECTION_RETENTION` and `DBB_DUMP_RETENTION` (and their config keys) are removed, not aliased. A deployment that still sets one starts, deletes nothing and logs a WARN giving the new `DBB_RETENTION_<OBJECT>_<ACTION>_AFTER` name ([#512](https://github.com/fclairamb/dbbat/issues/512))
+* **storage:** bucket URLs accept only `s3://` and `file://`; `gs://` and `azblob://` are refused at startup ([#512](https://github.com/fclairamb/dbbat/issues/512))
+
+### Features
+
+* **retention:** uniform retention settings, windows per server, rows archive to object storage ([#512](https://github.com/fclairamb/dbbat/issues/512)) ([9a3608b](https://github.com/fclairamb/dbbat/commit/9a3608bd4003f459013558904cce431f3426cd47))
+  * One `retention` config section; every window defaults to never, so nothing is archived or deleted until configured
+  * Delete windows set per instance, server group and server, resolved live (the longest window across groups wins), with `PUT /instance/retention` and `effective_retention` on `GET /servers/{uid}`
+  * After `archive_after`, a closed session's captured rows move to `DBB_ARCHIVE_URL` as one hash-checked Parquet file per connection, still readable through `GET /queries/{uid}/rows` and downloadable from `GET /connections/{uid}/archive/rows`; archive and delete steps are audited
+  * UI: Retention card in Settings, duration fields in the server and server-group dialogs, Archived badge on connections
+
+### Bug Fixes
+
+* **server-groups:** `POST /server-groups` no longer ignores retention windows on create ([#512](https://github.com/fclairamb/dbbat/issues/512)) ([9a3608b](https://github.com/fclairamb/dbbat/commit/9a3608bd4003f459013558904cce431f3426cd47))
+* **deps:** update github.com/go-sql-driver/mysql to v1.10.2 and github.com/microsoft/go-mssqldb to v1.12.0 ([#510](https://github.com/fclairamb/dbbat/issues/510), [#514](https://github.com/fclairamb/dbbat/issues/514))
+
+## [0.32.3](https://github.com/fclairamb/dbbat/compare/v0.32.2...v0.32.3) (2026-11-17)
+
+
+### Security
+
+* **proxy:** fixes from the 2026-11-16 security scan: approval evasion, audit gaps, password changes and shared quotas ([#501](https://github.com/fclairamb/dbbat/issues/501)) ([c4e076a](https://github.com/fclairamb/dbbat/commit/c4e076a040b0a7e4ebda2568ea4e235d831f1ff3))
+
+### Bug Fixes
+
+* **oracle:** Oracle 18c XE support: JDBC thin login, sqlplus refusals and TNS Resend handling ([#507](https://github.com/fclairamb/dbbat/issues/507)) ([f7df79f](https://github.com/fclairamb/dbbat/commit/f7df79f0533545933c7aec41de7c6026e2161e52))
+* **oracle:** nightly integration suite repaired (MongoDB, 23ai sqlplus, go-ora 18c panic, JDBC synthetic AUTH) ([#502](https://github.com/fclairamb/dbbat/issues/502)) ([8ee5a89](https://github.com/fclairamb/dbbat/commit/8ee5a89148f99deedac309b50dcd8658c10531f7))
+
+## [0.32.2](https://github.com/fclairamb/dbbat/compare/v0.32.1...v0.32.2) (2026-11-15)
+
+
+### Features
+
+* **auth:** link or unlink a Slack or OIDC identity to your own account from the new Profile page; unlinking the last sign-in method is refused, and both actions are audited ([#498](https://github.com/fclairamb/dbbat/issues/498)) ([3daf59e](https://github.com/fclairamb/dbbat/commit/3daf59e79ea57f2dda6e72b160dbd002a54d74a6))
+* **audit:** audit and query listings flag rows outside the MAC chain with an Unverified badge ([#498](https://github.com/fclairamb/dbbat/issues/498)) ([3daf59e](https://github.com/fclairamb/dbbat/commit/3daf59e79ea57f2dda6e72b160dbd002a54d74a6))
+
+### Bug Fixes
+
+* **grants:** close batch-statement grant bypasses ([#498](https://github.com/fclairamb/dbbat/issues/498)) ([3daf59e](https://github.com/fclairamb/dbbat/commit/3daf59e79ea57f2dda6e72b160dbd002a54d74a6))
+  * PostgreSQL: `block_ddl` / `block_copy` check every statement of a simple-query batch, not only the first (`SELECT 1; DROP TABLE t` is refused)
+  * SQL Server: `EXEC <procedure>` sent as SQLBatch text (including `sp_cursor` and nested `sp_executesql`) is refused under `read_only`, `block_ddl` and `block_copy`, like the RPC path
+  * Oracle: `AUDIT`, `NOAUDIT`, `ANALYZE` and `ASSOCIATE`/`DISASSOCIATE STATISTICS` are refused under `read_only` and `block_ddl`, `LOCK TABLE` under `read_only`
+* **capture:** PostgreSQL captured rows keep their column names and decoded binary values when an Execute has no RowDescription (pgx prepared statements, paged portals) ([#498](https://github.com/fclairamb/dbbat/issues/498)) ([3daf59e](https://github.com/fclairamb/dbbat/commit/3daf59e79ea57f2dda6e72b160dbd002a54d74a6))
+
+## [0.32.1](https://github.com/fclairamb/dbbat/compare/v0.32.0...v0.32.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/jackc/pgx/v5 to v5.13.0 ([#487](https://github.com/fclairamb/dbbat/issues/487)) ([22331fb](https://github.com/fclairamb/dbbat/commit/22331fb579b22e2262c9afeefa243ee7192e717b))
+* **deps:** update module github.com/moby/moby/api to v1.57.0 ([#493](https://github.com/fclairamb/dbbat/issues/493)) ([5b7b7e7](https://github.com/fclairamb/dbbat/commit/5b7b7e7218148f6c7170121ea9ef37325c1c6ae0))
+* **deps:** update module github.com/slack-go/slack to v0.35.0 ([#476](https://github.com/fclairamb/dbbat/issues/476)) ([966d033](https://github.com/fclairamb/dbbat/commit/966d0335f8db4607d0e5e7e60b417175d1be7996))
+* **deps:** update module github.com/slack-go/slack to v0.36.0 ([#495](https://github.com/fclairamb/dbbat/issues/495)) ([2a4160b](https://github.com/fclairamb/dbbat/commit/2a4160b8b8b0170635dd2e4568f7bf1ecc758566))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.10.0 ([#479](https://github.com/fclairamb/dbbat/issues/479)) ([ab0e1b9](https://github.com/fclairamb/dbbat/commit/ab0e1b933989bc76e8bf620a24a5edb670c09727))
+* **deps:** update module gocloud.dev to v0.48.0 ([#488](https://github.com/fclairamb/dbbat/issues/488)) ([f4cab76](https://github.com/fclairamb/dbbat/commit/f4cab7678bbb268686f997c16b7e1a6a9468281f))
+* **deps:** update module gocloud.dev to v0.48.1 ([#490](https://github.com/fclairamb/dbbat/issues/490)) ([ae8f06a](https://github.com/fclairamb/dbbat/commit/ae8f06a309ee5e85812778b24039e4bc1fe5034f))
+* **deps:** update module gocloud.dev to v0.49.0 ([#491](https://github.com/fclairamb/dbbat/issues/491)) ([de8ed90](https://github.com/fclairamb/dbbat/commit/de8ed90b451490eb6234b80372e037c996cb0caf))
+* **deps:** update module golang.org/x/crypto to v0.59.0 ([#489](https://github.com/fclairamb/dbbat/issues/489)) ([2ba543b](https://github.com/fclairamb/dbbat/commit/2ba543b4283368fcaef9b964ab8034b98be52b55))
+* **deps:** update module golang.org/x/oauth2 to v0.38.0 ([#481](https://github.com/fclairamb/dbbat/issues/481)) ([00155c9](https://github.com/fclairamb/dbbat/commit/00155c99ad93a8ee72352cbb2874e9c6b885676e))
+* **deps:** update module golang.org/x/text to v0.44.0 ([#483](https://github.com/fclairamb/dbbat/issues/483)) ([c2d8dc9](https://github.com/fclairamb/dbbat/commit/c2d8dc959bb74c286ef51c22c6b8df9ec565f99f))
+* **deps:** update testcontainers-go monorepo to v0.45.0 ([#478](https://github.com/fclairamb/dbbat/issues/478)) ([69827f2](https://github.com/fclairamb/dbbat/commit/69827f213d55d6fe48885cc8d328e420d6f7cb71))
+* **proxy:** close MySQL/PG/login grant-control and logging gaps from the 2026-11-09 scan ([#497](https://github.com/fclairamb/dbbat/issues/497)) ([e81b1a0](https://github.com/fclairamb/dbbat/commit/e81b1a0af4661e8e6a10dabe434691e28e43992e))
+* **security:** close MySQL/PG/login grant-control and logging gaps from the 2026-11-09 scan ([#480](https://github.com/fclairamb/dbbat/issues/480)) ([d9c8225](https://github.com/fclairamb/dbbat/commit/d9c8225be2906113fb91c68163e46c604d0d83f0))
+
 ## [0.32.0](https://github.com/fclairamb/dbbat/compare/v0.31.1...v0.32.0) (2026-11-05)
 
 

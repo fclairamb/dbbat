@@ -317,9 +317,8 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	dumpCfg := config.DumpConfig{}
 	if dumpDir != "" {
 		dumpCfg = config.DumpConfig{
-			Dir:       dumpDir,
-			MaxSize:   config.DefaultDumpMaxSize,
-			Retention: config.DefaultDumpRetention,
+			Dir:     dumpDir,
+			MaxSize: config.DefaultDumpMaxSize,
 		}
 	}
 
@@ -867,6 +866,32 @@ func TestIntegration_BlockDDL_BlocksCreateTable(t *testing.T) {
 	f.assertBlockedQueryLogged(ctx, simpleSQL)
 }
 
+// TestIntegration_BlockDDL_RefusesBatchedDrop verifies block_ddl refuses a
+// simple-query batch whose first statement is harmless and whose second is
+// DDL, and that the table is still there afterwards.
+func TestIntegration_BlockDDL_RefusesBatchedDrop(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	seed := f.mustConnect(ctx, fixturePass)
+	_, err := seed.Exec(ctx, "CREATE TABLE batch_keep (id int)")
+	require.NoError(t, err)
+	require.NoError(t, seed.Close(ctx))
+
+	f.replaceGrant(ctx, []string{"block_ddl"})
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	_, err = conn.Exec(ctx, "SELECT 1; DROP TABLE batch_keep", pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "a batch hiding DDL after a SELECT must be refused")
+
+	var n int
+
+	require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM batch_keep").Scan(&n),
+		"the table must still exist and the session must survive")
+	assert.Equal(t, 0, n)
+}
+
 // TestIntegration_BlockDDL_RefusesDoBlock verifies block_ddl refuses a DO
 // block (and a CALL) whose body would drop a table, and that the table is
 // still there afterwards.
@@ -1291,4 +1316,91 @@ func TestIntegration_PipelinedBatch_MiddleStatementFails(t *testing.T) {
 	require.NotNil(t, rows[last].Error)
 	assert.Equal(t, "no completion message from upstream", *rows[last].Error)
 	assert.Empty(t, f.capturedRowText(ctx, rows[last].UID))
+}
+
+// TestIntegration_ResultCapture_PreparedStatementKeepsColumnNames covers a pgx
+// QueryRow: the statement is described in its own exchange and the Execute that
+// follows gets no RowDescription, yet the captured row must carry its name.
+func TestIntegration_ResultCapture_PreparedStatementKeepsColumnNames(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	var got int
+
+	require.NoError(t, conn.QueryRow(ctx, "SELECT 41 + 1 AS captured_answer").Scan(&got))
+	require.Equal(t, 42, got)
+
+	require.Eventually(t, func() bool {
+		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 200})
+		if err != nil {
+			return false
+		}
+
+		for i := range queries {
+			if !strings.Contains(queries[i].SQLText, "captured_answer") {
+				continue
+			}
+
+			rows, err := f.store.GetQueryRows(ctx, queries[i].UID, "", 10)
+			if err != nil || len(rows.Rows) == 0 {
+				return false
+			}
+
+			return strings.Contains(string(rows.Rows[0].RowData), `"captured_answer"`)
+		}
+
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "captured row must carry its column name")
+}
+
+// countQueriesWithText counts the logged queries carrying exactly this text.
+func (f *fixture) countQueriesWithText(ctx context.Context, t *testing.T, sql string) int {
+	t.Helper()
+
+	queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 200})
+	require.NoError(t, err)
+
+	n := 0
+
+	for i := range queries {
+		if queries[i].SQLText == sql {
+			n++
+		}
+	}
+
+	return n
+}
+
+// TestIntegration_PipelinedSimpleQueries_AllLogged sends two simple Queries in
+// one flush, before reading any response, against a real PostgreSQL: both ran
+// upstream, so both must be logged. A single Query, the positive control,
+// still logs exactly one row.
+func TestIntegration_PipelinedSimpleQueries_AllLogged(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	const (
+		first  = "SELECT 1 AS pipelined_first"
+		second = "SELECT 2 AS pipelined_second"
+		single = "SELECT 3 AS not_pipelined"
+	)
+
+	sendPipelined(t, conn, first, second)
+	sendPipelined(t, conn, single)
+
+	require.Eventually(t, func() bool {
+		return f.countQueriesWithText(ctx, t, first) == 1 &&
+			f.countQueriesWithText(ctx, t, second) == 1 &&
+			f.countQueriesWithText(ctx, t, single) == 1
+	}, 5*time.Second, 100*time.Millisecond, "each pipelined Query must be logged once")
+
+	// No late duplicate either.
+	time.Sleep(300 * time.Millisecond)
+	assert.Equal(t, 1, f.countQueriesWithText(ctx, t, first))
+	assert.Equal(t, 1, f.countQueriesWithText(ctx, t, second))
+	assert.Equal(t, 1, f.countQueriesWithText(ctx, t, single))
 }

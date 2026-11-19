@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"sort"
@@ -937,4 +938,131 @@ func TestLoopback_SimpleQueryBehindPipelinedBatch(t *testing.T) {
 
 func sortByExecutedAt(rows []store.Query) {
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].ExecutedAt.Before(rows[j].ExecutedAt) })
+}
+
+// TestLoopback_PipelinedSimpleQueriesAllLogged: a client pipelining simple
+// Queries (libpq pipeline mode, back-to-back PQsendQuery) sends the next one
+// before the previous one's ReadyForQuery. Each must produce its own row, with
+// its own text and rows — the single staging slot used to be overwritten, so
+// only the last Query of the flush was logged.
+func TestLoopback_PipelinedSimpleQueriesAllLogged(t *testing.T) {
+	t.Parallel()
+
+	h := newLoopback(t)
+
+	const (
+		first  = "SELECT 'alpha' AS a"
+		second = "SELECT 'bravo' AS b"
+	)
+
+	h.sendForwarded(t, &pgproto3.Query{String: first})
+	h.sendForwarded(t, &pgproto3.Query{String: second})
+	h.awaitSyncEpoch(t, 2)
+
+	h.answer(t,
+		oneColumn("a"), textRow("alpha"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")},
+		&pgproto3.ReadyForQuery{},
+	)
+
+	h.s.bookMu.Lock()
+	staged := h.s.currentQuery
+	h.s.bookMu.Unlock()
+	require.NotNil(t, staged, "the second Query still waits for its own ReadyForQuery")
+	assert.Equal(t, second, staged.sql)
+
+	h.answer(t,
+		oneColumn("b"), textRow("bravo"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")},
+		&pgproto3.ReadyForQuery{},
+	)
+
+	rows := h.awaitConnectionQueries(t, 2)
+	assertCompletedOwnDuration(t, rows, first)
+	assertCompletedOwnDuration(t, rows, second)
+	assert.Equal(t, []string{`{"a":"alpha"}`}, h.capturedValues(t, findRow(t, rows, first).UID))
+	assert.Equal(t, []string{`{"b":"bravo"}`}, h.capturedValues(t, findRow(t, rows, second).UID))
+
+	h.s.bookMu.Lock()
+	assert.Nil(t, h.s.currentQuery)
+	assert.Empty(t, h.s.queuedSimpleQueries)
+	h.s.bookMu.Unlock()
+
+	assert.Empty(t, h.logs.warnings(""))
+}
+
+// TestLoopback_PipelinedSimpleQueriesChargeQuota: N pipelined simple Queries
+// charge N against the in-session query quota, and produce N rows — the
+// persisted count a reconnect recomputes max_query_counts from.
+func TestLoopback_PipelinedSimpleQueriesChargeQuota(t *testing.T) {
+	t.Parallel()
+
+	h := newLoopback(t)
+
+	const n = 3
+
+	for i := range n {
+		h.sendForwarded(t, &pgproto3.Query{String: fmt.Sprintf("SELECT %d", i)})
+	}
+
+	h.awaitSyncEpoch(t, n)
+
+	h.s.bookMu.Lock()
+	assert.Equal(t, int64(n), h.s.grant.QueryCount)
+	h.s.bookMu.Unlock()
+
+	for range n {
+		h.answer(t, &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")}, &pgproto3.ReadyForQuery{})
+	}
+
+	rows := h.awaitConnectionQueries(t, n)
+	for i := range n {
+		assertCompletedOwnDuration(t, rows, fmt.Sprintf("SELECT %d", i))
+	}
+
+	assert.Empty(t, h.logs.warnings(""))
+}
+
+// TestLoopback_SimpleQueryBetweenPipelinedBatchesKeepsItsSlot: a simple Query
+// between two extended batches must survive the first batch's ReadyForQuery,
+// whose reconcile used to clear the staging slot whenever a later batch was
+// still queued.
+func TestLoopback_SimpleQueryBetweenPipelinedBatchesKeepsItsSlot(t *testing.T) {
+	t.Parallel()
+
+	h := newLoopback(t)
+
+	const (
+		batch1 = "SELECT 'one' AS v"
+		simple = "SELECT 'mid' AS m"
+		batch2 = "SELECT 'two' AS w"
+	)
+
+	h.queueExecute(t, "1", batch1)
+	h.awaitPending(t, 1)
+	h.sendForwarded(t, &pgproto3.Sync{})
+	h.sendForwarded(t, &pgproto3.Query{String: simple})
+	h.queueExecute(t, "2", batch2)
+	h.awaitPending(t, 2)
+	h.sendForwarded(t, &pgproto3.Sync{})
+	h.awaitSyncEpoch(t, 3)
+
+	h.answer(t,
+		oneColumn("v"), textRow("one"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")},
+		&pgproto3.ReadyForQuery{},
+	)
+	h.answer(t,
+		oneColumn("m"), textRow("mid"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")},
+		&pgproto3.ReadyForQuery{},
+	)
+	h.answer(t,
+		oneColumn("w"), textRow("two"), &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")},
+		&pgproto3.ReadyForQuery{},
+	)
+
+	rows := h.awaitConnectionQueries(t, 3)
+	assertCompletedOwnDuration(t, rows, batch1)
+	assertCompletedOwnDuration(t, rows, simple)
+	assertCompletedOwnDuration(t, rows, batch2)
+	assert.Equal(t, []string{`{"m":"mid"}`}, h.capturedValues(t, findRow(t, rows, simple).UID))
+
+	assert.Empty(t, h.logs.warnings(""))
 }

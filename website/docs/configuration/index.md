@@ -153,7 +153,7 @@ rollout-window caveat, not a live bug.
 |----------|-------------|---------|
 | `DBB_DUMP_DIR` | Directory for `.pcapng` session captures. Empty = disabled. | _disabled_ |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
-| `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration). Local captures only. | `24h` |
+| `DBB_RETENTION_DUMPS_DELETE_AFTER` | Auto-delete dumps older than this (Go duration). Local captures only. | `24h` |
 | `DBB_DUMP_UPLOAD_URL` | Blob bucket finished captures are uploaded to on session close (`s3://bucket/prefix`, `file://…`). Empty = local disk only. Requires `DBB_DUMP_DIR`. | _disabled_ |
 
 See [Session Packet Dumps](/docs/features/session-dumps) for what gets captured.
@@ -238,11 +238,16 @@ and both ends revert to cleartext TDS once login is through.
 | `DBB_QUERY_STORAGE_STORE_RESULTS` | Globally enable result-row capture | `true` |
 | `DBB_QUERY_STORAGE_MAX_RESULT_ROWS` | Max rows captured per query | `100000` |
 | `DBB_QUERY_STORAGE_MAX_RESULT_BYTES` | Max bytes captured per query | `104857600` (100 MB) |
-| `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history and its captured rows past this Go duration. `0` keeps everything forever. | `0` (recommended: `720h`) |
-| `DBB_CONNECTION_RETENTION` | Auto-delete **closed** connections — the session ledger — once they disconnected longer ago than this. Unset inherits the query window above; `0` keeps sessions forever. Must be ≥ the query window. | Inherits `DBB_QUERY_STORAGE_RETENTION` |
+| `DBB_RETENTION_QUERIES_DELETE_AFTER` | Auto-delete query history and its captured rows past this Go duration. `0` keeps everything forever. | never (recommended: `720h`) |
+| `DBB_RETENTION_CONNECTIONS_DELETE_AFTER` | Auto-delete **closed** connections — the session ledger — once they disconnected longer ago than this. Unset or `0` keeps sessions forever. Must be ≥ the statement window. | never |
 
 Retention is **opt-in**: upgrading dbbat never starts deleting audit history on
-its own. The per-query caps above bound one query's capture; retention bounds
+its own. Every window is a Go duration named `DBB_RETENTION_<OBJECT>_<ACTION>_AFTER`
+(config key `retention.<object>.<action>_after`); `0` means never. The one default
+that is not "never" is the local capture spool (`24h`). Anything wrong (a malformed
+or negative value, an unknown `DBB_RETENTION_*` name, one of the three
+pre-uniform names, which are never read)
+zeroes every window and logs a startup WARN: nothing is deleted. The WARN names the replacement variable. The per-query caps above bound one query's capture; retention bounds
 the accumulation of every query ever proxied.
 
 There are two windows because the two things expire on different schedules.
@@ -250,9 +255,9 @@ Statements and their captured rows are the bulk of the store and can hold
 customer data, so an operator wants them gone after 30 or 90 days.
 A connection is one small row per session — who, from where, to which database,
 under which grant — and that ledger is what a security review asks for a year
-later. `DBB_CONNECTION_RETENTION=8760h` with
-`DBB_QUERY_STORAGE_RETENTION=720h` keeps a year of sessions and a month of
-statements; `DBB_CONNECTION_RETENTION=0` keeps the ledger forever.
+later. `DBB_RETENTION_CONNECTIONS_DELETE_AFTER=8760h` with
+`DBB_RETENTION_QUERIES_DELETE_AFTER=720h` keeps a year of sessions and a month of
+statements; `DBB_RETENTION_CONNECTIONS_DELETE_AFTER=0` keeps the ledger forever.
 
 The connection window can never be **shorter** than the query window, because
 deleting a session deletes its statements — that would expire history earlier

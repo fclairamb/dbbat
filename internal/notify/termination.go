@@ -155,7 +155,7 @@ func buildTerminationBlocks(ev store.TerminationEvent, publicURL string, include
 	if includeSQL && ev.QueryHead != "" {
 		blocks = append(blocks, slack.NewSectionBlock(
 			slack.NewTextBlockObject(
-				"mrkdwn", "```"+truncateSQL(ev.QueryHead, TerminationSQLHeadLength)+"```", false, false,
+				"mrkdwn", "```"+EscapeSlackText(truncateSQL(ev.QueryHead, TerminationSQLHeadLength))+"```", false, false,
 			), nil, nil,
 		))
 	}
@@ -175,7 +175,7 @@ func terminationMainText(ev store.TerminationEvent) string {
 	text := "*User*: " + terminationUserLabel(ev)
 
 	if ev.Grant != nil && ev.Grant.Definition != nil {
-		text += fmt.Sprintf(" · *Grant*: %s", ev.Grant.Definition.Name)
+		text += fmt.Sprintf(" · *Grant*: %s", EscapeSlackText(ev.Grant.Definition.Name))
 	}
 
 	text += "\n*Reason*: " + terminationReasonText(ev)
@@ -205,13 +205,13 @@ func terminationDatabaseLabel(ev store.TerminationEvent) string {
 func terminationReasonText(ev store.TerminationEvent) string {
 	switch ev.Reason {
 	case store.TerminationAdminTerminated:
-		by := ev.TerminatedBy
+		by := EscapeSlackText(ev.TerminatedBy)
 		if by == "" {
 			by = "an admin"
 		}
 
 		if ev.Detail != "" {
-			return fmt.Sprintf("Terminated by %s: %s", by, ev.Detail)
+			return fmt.Sprintf("Terminated by %s: %s", by, EscapeSlackText(ev.Detail))
 		}
 
 		return "Terminated by " + by
@@ -230,6 +230,28 @@ func terminationReasonText(ev store.TerminationEvent) string {
 		return "the grant's transfer quota was exceeded"
 
 	default:
-		return ev.Reason
+		return EscapeSlackText(ev.Reason)
+	}
+}
+
+// NotifyArchiveFailure posts one Slack message to the default channel saying
+// the archive bucket has been failing for a while. The archiver calls it at
+// most once per outage (it re-arms after the next successful pass), which is
+// the coalescing: an outage is one message, not one per hourly pass.
+//
+// Best-effort like every other notice: a failed post is logged and swallowed.
+func (n *SlackNotifier) NotifyArchiveFailure(ctx context.Context, cause error) {
+	if n == nil || n.channel == "" {
+		return
+	}
+
+	text := fmt.Sprintf(
+		":warning: dbbat cannot reach its archive bucket (DBB_ARCHIVE_URL). Closed sessions are not being archived, "+
+			"and their statements are kept in PostgreSQL past their delete window until the bucket works again.\nLast error: %s",
+		cause,
+	)
+
+	if _, _, err := n.client.PostMessageContext(ctx, n.channel, slack.MsgOptionText(text, false)); err != nil {
+		n.log.WarnContext(ctx, "slack archive failure post failed", slog.Any("error", err))
 	}
 }

@@ -153,7 +153,7 @@ func (s *Store) CreatePendingQuery(ctx context.Context, query *Query, pattern st
 		UID:             newUIDv7(),
 		ConnectionID:    query.ConnectionID,
 		SQLText:         storableSQLText(query.SQLText),
-		Parameters:      query.Parameters,
+		Parameters:      storableParameters(query.Parameters),
 		ExecutedAt:      query.ExecutedAt,
 		ApprovalStatus:  &status,
 		ApprovalPattern: &pattern,
