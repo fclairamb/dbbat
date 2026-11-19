@@ -152,8 +152,10 @@ func mssqlDynamicSQL(sql string) (DynamicSQL, bool) {
 			// Not dynamic SQL at all (a bare `EXEC dbo.p`): a procedure call
 			// whose body dbbat cannot see, unless it is a SQL-carrying system
 			// procedure, which the keyword scan reaches next.
-			if (kw == kwExec || kw == kwExecute) && !p.execTargetsSQLProcedure() {
-				dyn.Procedure = true
+			if kw == kwExec || kw == kwExecute {
+				if targets, _ := p.execTargetsSQLProcedure(); !targets {
+					dyn.Procedure = true
+				}
 			}
 		}
 	}
@@ -163,34 +165,37 @@ func mssqlDynamicSQL(sql string) (DynamicSQL, bool) {
 
 // execTargetsSQLProcedure reports whether the EXEC/EXECUTE just consumed calls
 // one of the SQL-carrying system procedures (optionally qualified, optionally
-// as `@rc = proc`). It does not consume.
-func (p *useScanner) execTargetsSQLProcedure() bool {
+// as `@rc = proc`). It does not consume. The second result reports that the
+// name is written with a bracketed or quoted identifier, which skipOpaque steps
+// over, so the keyword scan will never reach it.
+func (p *useScanner) execTargetsSQLProcedure() (bool, bool) {
 	i := p.skipBlanks(p.i)
 
 	if i < len(p.s) && p.s[i] == '@' {
 		eq := strings.IndexByte(p.s[i:], '=')
 		if eq < 0 || strings.ContainsAny(strings.TrimSpace(p.s[i:i+eq]), " \t\r\n") {
-			return false
+			return false, false
 		}
 
 		i = p.skipBlanks(i + eq + 1)
 	}
 
 	start := i
-	for i < len(p.s) && (isUseNameByte(p.s[i], p.syntax) || strings.IndexByte(".[]", p.s[i]) >= 0) {
+	for i < len(p.s) && (isUseNameByte(p.s[i], p.syntax) || strings.IndexByte(`.[]"`, p.s[i]) >= 0) {
 		i++
 	}
 
-	name := strings.NewReplacer("[", "", "]", "").Replace(p.s[start:i])
+	delimited := strings.ContainsAny(p.s[start:i], `["`)
+	name := strings.NewReplacer("[", "", "]", "", `"`, "").Replace(p.s[start:i])
 	name = name[strings.LastIndexByte(name, '.')+1:]
 
 	for _, kw := range mssqlDynamicKeywords[2:] {
 		if strings.EqualFold(name, kw) {
-			return true
+			return true, delimited
 		}
 	}
 
-	return false
+	return false, delimited
 }
 
 // skipBlanks returns the index of the first non-whitespace byte at or after i.
@@ -454,7 +459,7 @@ func (p *useScanner) execParenStatement() (string, dynamicOutcome) {
 		// to a system procedure that runs its argument as a statement, and
 		// dbbat cannot certify what that statement is without unwrapping the
 		// delimiter. Undecidable, not inert.
-		if !p.eof() && (p.s[p.i] == '[' || p.s[p.i] == '"') {
+		if targets, delimited := p.execTargetsSQLProcedure(); targets && delimited {
 			p.i = saved
 
 			return "", dynamicUndecidable
