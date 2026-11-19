@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -59,12 +61,19 @@ type CreateDatabaseRequest struct {
 
 // UpdateDatabaseRequest represents the request to update a database
 type UpdateDatabaseRequest struct {
+	// ArchiveAfterSeconds and DeleteAfterSeconds are the server's retention
+	// windows. Tri-state: absent leaves the value alone, null inherits, a number
+	// sets it (0 means never).
+	ArchiveAfterSeconds store.OptionalSeconds `json:"archive_after_seconds"`
+	DeleteAfterSeconds  store.OptionalSeconds `json:"delete_after_seconds"`
+
 	// Name renames the server, subject to the same slug rule creation enforces
 	// (store.IsValidServerName). It is the one field clients actually type —
 	// the PostgreSQL/MySQL/MongoDB database name, the Oracle SERVICE_NAME — so
 	// a rename breaks every saved connection string using the old one, while
 	// leaving already-authenticated sessions alone. Omitted (null) leaves it
-	// unchanged; a name already taken, soft-deleted rows included, is a 409.
+	// unchanged; a name already taken by a live server is a 409, while the name of
+	// a deleted server is free again.
 	Name              *string    `json:"name"`
 	Description       *string    `json:"description"`
 	Host              *string    `json:"host"`
@@ -141,6 +150,13 @@ type DatabaseResponse struct {
 	// omitting it would make "cleared" indistinguishable from "unknown".
 	AccessApproverUserGroupUIDs []uuid.UUID `json:"access_approver_user_group_uids"`
 	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
+	// ArchiveAfterSeconds and DeleteAfterSeconds are the server's own retention
+	// windows: null inherits (server group, then instance), 0 never.
+	ArchiveAfterSeconds *int64 `json:"archive_after_seconds"`
+	DeleteAfterSeconds  *int64 `json:"delete_after_seconds"`
+	// EffectiveRetention is both windows resolved, with where each came from.
+	// Present on GET /servers/{uid} only.
+	EffectiveRetention *store.ResolvedRetention `json:"effective_retention,omitempty"`
 	// ConnectionTest is present only when the request set test_connection.
 	ConnectionTest *ConnectionTestResponse `json:"connection_test,omitempty"`
 	// OracleServiceNameConflict is present only on an Oracle row whose upstream
@@ -321,8 +337,8 @@ func (s *Server) writeUpdateServerError(c *gin.Context, err error) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
 	case errors.Is(err, store.ErrServerNameInvalid):
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
-	// servers_name_key spans soft-deleted rows, so the name of a deleted server
-	// is still taken — a 409 naming the reason, never a 500.
+	// A name held by another live server is a 409 naming the reason, never a
+	// 500. The name of a deleted server is free (servers_name_active_uq).
 	case errors.Is(err, store.ErrServerNameConflict):
 		writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
 	default:
@@ -385,6 +401,13 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 	if currentUser.IsAdmin() {
 		resp := toDatabaseResponse(db)
 		s.attachOracleServiceNameConflict(c.Request.Context(), &resp)
+
+		if effective, err := s.effectiveRetention(c, db.UID); err != nil {
+			s.logger.WarnContext(c.Request.Context(), "failed to resolve effective retention", "error", err)
+		} else {
+			resp.EffectiveRetention = effective
+		}
+
 		successResponse(c, resp)
 
 		return
@@ -521,7 +544,13 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		return
 	}
 
+	if !s.retentionEditAllowed(c, req.ArchiveAfterSeconds, req.DeleteAfterSeconds, current) {
+		return
+	}
+
 	updates := store.ServerUpdate{
+		ArchiveAfter:      req.ArchiveAfterSeconds,
+		DeleteAfter:       req.DeleteAfterSeconds,
 		Name:              req.Name,
 		Description:       req.Description,
 		Host:              req.Host,
@@ -553,6 +582,8 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 
 		return
 	}
+
+	s.wakeRetentionIfEdited(req.ArchiveAfterSeconds, req.DeleteAfterSeconds)
 
 	// Log audit event
 	currentUser := getCurrentUser(c)
@@ -709,6 +740,9 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 
 		AccessApproverUserGroupUIDs: normalizeUUIDs(db.AccessApproverUserGroupUIDs),
 		QueryApproverUserGroupUIDs:  normalizeUUIDs(db.QueryApproverUserGroupUIDs),
+
+		ArchiveAfterSeconds: db.ArchiveAfterSeconds,
+		DeleteAfterSeconds:  db.DeleteAfterSeconds,
 	}
 }
 
@@ -760,6 +794,14 @@ func toDatabaseLimitedResponse(db *store.Server) DatabaseLimitedResponse {
 // validateCreateProtocolFields validates and defaults the per-protocol fields
 // of a create request in place, returning an error message (empty when valid).
 func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
+	if errMsg := validateSSLMode(req.SSLMode); errMsg != "" {
+		return errMsg
+	}
+
+	if errMsg := validateOracleSSLMode(req.Protocol, req.SSLMode); errMsg != "" {
+		return errMsg
+	}
+
 	switch req.Protocol {
 	case store.ProtocolSSH:
 		// SSH bastions have no database_name/ssl_mode; they need a private key
@@ -799,6 +841,36 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 	return ""
 }
 
+// validateSSLMode rejects an ssl_mode PlanFor does not recognize, so a typo such
+// as "verify-ful" is refused instead of being stored and shown as a verifying
+// mode. The empty string is accepted: it means prefer.
+func validateSSLMode(mode string) string {
+	if upstream.IsKnownSSLMode(mode) {
+		return ""
+	}
+
+	return "ssl_mode must be one of: " + strings.Join(upstream.SSLModes(), ", ")
+}
+
+// validateOracleSSLMode refuses the ssl_modes an Oracle row cannot honor: the
+// proxy relays the client's TNS Connect over a plain socket whatever the row
+// says, so require/verify-* would be a fail-open setting (and a green
+// connectivity check would prove more than a real session does).
+func validateOracleSSLMode(protocol, mode string) string {
+	if protocol != store.ProtocolOracle {
+		return ""
+	}
+
+	switch mode {
+	case "require", "verify-ca", "verify-full":
+		return "ssl_mode " + mode + " is not supported for Oracle: dbbat does not encrypt the " +
+			"Oracle upstream leg (use network encryption on the Oracle server, or a tunnel); " +
+			"use disable, allow or prefer"
+	}
+
+	return ""
+}
+
 // validateUpdateProtocolFields validates an update against the row it will
 // produce, returning an error message (empty when valid).
 //
@@ -819,6 +891,26 @@ func validateUpdateProtocolFields(current *store.Server, req *UpdateDatabaseRequ
 
 	if !isSupportedProtocol(protocol) {
 		return "protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes"
+	}
+
+	if req.SSLMode != nil {
+		if errMsg := validateSSLMode(*req.SSLMode); errMsg != "" {
+			return errMsg
+		}
+	}
+
+	// Refuse on a new ssl_mode, or on a protocol change that would carry the
+	// stored one onto an Oracle row. An existing Oracle row that is merely
+	// edited keeps working: the connectivity check warns about it instead.
+	switch {
+	case req.SSLMode != nil:
+		if errMsg := validateOracleSSLMode(protocol, *req.SSLMode); errMsg != "" {
+			return errMsg
+		}
+	case protocol != current.Protocol:
+		if errMsg := validateOracleSSLMode(protocol, current.SSLMode); errMsg != "" {
+			return errMsg
+		}
 	}
 
 	if protocol != store.ProtocolKubernetes {

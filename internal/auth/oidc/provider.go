@@ -324,6 +324,7 @@ func (p *Provider) ExchangeCodeWithVerifier(
 	return &auth.OAuthUser{
 		ProviderID:    idToken.Subject,
 		Email:         email,
+		EmailVerified: email != "" && claims.EmailVerified != nil && *claims.EmailVerified,
 		DisplayName:   claims.Name,
 		TeamID:        claims.TenantID,
 		TeamName:      claims.Organization,

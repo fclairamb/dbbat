@@ -251,11 +251,14 @@ func (s *Session) checkQuotas() error {
 		return shared.ErrGrantExpired
 	}
 
-	if maxQueries := s.grant.MaxQueryCounts(); maxQueries != nil && s.grant.QueryCount >= *maxQueries {
+	// The grant's consumption across all its sessions, not just this one's.
+	queries, bytes := shared.QuotaUsage(s.grant, s.usage)
+
+	if maxQueries := s.grant.MaxQueryCounts(); maxQueries != nil && queries >= *maxQueries {
 		return ErrQueryLimitExceeded
 	}
 
-	if maxBytes := s.grant.MaxBytesTransferred(); maxBytes != nil && s.grant.BytesTransferred >= *maxBytes {
+	if maxBytes := s.grant.MaxBytesTransferred(); maxBytes != nil && bytes >= *maxBytes {
 		return ErrDataLimitExceeded
 	}
 

@@ -248,8 +248,11 @@ func TestSession_ProxyUpstreamToClient_ByteLimitAbort(t *testing.T) {
 		t.Fatalf("grant.BytesTransferred = %d, want == lastBytesSnapshot %d", grant.BytesTransferred, s.lastBytesSnapshot)
 	}
 
-	if grant.QueryCount != 1 {
-		t.Fatalf("grant.QueryCount = %d, want 1 (aborted query is logged once)", grant.QueryCount)
+	// The query count is charged at admission (chargeQueryQuota), which this
+	// test bypasses by staging the query directly: completing the aborted
+	// query must not charge it a second time.
+	if grant.QueryCount != 0 {
+		t.Fatalf("grant.QueryCount = %d, want 0 (completion must not re-charge the query quota)", grant.QueryCount)
 	}
 
 	select {

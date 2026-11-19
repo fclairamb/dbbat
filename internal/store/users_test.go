@@ -427,9 +427,12 @@ func TestEnsureDefaultAdmin(t *testing.T) {
 
 		store := setupTestStore(t)
 
-		err := store.EnsureDefaultAdmin(ctx, "adminhash")
+		created, err := store.EnsureDefaultAdmin(ctx, "adminhash")
 		if err != nil {
 			t.Fatalf("EnsureDefaultAdmin() error = %v", err)
+		}
+		if !created {
+			t.Error("EnsureDefaultAdmin() created = false, want true")
 		}
 
 		user, err := store.GetUserByUsername(ctx, "admin")
@@ -457,9 +460,12 @@ func TestEnsureDefaultAdmin(t *testing.T) {
 			t.Fatalf("CreateUser() error = %v", err)
 		}
 
-		err = store.EnsureDefaultAdmin(ctx, "adminhash")
+		created, err := store.EnsureDefaultAdmin(ctx, "adminhash")
 		if err != nil {
 			t.Fatalf("EnsureDefaultAdmin() error = %v", err)
+		}
+		if created {
+			t.Error("EnsureDefaultAdmin() created = true, want false")
 		}
 
 		// Should not create admin user

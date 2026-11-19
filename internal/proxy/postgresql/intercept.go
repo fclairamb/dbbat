@@ -84,6 +84,7 @@ var readOnlySetConfigNames = []string{
 // procedure may COMMIT and start a fresh transaction after changing the session
 // default, which no reading of the text can rule out. Anchored at the start of
 // a statement, including the second statement of a simple-query batch.
+// block_ddl refuses the same two, since either body can run DDL.
 var readOnlyProcedurePattern = regexp.MustCompile(`(?i)(?:^|;)\s*(?:DO|CALL)\b`)
 
 // statementTimeoutBypassPatterns detect a client trying to unset or widen the
@@ -152,12 +153,20 @@ func (s *Session) validateStatement(sqlText string) error {
 	}
 
 	// Control: block_ddl (only check if not already read_only, since read_only blocks DDL at PG level)
-	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && isDDLQuery(sqlText) {
+	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && anyStatement(sqlText, isDDLQuery) {
 		return ErrDDLNotPermitted
 	}
 
+	// Control: block_ddl, code dbbat cannot see. A DO block or a CALL carries
+	// no DDL keyword up front, yet its body can run any DDL (directly or via
+	// EXECUTE). Same fail-closed rule as the other dialects
+	// (shared.RefusesOpaqueDynamicSQL).
+	if s.grant.ShouldBlockDDL() && shared.MatchesNormalizedSQL(sqlText, readOnlyProcedurePattern) {
+		return ErrDDLProcedureCall
+	}
+
 	// Control: block_copy
-	if s.grant.ShouldBlockCopy() && isCopyQuery(sqlText) {
+	if s.grant.ShouldBlockCopy() && anyStatement(sqlText, isCopyQuery) {
 		return ErrCopyNotPermitted
 	}
 
@@ -169,6 +178,28 @@ func (s *Session) validateStatement(sqlText string) error {
 	}
 
 	return nil
+}
+
+// anyStatement reports whether pred holds for the text or for any statement of
+// a simple-query batch. PostgreSQL runs every statement of a Query message, and
+// the prefix classifiers only read the first keyword.
+func anyStatement(sqlText string, pred func(string) bool) bool {
+	if pred(sqlText) {
+		return true
+	}
+
+	parts := shared.SplitPostgresStatements(sqlText)
+	if len(parts) < 2 {
+		return false
+	}
+
+	for _, part := range parts {
+		if pred(part) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // validateReadOnlyBatch checks every statement of a simple-query string on a
@@ -233,14 +264,17 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 	// sqlText — the *client's* text — is what is recorded, here and everywhere
 	// else. The tag below is applied to the outgoing message only.
 	if err := s.book(func() error {
-		s.currentQuery = &pendingQuery{
+		s.stageSimpleQuery(&pendingQuery{
 			sql:         sqlText,
 			startTime:   time.Now(),
 			approvalUID: approvalUID,
 			// The RFQ answering this Query is the syncEpoch+1-th one — the
 			// reconcile in the upstream leg keys on it.
 			syncEpoch: s.clientSyncEpoch,
-		}
+		})
+
+		// One charge per forwarded statement, pipelined or not.
+		s.chargeQueryQuota()
 
 		s.refreshStatementClock()
 
@@ -275,6 +309,7 @@ func (s *Session) handleParse(msg *pgproto3.Parse) error {
 	// Execute time matches against. The OID slice is copied because pgproto3
 	// reuses message buffers across Receive calls.
 	s.extendedState.mu.Lock()
+	delete(s.extendedState.stmtColumns, msg.Name) // re-Parse: the old description is void
 	s.extendedState.preparedStatements[msg.Name] = &preparedStatement{
 		sql:      sqlText,
 		typeOIDs: slices.Clone(msg.ParameterOIDs),
@@ -296,13 +331,24 @@ func (s *Session) handleParse(msg *pgproto3.Parse) error {
 // carrying the resolved parameter OIDs. Portal describes ('P') never produce
 // one, so only statement describes are queued.
 func (s *Session) handleDescribe(msg *pgproto3.Describe) {
-	if msg.ObjectType != 'S' {
-		return
-	}
+	_ = s.book(func() error {
+		s.extendedState.mu.Lock()
+		defer s.extendedState.mu.Unlock()
 
-	s.extendedState.mu.Lock()
-	s.extendedState.pendingDescribes = append(s.extendedState.pendingDescribes, msg.Name)
-	s.extendedState.mu.Unlock()
+		if msg.ObjectType == 'S' {
+			s.extendedState.pendingDescribes = append(s.extendedState.pendingDescribes, msg.Name)
+		}
+
+		// Both kinds are answered by a RowDescription or NoData: queue the
+		// target so the upstream leg knows what the answer describes.
+		s.extendedState.describeQueue = append(s.extendedState.describeQueue, describeTarget{
+			portal: msg.ObjectType == 'P',
+			name:   msg.Name,
+			epoch:  s.clientSyncEpoch,
+		})
+
+		return nil
+	})
 }
 
 // handleParameterDescription records the server-resolved parameter OIDs on the
@@ -378,9 +424,15 @@ func (s *Session) handleBind(msg *pgproto3.Bind) {
 		}
 	}
 
+	// A rebound portal may return other columns: forget the old description.
+	s.extendedState.mu.Lock()
+	delete(s.extendedState.portalColumns, msg.DestinationPortal)
+	s.extendedState.mu.Unlock()
+
 	s.extendedState.portals[msg.DestinationPortal] = &portalState{
-		stmtName:   msg.PreparedStatement,
-		parameters: params,
+		stmtName:      msg.PreparedStatement,
+		parameters:    params,
+		resultFormats: slices.Clone(msg.ResultFormatCodes),
 	}
 }
 
@@ -452,7 +504,23 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 		startTime:   time.Now(),
 		parameters:  portal.parameters,
 		approvalUID: approvalUID,
+
+		resultFormats: portal.resultFormats,
+		stmtName:      portal.stmtName,
+		portalName:    msg.Portal,
 	}
+
+	// Seed the column metadata from what a Describe of the portal, or of its
+	// statement, already told us: the upstream sends no RowDescription for
+	// this Execute when the client described earlier (pgx's prepared-statement
+	// cache) or when a portal is paged.
+	s.extendedState.mu.Lock()
+	if meta := s.extendedState.portalColumns[msg.Portal]; meta != nil {
+		query.columnNames, query.columnOIDs = meta.names, meta.oids
+	} else if meta := s.extendedState.stmtColumns[portal.stmtName]; meta != nil {
+		query.columnNames, query.columnOIDs = meta.names, meta.oids
+	}
+	s.extendedState.mu.Unlock()
 
 	return s.book(func() error {
 		// The RFQ answering this batch's Sync is the syncEpoch+1-th one — the
@@ -460,6 +528,8 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 		query.syncEpoch = s.clientSyncEpoch
 
 		s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
+
+		s.chargeQueryQuota()
 
 		s.refreshStatementClock()
 
@@ -473,9 +543,13 @@ func (s *Session) handleClose(msg *pgproto3.Close) {
 	case 'S': // Statement
 		s.extendedState.mu.Lock()
 		delete(s.extendedState.preparedStatements, msg.Name)
+		delete(s.extendedState.stmtColumns, msg.Name)
 		s.extendedState.mu.Unlock()
 	case 'P': // Portal
 		delete(s.extendedState.portals, msg.Name)
+		s.extendedState.mu.Lock()
+		delete(s.extendedState.portalColumns, msg.Name)
+		s.extendedState.mu.Unlock()
 	}
 }
 
@@ -605,6 +679,7 @@ func (s *Session) recordBlockedQuery(sqlText string, params *store.QueryParamete
 	// does on the three protocols that already recorded refusals.
 	if s.grant != nil {
 		s.grant.QueryCount++
+		s.usage.AddQueries(1)
 	}
 }
 
@@ -674,9 +749,30 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 	// Persist asynchronously so the proxy isn't blocked on the store write.
 	s.persistQueryAsync(query, s.currentQuery.rowSink, recordPending, copyRows, bytesTransferred)
 
-	// Update local grant state for in-session quota checks
-	s.grant.QueryCount++
+	// Update local grant state for in-session quota checks. The query itself
+	// was already charged when it was admitted (chargeQueryQuota); bytes are
+	// only known now.
 	s.grant.BytesTransferred += bytesTransferred
+}
+
+// chargeQueryQuota counts an admitted statement against the in-session query
+// quota, at the moment it is queued for upstream rather than when it
+// completes. Charging on completion let a client pipeline any number of
+// Executes before one Sync: each passed checkQuotas against the same stale
+// count, because none had reached ReadyForQuery yet.
+//
+// The persisted side needs nothing: the cross-session total is a COUNT(*) of
+// queries rows (populateGrantCounters), and every admitted statement yields
+// exactly one row when it completes, aborts or is torn down — the same row the
+// old completion-time increment stood for. Refusals are charged separately, in
+// recordBlockedQuery, and never reach this point.
+//
+// Callers hold bookMu.
+func (s *Session) chargeQueryQuota() {
+	if s.grant != nil {
+		s.grant.QueryCount++
+		s.usage.AddQueries(1)
+	}
 }
 
 // persistQueryAsync writes the query log row, its captured rows, and the
@@ -711,7 +807,11 @@ func (s *Session) persistQueryAsync(
 		return
 	}
 
+	s.persists.start()
+
 	go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
+		defer s.persists.done()
+
 		// A panic here must not leave the sink unresolved: the shared row writer
 		// waits on it before inserting anything this query queued. Fail is a
 		// no-op once Resolve has run, so this only bites on the panic path.
@@ -877,6 +977,21 @@ func decodeBinaryParameter(data []byte, oid uint32) string {
 	return fmt.Sprintf("(oid:%d)%s", oid, base64.StdEncoding.EncodeToString(data))
 }
 
+// resultFormat returns the format code (0 text, 1 binary) of result column i
+// under the Bind rules: none means all text, one applies to every column.
+func resultFormat(formats []int16, i int) int16 {
+	switch {
+	case len(formats) == 0:
+		return 0
+	case len(formats) == 1:
+		return formats[0]
+	case i < len(formats):
+		return formats[i]
+	}
+
+	return 0
+}
+
 // getTypeOID safely retrieves a type OID from a slice.
 func getTypeOID(oids []uint32, idx int) uint32 {
 	if idx < len(oids) {
@@ -886,7 +1001,7 @@ func getTypeOID(oids []uint32, idx int) uint32 {
 }
 
 // convertDataRow converts a DataRow to a QueryRow with JSON data.
-func (s *Session) convertDataRow(values [][]byte, columnNames []string, columnOIDs []uint32) store.QueryRow {
+func (s *Session) convertDataRow(values [][]byte, columnNames []string, columnOIDs []uint32, formats ...int16) store.QueryRow {
 	rowData := make(map[string]interface{})
 	rowSize := int64(0)
 
@@ -907,6 +1022,12 @@ func (s *Session) convertDataRow(values [][]byte, columnNames []string, columnOI
 		var oid uint32
 		if i < len(columnOIDs) {
 			oid = columnOIDs[i]
+		}
+
+		if resultFormat(formats, i) == 1 {
+			// Binary column: render it as the text form decodeColumnValue
+			// understands, using its OID.
+			val = []byte(decodeBinaryParameter(val, oid))
 		}
 
 		rowData[columnName] = decodeColumnValue(val, oid)

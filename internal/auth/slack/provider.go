@@ -50,14 +50,16 @@ type tokenResponse struct {
 
 // userInfoResponse represents the Slack OIDC userinfo endpoint response.
 type userInfoResponse struct {
-	OK       bool   `json:"ok"`
-	Sub      string `json:"sub"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Picture  string `json:"picture"`
-	TeamID   string `json:"https://slack.com/team_id"`   //nolint:tagliatelle // Slack OIDC standard claim name
-	TeamName string `json:"https://slack.com/team_name"` //nolint:tagliatelle // Slack OIDC standard claim name
-	Error    string `json:"error,omitempty"`
+	OK    bool   `json:"ok"`
+	Sub   string `json:"sub"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	// EmailVerified is Slack's standard OIDC claim. Absent reads as false.
+	EmailVerified bool   `json:"email_verified"`
+	Picture       string `json:"picture"`
+	TeamID        string `json:"https://slack.com/team_id"`   //nolint:tagliatelle // Slack OIDC standard claim name
+	TeamName      string `json:"https://slack.com/team_name"` //nolint:tagliatelle // Slack OIDC standard claim name
+	Error         string `json:"error,omitempty"`
 }
 
 // NewProvider creates a new Slack OIDC provider.
@@ -119,13 +121,14 @@ func (p *Provider) ExchangeCode(ctx context.Context, code, redirectURI string) (
 	rawData, _ := json.Marshal(userInfo)
 
 	return &auth.OAuthUser{
-		ProviderID:  userInfo.Sub,
-		Email:       userInfo.Email,
-		DisplayName: userInfo.Name,
-		TeamID:      userInfo.TeamID,
-		TeamName:    userInfo.TeamName,
-		AvatarURL:   userInfo.Picture,
-		RawData:     rawData,
+		ProviderID:    userInfo.Sub,
+		Email:         userInfo.Email,
+		EmailVerified: userInfo.Email != "" && userInfo.EmailVerified,
+		DisplayName:   userInfo.Name,
+		TeamID:        userInfo.TeamID,
+		TeamName:      userInfo.TeamName,
+		AvatarURL:     userInfo.Picture,
+		RawData:       rawData,
 	}, nil
 }
 

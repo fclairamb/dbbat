@@ -22,6 +22,12 @@ import (
 // bytes are unaffected — they were forwarded packet by packet as they arrived.
 const maxAccountBuffer = 8 * 1024 * 1024
 
+// errClientDisconnectedMidResponse completes a statement still in flight when
+// the session ends without a termination reason: the client hung up (or the
+// upstream went away) before the response's end-of-message was relayed. Same
+// wording as the PostgreSQL proxy, so the query history reads alike.
+const errClientDisconnectedMidResponse = "client disconnected before the response completed"
+
 // errNeedMore means a token is not complete yet, so the walk must wait for the
 // next packet. It is the incremental counterpart of ErrTokenTruncated.
 var errNeedMore = errors.New("mssql: incomplete TDS token")
@@ -67,8 +73,55 @@ type resultAccountant struct {
 	handle    int64
 	haveHandl bool
 
-	tail    [doneTokenLen]byte
-	tailLen int
+	tail messageTail
+}
+
+// messageTail keeps the last doneTokenLen bytes of a response message as it
+// streams past a packet at a time, which is exactly its final DONE-family
+// token.
+type messageTail struct {
+	buf [doneTokenLen]byte
+	len int
+}
+
+// record folds one packet's payload into the tail.
+func (t *messageTail) record(payload []byte) {
+	if len(payload) >= doneTokenLen {
+		t.len = copy(t.buf[:], payload[len(payload)-doneTokenLen:])
+
+		return
+	}
+
+	keep := min(t.len, doneTokenLen-len(payload))
+	copy(t.buf[:], t.buf[t.len-keep:t.len])
+	copy(t.buf[keep:], payload)
+	t.len = keep + len(payload)
+}
+
+// lastDone decodes the DONE-family token the message ended on, if it ended on
+// one.
+func (t *messageTail) lastDone() (doneToken, bool) {
+	if t.len < doneTokenLen {
+		return doneToken{}, false
+	}
+
+	switch t.buf[0] {
+	case tokenDone, tokenDoneProc, tokenDoneInProc:
+	default:
+		return doneToken{}, false
+	}
+
+	done, err := parseDoneBody(t.buf[1:])
+	if err != nil {
+		return doneToken{}, false
+	}
+
+	return done, true
+}
+
+// reset forgets the tail, at the start of the next message.
+func (t *messageTail) reset() {
+	t.len = 0
 }
 
 // newResultAccountant starts accounting for one response message.
@@ -148,16 +201,7 @@ func (a *resultAccountant) desync(ctx context.Context, err error) {
 // recordTail keeps the last doneTokenLen bytes of the message, which is exactly
 // its final DONE-family token.
 func (a *resultAccountant) recordTail(payload []byte) {
-	if len(payload) >= doneTokenLen {
-		a.tailLen = copy(a.tail[:], payload[len(payload)-doneTokenLen:])
-
-		return
-	}
-
-	keep := min(a.tailLen, doneTokenLen-len(payload))
-	copy(a.tail[:], a.tail[a.tailLen-keep:a.tailLen])
-	copy(a.tail[keep:], payload)
-	a.tailLen = keep + len(payload)
+	a.tail.record(payload)
 }
 
 // consumeToken advances past one token, returning how many bytes it took.
@@ -574,18 +618,9 @@ func (a *resultAccountant) finish(ctx context.Context) {
 
 // readTailDone decodes the DONE token sitting at the end of the message.
 func (a *resultAccountant) readTailDone() {
-	if a.tailLen < doneTokenLen {
-		return
-	}
-
-	switch a.tail[0] {
-	case tokenDone, tokenDoneInProc:
-	default:
-		return
-	}
-
-	done, err := parseDoneBody(a.tail[1:])
-	if err != nil || !done.HasCount {
+	// The backstop reads DONE and DONEINPROC only, never DONEPROC.
+	done, ok := a.tail.lastDone()
+	if !ok || a.tail.buf[0] == tokenDoneProc || !done.HasCount {
 		return
 	}
 
@@ -594,6 +629,11 @@ func (a *resultAccountant) readTailDone() {
 }
 
 // setPending registers the statement whose response is about to arrive.
+//
+// One slot is enough because the forward pump never sends a request while the
+// previous one is still unanswered: see claimUpstreamTurn in relay.go. Without
+// that, a pipelining client's second request would overwrite the first here,
+// and the first's response would be logged under the second's text.
 func (s *session) setPending(pending *pendingQuery) {
 	s.pendingMu.Lock()
 	s.pending = pending
@@ -632,6 +672,18 @@ type queryOutcome struct {
 // captured results is inserted bare and completed only once the rows have
 // landed, so a query never reads as finished while its rows are still arriving.
 func (s *session) recordQuery(ctx context.Context, pending *pendingQuery, outcome queryOutcome) {
+	s.recordQueryWith(ctx, pending, outcome, true)
+}
+
+// recordQuerySync is recordQuery with the store write done before it returns.
+// The teardown uses it: the connection row is closed, and its query chain
+// sealed, right after, so a background insert would land behind the seal.
+func (s *session) recordQuerySync(ctx context.Context, pending *pendingQuery, outcome queryOutcome) {
+	s.recordQueryWith(ctx, pending, outcome, false)
+}
+
+// recordQueryWith is the shared body of recordQuery and recordQuerySync.
+func (s *session) recordQueryWith(ctx context.Context, pending *pendingQuery, outcome queryOutcome, async bool) {
 	if s.connection == nil || s.server.store == nil {
 		return
 	}
@@ -658,9 +710,15 @@ func (s *session) recordQuery(ctx context.Context, pending *pendingQuery, outcom
 
 	hasRows := len(outcome.rows) > 0
 
-	go safe.RunGuarded(ctx, s.logger, goroutineNameQueryRecord, func() {
+	persist := func() {
 		s.persistQuery(ctx, pending.approvalUID, record, outcome, hasRows, bytesTransferred)
-	})
+	}
+
+	if async {
+		go safe.RunGuarded(ctx, s.logger, goroutineNameQueryRecord, persist)
+	} else {
+		safe.RunGuarded(ctx, s.logger, goroutineNameQueryRecord, persist)
+	}
 
 	s.chargeGrant(bytesTransferred)
 }

@@ -12,6 +12,44 @@ jobs:
   release-please:
     runs-on: ubuntu-26.04
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: actions/checkout@v7.0.1
+
+      # Pre-create the labels release-please relies on to track its own PRs.
+      # If GitHub's Labels API hiccups while release-please is running, the
+      # action can't find its PR later and either scans hundreds of commits
+      # or silently drifts the title/body out of sync with the release
+      # branch. Creating them up-front is cheap and idempotent —
+      # `gh label create --force` updates colour if it already exists and
+      # succeeds either way.
+      - name: Ensure release-please labels exist
+        env:
+          GH_TOKEN: ${{ secrets.CI_PAT }}
+        run: |
+          gh label create "autorelease: pending" --color ededed --force --repo ${{ github.repository }}
+          gh label create "autorelease: tagged"  --color ededed --force --repo ${{ github.repository }}
+
+      - id: release
+        uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.CI_PAT }}
+
+      # Drift detector: if HEAD is a merged `chore(release): vX.Y.Z` commit
+      # but no matching GitHub release exists, release-please lost track of
+      # its own PR. Fail the workflow loudly — silent drift means a version
+      # is "released" in the changelog but never tagged or deployed.
+      - name: Detect release drift
+        if: ${{ always() && !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.CI_PAT }}
+        run: |
+          set -euo pipefail
+          msg=$(git log -1 --pretty=%s)
+          if [[ "$msg" =~ ^chore\(release\):\ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            want="v${BASH_REMATCH[1]}"
+            if ! gh api "repos/${{ github.repository }}/releases/tags/$want" >/dev/null 2>&1; then
+              echo "::error::HEAD is '$msg' but release $want was not created by release-please." \
+                   "Tag and release must be created manually (gh release create $want --target <merge-sha>)."
+              exit 1
+            fi
+            echo "Release drift check: $want tagged and released ✓"
+          fi

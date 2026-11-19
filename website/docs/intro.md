@@ -88,7 +88,7 @@ sqlcmd / driver      ─►  DBBat (TDS PRELOGIN + LOGIN7)     ─► SQL Server
 - Apply any combination of controls:
   - `read_only`: regex SQL inspection + PostgreSQL `default_transaction_read_only` + MySQL/MariaDB write blocks
   - `block_copy`: forbid `COPY` (PostgreSQL) and `LOAD DATA` / `SELECT … INTO OUTFILE` (MySQL)
-  - `block_ddl`: forbid `CREATE`, `ALTER`, `DROP`, `TRUNCATE`
+  - `block_ddl`: forbid `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, plus `DO` blocks and `CALL` on PostgreSQL (their body can run DDL dbbat cannot see)
 - Optional quotas: `max_query_counts`, `max_bytes_transferred`
 - **Grant definitions**: reusable templates describing what a user may request, so access does not have to be hand-crafted each time
 - **Self-service grant requests**: users request access against a definition instead of pinging an admin

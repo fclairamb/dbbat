@@ -50,6 +50,12 @@ type OAuthUser struct {
 	TeamName    string          // Optional workspace/org name
 	AvatarURL   string          // Optional profile picture URL
 	RawData     json.RawMessage // Full provider response
+	// EmailVerified is true only when the provider positively asserted that
+	// Email belongs to the identity (`email_verified: true`). An absent claim
+	// is false. It gates linking an unlinked identity onto an existing account
+	// whose username equals Email: without it, anyone able to set their email
+	// at the issuer could sign in as that account.
+	EmailVerified bool
 	// Groups is the directory group membership the provider asserted, read
 	// out of a verified token. It is authorization input, so a provider must
 	// only populate it from something the issuer signed.

@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -155,6 +156,52 @@ func TestSlackNotifyBytesStepEnv(t *testing.T) {
 
 			_, err := Load(LoadOptions{})
 			require.ErrorIs(t, err, ErrSlackNotifyBytesStepInvalid)
+		})
+	}
+}
+
+// TestSlackNotifyRenewalWindowEnv verifies DBB_SLACK_NOTIFY_RENEWAL_WINDOW
+// defaults to 24h, accepts 0 to disable, and fails startup when malformed or
+// negative.
+func TestSlackNotifyRenewalWindowEnv(t *testing.T) {
+	setBase := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+		t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	}
+
+	t.Run("default is 24h", func(t *testing.T) {
+		setBase(t)
+
+		cfg, err := Load(LoadOptions{})
+		require.NoError(t, err)
+
+		window, err := cfg.SlackNotify.ResolveRenewalWindow()
+		require.NoError(t, err)
+		assert.Equal(t, 24*time.Hour, window)
+	})
+
+	for raw, want := range map[string]time.Duration{"0": 0, "90m": 90 * time.Minute, "48h": 48 * time.Hour} {
+		t.Run(raw, func(t *testing.T) {
+			setBase(t)
+			t.Setenv("DBB_SLACK_NOTIFY_RENEWAL_WINDOW", raw)
+
+			cfg, err := Load(LoadOptions{})
+			require.NoError(t, err)
+
+			window, err := cfg.SlackNotify.ResolveRenewalWindow()
+			require.NoError(t, err)
+			assert.Equal(t, want, window)
+		})
+	}
+
+	for _, raw := range []string{"-1h", "daily", "24"} {
+		t.Run("invalid "+raw, func(t *testing.T) {
+			setBase(t)
+			t.Setenv("DBB_SLACK_NOTIFY_RENEWAL_WINDOW", raw)
+
+			_, err := Load(LoadOptions{})
+			require.ErrorIs(t, err, ErrSlackNotifyRenewalWindowInvalid)
 		})
 	}
 }

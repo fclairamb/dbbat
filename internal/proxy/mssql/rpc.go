@@ -373,9 +373,73 @@ var preparingProcs = map[uint16]bool{
 // cursor bookkeeping and releasing a handle. They are logged and forwarded even
 // under a restrictive grant, because the statement they act on was already
 // checked when it was prepared or opened.
+//
+// sp_cursor is deliberately absent: its optype can ask for a positioned
+// UPDATE, DELETE or INSERT on the cursor's base table, a write the cursor's
+// SELECT never revealed. It is classified by cursorWrites instead.
 var harmlessProcs = map[uint16]bool{
-	spCursor: true, spCursorFetch: true, spCursorOption: true,
+	spCursorFetch: true, spCursorOption: true,
 	spCursorClose: true, spCursorUnprepare: true, spUnprepare: true,
+}
+
+// sp_cursor optype bits (`sp_cursor (Transact-SQL)`). The low three ask for a
+// positioned write; REFRESH (0x08), LOCK (0x10), SETPOSITION (0x20) and
+// ABSOLUTE (0x40) only move or lock the cursor, and may be combined with them.
+const (
+	cursorOpUpdate int64 = 0x0001
+	cursorOpDelete int64 = 0x0002
+	cursorOpInsert int64 = 0x0004
+
+	cursorOpWrites = cursorOpUpdate | cursorOpDelete | cursorOpInsert
+)
+
+// cursorOptypeParamIndex is @optype's position: sp_cursor(@cursor, @optype,
+// @rownum, @table, @value…).
+const cursorOptypeParamIndex = 1
+
+// cursorWrites reports whether an sp_cursor request may write through the
+// cursor: its optype asks for UPDATE, DELETE or INSERT, or cannot be read as an
+// integer — absent, NULL, or sent as a type SQL Server would convert but dbbat
+// would have to guess at. Both answers fail closed under a restrictive grant.
+func (r rpcRequest) cursorWrites() bool {
+	optype, ok := r.cursorOptype()
+	if !ok {
+		return true
+	}
+
+	return optype&cursorOpWrites != 0
+}
+
+// cursorOptype reads sp_cursor's @optype: by name when the client named it
+// (named parameters may come in any order), otherwise at its position, but
+// only when that positional parameter is unnamed or named @optype itself.
+func (r rpcRequest) cursorOptype() (int64, bool) {
+	for i, p := range r.params {
+		if strings.EqualFold(p.name, "@optype") {
+			return r.integerParam(i)
+		}
+	}
+
+	if cursorOptypeParamIndex >= len(r.params) || r.params[cursorOptypeParamIndex].name != "" {
+		return 0, false
+	}
+
+	return r.integerParam(cursorOptypeParamIndex)
+}
+
+// integerParam is intParam restricted to integer-typed parameters: intParam
+// decodes by length alone, so a two-byte nvarchar would read as a smallint.
+func (r rpcRequest) integerParam(i int) (int64, bool) {
+	if i >= len(r.params) {
+		return 0, false
+	}
+
+	switch r.params[i].info.id {
+	case typeInt1, typeInt2, typeInt4, typeInt8, typeIntN:
+		return r.intParam(i)
+	default:
+		return 0, false
+	}
 }
 
 // isWellKnown reports whether the request used the procedure-id shorthand.

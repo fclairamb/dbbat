@@ -823,8 +823,8 @@ export function useCreateGrantDefinition(options?: {
       }
       return response.data;
     },
-    onSuccess: (def) => {
-      queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
+    onSuccess: async (def) => {
+      await queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
       options?.onSuccess?.(def);
     },
     onError: options?.onError,
@@ -853,12 +853,16 @@ export function useUpdateGrantDefinition(options?: {
       }
       return response.data;
     },
-    onSuccess: (def) => {
-      queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
+    onSuccess: async (def) => {
+      // Await the refetch before the caller closes its dialog: re-opening the
+      // editor right away must prefill from the saved row, not a stale cache.
       // Grant requests embed the live version of their definition, so an edit
       // (which archives the current version and inserts a successor) changes
       // what every request against that lineage renders.
-      queryClient.invalidateQueries({ queryKey: ["grant-requests"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["grant-definitions"] }),
+        queryClient.invalidateQueries({ queryKey: ["grant-requests"] }),
+      ]);
       options?.onSuccess?.(def);
     },
     onError: options?.onError,
@@ -1602,6 +1606,29 @@ export function useInstance() {
   });
 }
 
+export function useUpdateInstanceRetention(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { archive_after: string; delete_after: string }) => {
+      const response = await apiClient.PUT("/instance/retention", { body });
+      if (response.error) {
+        throw new Error(
+          (response.error as { message?: string }).message ||
+            "Failed to save retention"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["instance"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
 export function useUpdateInstancePublic(options?: {
   onSuccess?: () => void;
   onError?: (error: Error) => void;
@@ -1892,5 +1919,65 @@ export function useDenyAllPendingApprovals(options?: {
       queryClient.invalidateQueries({ queryKey: ["queries"] });
       options?.onSuccess?.();
     },
+  });
+}
+
+// ============================================================================
+// Linked SSO identities (profile page)
+// ============================================================================
+
+export type LinkedIdentity = components["schemas"]["Identity"];
+
+const MY_IDENTITIES_QUERY_KEY = ["my-identities"];
+
+export function useMyIdentities() {
+  return useQuery({
+    queryKey: MY_IDENTITIES_QUERY_KEY,
+    queryFn: async (): Promise<LinkedIdentity[]> => {
+      const { data, error } = await apiClient.GET("/users/me/identities");
+      if (error) throw new Error(error.message || "Failed to load identities");
+      return data?.identities ?? [];
+    },
+  });
+}
+
+/**
+ * Starts the "link my SSO identity" flow: asks the server for the provider's
+ * authorization URL (bound to this session's user) and navigates the browser
+ * to it. The callback lands back on the profile page.
+ */
+export function useLinkIdentity(options?: { onError?: (error: Error) => void }) {
+  return useMutation({
+    mutationFn: async (provider: string): Promise<void> => {
+      const path = `/auth/${provider}/link` as "/auth/oidc/link";
+      const { data, error } = await apiClient.POST(path);
+      if (error || !data) {
+        throw new Error(error?.message || "Failed to start identity linking");
+      }
+      window.location.href = data.authorize_url;
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useUnlinkIdentity(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (provider: string): Promise<void> => {
+      const { error } = await apiClient.DELETE(
+        "/users/me/identities/{provider}",
+        { params: { path: { provider } } },
+      );
+      if (error) throw new Error(error.message || "Failed to unlink identity");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: MY_IDENTITIES_QUERY_KEY });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
   });
 }

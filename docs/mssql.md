@@ -351,6 +351,17 @@ on an encrypted client leg too. The channel is bounded because a parked session
 must not let a pipelining client make the proxy allocate without limit; a client
 that fills it simply stops being read.
 
+**Requests are serialized at the proxy.** TDS without MARS is request/response,
+but nothing stops a client from sending its next request before the previous
+response has arrived. The response accounting keeps a single in-flight
+statement, so the forward pump does not intercept or forward a request until the
+upstream has answered the previous one (its response EOM), nor until an
+`ATTENTION` it forwarded has been acknowledged with a `DONE_ATTN`. Otherwise a
+second request would overwrite the first, whose response would be logged under
+the second statement's text while the second went unlogged. `ATTENTION` itself
+is never held back: it is the cancel for the request in flight, so the pump
+forwards it at once, ahead of any request queued behind it.
+
 The same goroutine is why this proxy has no `shared.WatchedConn` underneath its
 client socket, unlike the other four: the socket is being read at all times, so
 a FIN is noticed the moment it lands.
@@ -479,7 +490,7 @@ text, so recording the handle would make the four-eyes rule silently stop
 applying the moment a client used prepared statements. Releasing a handle
 (`sp_unprepare`) is *not* logged as its statement — it is not running it again.
 
-Three cases cannot be resolved, and all three **fail closed whenever the grant
+Four cases cannot be resolved, and all four **fail closed whenever the grant
 restricts anything** (`read_only`, `block_ddl` or `block_copy`) — and are
 forwarded when it restricts nothing, because then there is nothing to fail
 closed about:
@@ -489,16 +500,25 @@ closed about:
 - **A stored procedure called by name.** `EXEC dbo.Something` is opaque: dbbat
   cannot see the body, so it cannot prove the procedure respects the
   restriction. (`ErrOpaqueProcedureBlocked`)
+- **A positioned write through a cursor.** `sp_cursor` (procedure id 1) is
+  not bookkeeping: its `@optype` (parameter 1, or named `@optype`) can ask for
+  a positioned `UPDATE` (`0x01`), `DELETE` (`0x02`) or `INSERT` (`0x04`) on the
+  cursor's base table, with the new values as parameters. The statement dbbat
+  checked when the cursor was opened is its `SELECT`, which passes `read_only`,
+  so the write is refused when any of those bits is set — combined with flags
+  or not — and when the optype cannot be read as an integer (absent, NULL, or
+  sent as another type). `REFRESH`, `LOCK`, `SETPOSITION` and `ABSOLUTE` go
+  through. (`ErrCursorWriteBlocked`)
 - **A request that will not parse.** An unparseable SQLBatch or RPC — including
   one whose `ALL_HEADERS` block does not validate — is refused rather than
   relayed, because it is one dbbat cannot enforce a grant on.
-  (`ErrMalformedRequest`) Unlike the two above, this one fails closed under
+  (`ErrMalformedRequest`) Unlike the three above, this one fails closed under
   *every* grant, restrictive or not.
 
 Cursor bookkeeping that carries neither a statement nor a decision —
-`sp_cursor`, `sp_cursorfetch`, `sp_cursoroption`, `sp_cursorclose`,
-`sp_cursorunprepare`, `sp_unprepare` — is allowed under a restrictive grant: the
-statement it acts on was checked when it was prepared or opened.
+`sp_cursorfetch`, `sp_cursoroption`, `sp_cursorclose`, `sp_cursorunprepare`,
+`sp_unprepare` — is allowed under a restrictive grant: the statement it acts on
+was checked when it was prepared or opened.
 
 ### `block_copy` on SQL Server
 
@@ -510,6 +530,25 @@ rows is refused as well, so no ordering trick delivers rows to the upstream. An
 allowed bulk-load message still goes through the pipeline: the rows carry no
 statement to check, but they do consume the grant's quota and belong in the
 audit trail.
+
+### Password changes are refused whatever the grant
+
+Every dbbat session to a server logs in as one shared upstream login, so a
+proxied user who changes its password (with `ALTER ANY LOGIN`, which a shared
+admin-ish login often has) breaks dbbat's stored credential and every other
+user's next connection fails. `shared.ValidateMSSQLBatch` therefore refuses,
+under **every** grant, full write included, with
+`shared.ErrPasswordChangeBlocked`, any statement of the batch that is
+`ALTER LOGIN … WITH … PASSWORD`, `CREATE LOGIN … WITH PASSWORD`, or the
+contained-database `ALTER USER … WITH PASSWORD` / `CREATE USER … WITH PASSWORD`.
+The scan is the one the write/DDL keywords use: literals, quoted and bracketed
+identifiers, variables and `OLD_PASSWORD` are stepped over, and it runs on every
+dynamic payload the batch or an `sp_executesql` RPC carries. A bare `password`
+after an `ALTER LOGIN` / `ALTER USER` with no `;` between them is refused too,
+since T-SQL needs no separator: that fails closed. `ALTER LOGIN l DISABLE` is
+left to the grant controls (refused under `read_only` and `block_ddl`, allowed
+under full write). The LOGIN7 change-password field is refused at login
+(`Login7.Validate`). Not covered: the deprecated `sp_password` procedure.
 
 ### `USE <db>`, and what is deliberately not enforced next to it
 
@@ -569,7 +608,7 @@ laxer rule set for dynamic SQL would turn every control into a suggestion:
 | dynamic SQL nested inside dynamic SQL | **refused** (`shared.ErrDynamicSQLNotCheckable`) rather than unwrapped further |
 | a statement argument that cannot be located at all | **refused**, same error |
 | `EXEC(@sql)`, `EXEC sp_executesql @sql`, `@stmt = @sql`, `EXEC('USE ' + @db)`, `EXEC sp_prepare @h OUT, NULL, @sql, 1` | **refused under `read_only`/`block_ddl` only** (`shared.ErrDynamicSQLOpaque`) — see below |
-| `EXEC dbo.some_proc`, `EXEC dbo.p @a = 1` | an ordinary procedure call, not dynamic SQL: opaque, and already failed closed under a restrictive grant on the RPC path |
+| `EXEC dbo.some_proc`, `EXEC dbo.p @a = 1` | an ordinary procedure call, not dynamic SQL: opaque, and failed closed under a restrictive grant (`ErrOpaqueProcedureBlocked`) on both the RPC and the SQLBatch path, including `EXEC sp_cursor …` written as batch text and a call inside an `sp_executesql` payload. `EXEC sp_executesql …` and the other SQL-carrying procedures are checked on their statement instead |
 | `EXEC(…) AT <linked_server>` | **out of scope and unenforced** — see below |
 
 Which parameter names can carry the statement is **one list**
@@ -694,13 +733,32 @@ optimistically instead used to leave a session that kept running with a
 `DONE_ATTN` owed to nobody, which the next refused statement would take: the
 client saw "cancelled" where it should have seen the real error.
 
+A statement's `queries` row is written when its response's end-of-message
+packet is relayed. When the session ends first — a client that sends a
+statement and closes its socket straight away, which still has it forwarded and
+executed upstream — the teardown completes the statement still in flight with
+`client disconnected before the response completed`, or with the termination
+message when dbbat is what ended the session. The write happens before the
+connection row is closed, so the row is inside the sealed query chain, and the
+bytes since the last completion are charged to it.
+
 ## `read_only` is a text control on SQL Server
 
 SQL Server has no session-level read-only mode, so there is no server-side pin
 as there is on PostgreSQL and MySQL/MariaDB. `ApplicationIntent=ReadOnly` only
 routes to a readable secondary when an availability group exists, and a plain
 instance ignores it. `read_only` is therefore the text classification alone
-(`shared.ValidateQuery`, writing CTEs included). `EXEC <proc>` is **not**
+(`shared.ValidateQuery`, writing CTEs included), applied to **every** statement
+of the batch: a batch needs no separator, so `shared.ValidateMSSQLBatch` scans
+the whole text for the reserved write and DDL keywords outside literals, quoted
+and bracketed identifiers, the way the `USE` scan does (`MERGE JOIN` /
+`MERGE UNION` hints excepted). The same scan refuses `SELECT … INTO <table>`
+(`#temp` included) under both controls, since it creates and fills a table: an
+INTO counts when the statement owning it at its parenthesis depth is a SELECT
+and its target is not a variable, so `INSERT INTO`, `MERGE INTO`, a DML's
+`OUTPUT … INTO` and `FETCH … INTO @v` keep their classification. `BULK INSERT`
+and `INSERT BULK` load rows, so `read_only` refuses them without `block_copy`
+too. `EXEC <proc>` is **not**
 refused under `read_only`: drivers and tools send `sp_reset_connection`,
 `sp_executesql` wrappers of plain reads and `sp_describe_first_result_set`, and
 the RPC path cannot tell those from a procedure that writes. A procedure or a

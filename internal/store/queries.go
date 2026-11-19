@@ -5,12 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
@@ -38,17 +40,144 @@ type QueryRowsCursor struct {
 	Offset int64 `json:"offset"`
 }
 
+// storableText repairs client-chosen text so the insert cannot fail on it:
+// Postgres `text` columns refuse invalid UTF-8 and the NUL byte, and `jsonb`
+// refuses the NUL character too. All of these reach here from client-chosen
+// bytes, and a refused insert would drop a statement that has already run from
+// the query history. Every proxy and the MCP path insert through CreateQuery,
+// CreatePendingQuery or StoreQueryRows, so these are the places no protocol can
+// forget. The repaired value is what the chain MAC covers, so verification
+// reads back exactly what was sealed.
+//
+// It is the one repair rule: statement text, bound parameter values
+// (storableParameters) and captured rows (storableRowData) all go through it,
+// so the three cannot drift.
+func storableText(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if strings.IndexByte(s, 0) >= 0 {
+		s = strings.ReplaceAll(s, "\x00", "\uFFFD")
+	}
+
+	return s
+}
+
+// storableSQLText repairs statement text for the `sql_text` column.
+func storableSQLText(s string) string {
+	return storableText(s)
+}
+
+// storableError repairs an upstream-chosen error message for the `error`
+// column. The text comes from the upstream server (on SQL Server a client can
+// pick it with THROW / RAISERROR), so a NUL in it must not make the insert
+// fail and drop an executed statement from the history. The chain MAC does not
+// cover this column.
+func storableError(s *string) *string {
+	if s == nil {
+		return nil
+	}
+
+	repaired := storableText(*s)
+
+	return &repaired
+}
+
+// storableParameters repairs the decoded parameter values before they are
+// marshaled to the `parameters` jsonb column, where a NUL (encoded as \u0000)
+// would make the whole insert fail. Raw holds base64 and is left alone. The
+// caller's value is never mutated: a copy is returned when anything changes.
+func storableParameters(params *QueryParameters) *QueryParameters {
+	if params == nil {
+		return nil
+	}
+
+	var values []string
+
+	for i, v := range params.Values {
+		repaired := storableText(v)
+		if repaired == v {
+			continue
+		}
+
+		if values == nil {
+			values = make([]string, len(params.Values))
+			copy(values, params.Values)
+		}
+
+		values[i] = repaired
+	}
+
+	if values == nil {
+		return params
+	}
+
+	clone := *params
+	clone.Values = values
+
+	return &clone
+}
+
+// jsonNULEscape is how a NUL character appears inside a JSON string once
+// encoded; Postgres refuses it in a jsonb value.
+var jsonNULEscape = []byte(`\u0000`)
+
+// storableRowData repairs a captured row document before it reaches the
+// `row_data` jsonb column: invalid UTF-8 and raw NUL bytes go through
+// storableText, and every \u0000 escape inside a string becomes \ufffd —
+// the same U+FFFD storableText substitutes. An escaped backslash followed by
+// "u0000" is literal text and is kept. Valid documents without either problem
+// are returned byte-identical.
+func storableRowData(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+
+	needsText := !utf8.Valid(raw) || bytes.IndexByte(raw, 0) >= 0
+	if !needsText && !bytes.Contains(raw, jsonNULEscape) {
+		return raw
+	}
+
+	data := raw
+	if needsText {
+		data = []byte(storableText(string(raw)))
+	}
+
+	out := make([]byte, 0, len(data))
+
+	for i := 0; i < len(data); i++ {
+		if data[i] != '\\' || i+1 >= len(data) {
+			out = append(out, data[i])
+
+			continue
+		}
+
+		// Inside a JSON string a backslash always starts an escape: copy it
+		// whole so an escaped backslash cannot be mistaken for the start of
+		// another one.
+		if bytes.HasPrefix(data[i:], jsonNULEscape) {
+			out = append(out, `\ufffd`...)
+			i += len(jsonNULEscape) - 1
+
+			continue
+		}
+
+		out = append(out, data[i], data[i+1])
+		i++
+	}
+
+	return out
+}
+
 // CreateQuery creates a new query record
 func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 	result := &Query{
 		UID:          newUIDv7(), // Generate UUIDv7 for time-ordered inserts
 		ConnectionID: query.ConnectionID,
-		SQLText:      query.SQLText,
-		Parameters:   query.Parameters,
+		SQLText:      storableSQLText(query.SQLText),
+		Parameters:   storableParameters(query.Parameters),
 		ExecutedAt:   query.ExecutedAt,
 		DurationMs:   query.DurationMs,
 		RowsAffected: query.RowsAffected,
-		Error:        query.Error,
+		Error:        storableError(query.Error),
 		// COPY metadata, set by the protocols that recognize a bulk transfer
 		// (PostgreSQL today). Nil for every other statement.
 		CopyFormat:    query.CopyFormat,
@@ -96,7 +225,7 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 // connection it belongs to.
 //
 // The chain is per connection rather than global on purpose: retention
-// (DBB_QUERY_STORAGE_RETENTION) deletes whole connections, which would sever a
+// (DBB_RETENTION_QUERIES_DELETE_AFTER) deletes whole connections, which would sever a
 // single global chain on its first sweep. Per connection, a reaped connection
 // takes its own chain with it and every surviving connection still verifies.
 //
@@ -278,7 +407,7 @@ func (s *Store) StoreQueryRows(ctx context.Context, rows []PendingQueryRow) erro
 			UID:          newUIDv7(), // Generate UUIDv7 for each row
 			QueryID:      row.QueryID,
 			RowNumber:    row.RowNumber,
-			RowData:      row.RowData,
+			RowData:      storableRowData(row.RowData),
 			RowSizeBytes: row.RowSizeBytes,
 		}
 	}
@@ -594,7 +723,9 @@ func readRowChainHeads(ctx context.Context, db bun.IDB, queryUIDs []uuid.UUID) (
 //
 // The gap it shares with connections.query_chain_mac: a process that dies
 // mid-capture never reaches the barrier, so that capture keeps a NULL stamp and
-// only its prefix and interior are protected. A missing stamp is never a break.
+// only its prefix and interior are protected. A missing stamp is a break only
+// when the stamp's sealed copy (a query.rows_sealed audit entry) says one was
+// written.
 func (s *Store) SealQueryRowChain(ctx context.Context, queryUID uuid.UUID) error {
 	if !s.ChainEnabled() {
 		return nil
@@ -619,14 +750,31 @@ func (s *Store) SealQueryRowChain(ctx context.Context, queryUID uuid.UUID) error
 	// The stamp is a MAC over the head, not the head itself: a verbatim copy
 	// could be recomputed by anyone who can read query_rows, which is exactly
 	// the attacker this is meant to catch. See rowChainStampMAC.
-	_, err := s.db.NewUpdate().
+	stamp := s.rowChainStampMAC(queryUID, head.count, head.mac)
+
+	var connectionIDs []uuid.UUID
+
+	err := s.db.NewUpdate().
 		Model((*Query)(nil)).
 		Where("uid = ?", queryUID).
-		Set("row_chain_mac = ?", s.rowChainStampMAC(queryUID, head.count, head.mac)).
+		Set("row_chain_mac = ?", stamp).
 		Set("row_chain_len = ?", head.count).
-		Exec(ctx)
+		Returning("connection_id").
+		Scan(ctx, &connectionIDs)
 	if err != nil {
 		return fmt.Errorf("failed to stamp the row chain head: %w", err)
+	}
+
+	// The stamp sits on a plain row: clearing it together with the rows it
+	// protects would read as a query that captured nothing. A sealed copy in
+	// the audit chain is what keeps that a break — see chain_sealed.go.
+	for _, connectionID := range connectionIDs {
+		s.queueRowSeal(ctx, rowSealRecord{
+			ConnectionUID: connectionID.String(),
+			QueryUID:      queryUID.String(),
+			RowChainLen:   head.count,
+			RowChainMAC:   hex.EncodeToString(stamp),
+		})
 	}
 
 	return nil
@@ -662,7 +810,7 @@ func (s *Store) UpdateQueryCompletion(
 	}
 
 	if queryError != nil {
-		q = q.Set("error = ?", *queryError)
+		q = q.Set("error = ?", *storableError(queryError))
 	}
 
 	_, err := q.Exec(ctx)
@@ -702,7 +850,7 @@ func (s *Store) buildListQueriesQuery(
 		Model(dest).
 		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, " +
 			"q.results_truncated, q.results_dropped, q.copy_format, q.copy_direction, " +
-			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, c.user_id, c.database_id").
+			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, q.chain_seq, c.user_id, c.database_id").
 		Join("JOIN connections c ON q.connection_id = c.uid")
 
 	if filter.ConnectionID != nil {
@@ -932,10 +1080,10 @@ type RetentionSweepResult struct {
 // is opt-in: a zero or negative duration skips that half of the sweep, and both
 // at zero is a no-op — the default is to keep everything forever.
 //
-//   - queryOlderThan (DBB_QUERY_STORAGE_RETENTION) governs statements and their
+//   - queryOlderThan (DBB_RETENTION_QUERIES_DELETE_AFTER) governs statements and their
 //     captured rows: the bulk of the store, and the part that can hold customer
 //     data.
-//   - connectionOlderThan (DBB_CONNECTION_RETENTION) governs the session ledger:
+//   - connectionOlderThan (DBB_RETENTION_CONNECTIONS_DELETE_AFTER) governs the session ledger:
 //     one small row per session saying who connected from where, to which
 //     database, under which grant. Configuration guarantees it is never shorter
 //     than the query window (see config.Config.RetentionWindows), because

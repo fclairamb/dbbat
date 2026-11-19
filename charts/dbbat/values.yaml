@@ -81,6 +81,11 @@ config:
   # -- Path to encryption key file (alternative to secrets.encryptionKey)
   # Mount a secret as a volume and reference the path here
   keyFile: ""
+  # -- Reverse proxies (IPs or CIDRs, comma-separated) whose X-Forwarded-For /
+  # X-Real-IP the API believes (DBB_TRUSTED_PROXIES). Empty trusts nobody, so
+  # behind an ingress every client shares the ingress's anonymous rate-limit
+  # bucket: set it to the ingress controller's pod CIDR, e.g. "10.42.0.0/16"
+  trustedProxies: ""
 
 # =============================================================================
 # Services

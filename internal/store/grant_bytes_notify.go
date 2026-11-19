@@ -160,7 +160,7 @@ func (s *Store) sweepGrantBytesOne(ctx context.Context, g *AccessGrant, defaultS
 		return GrantBytesEvent{}, false, nil
 	}
 
-	total, err := s.grantBytesTransferred(ctx, g)
+	total, err := s.grantBytesTransferred(ctx, g, nil)
 	if err != nil {
 		return GrantBytesEvent{}, false, err
 	}

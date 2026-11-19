@@ -29,6 +29,15 @@ If your IdP sends `email_verified: false`, the login is refused. If you
 configure `DBB_OIDC_EMAIL_DOMAINS`, the check runs against that **verified**
 email claim, never against anything the browser supplied.
 
+An identity signing in for the first time is linked onto an existing local
+account whose **username equals its email** only when the IdP positively
+asserts `email_verified: true` (Slack sends it too). An absent claim does not
+count. The link is never made onto an account holding the `admin` role,
+verified or not: an admin keeps signing in with their password (linking an
+identity from a logged-in session is not available yet). Either way the login
+falls through to auto-provisioning (a new account) or, with it off, is refused. Every link made this way writes a
+`user.identity_linked` audit entry naming the provider and the email.
+
 ## Configuration
 
 | Variable | Description | Default |
@@ -279,6 +288,7 @@ Keycloak realms are already tenant-scoped, so the email allowlist is optional.
 | `id token verification` failure | `aud` or `iss` mismatch — usually a multi-tenant issuer URL, or credentials from a different app registration |
 | "Your workspace or email domain is not authorized" | The verified email's domain is outside `DBB_OIDC_EMAIL_DOMAINS` |
 | "No account is linked to your identity" | Auto-provisioning is off for this provider (`DBB_AUTH_AUTO_CREATE_USERS=false`, or a `DBB_AUTH_AUTO_CREATE_USERS_<PROVIDER>=false` override) and no local user matches the email |
+| An existing user signs in to a second, new account instead of their own | Their email was not linked: the IdP did not send `email_verified: true`, or the account is an admin, which signs in with its password instead |
 | Startup fails with `DBB_OIDC_ROLE_MAPPING is malformed` | A pair without `=`, an empty group, or a role that is not `admin`, `viewer` or `connector` |
 | Everyone lost their mapped role at once | The IdP stopped emitting the claim, or it is not the one named by `DBB_OIDC_GROUPS_CLAIM`. The log line "OIDC login carried no group claim" is written on each such login |
 | Nobody is promoted, nobody is demoted | The claim arrives but its values do not match the mapping — most often Entra object ids against a mapping written with group names. Matching is exact, case included |

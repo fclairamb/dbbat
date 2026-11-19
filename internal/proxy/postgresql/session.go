@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,11 +46,20 @@ type pendingQuery struct {
 	syncEpoch uint64
 
 	// Result capture state
-	columnNames   []string // From RowDescription
-	columnOIDs    []uint32 // Type OIDs for decoding
-	capturedBytes int64    // Total bytes captured
-	rowNumber     int      // Current row counter
-	truncated     bool     // True if limits exceeded
+	columnNames []string // From RowDescription
+	columnOIDs  []uint32 // Type OIDs for decoding
+	// resultFormats are the result format codes of the Bind that created the
+	// portal (empty = all text, one = applies to every column), so binary
+	// columns are decoded with their OID rather than read as text.
+	resultFormats []int16
+	// stmtName and portalName identify what the Execute runs, so a
+	// RowDescription answering a Describe sent in the same batch can be
+	// attributed to it.
+	stmtName      string
+	portalName    string
+	capturedBytes int64 // Total bytes captured
+	rowNumber     int   // Current row counter
+	truncated     bool  // True if limits exceeded
 
 	// rowSink streams captured rows to the shared batching writer instead of
 	// holding the whole capture in RAM until the query ends. Created on the
@@ -79,8 +89,26 @@ type preparedStatement struct {
 
 // portalState tracks a portal with its bound parameters.
 type portalState struct {
-	stmtName   string
-	parameters *store.QueryParameters
+	stmtName      string
+	parameters    *store.QueryParameters
+	resultFormats []int16
+}
+
+// columnMeta is the result column metadata a RowDescription carried.
+type columnMeta struct {
+	names []string
+	oids  []uint32
+}
+
+// describeTarget is the object a pending Describe asked about, so the
+// RowDescription (or NoData) answering it can be filed under the right name.
+type describeTarget struct {
+	portal bool
+	name   string
+	// epoch is the client sync epoch the Describe was sent in; entries from a
+	// batch the upstream has closed (an error discarded the Describe) are
+	// dropped at the ReadyForQuery.
+	epoch uint64
 }
 
 // copyState tracks a COPY operation in progress.
@@ -107,6 +135,15 @@ type extendedQueryState struct {
 	// ParameterDescription. The server answers describes in order, so the head
 	// of the queue names the statement the next ParameterDescription belongs to.
 	pendingDescribes []string
+
+	// describeQueue is the FIFO of every Describe (statement or portal) still
+	// awaiting its RowDescription/NoData answer. stmtColumns and portalColumns
+	// remember the answers, by statement and portal name, so a later Execute
+	// whose upstream leg sends no RowDescription still gets column names and
+	// type OIDs. All guarded by mu.
+	describeQueue []describeTarget
+	stmtColumns   map[string]*columnMeta
+	portalColumns map[string]*columnMeta
 
 	// errorUntilSync mirrors PostgreSQL's own extended-protocol error state:
 	// once a message in a batch fails, every following message is discarded
@@ -171,6 +208,7 @@ type Session struct {
 	upstreamTLS           bool                    // Whether the proxy→upstream leg ended up encrypted
 	guard                 *shared.LimitGuard      // Mid-stream time/bandwidth limit enforcement
 	revocation            *cache.RevocationHandle // Signaled when this session's grant is revoked mid-flight
+	usage                 *cache.UsageHandle      // This session's share of its grant's quota consumption (nil: no quota)
 	liveSession           *cache.SessionHandle    // Signaled when an admin ends *this* session (POST /connections/{uid}/terminate)
 
 	// queryTagging is this session's tagging decision, taken once at auth:
@@ -191,6 +229,17 @@ type Session struct {
 	statementLimit    time.Duration
 	statementClock    shared.StatementClock
 
+	// preAuthTimeout bounds SSL negotiation, startup and authentication
+	// together. Zero means shared.PreAuthTimeout.
+	preAuthTimeout time.Duration
+
+	// queuedSimpleQueries holds the simple Queries a pipelining client sent
+	// while currentQuery was still waiting for its ReadyForQuery, oldest
+	// first. currentQuery is always the oldest staged simple Query; each one
+	// moves up when the one before it completes (completeSimpleQuery).
+	// Guarded by bookMu.
+	queuedSimpleQueries []*pendingQuery
+
 	// clientSyncEpoch counts the client messages that each earn exactly one
 	// upstream ReadyForQuery: every forwarded Sync and every forwarded simple
 	// Query. Each pendingQuery stamps it when queued, so the RFQ answering
@@ -207,6 +256,13 @@ type Session struct {
 	// already over — see reconcilePendingQueries. Bumped and read only under
 	// bookMu, inside the upstream leg's message switch.
 	upstreamReadyEpoch uint64
+
+	// upstreamCaughtUp is signaled, under bookMu, each time upstreamReadyEpoch
+	// moves and when the upstream leg ends; upstreamRelayEnded records the
+	// latter. A read_only session waits on it before forwarding the next batch
+	// — see awaitUpstreamCaughtUp. Nil until proxyMessages starts the relays.
+	upstreamCaughtUp   *sync.Cond
+	upstreamRelayEnded bool
 
 	// upstreamKey is the cancellation key the *upstream server* issued for
 	// this session's backend. dbbat forwards it to the client verbatim, so it
@@ -290,6 +346,11 @@ type Session struct {
 	// Only mutated from the upstream→client goroutine where logQuery runs,
 	// so no atomic needed.
 	lastBytesSnapshot int64
+
+	// persists counts the query records still being written in the
+	// background (persistQueryAsync), so cleanup can let them land before it
+	// closes the connection row. See teardown.go.
+	persists persistTracker
 }
 
 // NewSession creates a new session.
@@ -350,6 +411,13 @@ func NewSession(
 func (s *Session) Run() error {
 	defer s.cleanup()
 
+	// Nothing below may wait on an unauthenticated client for longer than the
+	// pre-auth window: a socket that says nothing would otherwise hold this
+	// goroutine and its descriptor forever. Lifted once authenticate succeeds.
+	if err := shared.ArmPreAuthDeadline(s.clientConn, s.preAuthTimeout); err != nil {
+		return fmt.Errorf("set pre-auth deadline: %w", err)
+	}
+
 	// Negotiate TLS before constructing the backend — wrapping clientConn
 	// after the backend is built would leave the backend reading from the
 	// plaintext side.
@@ -365,6 +433,12 @@ func (s *Session) Run() error {
 	// Authenticate
 	if err := s.authenticate(); err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
+	}
+
+	// The client is authenticated: an established session may sit idle for as
+	// long as it likes. The upstream dial below carries its own timeout.
+	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
+		return fmt.Errorf("clear pre-auth deadline: %w", err)
 	}
 
 	// Connect to upstream (this creates s.upstreamFrontend)
@@ -488,6 +562,11 @@ func (s *Session) proxyMessages() error {
 	// relaying such a request from another replica — signals.
 	s.liveSession = s.store.Sessions().Register(s.connectionUID)
 
+	// And add it to its grant's shared consumption reading, so the grant's
+	// quotas are one budget across all its sessions. Released in cleanup.
+	s.usage = shared.RegisterGrantUsage(s.store.Usage(), s.grant, s.bytesFromClient, s.bytesToClient)
+	s.usage.SetConnection(s.connectionUID)
+
 	// Build the limit guard once the grant is known, then run a watchdog that
 	// tears the session down if a limit is crossed (or the grant is revoked)
 	// while a query is blocked producing no traffic (the inline check in
@@ -495,6 +574,7 @@ func (s *Session) proxyMessages() error {
 	// error frame).
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithUsage(s.usage).
 		WithTermination(s.liveSession).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
@@ -502,7 +582,7 @@ func (s *Session) proxyMessages() error {
 	// per-statement cost of the (overwhelmingly common) no-pattern case is a
 	// single nil check on the hot path.
 	s.approvalGate = shared.NewApprovalGate(
-		s.approvalDeps, s.grant, s.connectionUID, s.user, s.database.Name,
+		s.approvalDeps, shared.ApprovalDialectStandard, s.grant, s.connectionUID, s.user, s.database.Name,
 	)
 	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, s.database.Name).
 		WithApprovals(s.approvalGate)
@@ -518,6 +598,8 @@ func (s *Session) proxyMessages() error {
 	go safe.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
 	}, s.closeConns)
+
+	s.upstreamCaughtUp = sync.NewCond(&s.bookMu)
 
 	// Channel to receive errors from goroutines
 	errChan := make(chan error, 2)
@@ -538,6 +620,11 @@ func (s *Session) proxyMessages() error {
 
 	// Wait for either direction to close or error
 	err := <-errChan
+
+	// One leg is gone; end the other one, and give it a bounded moment to
+	// get out of the bookkeeping before the teardown completes whatever is
+	// still in flight. See teardown.go.
+	s.finishRelays(err, errChan)
 
 	return err
 }
@@ -702,14 +789,28 @@ func (s *Session) proxyClientToUpstream() error {
 	for {
 		msg, err := s.clientBackend.Receive()
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
+			// pgproto3 reports a FIN at a message boundary as io.ErrUnexpectedEOF
+			// (translateEOFtoErrUnexpectedEOF), so a plain io.EOF never reaches
+			// here: a client that simply closes its socket without a Terminate —
+			// most connection pools do — looks exactly like one that stopped
+			// mid-frame. Either way the client is gone and nothing on our side
+			// failed; on Stonal's deployment it was ~2000 "Session error" lines a
+			// day.
+			if errors.Is(err, io.ErrUnexpectedEOF) || shared.IsClientHangup(err) {
+				return fmt.Errorf("%w: %w", errClientHungUp, err)
 			}
 
 			return fmt.Errorf("failed to receive from client: %w", err)
 		}
 
-		s.logger.InfoContext(s.ctx, "received message from client", slog.Any("message", msg))
+		// DEBUG, never INFO: the message carries the statement text (and a Bind
+		// its parameter values), which belongs in the audited queries table, not
+		// in the process log shipped to a log aggregator.
+		s.logger.DebugContext(s.ctx, "received message from client", slog.Any("message", msg))
+
+		if !s.awaitUpstreamCaughtUp(msg) {
+			return nil
+		}
 
 		// A batch dbbat already failed is dead until Sync — see
 		// extendedQueryState.errorUntilSync.
@@ -730,6 +831,66 @@ func (s *Session) proxyClientToUpstream() error {
 			return fmt.Errorf("failed to send to upstream: %w", err)
 		}
 	}
+}
+
+// awaitUpstreamCaughtUp holds a read_only session's next message until
+// upstream has answered everything already forwarded, and reports false when
+// the upstream leg ended while it waited.
+//
+// The read-only pin is guarded after the fact by readOnlyPinLost, which reads
+// the ParameterStatus upstream sends ahead of the ReadyForQuery that ends the
+// statement that dropped it. A client that pipelines its next batch behind that
+// statement would already have it in the upstream's socket buffer by then, and
+// the backend runs it — in a transaction the pin no longer covers — whatever
+// dbbat does with the socket afterwards. Not forwarding it until the previous
+// batch is answered puts the tripwire ahead of it.
+//
+// COPY sub-protocol messages are never held: they belong to the statement in
+// flight. Neither is Terminate, which ends the session either way.
+func (s *Session) awaitUpstreamCaughtUp(msg pgproto3.FrontendMessage) bool {
+	if s.upstreamCaughtUp == nil || s.grant == nil || !s.grant.IsReadOnly() {
+		return true
+	}
+
+	switch msg.(type) {
+	case *pgproto3.CopyData, *pgproto3.CopyDone, *pgproto3.CopyFail, *pgproto3.Terminate:
+		return true
+	}
+
+	s.bookMu.Lock()
+	defer s.bookMu.Unlock()
+
+	for s.clientSyncEpoch > s.upstreamReadyEpoch && !s.upstreamRelayEnded {
+		s.upstreamCaughtUp.Wait()
+	}
+
+	return !s.upstreamRelayEnded
+}
+
+// noteUpstreamReady counts one relayed ReadyForQuery and wakes a client leg
+// waiting in awaitUpstreamCaughtUp.
+//
+// Callers hold bookMu (see proxyUpstreamToClient).
+func (s *Session) noteUpstreamReady() {
+	s.upstreamReadyEpoch++
+
+	if s.upstreamCaughtUp != nil {
+		s.upstreamCaughtUp.Broadcast()
+	}
+}
+
+// markUpstreamRelayEnded releases a client leg parked in awaitUpstreamCaughtUp
+// once no ReadyForQuery can come any more.
+func (s *Session) markUpstreamRelayEnded() {
+	if s.upstreamCaughtUp == nil {
+		return
+	}
+
+	s.bookMu.Lock()
+	defer s.bookMu.Unlock()
+
+	s.upstreamRelayEnded = true
+	s.upstreamCaughtUp.Broadcast()
 }
 
 // interceptClientMessage runs one client message through the gate for its
@@ -761,6 +922,11 @@ func (s *Session) interceptClientMessage(msg pgproto3.FrontendMessage) error {
 			s.clientSyncEpoch++
 
 			return nil
+		})
+	case *pgproto3.FunctionCall:
+		return s.book(func() error {
+			return s.refuse(fmt.Sprintf("-- fast-path function call, function OID %d", m.Function),
+				nil, ErrFunctionCallNotAllowed)
 		})
 	case *pgproto3.Parse:
 		return s.handleParse(m)
@@ -918,44 +1084,113 @@ func (s *Session) sendQueryError(queryErr error, ready bool) {
 	}
 }
 
-// getCurrentPendingQuery returns the query that should receive result data.
-// For Simple Query Protocol: s.currentQuery
-// For Extended Query Protocol: last item in pendingQueries (most recent Execute).
+// getCurrentPendingQuery returns the statement the upstream is answering right
+// now: the one that receives RowDescription and DataRow, and the one an Execute
+// terminator completes.
+//
+// The upstream answers strictly in the order the client sent, so under the
+// extended protocol that is the *head* of pendingQueries, never the tail. With
+// two Executes before one Sync (a pgx Batch, a JDBC batch), taking the tail put
+// the first statement's rows under the second statement's SQL and vice versa,
+// and the query history then showed one statement's rows under another's text —
+// sealed into the captured-row chain, so audit verify could not notice.
+//
+// A staged simple Query (currentQuery) is answered after every queued Execute
+// sent before it: the head wins unless the simple Query was sent first, which
+// its lower syncEpoch says (a Query bumps the epoch, so an Execute queued after
+// it carries a higher one; an Execute queued before it in the same batch
+// carries the same one).
 //
 // Callers hold bookMu.
 func (s *Session) getCurrentPendingQuery() *pendingQuery {
-	// Simple Query Protocol
-	if s.currentQuery != nil {
-		return s.currentQuery
-	}
-
-	// Extended Query Protocol - return the most recent pending query.
 	// extendedState is nil in the unit contexts that drive a session without
 	// running its startup, and the watchdog reaches this from a third
 	// goroutine, so the nil check is not theoretical.
-	if s.extendedState != nil && len(s.extendedState.pendingQueries) > 0 {
-		return s.extendedState.pendingQueries[len(s.extendedState.pendingQueries)-1]
+	head := s.pendingHead()
+
+	if head != nil && (s.currentQuery == nil || head.syncEpoch <= s.currentQuery.syncEpoch) {
+		return head
 	}
 
-	return nil
+	return s.currentQuery
 }
 
-// popPendingQuery promotes the oldest pending extended-protocol query to
-// currentQuery, where the next ReadyForQuery logs it. It is the one pop all
-// four terminators share: an Execute ends with exactly one of CommandComplete,
+// pendingHead returns the oldest queued extended-protocol Execute, or nil.
+//
+// Callers hold bookMu.
+func (s *Session) pendingHead() *pendingQuery {
+	if s.extendedState == nil || len(s.extendedState.pendingQueries) == 0 {
+		return nil
+	}
+
+	return s.extendedState.pendingQueries[0]
+}
+
+// finishAnsweredExecute completes the extended-protocol statement an Execute
+// terminator belongs to, right away, with its own rows affected, error and
+// duration, and drops it from the queue. It is the one completion all four
+// terminators share: an Execute ends with exactly one of CommandComplete,
 // ErrorResponse, EmptyQueryResponse or PortalSuspended, and missing the last
-// two parked every paged grid and every empty statement on a stale queue entry
-// — from which on every pop took the wrong item and the last statements of the
-// session were never completed, leaving the watchdog armed on an idle backend.
+// two used to park every paged grid and every empty statement on a stale queue
+// entry.
+//
+// Completing at the terminator, rather than parking the entry until the
+// ReadyForQuery, is what keeps a pipelined batch apart: parking promoted each
+// terminated entry into currentQuery, where the next statement's rows landed
+// on it and the next terminator overwrote it without completing it.
+//
+// Bytes are attributed per terminator: the wire-level diff since the previous
+// completion. A batch's client bytes all arrive before its first answer, so
+// they land on its first statement; each later statement carries its own
+// answer, and the framing after the last terminator (the ReadyForQuery) rides
+// on the next statement, exactly as it does on the simple-query path.
+//
+// Reports false when the answered statement is not a queued Execute — a simple
+// Query, whose terminators the ReadyForQuery completes, or nothing at all.
 //
 // Callers hold bookMu (see proxyUpstreamToClient).
-func (s *Session) popPendingQuery() {
-	if s.extendedState == nil || len(s.extendedState.pendingQueries) == 0 {
+func (s *Session) finishAnsweredExecute(rowsAffected *int64, queryError *string) bool {
+	head := s.pendingHead()
+	if head == nil || s.getCurrentPendingQuery() != head {
+		return false
+	}
+
+	s.extendedState.pendingQueries = s.extendedState.pendingQueries[1:]
+
+	total := s.bytesFromClient.Load() + s.bytesToClient.Load()
+	bytesTransferred := total - s.lastBytesSnapshot
+	s.lastBytesSnapshot = total
+
+	// logQuery persists s.currentQuery; a simple Query staged behind this
+	// batch keeps its slot.
+	staged := s.currentQuery
+	s.currentQuery = head
+	s.logQuery(rowsAffected, queryError, bytesTransferred)
+	s.currentQuery = staged
+
+	// A COPY run by this Execute is over with it.
+	s.copyState = nil
+
+	return true
+}
+
+// dropPending removes q from the extended-protocol queue, if it is there.
+//
+// Callers hold bookMu.
+func (s *Session) dropPending(q *pendingQuery) {
+	if s.extendedState == nil {
 		return
 	}
 
-	s.currentQuery = s.extendedState.pendingQueries[0]
-	s.extendedState.pendingQueries = s.extendedState.pendingQueries[1:]
+	kept := s.extendedState.pendingQueries[:0]
+
+	for _, p := range s.extendedState.pendingQueries {
+		if p != q {
+			kept = append(kept, p)
+		}
+	}
+
+	s.extendedState.pendingQueries = kept
 }
 
 // reconcilePendingQueries finishes every pending extended-protocol query whose
@@ -972,7 +1207,8 @@ func (s *Session) popPendingQuery() {
 // DataGrip session was killed a full hour after its last statement. The entry
 // is logged with the ReadyForQuery's time as its end and dropped.
 //
-// It is a backstop, not the mechanism — rule 1 (all four terminators pop) is
+// It is a backstop, not the mechanism — rule 1 (all four terminators complete
+// their statement, see finishAnsweredExecute) is
 // what the normal flows are handled by — which is why the reconcile WARNs: the
 // unit tests assert the WARN is absent from normal flows, so a new gap shows
 // up as a failing assertion rather than as a killed session in production.
@@ -988,6 +1224,10 @@ func (s *Session) reconcilePendingQueries() {
 	}
 
 	ready := s.upstreamReadyEpoch
+
+	// logQuery persists s.currentQuery; a simple Query staged behind these
+	// entries keeps its slot.
+	staged := s.currentQuery
 
 	kept := s.extendedState.pendingQueries[:0]
 
@@ -1013,15 +1253,16 @@ func (s *Session) reconcilePendingQueries() {
 	}
 
 	s.extendedState.pendingQueries = kept
-	s.currentQuery = nil
+	s.currentQuery = staged
 }
 
 // oldestPendingQuery returns the statement the statement clock is parked on:
 // the oldest entry among the staged current query and the extended-protocol
 // queue. The watchdog measures that entry, so the row completed with the
-// limit text, the audit entry and the notification must name it too — the
-// newest (getCurrentPendingQuery) is what the streamed bytes belong to, which
-// is a different statement whenever an earlier one never got popped.
+// limit text, the audit entry and the notification must name it too. The
+// answered one (getCurrentPendingQuery) is what the streamed bytes belong to,
+// which is a different statement when a staged simple Query is older than the
+// queued Executes.
 //
 // Callers hold bookMu.
 func (s *Session) oldestPendingQuery() *pendingQuery {
@@ -1051,18 +1292,100 @@ func (s *Session) oldestPendingQuery() *pendingQuery {
 //
 // Callers hold bookMu (see proxyUpstreamToClient).
 func (s *Session) captureRowDescription(msg *pgproto3.RowDescription) {
-	query := s.getCurrentPendingQuery()
-	if query == nil {
+	meta := &columnMeta{
+		names: make([]string, len(msg.Fields)),
+		oids:  make([]uint32, len(msg.Fields)),
+	}
+
+	for i, field := range msg.Fields {
+		meta.names[i] = string(field.Name)
+		meta.oids[i] = field.DataTypeOID
+	}
+
+	target, described := s.popDescribe()
+	if !described {
+		// A simple Query: no Describe, the RowDescription belongs to the
+		// statement being answered.
+		if query := s.getCurrentPendingQuery(); query != nil {
+			query.columnNames, query.columnOIDs = meta.names, meta.oids
+		}
+
 		return
 	}
 
-	query.columnNames = make([]string, len(msg.Fields))
-	query.columnOIDs = make([]uint32, len(msg.Fields))
+	// Remember it for the Executes that will come without a RowDescription.
+	s.extendedState.mu.Lock()
+	if target.portal {
+		if s.extendedState.portalColumns == nil {
+			s.extendedState.portalColumns = map[string]*columnMeta{}
+		}
 
-	for i, field := range msg.Fields {
-		query.columnNames[i] = string(field.Name)
-		query.columnOIDs[i] = field.DataTypeOID
+		s.extendedState.portalColumns[target.name] = meta
+	} else {
+		if s.extendedState.stmtColumns == nil {
+			s.extendedState.stmtColumns = map[string]*columnMeta{}
+		}
+
+		s.extendedState.stmtColumns[target.name] = meta
 	}
+	s.extendedState.mu.Unlock()
+
+	// An Execute queued in the same batch, before this answer arrived, still
+	// has no metadata: seed it.
+	for _, q := range s.extendedState.pendingQueries {
+		if q.columnNames != nil {
+			continue
+		}
+
+		if (target.portal && q.portalName == target.name) || (!target.portal && q.stmtName == target.name) {
+			q.columnNames, q.columnOIDs = meta.names, meta.oids
+		}
+	}
+}
+
+// popDescribe removes the oldest outstanding Describe: the server answers
+// each with exactly one RowDescription or NoData, in order.
+//
+// Callers hold bookMu.
+func (s *Session) popDescribe() (describeTarget, bool) {
+	if s.extendedState == nil {
+		return describeTarget{}, false
+	}
+
+	s.extendedState.mu.Lock()
+	defer s.extendedState.mu.Unlock()
+
+	if len(s.extendedState.describeQueue) == 0 {
+		return describeTarget{}, false
+	}
+
+	target := s.extendedState.describeQueue[0]
+	s.extendedState.describeQueue = s.extendedState.describeQueue[1:]
+
+	return target, true
+}
+
+// dropStaleDescribes forgets Describes whose batch the upstream has closed
+// without answering them (an earlier error discarded them).
+//
+// Callers hold bookMu.
+func (s *Session) dropStaleDescribes() {
+	if s.extendedState == nil {
+		return
+	}
+
+	s.extendedState.mu.Lock()
+	defer s.extendedState.mu.Unlock()
+
+	kept := s.extendedState.describeQueue[:0]
+
+	for _, d := range s.extendedState.describeQueue {
+		if d.epoch >= s.upstreamReadyEpoch {
+			kept = append(kept, d)
+		}
+	}
+
+	s.extendedState.describeQueue = kept
 }
 
 // captureDataRow records one upstream result row against the pending query,
@@ -1104,7 +1427,7 @@ func (s *Session) captureDataRow(msg *pgproto3.DataRow) {
 		return
 	}
 
-	row := s.convertDataRow(msg.Values, query.columnNames, query.columnOIDs)
+	row := s.convertDataRow(msg.Values, query.columnNames, query.columnOIDs, query.resultFormats...)
 
 	query.capturedBytes += rowSize
 	query.rowNumber++
@@ -1193,8 +1516,9 @@ func (s *Session) ensureRowSink(query *pendingQuery) *shared.QuerySink {
 //
 //nolint:cyclop // Protocol handling with many message types inherently has high complexity
 func (s *Session) proxyUpstreamToClient() error {
-	var rowsAffected *int64
-	var queryError *string
+	defer s.markUpstreamRelayEnded()
+
+	var simple simpleQueryResult
 
 	for {
 		msg, err := s.receiveFromUpstream()
@@ -1225,39 +1549,12 @@ func (s *Session) proxyUpstreamToClient() error {
 		case *pgproto3.RowDescription:
 			s.captureRowDescription(m)
 
-		case *pgproto3.CommandComplete:
-			// Parse rows affected from CommandTag (e.g., "UPDATE 5")
-			rowsAffected = parseRowsAffected(string(m.CommandTag))
-			// Pop from pending queue if using Extended Query Protocol
-			s.popPendingQuery()
+		case *pgproto3.NoData:
+			s.popDescribe()
 
-		case *pgproto3.ErrorResponse:
-			// Capture error message
-			errMsg := m.Message
-			queryError = &errMsg
-			// Pop from pending queue if using Extended Query Protocol
-			s.popPendingQuery()
-
-		case *pgproto3.EmptyQueryResponse:
-			// The statement was the empty string: the fourth way an Execute
-			// ends (no command tag, no rows, no error). Not popping here is
-			// what parked every DataGrip session on a stale queue entry after
-			// it sent the empty statement it always sends, and got the idle
-			// session killed by the statement timeout an hour later.
-			rowsAffected = nil
-			queryError = nil
-			s.popPendingQuery()
-
-		case *pgproto3.PortalSuspended:
-			// The Execute carried a row limit and the portal has more rows.
-			// There is no command tag, and the backend is now idle — waiting
-			// for the client to ask for the next page — not executing. The
-			// next page's Execute was already queued by handleExecute as its
-			// own pendingQuery, with its own terminator, so a grid paged N
-			// times logs N rows, each with that page's real duration.
-			rowsAffected = nil
-			queryError = nil
-			s.popPendingQuery()
+		case *pgproto3.CommandComplete, *pgproto3.ErrorResponse,
+			*pgproto3.EmptyQueryResponse, *pgproto3.PortalSuspended:
+			s.noteTerminator(&simple, m)
 
 		case *pgproto3.DataRow:
 			s.captureDataRow(m)
@@ -1268,9 +1565,9 @@ func (s *Session) proxyUpstreamToClient() error {
 				direction: "out",
 				format:    m.OverallFormat,
 			}
-			// Extract column names from the current query if available
-			if s.currentQuery != nil {
-				s.copyState.columnNames = parseCopyColumnNames(s.currentQuery.sql)
+			// Extract column names from the answered query if available
+			if q := s.getCurrentPendingQuery(); q != nil {
+				s.copyState.columnNames = parseCopyColumnNames(q.sql)
 			}
 			s.logger.InfoContext(s.ctx, "COPY OUT started", slog.Int("format", int(m.OverallFormat)))
 
@@ -1280,9 +1577,9 @@ func (s *Session) proxyUpstreamToClient() error {
 				direction: "in",
 				format:    m.OverallFormat,
 			}
-			// Extract column names from the current query if available
-			if s.currentQuery != nil {
-				s.copyState.columnNames = parseCopyColumnNames(s.currentQuery.sql)
+			// Extract column names from the answered query if available
+			if q := s.getCurrentPendingQuery(); q != nil {
+				s.copyState.columnNames = parseCopyColumnNames(q.sql)
 			}
 			s.logger.InfoContext(s.ctx, "COPY IN started", slog.Int("format", int(m.OverallFormat)))
 
@@ -1305,25 +1602,9 @@ func (s *Session) proxyUpstreamToClient() error {
 			// forwarded Sync or a forwarded simple Query. Counting it is what
 			// lets the reconcile below tell a finished batch from one still
 			// in flight.
-			s.upstreamReadyEpoch++
+			s.noteUpstreamReady()
 
-			// Query complete - log it
-			if s.currentQuery != nil {
-				// Wire-level diff: cumulative client-side bytes since the
-				// previous query end (or session start). Captures the query
-				// text the client sent, the response framing, error
-				// packets, and pre-first-query auth bytes — everything the
-				// row-summed counter previously missed.
-				total := s.bytesFromClient.Load() + s.bytesToClient.Load()
-				bytesTransferred := total - s.lastBytesSnapshot
-				s.lastBytesSnapshot = total
-
-				s.logQuery(rowsAffected, queryError, bytesTransferred)
-				s.currentQuery = nil
-				s.copyState = nil // Reset copy state
-				rowsAffected = nil
-				queryError = nil
-			}
+			s.completeSimpleQuery(&simple)
 
 			// The protocol guarantees nothing from before this Sync is still
 			// running, so anything still queued from an earlier epoch is a
@@ -1332,6 +1613,7 @@ func (s *Session) proxyUpstreamToClient() error {
 			// the backstop that bounds any future gap of the kind that killed
 			// the idle DataGrip session.
 			s.reconcilePendingQueries()
+			s.dropStaleDescribes()
 		}
 
 		// Whatever the message did to the bookkeeping, the set of statements
@@ -1346,6 +1628,14 @@ func (s *Session) proxyUpstreamToClient() error {
 		s.clientBackend.Send(msg)
 
 		if err := s.clientBackend.Flush(); err != nil {
+			// A client that closed its socket mid-result surfaces here, on
+			// the write, as often as on the client leg's read. Classify it
+			// the same way, so the teardown names the hangup and the server
+			// logs it as one rather than as a session failure.
+			if shared.IsClientHangup(err) || errors.Is(err, syscall.EPIPE) {
+				return fmt.Errorf("%w: failed to send to client: %w", errClientHungUp, err)
+			}
+
 			return fmt.Errorf("failed to send to client: %w", err)
 		}
 
@@ -1360,6 +1650,129 @@ func (s *Session) proxyUpstreamToClient() error {
 	}
 }
 
+// simpleQueryResult carries a simple Query's outcome from its terminators to
+// the ReadyForQuery that completes it (a multi-statement Query earns several
+// terminators, one row).
+type simpleQueryResult struct {
+	rowsAffected *int64
+	queryError   *string
+}
+
+// noteTerminator handles the four messages that end a statement:
+// CommandComplete, ErrorResponse, EmptyQueryResponse and PortalSuspended. An
+// Execute's statement is completed on the spot (finishAnsweredExecute); a
+// simple Query's outcome is accumulated in res for its ReadyForQuery.
+//
+// Callers hold bookMu (see proxyUpstreamToClient).
+func (s *Session) noteTerminator(res *simpleQueryResult, msg pgproto3.BackendMessage) {
+	switch m := msg.(type) {
+	case *pgproto3.CommandComplete:
+		// Parse rows affected from CommandTag (e.g., "UPDATE 5"). An
+		// Execute's statement completes here; a simple Query's at the
+		// ReadyForQuery (a multi-statement Query earns several).
+		tagRows := parseRowsAffected(string(m.CommandTag))
+		if !s.finishAnsweredExecute(tagRows, nil) {
+			res.rowsAffected = tagRows
+		}
+
+	case *pgproto3.ErrorResponse:
+		errMsg := m.Message
+		if !s.finishAnsweredExecute(nil, &errMsg) {
+			res.queryError = &errMsg
+		}
+
+	case *pgproto3.EmptyQueryResponse:
+		// The statement was the empty string: the fourth way an Execute
+		// ends (no command tag, no rows, no error). Not completing here is
+		// what parked every DataGrip session on a stale queue entry after
+		// it sent the empty statement it always sends, and got the idle
+		// session killed by the statement timeout an hour later.
+		if !s.finishAnsweredExecute(nil, nil) {
+			res.rowsAffected = nil
+			res.queryError = nil
+		}
+
+	case *pgproto3.PortalSuspended:
+		// The Execute carried a row limit and the portal has more rows.
+		// There is no command tag, and the backend is now idle — waiting
+		// for the client to ask for the next page — not executing. The
+		// next page's Execute was already queued by handleExecute as its
+		// own pendingQuery, with its own terminator, so a grid paged N
+		// times logs N rows, each with that page's real duration.
+		if !s.finishAnsweredExecute(nil, nil) {
+			res.rowsAffected = nil
+			res.queryError = nil
+		}
+	}
+}
+
+// completeSimpleQuery runs at each ReadyForQuery: it completes the staged
+// simple Query this ReadyForQuery answers, and clears what the exchange left.
+//
+// Callers hold bookMu (see proxyUpstreamToClient).
+func (s *Session) completeSimpleQuery(res *simpleQueryResult) {
+	// A simple Query completes here. Only the ReadyForQuery that
+	// answers it, though: a Query staged behind a pipelined batch
+	// still waits for its own (its RFQ is the syncEpoch+1-th).
+	if s.currentQuery != nil && s.currentQuery.syncEpoch < s.upstreamReadyEpoch {
+		// Wire-level diff: cumulative client-side bytes since the
+		// previous query end (or session start). Captures the query
+		// text the client sent, the response framing, error
+		// packets, and pre-first-query auth bytes — everything the
+		// row-summed counter previously missed.
+		total := s.bytesFromClient.Load() + s.bytesToClient.Load()
+		bytesTransferred := total - s.lastBytesSnapshot
+		s.lastBytesSnapshot = total
+
+		s.logQuery(res.rowsAffected, res.queryError, bytesTransferred)
+		s.currentQuery = nil
+
+		// A pipelining client may have sent further simple Queries before
+		// this one was answered: the next one is the statement upstream
+		// answers now, and waits for its own ReadyForQuery.
+		s.promoteQueuedSimpleQuery()
+	}
+
+	// Whatever this exchange left behind is over with it: a terminator
+	// that belonged to no tracked statement (an extended-protocol
+	// Parse error with no Execute) must not leak its error into the
+	// next statement.
+	s.copyState = nil
+	res.rowsAffected = nil
+	res.queryError = nil
+}
+
+// stageSimpleQuery stages a forwarded simple Query for logging. The slot is
+// currentQuery, unless a previous simple Query still waits for its
+// ReadyForQuery (a client pipelining several Queries in one flush): then it
+// queues behind it instead of overwriting it, which left every Query but the
+// last of the flush unlogged.
+//
+// Callers hold bookMu.
+func (s *Session) stageSimpleQuery(q *pendingQuery) {
+	if s.currentQuery == nil {
+		s.currentQuery = q
+
+		return
+	}
+
+	s.queuedSimpleQueries = append(s.queuedSimpleQueries, q)
+}
+
+// promoteQueuedSimpleQuery moves the oldest queued simple Query into the
+// currentQuery slot once that slot is free.
+//
+// Callers hold bookMu.
+func (s *Session) promoteQueuedSimpleQuery() {
+	if s.currentQuery != nil || len(s.queuedSimpleQueries) == 0 {
+		return
+	}
+
+	s.currentQuery = s.queuedSimpleQueries[0]
+	s.queuedSimpleQueries[0] = nil
+	s.queuedSimpleQueries = s.queuedSimpleQueries[1:]
+}
+
 // receiveFromUpstream reads the next upstream message for the relay, and is
 // where the read-only tripwire runs: before anything is relayed, so that if the
 // pin is gone the client never gets the ReadyForQuery that would let it start
@@ -1367,6 +1780,12 @@ func (s *Session) proxyUpstreamToClient() error {
 func (s *Session) receiveFromUpstream() (pgproto3.BackendMessage, error) {
 	msg, err := s.upstreamFrontend.Receive()
 	if err != nil {
+		// pgproto3 reports a FIN as io.ErrUnexpectedEOF: the target ended the
+		// session, which is not a relay bug.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, fmt.Errorf("%w: %w", errUpstreamClosed, err)
+		}
+
 		return nil, fmt.Errorf("failed to receive from upstream: %w", err)
 	}
 
@@ -1523,15 +1942,18 @@ func (s *Session) persistAbortedQuery(errText string) {
 		bytesTransferred = 0
 	}
 
-	// Extended Query Protocol leaves the in-flight query in the pending queue
-	// (currentQuery is nil until CommandComplete/ErrorResponse pops it); logQuery
-	// persists s.currentQuery, so promote it. The session is tearing down, so
-	// mutating currentQuery here is safe.
-	if s.currentQuery == nil {
-		s.currentQuery = query
-	}
-
+	// Under the extended protocol the in-flight query is the head of the
+	// pending queue; logQuery persists s.currentQuery, so stage it there, and
+	// drop it from the queue so no later teardown completes it twice. A
+	// simple Query staged behind it keeps its slot.
+	staged := s.currentQuery
+	s.currentQuery = query
 	s.logQuery(nil, &errText, bytesTransferred)
+
+	if query != staged {
+		s.dropPending(query)
+		s.currentQuery = staged
+	}
 }
 
 // persistTerminatedQuery completes the statement that was in flight when the
@@ -1564,61 +1986,11 @@ func (s *Session) persistTerminatedQuery(t store.Termination) {
 		return
 	}
 
-	// Wire-level diff, computed once: the streamed-so-far bytes belong to the
-	// newest entry — that is what persistAbortedQuery attributes them to on
-	// the abort path, and the terminated path keeps the same rule.
-	total := s.bytesFromClient.Load() + s.bytesToClient.Load()
-
-	bytesTransferred := total - s.lastBytesSnapshot
-	if bytesTransferred > 0 {
-		s.lastBytesSnapshot = total
-	} else {
-		// Nothing new to attribute. The entries still get completed below —
-		// a row a result capture already inserted must not read as still
-		// running — they just carry no byte count.
-		bytesTransferred = 0
-	}
-
-	newest := s.getCurrentPendingQuery()
-
-	// Every pending entry except the oldest completes as aborted, without the
-	// limit text, so the teardown leaves no row that reads as still running.
-	// The oldest goes last, with the limit text.
-	aborted := "aborted: session terminated by dbbat"
-
-	if s.extendedState != nil {
-		for _, q := range s.extendedState.pendingQueries {
-			if q == nil || q == oldest {
-				continue
-			}
-
-			bytes := int64(0)
-			if q == newest {
-				bytes = bytesTransferred
-			}
-
-			s.currentQuery = q
-			s.logQuery(nil, &aborted, bytes)
-		}
-	}
-
-	oldestBytes := int64(0)
-	if oldest == newest {
-		oldestBytes = bytesTransferred
-	}
-
-	s.currentQuery = oldest
-	s.logQuery(nil, &message, oldestBytes)
-
-	// The teardown has now completed everything that was in flight; drop the
-	// bookkeeping rather than leaving rows that could read as still running.
-	s.currentQuery = nil
-	s.copyState = nil
-	if s.extendedState != nil {
-		s.extendedState.pendingQueries = nil
-	}
-
-	s.refreshStatementClock()
+	// The streamed-so-far bytes belong to the answered entry — that is what
+	// persistAbortedQuery attributes them to on the abort path, and the
+	// terminated path keeps the same rule. Every entry but the oldest
+	// completes as aborted, without the limit text.
+	s.completeInFlightLocked(oldest, message, "aborted: session terminated by dbbat")
 }
 
 // cleanup closes connections and updates records.
@@ -1640,6 +2012,7 @@ func (s *Session) cleanup() {
 	}
 
 	s.store.Sessions().Deregister(s.connectionUID, s.liveSession)
+	s.usage.Release()
 
 	if s.dumpWriter != nil {
 		if err := s.dumpWriter.Close(); err != nil {
@@ -1650,6 +2023,11 @@ func (s *Session) cleanup() {
 		// uploads are not configured, and it never blocks on the network.
 		s.dumpUploader.Finish(s.ctx, s.connectionUID)
 	}
+
+	// The in-flight statements the teardown just completed, and their bytes,
+	// are written in the background; let them land first, so a reconnect —
+	// whose grant recomputes its byte budget from the store — sees them.
+	s.persists.wait(persistDrainTimeout)
 
 	if s.connectionUID != uuid.Nil {
 		if err := s.store.CloseConnectionWithReason(s.ctx, s.connectionUID, termination); err != nil {

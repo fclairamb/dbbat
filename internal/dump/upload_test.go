@@ -144,42 +144,6 @@ func TestOpenUploaderRequiresSpoolAndRecorder(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestNormalizeBucketURL(t *testing.T) {
-	t.Parallel()
-
-	// The s3 opener reads the bucket from the host and ignores the path, so a
-	// documented "s3://bucket/prefix" has to become a prefix query parameter or
-	// every capture silently lands at the bucket root.
-	got, err := normalizeBucketURL("s3://my-bucket/captures/dbbat")
-	require.NoError(t, err)
-	assert.Equal(t, "s3://my-bucket?prefix=captures%2Fdbbat%2F", got)
-
-	// No path: nothing to fold in.
-	got, err = normalizeBucketURL("s3://my-bucket")
-	require.NoError(t, err)
-	assert.Equal(t, "s3://my-bucket", got)
-
-	// Other query parameters survive.
-	got, err = normalizeBucketURL("s3://my-bucket/captures?region=eu-west-1")
-	require.NoError(t, err)
-	assert.Contains(t, got, "region=eu-west-1")
-	assert.Contains(t, got, "prefix=captures%2F")
-
-	// An explicit prefix wins over the path.
-	got, err = normalizeBucketURL("s3://my-bucket/ignored?prefix=explicit/")
-	require.NoError(t, err)
-	assert.Contains(t, got, "prefix=explicit%2F")
-	assert.NotContains(t, got, "ignored")
-
-	// file:// paths are the location, not a prefix.
-	got, err = normalizeBucketURL("file:///var/lib/dbbat/captures")
-	require.NoError(t, err)
-	assert.Equal(t, "file:///var/lib/dbbat/captures", got)
-
-	_, err = normalizeBucketURL("my-bucket/prefix")
-	require.Error(t, err)
-}
-
 func TestKeyLayout(t *testing.T) {
 	t.Parallel()
 

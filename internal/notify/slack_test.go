@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/slack-go/slack"
@@ -27,6 +28,11 @@ type fakePersister struct {
 	uid      uuid.UUID
 	called   bool
 	failNext error
+
+	root       *store.GrantRequest
+	rootErr    error
+	threadUID  uuid.UUID
+	threadRoot uuid.UUID
 }
 
 func (f *fakePersister) SetGrantRequestSlackMessage(_ context.Context, uid uuid.UUID, channel, ts string) error {
@@ -46,6 +52,27 @@ func (f *fakePersister) SetGrantRequestSlackMessage(_ context.Context, uid uuid.
 	}
 
 	return nil
+}
+
+func (f *fakePersister) SetGrantRequestSlackThread(_ context.Context, uid, rootUID uuid.UUID, channel, ts string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.threadUID = uid
+	f.threadRoot = rootUID
+	f.channel = channel
+	f.ts = ts
+
+	return nil
+}
+
+func (f *fakePersister) FindRenewalRoot(
+	_ context.Context, _, _, _ uuid.UUID, _ []string, _ time.Time,
+) (*store.GrantRequest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.root, f.rootErr
 }
 
 func nopLogger() *slog.Logger {

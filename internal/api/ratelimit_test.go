@@ -433,3 +433,77 @@ func TestRateLimiter_DifferentIPs(t *testing.T) {
 		t.Errorf("IP2 request: status = %d, want %d", w.Code, http.StatusOK)
 	}
 }
+
+// anonRouterForProxyTest builds a router configured the way setupRouter is,
+// with an anonymous limit of one request per minute.
+func anonRouterForProxyTest(t *testing.T, trusted string) *gin.Engine {
+	t.Helper()
+
+	rl := NewRateLimiter(config.RateLimitConfig{
+		Enabled:               true,
+		RequestsPerMinute:     60,
+		RequestsPerMinuteAnon: 1,
+		Burst:                 0,
+	})
+
+	router := gin.New()
+	if err := configureTrustedProxies(router, &config.Config{TrustedProxies: trusted}); err != nil {
+		t.Fatalf("configureTrustedProxies: %v", err)
+	}
+
+	router.Use(rl.PreAuthMiddleware())
+	router.GET("/test", func(c *gin.Context) {
+		c.String(http.StatusOK, c.ClientIP())
+	})
+
+	return router
+}
+
+func proxyTestRequest(router *gin.Engine, forwardedFor string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "10.0.0.5:12345"
+	req.Header.Set("X-Forwarded-For", forwardedFor)
+	req.Header.Set("X-Real-IP", forwardedFor)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	return w
+}
+
+// With no trusted proxy, a client rotating X-Forwarded-For must not get a
+// fresh anonymous bucket per request: both requests are keyed on the peer.
+func TestRateLimiter_ForwardedForIgnoredWithoutTrustedProxies(t *testing.T) {
+	t.Parallel()
+
+	router := anonRouterForProxyTest(t, "")
+
+	w := proxyTestRequest(router, "1.1.1.1")
+	if w.Code != http.StatusOK || w.Body.String() != "10.0.0.5" {
+		t.Fatalf("first request: status %d, client ip %q; want 200 and the peer", w.Code, w.Body.String())
+	}
+
+	w = proxyTestRequest(router, "2.2.2.2")
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request with a new X-Forwarded-For: status %d, want %d", w.Code, http.StatusTooManyRequests)
+	}
+}
+
+// Positive control: once the peer's CIDR is trusted, X-Forwarded-For is the
+// client IP and each forwarded client has its own bucket.
+func TestRateLimiter_ForwardedForHonoredFromTrustedProxy(t *testing.T) {
+	t.Parallel()
+
+	router := anonRouterForProxyTest(t, "10.0.0.0/8")
+
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
+		w := proxyTestRequest(router, ip)
+		if w.Code != http.StatusOK || w.Body.String() != ip {
+			t.Fatalf("request from %s: status %d, client ip %q", ip, w.Code, w.Body.String())
+		}
+	}
+
+	if w := proxyTestRequest(router, "1.1.1.1"); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("repeat from 1.1.1.1: status %d, want %d", w.Code, http.StatusTooManyRequests)
+	}
+}

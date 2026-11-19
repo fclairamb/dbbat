@@ -227,9 +227,9 @@ sqlcmd -S localhost,1434 -U developer -P temppass123 -d production -C
 | `DBB_INSTANCE_ID` | Identifies this process among replicas sharing the store, so crash-orphaned connections can be reclaimed | Hostname |
 | `DBB_DUMP_DIR` | Directory for session packet dumps (empty disables) | - |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
-| `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration) | `24h` |
-| `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history and captured result rows older than this (Go duration; `0` keeps them forever) | `0` (recommended: `720h`) |
-| `DBB_CONNECTION_RETENTION` | Auto-delete closed connections — the session ledger — once they disconnected longer ago than this. Unset inherits the query window; `0` keeps sessions forever while statements still expire. Must be ≥ the query window | Inherits `DBB_QUERY_STORAGE_RETENTION` |
+| `DBB_RETENTION_DUMPS_DELETE_AFTER` | Auto-delete dumps older than this (Go duration) | `24h` |
+| `DBB_RETENTION_QUERIES_DELETE_AFTER` | Auto-delete query history and captured result rows older than this (Go duration; `0` keeps them forever) | never (recommended: `720h`) |
+| `DBB_RETENTION_CONNECTIONS_DELETE_AFTER` | Auto-delete closed connections — the session ledger — once they disconnected longer ago than this. Unset or `0` keeps sessions forever. Must be ≥ the statement window | never |
 | `DBB_MCP_ENABLED` | Serve the MCP endpoint for AI agents at `/api/v1/mcp` (API-key authenticated; see [docs/mcp.md](docs/mcp.md)) | `true` |
 | `DBB_MYSQL_TLS_DISABLE` | Disable MySQL TLS termination at the proxy | `false` |
 | `DBB_MYSQL_TLS_CERT_FILE` | PEM cert for MySQL TLS (auto self-signed if empty) | - |

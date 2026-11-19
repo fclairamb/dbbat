@@ -159,3 +159,62 @@ func TestCheck_OracleServiceNameConflict_Silent(t *testing.T) {
 		})
 	}
 }
+
+// TestCheck_OracleSSLModeWarning: the proxy never encrypts the Oracle upstream
+// leg, so a row at require/verify-* gets a warning; disable and non-Oracle rows
+// do not.
+func TestCheck_OracleSSLModeWarning(t *testing.T) {
+	t.Parallel()
+
+	ln := tnsRefuseListener(t, 1017)
+	host, port := splitHostPort(t, ln.Addr().String())
+
+	for name, tc := range map[string]struct {
+		protocol string
+		mode     string
+		want     bool
+	}{
+		"oracle require":     {store.ProtocolOracle, "require", true},
+		"oracle verify-full": {store.ProtocolOracle, "verify-full", true},
+		"oracle disable":     {store.ProtocolOracle, "disable", false},
+		"oracle empty":       {store.ProtocolOracle, "", false},
+		"postgres require":   {store.ProtocolPostgreSQL, "require", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := newOracleTarget(host, port)
+			srv.Protocol = tc.protocol
+			srv.SSLMode = tc.mode
+
+			got := false
+
+			for _, w := range oracleSSLModeWarnings(srv) {
+				got = got || w.Code == CodeOracleUpstreamNotEncrypted
+			}
+
+			if got != tc.want {
+				t.Errorf("warning present = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// End to end through Check: the warning rides alongside the outcome.
+	srv := newOracleTarget(host, port)
+	srv.SSLMode = "require"
+
+	checker := New(newFakeResolver(), testKey())
+	checker.timeout = 5 * time.Second
+
+	res := checker.Check(context.Background(), srv)
+
+	found := false
+
+	for _, w := range res.Warnings {
+		found = found || w.Code == CodeOracleUpstreamNotEncrypted
+	}
+
+	if !found {
+		t.Errorf("Check warnings = %+v, want %s", res.Warnings, CodeOracleUpstreamNotEncrypted)
+	}
+}

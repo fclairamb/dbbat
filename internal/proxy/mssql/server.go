@@ -11,13 +11,11 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -55,6 +53,10 @@ type Server struct {
 	dumpUploader *dump.Uploader
 
 	logger *slog.Logger
+
+	// preAuth is the window an unauthenticated client gets to finish
+	// PRELOGIN → TLS → LOGIN7 (shared.PreAuthTimeout unless a test shortens it).
+	preAuth shared.PreAuthTimer
 
 	// spidCounter feeds the synthetic SPID stamped on outbound packets, so a
 	// client that displays @@SPID-ish diagnostics sees a stable per-connection
@@ -163,10 +165,6 @@ func (s *Server) Start(addr string) error {
 	s.setListener(listener)
 	s.logger.InfoContext(s.ctx, "SQL Server proxy listening", slog.String("addr", addr))
 
-	if s.dumpConfig.Dir != "" {
-		go s.runDumpCleanup()
-	}
-
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -246,43 +244,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // dumpCleanupInterval is how often the local capture spool is swept.
-const dumpCleanupInterval = 1 * time.Hour
-
-// goroutineNameDumpRetention is what a panic in a retention sweep is logged under.
-const goroutineNameDumpRetention = "mssql dump retention sweep"
-
-// runDumpCleanup deletes captures older than the configured retention. It
-// applies to the local spool only — captures dbbat uploaded are the bucket's
-// lifecycle policy to expire.
-func (s *Server) runDumpCleanup() {
-	retention, err := time.ParseDuration(s.dumpConfig.Retention)
-	if err != nil {
-		retention = 24 * time.Hour
-	}
-
-	ticker := time.NewTicker(dumpCleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// One turn under the guard rather than the whole loop: a panic in a
-			// sweep must not take the process down, and must not retire retention
-			// for the life of the process either. See safe.RunMaintenance.
-			safe.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
-				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
-				if err != nil {
-					s.logger.ErrorContext(s.ctx, "MSSQL dump cleanup failed", slog.Any("error", err))
-				} else if deleted > 0 {
-					s.logger.InfoContext(s.ctx, "MSSQL dump cleanup", slog.Int("deleted", deleted))
-				}
-			})
-		case <-s.shutdown:
-			return
-		}
-	}
-}
-
 // nextSPID hands out the per-connection session id echoed in packet headers.
 // It wraps at 16 bits and skips 0, which clients read as "no session".
 func (s *Server) nextSPID() uint16 {

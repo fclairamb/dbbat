@@ -620,6 +620,15 @@ func TestThreadReplyText(t *testing.T) {
 	}
 }
 
+func TestThreadReplyText_EscapesUsername(t *testing.T) {
+	t.Parallel()
+
+	got := threadReplyText(notify.GrantActionDenied, "", &store.User{Username: "<!channel>"})
+	if strings.Contains(got, "<!channel>") || !strings.Contains(got, "&lt;!channel&gt;") {
+		t.Errorf("denied reply = %q", got)
+	}
+}
+
 func TestActionForStatus(t *testing.T) {
 	t.Parallel()
 

@@ -32,7 +32,7 @@ var (
 	// ErrServerViaCycle is returned when a via_uid chain loops back on itself.
 	ErrServerViaCycle = errors.New("via_uid chain forms a cycle")
 	// ErrServerNameConflict is returned when creating or renaming a server to a
-	// name that is already taken (violates the servers_name_key unique constraint).
+	// name that is already taken (violates the servers_name_active_uq unique index, live rows only).
 	ErrServerNameConflict = errors.New("a server with this name already exists")
 	// ErrServerNameInvalid is returned when a server name does not match the
 	// required slug format (see IsValidServerName) — wrong charset or too long.

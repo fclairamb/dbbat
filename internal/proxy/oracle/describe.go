@@ -91,7 +91,10 @@ func parseColumnDescribesMode(ttcPayload []byte, modern bool, shape oerShape) []
 		return nil
 	}
 
-	c := &dcursor{buf: ttcPayload, pos: start, wide: shape.fixedWidth, wide64: shape.fixedWidth64}
+	c := &dcursor{
+		buf: ttcPayload, pos: start, wide: shape.fixedWidth, wide64: shape.fixedWidth64,
+		pre23: shape.serverPredates(ttcFieldVersion23_1),
+	}
 	cols := make([]columnDesc, 0, count)
 
 	for range count {
@@ -301,6 +304,10 @@ type dcursor struct {
 	err    bool
 	wide   bool
 	wide64 bool
+	// pre23 says the server predates TTC field version 23.1, so a 64-bit
+	// column record ends in wide64ColumnRecordTailLenPre23 bytes rather than
+	// wide64ColumnRecordTailLen.
+	pre23 bool
 }
 
 // skip advances past n bytes that are read by no field, failing the cursor if
@@ -541,6 +548,14 @@ const (
 	// it and misalign the walk, which costs the describe (the caller falls back
 	// to scanAndPadColumnNames) and never a wrong name.
 	wide64ColumnRecordTailLen = 24
+
+	// wide64ColumnRecordTailLenPre23 is the same span against a server below
+	// TTC field version 23.1 (Oracle 18c XE): the two classic trailing
+	// integers and nothing after them, because the domain fields and the
+	// annotation count are not sent. Measured on every column of
+	// testdata/oci64_18c_describe.hex and of the REF cursor descriptors in
+	// testdata/oci64_18c_refcursor_bind_output.hex.
+	wide64ColumnRecordTailLenPre23 = 6
 )
 
 // parseColumnDescribeWide64 is parseColumnDescribe for the **64-bit** OCI
@@ -592,7 +607,11 @@ func parseColumnDescribeWide64(c *dcursor) (string, int) {
 	c.dlc()         // schema name
 	c.dlc()         // type name
 
-	c.skip(wide64ColumnRecordTailLen)
+	if c.pre23 {
+		c.skip(wide64ColumnRecordTailLenPre23)
+	} else {
+		c.skip(wide64ColumnRecordTailLen)
+	}
 
 	return string(name), dataType
 }

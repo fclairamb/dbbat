@@ -11,7 +11,6 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	gomysqlserver "github.com/go-mysql-org/go-mysql/server"
 
@@ -19,7 +18,6 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -53,6 +51,10 @@ type Server struct {
 	// is explicitly disabled in config.
 	tlsConfig     *tls.Config
 	rsaPrivateKey *rsa.PrivateKey
+
+	// preAuth is the window an unauthenticated client gets to finish its
+	// handshake and login (shared.PreAuthTimeout unless a test shortens it).
+	preAuth shared.PreAuthTimer
 
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
@@ -146,10 +148,6 @@ func (s *Server) Start(addr string) error {
 
 	s.setListener(listener)
 	s.logger.InfoContext(s.ctx, "MySQL proxy server listening", slog.String("addr", addr))
-
-	if s.dumpConfig.Dir != "" {
-		go s.runDumpCleanup()
-	}
 
 	for {
 		conn, err := listener.Accept()
@@ -273,40 +271,6 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		s.logger.InfoContext(s.ctx, "MySQL session ended",
 			slog.Any("remote_addr", clientConn.RemoteAddr()),
 			slog.Any("error", err))
-	}
-}
-
-const dumpCleanupInterval = 1 * time.Hour
-
-// goroutineNameDumpRetention is what a panic in a retention sweep is logged under.
-const goroutineNameDumpRetention = "mysql dump retention sweep"
-
-func (s *Server) runDumpCleanup() {
-	retention, err := time.ParseDuration(s.dumpConfig.Retention)
-	if err != nil {
-		retention = 24 * time.Hour
-	}
-
-	ticker := time.NewTicker(dumpCleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// One turn under the guard rather than the whole loop: a panic in a
-			// sweep must not take the process down, and must not retire retention
-			// for the life of the process either. See safe.RunMaintenance.
-			safe.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
-				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
-				if err != nil {
-					s.logger.ErrorContext(s.ctx, "MySQL dump cleanup failed", slog.Any("error", err))
-				} else if deleted > 0 {
-					s.logger.InfoContext(s.ctx, "MySQL dump cleanup", slog.Int("deleted", deleted))
-				}
-			})
-		case <-s.shutdown:
-			return
-		}
 	}
 }
 

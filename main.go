@@ -227,6 +227,17 @@ func loadConfigWithCLI(flags *cliFlags) (*config.Config, error) {
 	return config.Load(opts, buildCLIOverrides(flags))
 }
 
+// warnStatementTimeout says out loud that a malformed statement timeout
+// disables the limit rather than shortening it (see Config.StatementTimeout):
+// the operator asked for a bound and silently has none.
+func warnStatementTimeout(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
+	if cfg.StatementTimeoutMisconfigured() {
+		logger.WarnContext(ctx, "Invalid DBB_STATEMENT_TIMEOUT, no instance-wide statement limit is applied",
+			slog.String("value", cfg.StatementTimeout),
+			slog.String("hint", "use a Go duration such as 30s or 5m"))
+	}
+}
+
 func runServer(ctx context.Context, flags *cliFlags) error {
 	// Load configuration first
 	cfg, err := loadConfigWithCLI(flags)
@@ -258,13 +269,14 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		// Seals the audit and query chains. The store keeps only an HKDF
 		// subkey of this; see docs/audit-chain.md.
 		EncryptionKey: cfg.EncryptionKey,
-		// Not what drives the sweep (startQueryRetentionSweep owns that) —
+		// Not what drives the sweep (startRetentionSweeper owns that) —
 		// what lets chain verification and the connection detail API tell a
 		// session retention emptied from one somebody emptied. The **query**
 		// window, resolved: the ledger window only decides whether the session
 		// row survives, and an incoherent pair resolves both to zero, which is
 		// also what the sweep does.
-		QueryRetention: cfg.RetentionWindows().Query,
+		QueryRetention:   cfg.RetentionWindows().Queries,
+		ArchiveRetention: cfg.RetentionWindows().QueriesArchive,
 	}
 	if cfg.RunMode == config.RunModeTest {
 		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
@@ -298,11 +310,14 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("failed to hash default admin password: %w", err)
 	}
 
-	if err := dataStore.EnsureDefaultAdmin(ctx, passwordHash); err != nil {
+	created, err := dataStore.EnsureDefaultAdmin(ctx, passwordHash)
+	if err != nil {
 		return fmt.Errorf("failed to ensure default admin: %w", err)
 	}
 
-	logger.InfoContext(ctx, "Default admin user ensured (username: admin, password: admin)")
+	if created {
+		logger.InfoContext(ctx, "Default admin user created (username: admin, password: admin)")
+	}
 
 	// Provision test data if in test mode
 	if cfg.RunMode == config.RunModeTest {
@@ -360,24 +375,23 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		MaxSize:    cfg.AuthCache.MaxSize,
 	})
 
-	// A malformed statement timeout disables the limit rather than shortening
-	// it (see Config.StatementTimeout), so it has to be said out loud: the
-	// operator asked for a bound and silently has none.
-	if cfg.StatementTimeoutMisconfigured() {
-		logger.WarnContext(ctx, "Invalid DBB_STATEMENT_TIMEOUT, no instance-wide statement limit is applied",
-			slog.String("value", cfg.StatementTimeout),
-			slog.String("hint", "use a Go duration such as 30s or 5m"))
-	}
+	warnStatementTimeout(ctx, cfg, logger)
 
 	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader, logger)
 
-	// One retention sweep for the whole process (nil when disabled, the default).
-	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
+	sweeper, err := startRetention(ctx, cfg, dataStore, apiServer, logger)
+	if err != nil {
+		return err
+	}
+
+	// Expired OAuth/device/login-exchange states are purged whatever the
+	// retention settings: unauthenticated endpoints create them.
+	oauthPurger := startOAuthStatePurge(ctx, dataStore, logger)
 
 	// Draining releases parked queries first, then stops the servers.
 	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxies.postgres,
 		proxies.oracle, proxies.mysql, proxies.mongo, proxies.mssql,
-		rowWriter, sweeper, heartbeat, dumpUploader)
+		rowWriter, sweeper, oauthPurger, heartbeat, dumpUploader)
 
 	return awaitShutdown(ctx, logger, servers...)
 }
@@ -1764,7 +1778,8 @@ func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) erro
 		// what that window is — from the same configuration the sweep reads,
 		// through the same resolver, so a misconfigured pair excuses nothing
 		// here either.
-		QueryRetention: cfg.RetentionWindows().Query,
+		QueryRetention:   cfg.RetentionWindows().Queries,
+		ArchiveRetention: cfg.RetentionWindows().QueriesArchive,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize store: %w", err)
@@ -1829,11 +1844,11 @@ func verifyQueryChains(
 		slog.Int64("connections", result.Connections),
 		slog.Int64("statements", result.Verified),
 		// A chain missing its oldest statements is what
-		// DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session,
+		// DBB_RETENTION_QUERIES_DELETE_AFTER leaves behind on a long-lived session,
 		// so it is counted rather than treated as tampering.
 		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated),
 		// And a session with *no* statement left is what a
-		// DBB_CONNECTION_RETENTION longer than the statement window leaves
+		// DBB_RETENTION_CONNECTIONS_DELETE_AFTER longer than the statement window leaves
 		// behind on every closed session between the two: by design, and
 		// counted apart so it cannot drown the number above.
 		slog.Int64("chains_emptied_by_retention", result.Emptied))
@@ -1946,6 +1961,7 @@ type escalatorAdapter struct {
 
 func (a escalatorAdapter) Schedule(ctx context.Context, hold shared.ApprovalHoldInfo) {
 	a.inner.Schedule(ctx, notify.ApprovalHold{
+		Definition:    hold.Definition,
 		QueryUID:      hold.QueryUID,
 		ConnectionUID: hold.ConnectionUID,
 		Username:      hold.Username,
@@ -2072,7 +2088,8 @@ func collectServers(
 	mongoServer *mongodb.Server,
 	mssqlServer *mssql.Server,
 	rowWriter *shared.RowWriter,
-	sweeper *queryRetentionSweeper,
+	sweeper *retentionSweeper,
+	oauthPurger *oauthStatePurger,
 	heartbeat *instanceHeartbeat,
 	dumpUploader *dump.Uploader,
 ) []shutdownable {
@@ -2102,6 +2119,10 @@ func collectServers(
 
 	if sweeper != nil {
 		servers = append(servers, sweeper)
+	}
+
+	if oauthPurger != nil {
+		servers = append(servers, oauthPurger)
 	}
 
 	// After the proxies, before the heartbeat: the queue can only be drained

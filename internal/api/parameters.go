@@ -195,6 +195,15 @@ type instanceInfoResponse struct {
 	Resolved        instanceResolvedInfo    `json:"resolved"`
 	ResolvedLimits  instanceResolvedLimits  `json:"resolved_limits"`
 	ResolvedTagging instanceResolvedTagging `json:"resolved_tagging"`
+	// Retention is admin-only: the raw retention.queries.* parameters.
+	Retention *instanceRetentionInfo `json:"retention,omitempty"`
+	// ResolvedRetention is the instance level of the retention policy with its
+	// source, and archive_enabled (a bucket is configured).
+	ResolvedRetention instanceResolvedRetention `json:"resolved_retention"`
+	// NotifyChannels are the keys of DBB_SLACK_NOTIFY_CHANNELS (never the
+	// channel ids) a grant definition's notify_channel can name, besides the
+	// reserved "none".
+	NotifyChannels []string `json:"notify_channels"`
 }
 
 // resolveInstanceLimits turns the stored parameter plus the environment
@@ -289,6 +298,12 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 		return
 	}
 
+	retention, err := s.store.GetRetentionParams(ctx)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to get instance retention")
+		return
+	}
+
 	listenPG := ""
 	listenOra := ""
 	listenMySQL := ""
@@ -326,11 +341,14 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			MSSQLPort: resolved.MSSQLPort,
 			WebUIURL:  resolved.WebUIURL,
 		},
-		ResolvedLimits:  resolveInstanceLimits(limits, s.config),
-		ResolvedTagging: resolveInstanceTagging(tagging, s.config),
+		ResolvedLimits:    resolveInstanceLimits(limits, s.config),
+		ResolvedTagging:   resolveInstanceTagging(tagging, s.config),
+		ResolvedRetention: s.resolveInstanceRetention(retention),
+		NotifyChannels:    s.notifyChannelKeys(),
 	}
 
 	if isAdmin {
+		resp.Retention = &instanceRetentionInfo{ArchiveAfter: retention.ArchiveAfter, DeleteAfter: retention.DeleteAfter}
 		resp.Public = &instancePublicInfo{
 			Host:      pe.Host,
 			PGHost:    pe.PGHost,

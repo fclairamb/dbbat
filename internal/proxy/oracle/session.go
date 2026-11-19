@@ -171,6 +171,11 @@ type session struct {
 	// and JDBC trips ORA-17401 in T4CTTIfun.receive.
 	clientAuthPhase2Pkt *TNSPacket
 
+	// logonAlterSession is what the client's AUTH_ALTER_SESSION applies at
+	// logon, as checked by gateLogonAlterSession and forwarded verbatim; empty
+	// when dbbat built its own Phase 2. Recorded once the connection row exists.
+	logonAlterSession []string
+
 	// Query tracking.
 	//
 	// trackerMu guards every piece of per-session query bookkeeping: the
@@ -197,8 +202,12 @@ type session struct {
 	// (which does no I/O); the client leg takes it in explicit regions, with
 	// holdIfNeeded deliberately outside them. Functions below are annotated
 	// with which side of that boundary they sit on.
-	trackerMu    sync.Mutex
-	tracker      *oracleQueryTracker
+	trackerMu sync.Mutex
+	tracker   *oracleQueryTracker
+
+	// callTurn is the bookkeeping that makes a pipelined call wait for the
+	// previous one's answer: see pipelining.go.
+	callTurn     callTurn
 	queryStorage config.QueryStorageConfig
 
 	// fragmentedMessage is the client TTC message currently being gated, when
@@ -267,6 +276,12 @@ type session struct {
 	statementLimit    time.Duration
 	statementClock    shared.StatementClock
 
+	// preAuthTimeout bounds everything from the accept to the AUTH OK. Zero
+	// means shared.PreAuthTimeout.
+	preAuthTimeout time.Duration
+	// preAuthRelays is the server's pre-auth relay semaphore (nil = unbounded).
+	preAuthRelays chan struct{}
+
 	// termination records why dbbat ended this session, when dbbat is what
 	// ended it.
 	terminationMu sync.Mutex
@@ -297,6 +312,10 @@ type session struct {
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
+	// usage is this session's share of its grant's quota consumption, so the
+	// grant's quotas are one budget across all its sessions. Nil when the
+	// grant has no quota.
+	usage *cache.UsageHandle
 	// liveSession is signaled when an admin ends *this* session, keyed by the
 	// connection uid rather than by the grant.
 	liveSession *cache.SessionHandle
@@ -399,6 +418,42 @@ func newSession(
 	return s
 }
 
+// completeLogin hands the client its AUTH OK and leaves the pre-auth phase:
+// the relay slot goes back and the deadline is lifted, so the session may sit
+// idle for as long as the client keeps it open.
+func (s *session) completeLogin(authOK []byte, releaseRelay func()) error {
+	if _, err := s.clientConn.Write(authOK); err != nil {
+		return fmt.Errorf("failed to send AUTH OK: %w", err)
+	}
+
+	releaseRelay()
+
+	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
+		return fmt.Errorf("clear pre-auth deadline: %w", err)
+	}
+
+	return nil
+}
+
+// acquirePreAuthRelay takes a pre-auth relay slot without waiting. The
+// returned release is idempotent, so it can be both deferred and called on
+// success.
+func (s *session) acquirePreAuthRelay() (func(), bool) {
+	if s.preAuthRelays == nil {
+		return func() {}, true
+	}
+
+	select {
+	case s.preAuthRelays <- struct{}{}:
+	default:
+		return nil, false
+	}
+
+	var once sync.Once
+
+	return func() { once.Do(func() { <-s.preAuthRelays }) }, true
+}
+
 // readConnectPacket reads the client's first TNS packet and classifies the two
 // ways that read can fail. A TCP health check opens the socket and closes it
 // without a byte, so this is where every probe lands: that exact case — zero
@@ -424,6 +479,14 @@ func (s *session) readConnectPacket() (*TNSPacket, error) {
 func (s *session) run() error {
 	defer s.cleanup()
 
+	// Everything up to the AUTH OK runs under the pre-auth window — the client
+	// reads, and the pre-auth relay and its upstream socket with them: a socket
+	// that says nothing would otherwise hold this goroutine, and once past the
+	// Connect an upstream connection, forever.
+	if err := shared.ArmPreAuthDeadline(s.clientConn, s.preAuthTimeout); err != nil {
+		return fmt.Errorf("set pre-auth deadline: %w", err)
+	}
+
 	// Step 1: Receive TNS Connect from client
 	connectPkt, err := s.readConnectPacket()
 	if err != nil {
@@ -435,6 +498,16 @@ func (s *session) run() error {
 
 		return fmt.Errorf("%w: got %s", ErrExpectedConnectPacket, connectPkt.Type)
 	}
+
+	// Take a pre-auth relay slot before anything dials upstream; released on
+	// the AUTH OK below, or on the way out if the login never gets there.
+	releaseRelay, ok := s.acquirePreAuthRelay()
+	if !ok {
+		s.sendRefuse(ORA12520, "too many logins in progress, retry later")
+
+		return ErrPreAuthRelaysExhausted
+	}
+	defer releaseRelay()
 
 	// Step 2: Parse service name and resolve database
 	if err := s.resolveDatabase(connectPkt.Payload); err != nil {
@@ -570,8 +643,8 @@ func (s *session) run() error {
 		authOK = reframeAuthOK(authOK, s.upstreamAuthOKFlags, s.upstreamAuthOKFragLens, s.tnsLegacyLength)
 	}
 
-	if _, err := s.clientConn.Write(authOK); err != nil {
-		return fmt.Errorf("failed to send AUTH OK: %w", err)
+	if err := s.completeLogin(authOK, releaseRelay); err != nil {
+		return err
 	}
 
 	// Step 7: Record connection
@@ -592,6 +665,10 @@ func (s *session) run() error {
 		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
 	} else {
 		s.connectionUID = conn.UID
+
+		// What the client's AUTH_ALTER_SESSION applied at logon, on file as the
+		// first statements of the session.
+		s.recordLogonAlterSession()
 	}
 
 	// The per-user statement tag needs the user and the grant, both settled by
@@ -805,7 +882,9 @@ func (s *session) authRefusalOERShape() (oerShape, int, byte) {
 		return shape, seq, callNumber
 	}
 
-	if s.authChallengeIsModern() {
+	// The two fields are Oracle 20c's: a server that predates it sends them to
+	// no client, whatever the challenge.
+	if s.authChallengeIsModern() && !shape.serverPredates(ttcFieldVersion20_1) {
 		shape.extraTailFields = oerModernExtraTailFields
 	}
 
@@ -872,6 +951,12 @@ func authRejectFor(err error) (uint16, string) {
 // text stays in the logs: it can name hosts and accounts. The client learns
 // which side failed, so it stops suspecting its API key, and who can fix it.
 func upstreamAuthRejectFor(err error) (uint16, string) {
+	// Refused by dbbat itself, before the client's Phase 2 went upstream: the
+	// client's own logon settings failed the statement gate.
+	if code, message, ok := logonAlterSessionRefusal(err); ok {
+		return code, message
+	}
+
 	if errors.Is(err, ErrUpstreamAuthPhase1Rejected) || errors.Is(err, ErrUpstreamAuthPhase2Rejected) {
 		return ORA01017, "dbbat accepted your API key, but the database refused the credentials " +
 			"dbbat stores for it; ask a dbbat administrator to update them and run the connectivity check"
@@ -1464,7 +1549,20 @@ func (s *session) clientChallengeTrailer(verifierType int) []byte {
 		}
 	}
 
-	return buildAuthChallengeEndMarker(verifierType, s.clientWideEncoding)
+	trailer := buildAuthChallengeEndMarker(verifierType, s.clientWideEncoding)
+
+	// The thin 18453 summary was captured off 23ai and ends with the two
+	// "fields added in Oracle Database 20c". A server older than 20c sends a
+	// thin client none: JDBC thin parses the summary to the field version it
+	// negotiated, leaves the two zeros in its read buffer and reads the first
+	// as the code of the next message — ORA-17401 `Protocol violation [0]` in
+	// doOAUTH, the 18c XE login failure. The 6949 summary carries no such pair.
+	if !s.clientWideEncoding && verifierType == VerifierType18453 &&
+		s.oerShapeSnapshot().serverPredates(ttcFieldVersion20_1) {
+		trailer = trailer[:len(trailer)-oerModernExtraTailFields]
+	}
+
+	return trailer
 }
 
 // o5LogonVerifierData holds decrypted O5LOGON verifier data for a user's API key.
@@ -1682,7 +1780,6 @@ const (
 	goroutineNameQueryRecord     = "oracle query record"
 	goroutineNameQueryCompletion = "oracle query completion"
 	goroutineNameVerifierUpgrade = "oracle api key verifier upgrade"
-	goroutineNameDumpRetention   = "oracle dump retention sweep"
 )
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
@@ -1703,6 +1800,11 @@ func (s *session) proxyMessages() error {
 	// relaying such a request from another replica — signals.
 	s.liveSession = s.store.Sessions().Register(s.connectionUID)
 
+	// And add it to its grant's shared consumption reading, so the grant's
+	// quotas are one budget across all its sessions. Released in cleanup.
+	s.usage = shared.RegisterGrantUsage(s.store.Usage(), s.grant, s.bytesFromClient, s.bytesToClient)
+	s.usage.SetConnection(s.connectionUID)
+
 	// Build the limit guard now that the grant is known, and run a watchdog to
 	// tear the session down if a limit is crossed (or the grant is revoked)
 	// while a query is blocked producing no traffic. The inline check in
@@ -1710,6 +1812,7 @@ func (s *session) proxyMessages() error {
 	// error frame.
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithUsage(s.usage).
 		WithTermination(s.liveSession).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
@@ -1718,7 +1821,7 @@ func (s *session) proxyMessages() error {
 		databaseName = s.database.Name
 	}
 
-	s.approvalGate = shared.NewApprovalGate(s.approvalDeps, s.grant, s.connectionUID, s.user, databaseName)
+	s.approvalGate = shared.NewApprovalGate(s.approvalDeps, shared.ApprovalDialectStandard, s.grant, s.connectionUID, s.user, databaseName)
 	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, databaseName).
 		WithApprovals(s.approvalGate)
 	s.stream.Connection(s.ctx, shared.ConnectionOpened)
@@ -1736,6 +1839,8 @@ func (s *session) proxyMessages() error {
 	}, s.closeConns)
 
 	errChan := make(chan error, 2)
+
+	s.callTurn.upstreamDone = make(chan struct{})
 
 	// Both directions run under safe.RunRelay, which turns a panic into an
 	// error on errChan instead of a dead process: these are goroutines of their
@@ -2244,7 +2349,7 @@ func (s *session) closeConns() {
 // for TTC-level query interception, and forwards to upstream.
 func (s *session) clientToUpstream() error {
 	for {
-		pkt, err := readTNSPacket(s.clientConn)
+		pkt, err := s.nextClientPacket()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
@@ -2293,6 +2398,10 @@ func (s *session) gateAndForwardDataMessage(pkt *TNSPacket) error {
 	blocked := s.interceptClientMessage(msg.gate)
 
 	s.fragmentedMessage = nil
+
+	if !blocked {
+		s.armCallAnswer()
+	}
 
 	if blocked {
 		// Every fragment is dropped, not just the first: the refusal was
@@ -2813,6 +2922,8 @@ func statementOpOffsets(ttcPayload []byte) []int {
 // upstreamToClient reads TNS packets from upstream, intercepts Data packets
 // for response tracking and row capture, and forwards to the client.
 func (s *session) upstreamToClient() error {
+	defer s.callTurn.noteUpstreamGone()
+
 	for {
 		pkt, err := readTNSPacket(s.upstreamConn)
 		if err != nil {
@@ -2829,6 +2940,11 @@ func (s *session) upstreamToClient() error {
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
 			s.interceptUpstreamMessage(pkt)
 		}
+
+		// Whatever it was, the upstream has started answering: a call held behind
+		// it may go. After the intercept, so a response that ends the call has
+		// already completed its statement.
+		s.noteUpstreamResponse()
 
 		// Forward to client. The capture's server→client recording point is the
 		// write tap on s.clientConn (startDumpIfConfigured), not a call here: a
@@ -3183,7 +3299,7 @@ func (s *session) observeClientAuthEncoding(phase1Payload []byte) {
 	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Payload)
 
 	if ttc := extractTTCPayload(phase1Payload); ttc != nil {
-		s.clientWide64Encoding = usesWide64OpHeader(ttc)
+		s.clientWide64Encoding = isWide64AuthPhase1(ttc)
 	}
 }
 
@@ -3325,7 +3441,11 @@ func (s *session) nextOERFrame() (oerShape, int, byte) {
 	shape := s.oer.orDefault()
 	if !shape.tailLearned {
 		shape.fixedWidth = s.clientWideEncoding
-		shape.endOfResponse = s.clientWideEncoding
+		// OCI negotiates the end-of-response marker on 23ai even with the
+		// Accept's flag cleared, but no server below 23.4 can negotiate it at
+		// all: an 18c sqlplus reads the trailing 0x1d as an unknown message
+		// and drops the session (ORA-03113).
+		shape.endOfResponse = s.clientWideEncoding && !shape.serverPredates(ttcFieldVersion23_4)
 		shape.fixedWidth64 = s.clientWide64Encoding
 	}
 
@@ -3837,6 +3957,7 @@ func (s *session) cleanup() {
 	}
 
 	s.store.Sessions().Deregister(s.connectionUID, s.liveSession)
+	s.usage.Release()
 
 	if s.dump != nil {
 		if err := s.dump.Close(); err != nil {

@@ -137,33 +137,40 @@ func TestUpdateServerRenameRejectsNonSlug(t *testing.T) {
 	assert.Equal(t, "slug_gate", data["name"])
 }
 
-// TestUpdateServerRenameConflictIsA409 covers both halves of the unique
-// constraint. servers_name_key is global — it spans soft-deleted rows — so the
-// name of a *deleted* server is still taken, and that is the case that would
-// otherwise surface as an opaque 500.
+// TestUpdateServerRenameConflictIsA409: a rename onto the name of a live server
+// is a 409, never an opaque 500. The name of a *deleted* server is free again
+// (servers_name_active_uq covers live rows only), so that rename succeeds.
 func TestUpdateServerRenameConflictIsA409(t *testing.T) {
 	t.Parallel()
 
 	router, token, _, _ := renameTestAdmin(t)
 	uid := createRenameServer(t, router, token, "conflict_subject")
 
-	createRenameServer(t, router, token, "conflict_live")
+	liveUID := createRenameServer(t, router, token, "conflict_live")
 
 	deletedUID := createRenameServer(t, router, token, "conflict_deleted")
 	w, _ := doJSON(t, router, "DELETE", "/api/v1/servers/"+deletedUID, token, nil)
 	require.Equal(t, 200, w.Code, w.Body.String())
 
-	for _, taken := range []string{"conflict_live", "conflict_deleted"} {
-		w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
-			"name": taken,
-		})
-		require.Equal(t, 409, w.Code, "rename to %q: %s", taken, w.Body.String())
-		assert.Contains(t, w.Body.String(), "already exists", "rename to %q", taken)
-	}
+	w, _ = doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+		"name": "conflict_live",
+	})
+	require.Equal(t, 409, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "already exists")
 
 	w, data := doJSON(t, router, "GET", "/api/v1/servers/"+uid, token, nil)
 	require.Equal(t, 200, w.Code, w.Body.String())
 	assert.Equal(t, "conflict_subject", data["name"])
+
+	w, _ = doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+		"name": "conflict_deleted",
+	})
+	require.Equal(t, 200, w.Code, "rename to a deleted server's name: %s", w.Body.String())
+
+	// Same rule on the create path: once deleted, a name can be declared again.
+	w, _ = doJSON(t, router, "DELETE", "/api/v1/servers/"+liveUID, token, nil)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	createRenameServer(t, router, token, "conflict_live")
 }
 
 // TestUpdateServerRenameIsAudited: a rename moves the connection target for

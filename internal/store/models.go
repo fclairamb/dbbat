@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"time"
@@ -243,6 +244,12 @@ type Server struct {
 	AccessApproverUserGroupUIDs []uuid.UUID `bun:"access_approver_user_group_uids,array,notnull,default:'{}'" json:"access_approver_user_group_uids"`
 	QueryApproverUserGroupUIDs  []uuid.UUID `bun:"query_approver_user_group_uids,array,notnull,default:'{}'" json:"query_approver_user_group_uids"`
 
+	// ArchiveAfterSeconds and DeleteAfterSeconds are this server's retention
+	// windows. Three states: nil inherits (server group, then instance), 0
+	// means never, a positive value is the duration. See ResolveRetentionByServers.
+	ArchiveAfterSeconds *int64 `bun:"archive_after_seconds" json:"archive_after_seconds"`
+	DeleteAfterSeconds  *int64 `bun:"delete_after_seconds" json:"delete_after_seconds"`
+
 	CreatedBy *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
 	CreatedAt time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	UpdatedAt time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
@@ -366,13 +373,18 @@ func (db *Server) KubernetesNamespaceOrDefault() string {
 
 // ServerUpdate represents fields that can be updated
 type ServerUpdate struct {
+	// ArchiveAfter and DeleteAfter are the server's retention windows,
+	// tri-state: unset leaves them alone, a nil value inherits, a number sets.
+	ArchiveAfter OptionalSeconds
+	DeleteAfter  OptionalSeconds
+
 	// Name renames the server. It is the client-facing selector on all five
 	// protocols (the "database name" a client types in its connection string),
 	// so a rename is a breaking change for every saved connection string —
 	// which is exactly why it has to be doable through the API rather than by
 	// hand against the storage database. Validated against IsValidServerName,
 	// the same check CreateServer applies, and a collision with an existing
-	// name — soft-deleted rows included, since servers_name_key is global —
+	// live name — servers_name_active_uq ignores soft-deleted rows —
 	// comes back as ErrServerNameConflict.
 	Name              *string
 	Description       *string
@@ -460,6 +472,17 @@ type Connection struct {
 	// part of the API surface — hence json:"-".
 	InstanceID string `bun:"instance_id,notnull,default:''" json:"-"`
 
+	// Archive state (see internal/archive). Only the captured result rows are
+	// archived; statements stay here until delete_after. ArchiveClaimedAt is a
+	// lease and never serialized.
+	ArchiveClaimedAt  *time.Time `bun:"archive_claimed_at" json:"-"`
+	ArchivedAt        *time.Time `bun:"archived_at" json:"archived_at,omitempty"`
+	ArchiveKey        *string    `bun:"archive_key" json:"-"`
+	ArchiveRowsSHA256 *string    `bun:"archive_rows_sha256" json:"-"`
+	ArchiveRowsBytes  *int64     `bun:"archive_rows_bytes" json:"-"`
+	ArchiveRowsCount  *int64     `bun:"archive_rows_count" json:"-"`
+	ArchiveDeletedAt  *time.Time `bun:"archive_deleted_at" json:"archive_deleted_at,omitempty"`
+
 	// RunID is the *run* that opened this connection: a UUID minted in memory
 	// at startup, so it is unique per live process even when several replicas
 	// share an instance id. It is what lets the reconcile ask whether a live
@@ -519,7 +542,7 @@ type Connection struct {
 
 	// QueryChainLen is the head's chain_seq — which, chain_seq being dense from
 	// 1, is the number of statements the session logged. Deliberately not a
-	// count of *surviving* statements: DBB_QUERY_STORAGE_RETENTION reaps the
+	// count of *surviving* statements: DBB_RETENTION_QUERIES_DELETE_AFTER reaps the
 	// oldest statements of a long-lived session, and a stamp that moved with
 	// them would report a break on every truncated session.
 	QueryChainLen int64 `bun:"query_chain_len,notnull,default:0" json:"-"`
@@ -715,6 +738,10 @@ type Query struct {
 	ChainSeq *int64 `bun:"chain_seq" json:"-"`
 	PrevMAC  []byte `bun:"prev_mac" json:"-"`
 	MAC      []byte `bun:"mac" json:"-"`
+
+	// Chained is derived from ChainSeq when the row is read: false means the
+	// row carries no chain position, so nothing vouches for it.
+	Chained bool `bun:"-" json:"chained"`
 
 	// RowChainMAC seals the final head of this query's *result row* chain when
 	// the capture finishes, and RowChainLen is how many captured rows that head
@@ -1094,6 +1121,10 @@ type GrantDefinition struct {
 	//   0   — no notice for this definition, overriding the instance default.
 	//   > 0 — the step, in bytes.
 	NotifyBytesStep *int64 `bun:"notify_bytes_step" json:"notify_bytes_step"`
+	// NotifyChannel picks the Slack channel this definition's notifications
+	// go to: nil — the instance default channel, "none" — post nothing,
+	// anything else — a key of DBB_SLACK_NOTIFY_CHANNELS.
+	NotifyChannel *string `bun:"notify_channel" json:"notify_channel"`
 	// Priority, when non-nil, is copied verbatim onto every grant
 	// materialized from this definition, pinning it above or below the tier
 	// its controls would otherwise earn. nil — the default — means "compute
@@ -1320,8 +1351,14 @@ type ServerGroup struct {
 	// Read live at decision time, like membership itself.
 	AccessApproverUserGroupUIDs []uuid.UUID `bun:"access_approver_user_group_uids,array,notnull,default:'{}'" json:"access_approver_user_group_uids"`
 	QueryApproverUserGroupUIDs  []uuid.UUID `bun:"query_approver_user_group_uids,array,notnull,default:'{}'" json:"query_approver_user_group_uids"`
-	CreatedBy                   *uuid.UUID  `bun:"created_by,type:uuid" json:"created_by,omitempty"`
-	CreatedAt                   time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+
+	// ArchiveAfterSeconds and DeleteAfterSeconds are the group's retention
+	// windows, tri-state like the server's (nil inherits, 0 never).
+	ArchiveAfterSeconds *int64 `bun:"archive_after_seconds" json:"archive_after_seconds"`
+	DeleteAfterSeconds  *int64 `bun:"delete_after_seconds" json:"delete_after_seconds"`
+
+	CreatedBy *uuid.UUID `bun:"created_by,type:uuid" json:"created_by,omitempty"`
+	CreatedAt time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
 // ServerGroupMember is the group ↔ server join row, the exact counterpart of
@@ -1369,6 +1406,11 @@ type GrantRequest struct {
 	// because the API has no need to expose Slack message coordinates.
 	SlackChannel   *string `bun:"slack_channel" json:"-"`
 	SlackMessageTS *string `bun:"slack_message_ts" json:"-"`
+	// SlackThreadRootUID is set when this request was posted as a reply in
+	// another request's thread (an auto-approved renewal). SlackChannel /
+	// SlackMessageTS then hold the ROOT's coordinates, not a message of this
+	// request's own, so the notifier must never chat.update them.
+	SlackThreadRootUID *uuid.UUID `bun:"slack_thread_root_uid,type:uuid" json:"-"`
 
 	// Definition is the **live** version of the lineage GrantDefinitionID
 	// points into, attached by the store on every read path (see
@@ -1424,6 +1466,24 @@ type AuditLog struct {
 	ChainSeq *int64 `bun:"chain_seq" json:"-"`
 	PrevMAC  []byte `bun:"prev_mac" json:"-"`
 	MAC      []byte `bun:"mac" json:"-"`
+
+	// Chained is derived from ChainSeq when the row is read: false means the
+	// row carries no chain position (pre-anchor, keyless store, or forged).
+	Chained bool `bun:"-" json:"chained"`
+}
+
+// AfterScanRow derives Chained from ChainSeq after each row is read.
+func (a *AuditLog) AfterScanRow(_ context.Context) error {
+	a.Chained = a.ChainSeq != nil
+
+	return nil
+}
+
+// AfterScanRow derives Chained from ChainSeq after each row is read.
+func (q *Query) AfterScanRow(_ context.Context) error {
+	q.Chained = q.ChainSeq != nil
+
+	return nil
 }
 
 // AuditEvent is an alias for backward compatibility
@@ -1603,8 +1663,11 @@ type OAuthState struct {
 	Provider    string          `bun:"provider,notnull" json:"provider"`
 	RedirectURL string          `bun:"redirect_url" json:"redirect_url,omitempty"`
 	Metadata    json.RawMessage `bun:"metadata,type:jsonb" json:"metadata,omitempty"`
-	ExpiresAt   time.Time       `bun:"expires_at,notnull" json:"expires_at"`
-	CreatedAt   time.Time       `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	// LinkUserID is set when the flow was started by a signed-in user to
+	// attach the returned identity to their own account.
+	LinkUserID *uuid.UUID `bun:"link_user_id,type:uuid" json:"link_user_id,omitempty"`
+	ExpiresAt  time.Time  `bun:"expires_at,notnull" json:"expires_at"`
+	CreatedAt  time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
 // APIKeyFilter represents filters for listing API keys

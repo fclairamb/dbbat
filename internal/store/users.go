@@ -241,28 +241,30 @@ func (s *Store) EnsureUserOracleSalts(ctx context.Context, userID uuid.UUID) (*O
 	return protocolData.Oracle, nil
 }
 
-// EnsureDefaultAdmin creates a default admin user if no users exist
-func (s *Store) EnsureDefaultAdmin(ctx context.Context, passwordHash string) error {
+// EnsureDefaultAdmin creates a default admin user if no users exist. It
+// reports whether it did, so the caller only announces the default credentials
+// when they are actually in force.
+func (s *Store) EnsureDefaultAdmin(ctx context.Context, passwordHash string) (bool, error) {
 	// Check if any users exist
 	count, err := s.db.NewSelect().
 		Model((*User)(nil)).
 		Count(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to count users: %w", err)
+		return false, fmt.Errorf("failed to count users: %w", err)
 	}
 
 	// If users exist, nothing to do
 	if count > 0 {
-		return nil
+		return false, nil
 	}
 
 	// Create default admin user with admin and connector roles
 	_, err = s.CreateUser(ctx, "admin", passwordHash, []string{RoleAdmin, RoleConnector})
 	if err != nil {
-		return fmt.Errorf("failed to create default admin: %w", err)
+		return false, fmt.Errorf("failed to create default admin: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // TouchUserLastLogin stamps users.last_login_at with the current instant.
@@ -309,7 +311,7 @@ type UserLastConnection struct {
 // never has. Absence from this response is therefore exact.
 //
 // It reads "last connection *still on record*", not "last connection ever":
-// connection rows are deletable and DBB_QUERY_STORAGE_RETENTION's sibling
+// connection rows are deletable and DBB_RETENTION_QUERIES_DELETE_AFTER's sibling
 // sweeps reap them, so a user whose sessions have all aged out reports as
 // never having connected. That is the correct reading of the stored evidence,
 // and the reason the column is labeled from the record rather than from

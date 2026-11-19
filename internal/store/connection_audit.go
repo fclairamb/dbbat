@@ -56,6 +56,16 @@ const (
 	// operator reading the audit page after a killed session actually needs.
 	AuditEventConnectionTerminated = "connection.terminated"
 
+	// AuditEventConnectionArchived is written when a closed connection's
+	// captured result rows were moved to the archive bucket. It seals the
+	// object's key, size, SHA-256 and row count. A retried archive appends a
+	// second entry: the latest one is authoritative.
+	AuditEventConnectionArchived = "connection.archived"
+
+	// AuditEventConnectionArchiveDeleted is written when the archive object of a
+	// connection was deleted at its delete window.
+	AuditEventConnectionArchiveDeleted = "connection.archive_deleted"
+
 	// AuditEventConnectionTerminateRequested is written when an admin asks for
 	// a session to end, by the replica that served the API call.
 	//
@@ -130,6 +140,13 @@ var SessionAuditEventTypes = []string{
 	AuditEventConnectionOpened,
 	AuditEventConnectionClosed,
 	AuditEventConnectionTerminated,
+	// Not one session's lifecycle, but the same kind of volume: one entry per
+	// second of captures at most, carrying their sealed row stamps.
+	AuditEventQueryRowsSealed,
+	// One entry per archived (or archive-deleted) connection, sealing the
+	// archive object's hash.
+	AuditEventConnectionArchived,
+	AuditEventConnectionArchiveDeleted,
 }
 
 // Who wrote a connection.closed entry. It is part of the record because the two

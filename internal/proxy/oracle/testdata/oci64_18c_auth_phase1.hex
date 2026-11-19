@@ -1,0 +1,11 @@
+# The client's AUTH Phase 1 (03 76).
+#
+# Recorded on the nightly `18c XE (pinned)` leg (gvenzl/oracle-xe:18.4.0-slim,
+# the sqlplus 18.4 bundled in that image as the OCI client), through dbbat,
+# with the integration workflow's `capture_dumps` input (run 43950505525).
+# One line per TNS Data packet: the payload, two data-flag bytes first, exactly
+# as extractTTCPayload receives it.
+#
+# This is the 64-bit OCI dialect without the token block a 23ai server
+# negotiates (see wide64FieldsAt): the op fields follow the sequence byte.
+0000037602feffffffffffffff0b00000001000000feffffffffffffff0500000000000000fefffffffffffffffeffffffffffffff0b637572736f7270726f62650d0000000d415554485f5445524d494e414c05000000057074732f30000000000f0000000f415554485f50524f4752414d5f4e4d200000002073716c706c7573403565353034623739396665392028544e532056312d563329000000000c0000000c415554485f4d414348494e450c0000000c356535303462373939666539000000000800000008415554485f5049440300000003323431000000000800000008415554485f53494406000000066f7261636c6500000000

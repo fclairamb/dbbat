@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -10,12 +11,14 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/approval"
+	"github.com/fclairamb/dbbat/internal/archive"
 	"github.com/fclairamb/dbbat/internal/auth"
 	"github.com/fclairamb/dbbat/internal/auth/oidc"
 	"github.com/fclairamb/dbbat/internal/auth/slack"
@@ -37,15 +40,24 @@ var frontendFS embed.FS
 
 // Server represents the REST API server.
 type Server struct {
-	store              *store.Store
-	encryptionKey      []byte
-	logger             *slog.Logger
+	store         *store.Store
+	encryptionKey []byte
+	logger        *slog.Logger
+	// lifecycleMu guards httpServer, socketCancel, listenCancel and stopped:
+	// Start writes them on the goroutine main runs it on, Shutdown reads them
+	// on the signal path.
+	lifecycleMu sync.Mutex
+	// stopped records a Shutdown, so a Start that loses the race to it does
+	// not go on to serve forever.
+	stopped            bool
 	httpServer         *http.Server
 	rateLimiter        *RateLimiter
 	authFailureTracker *authFailureTracker
 	authCache          *cache.AuthCache
 	config             *config.Config
-	oauthProviders     map[string]auth.OAuthProvider
+	// retentionWake wakes the retention sweeper (see SetRetentionWaker).
+	retentionWake  func()
+	oauthProviders map[string]auth.OAuthProvider
 	// notifier is the outbound Slack client; nil when notifications are
 	// disabled (no bot token configured).
 	notifier *notify.SlackNotifier
@@ -70,6 +82,10 @@ type Server struct {
 	// only ever exist in the local spool.
 	dumpStorage *dump.Uploader
 
+	// archiver reads archived result rows back; nil when no archive bucket is
+	// configured (DBB_ARCHIVE_URL).
+	archiver *archive.Archiver
+
 	// mcp serves the Model Context Protocol endpoint. Built in setupRouter,
 	// nil when DBB_MCP_ENABLED is false — in which case the routes are not
 	// registered either.
@@ -78,6 +94,12 @@ type Server struct {
 	// chainVerify bounds GET /audit/verify: a chain walk is O(rows), so its
 	// outcome is cached and only one walk runs at a time.
 	chainVerify *chainVerifyCache
+}
+
+// SetArchive installs the archive that archived result rows are read back from.
+// Nil is fine and means no archive bucket is configured.
+func (s *Server) SetArchive(a *archive.Archiver) {
+	s.archiver = a
 }
 
 // SetDumpStorage installs the blob store holding uploaded session captures, so
@@ -162,6 +184,10 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 			// The deployer can fix the env vars without losing the service.
 			logger.ErrorContext(context.Background(), "slack notifications misconfigured", slog.Any("error", err))
 		}
+
+		if notifier != nil {
+			warnUnknownNotifyChannels(context.Background(), dataStore, cfg.SlackNotify, logger)
+		}
 	}
 
 	return &Server{
@@ -192,13 +218,21 @@ const (
 func (s *Server) Start(addr string) error {
 	router := s.setupRouter()
 
-	s.httpServer = &http.Server{
+	s.lifecycleMu.Lock()
+	if s.stopped {
+		s.lifecycleMu.Unlock()
+
+		return nil
+	}
+
+	httpServer := &http.Server{
 		Addr:         addr,
 		Handler:      router,
 		ReadTimeout:  httpReadTimeout,
 		WriteTimeout: httpWriteTimeout,
 		IdleTimeout:  httpIdleTimeout,
 	}
+	s.httpServer = httpServer
 
 	// Subscribe to cross-replica events so a hold on another pod reaches the
 	// admins connected here.
@@ -211,24 +245,62 @@ func (s *Server) Start(addr string) error {
 	// When interactivity rides on the inbound HTTP endpoint alone, surface
 	// the Slack-side reachability requirement in the startup logs.
 	s.logSlackInteractivityTransport()
+	s.lifecycleMu.Unlock()
 
 	s.logger.InfoContext(context.Background(), "Starting API server", slog.String("addr", addr))
 
-	return s.httpServer.ListenAndServe()
+	// ErrServerClosed is what ListenAndServe returns once Shutdown has been
+	// called, i.e. the graceful stop working as intended. Passing it up made
+	// main's "API server error" handler os.Exit(1) in the middle of every
+	// shutdown, before the proxies, the row writer, the heartbeat and the dump
+	// uploader had been drained.
+	if err := httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+
+	return nil
 }
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.socketCancel != nil {
-		s.socketCancel()
+	s.lifecycleMu.Lock()
+	s.stopped = true
+	socketCancel, listenCancel, httpServer := s.socketCancel, s.listenCancel, s.httpServer
+	s.lifecycleMu.Unlock()
+
+	if socketCancel != nil {
+		socketCancel()
 	}
 
-	if s.listenCancel != nil {
-		s.listenCancel()
+	if listenCancel != nil {
+		listenCancel()
 	}
 
-	if s.httpServer != nil {
-		return s.httpServer.Shutdown(ctx)
+	if httpServer != nil {
+		return httpServer.Shutdown(ctx)
+	}
+
+	return nil
+}
+
+// configureTrustedProxies tells gin which peers may set the client IP through
+// X-Forwarded-For / X-Real-IP. gin.New() trusts every peer, which let any
+// client choose the IP that keys the anonymous rate limits and the access log;
+// without DBB_TRUSTED_PROXIES nobody is trusted and ClientIP() is the socket
+// peer.
+func configureTrustedProxies(router *gin.Engine, cfg *config.Config) error {
+	var proxies []string
+
+	if cfg != nil {
+		var err error
+
+		if proxies, err = cfg.ParseTrustedProxies(); err != nil {
+			return err
+		}
+	}
+
+	if err := router.SetTrustedProxies(proxies); err != nil {
+		return fmt.Errorf("set trusted proxies: %w", err)
 	}
 
 	return nil
@@ -243,6 +315,13 @@ func (s *Server) setupRouter() *gin.Engine {
 
 	// Disable automatic trailing slash redirect to avoid loops with SPA routing
 	router.RedirectTrailingSlash = false
+
+	// Validated at startup (config.validate), so an error here means a
+	// Config built by hand; fail closed rather than leave gin trusting all.
+	if err := configureTrustedProxies(router, s.config); err != nil {
+		s.logger.ErrorContext(context.Background(), "Invalid trusted proxies, trusting none", slog.Any("error", err))
+		_ = router.SetTrustedProxies(nil)
+	}
 
 	// Middleware
 	router.Use(gin.Recovery())
@@ -265,13 +344,28 @@ func (s *Server) setupRouter() *gin.Engine {
 
 		// Auth endpoints (login and pre-login password change are unauthenticated)
 		auth := v1.Group("/auth")
-		auth.POST("/login", s.handleLogin)
-		auth.PUT("/password", s.handlePreLoginPasswordChange)
+		// Both check a password, so besides the per-(username, IP) backoff
+		// of authFailureTracker they are IP rate limited against spraying
+		// across many usernames from one source.
+		if s.rateLimiter != nil {
+			auth.POST("/login", s.rateLimiter.PreAuthMiddleware(), s.handleLogin)
+			auth.PUT("/password", s.rateLimiter.PreAuthMiddleware(), s.handlePreLoginPasswordChange)
+		} else {
+			auth.POST("/login", s.handleLogin)
+			auth.PUT("/password", s.handlePreLoginPasswordChange)
+		}
 		auth.GET("/providers", s.handleAuthProviders)
 
-		// OAuth provider routes (unauthenticated)
+		// OAuth provider routes (unauthenticated). The authorize route writes
+		// an oauth_states row on every request, so it is IP rate limited like
+		// the other pre-auth endpoints that create rows; the callback only
+		// consumes one.
 		for name := range s.oauthProviders {
-			auth.GET("/"+name, s.handleOAuthAuthorize(name))
+			if s.rateLimiter != nil {
+				auth.GET("/"+name, s.rateLimiter.PreAuthMiddleware(), s.handleOAuthAuthorize(name))
+			} else {
+				auth.GET("/"+name, s.handleOAuthAuthorize(name))
+			}
 			auth.GET("/"+name+"/callback", s.handleOAuthCallback(name))
 		}
 
@@ -332,6 +426,11 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticatedAuth := authenticated.Group("/auth")
 			authenticatedAuth.POST("/logout", s.handleLogout)
 			authenticatedAuth.GET("/me", s.handleMe)
+			// Link an SSO identity to the signed-in account. Web session
+			// only: it changes how the account can be reached.
+			for name := range s.oauthProviders {
+				authenticatedAuth.POST("/"+name+"/link", s.requireWebSession(), s.handleOAuthLink(name))
+			}
 			// Device authorization consent page + decision. GET is any
 			// authenticated user (the page is behind login); POST mints a
 			// real API key, so it requires Web Session or Basic Auth, like
@@ -349,6 +448,8 @@ func (s *Server) setupRouter() *gin.Engine {
 			// still resolve.
 			users.GET("/role-syncs", s.requireAdminOrViewer(), s.handleListRoleSyncs)
 			users.GET("/last-connections", s.requireAdminOrViewer(), s.handleListLastConnections)
+			users.GET("/me/identities", s.handleListMyIdentities)
+			users.DELETE("/me/identities/:provider", s.requireWebSession(), s.handleUnlinkMyIdentity)
 			users.GET("/:uid", s.handleGetUser)
 			users.PUT("/:uid", s.handleUpdateUser)
 			// Note: PUT /:uid/password is registered separately (uses credential auth, not Bearer)
@@ -465,6 +566,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Capture download is admin-only (narrowed from admin-or-viewer):
 			// the raw pcapng is byte-fidelity beyond what a viewer sees on the
 			// queries pages, including the auth handshake and every result row.
+			authenticated.GET("/connections/:uid/archive/rows", s.requireAdmin(), s.handleGetConnectionArchiveRows)
 			authenticated.GET("/connections/:uid/dump", s.requireAdmin(), s.handleGetConnectionDump)
 			authenticated.DELETE("/connections/:uid/dump", s.requireAdmin(), s.handleDeleteConnectionDump)
 			// Ending a live session is admin-only, and a POST on a sub-path
@@ -513,6 +615,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticated.GET("/instance", s.handleGetInstance)
 			authenticated.PUT("/instance/public", s.requireAdmin(), s.handleUpdateInstancePublic)
 			authenticated.PUT("/instance/limits", s.requireAdmin(), s.handleUpdateInstanceLimits)
+			authenticated.PUT("/instance/retention", s.requireAdmin(), s.handleUpdateInstanceRetention)
 			authenticated.PUT("/instance/tagging", s.requireAdmin(), s.handleUpdateInstanceTagging)
 
 			// Model Context Protocol endpoint (Streamable HTTP), for AI
@@ -607,36 +710,8 @@ func (s *Server) handleOpenAPISpec(c *gin.Context) {
 	c.Data(http.StatusOK, "application/x-yaml", openapiSpec)
 }
 
-// handleSwaggerUI serves the Swagger UI HTML page.
-func (s *Server) handleSwaggerUI(c *gin.Context) {
-	html := `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DBBat API Documentation</title>
-    <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
-</head>
-<body>
-    <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-    <script>
-        window.onload = function() {
-            SwaggerUIBundle({
-                url: "/api/openapi.yml",
-                dom_id: '#swagger-ui',
-                presets: [
-                    SwaggerUIBundle.presets.apis,
-                    SwaggerUIBundle.SwaggerUIStandalonePreset
-                ],
-                layout: "BaseLayout"
-            });
-        };
-    </script>
-</body>
-</html>`
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
-}
+// healthPath is the liveness probe route, logged at DEBUG when it succeeds.
+const healthPath = "/api/v1/health"
 
 // loggingMiddleware logs HTTP requests.
 func (s *Server) loggingMiddleware() gin.HandlerFunc {
@@ -650,7 +725,14 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 		latency := time.Since(start)
 		statusCode := c.Writer.Status()
 
-		s.logger.InfoContext(c.Request.Context(), "API request",
+		// A successful health probe is the orchestrator's heartbeat, a couple
+		// per second per replica: at INFO it was ~95% of the access log.
+		level := slog.LevelInfo
+		if path == healthPath && statusCode < http.StatusBadRequest {
+			level = slog.LevelDebug
+		}
+
+		s.logger.Log(c.Request.Context(), level, "API request",
 			slog.String("method", c.Request.Method),
 			slog.String("path", path),
 			slog.String("query", query),

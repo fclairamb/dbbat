@@ -890,3 +890,87 @@ func TestGetQueryRowsDataSizeLimit(t *testing.T) {
 		}
 	})
 }
+
+func TestQueryErrorTextIsRepaired(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	dirty := "boom\x00after\xffend"
+	want := "boom�after�end"
+
+	readError := func(t *testing.T, uid uuid.UUID) string {
+		t.Helper()
+
+		var got string
+
+		err := store.db.NewRaw("SELECT error FROM queries WHERE uid = ?", uid).Scan(ctx, &got)
+		if err != nil {
+			t.Fatalf("read error column: %v", err)
+		}
+
+		return got
+	}
+
+	t.Run("CreateQuery", func(t *testing.T) {
+		t.Parallel()
+
+		conn := createTestConnection(t, ctx, store, "errfix-create")
+		created, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: conn.UID, SQLText: "SELECT 1", ExecutedAt: time.Now(), Error: &dirty,
+		})
+		if err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+
+		if got := readError(t, created.UID); got != want {
+			t.Errorf("stored error = %q, want %q", got, want)
+		}
+
+		if res, err := store.VerifyQueryChain(ctx, conn.UID); err != nil || res.Break != nil {
+			t.Errorf("chain not clean: err=%v result=%+v", err, res)
+		}
+	})
+
+	t.Run("UpdateQueryCompletion", func(t *testing.T) {
+		t.Parallel()
+
+		conn := createTestConnection(t, ctx, store, "errfix-update")
+		created, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: conn.UID, SQLText: "SELECT 1", ExecutedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+
+		if err := store.UpdateQueryCompletion(ctx, created.UID, nil, nil, &dirty, false, false); err != nil {
+			t.Fatalf("UpdateQueryCompletion() error = %v", err)
+		}
+
+		if got := readError(t, created.UID); got != want {
+			t.Errorf("stored error = %q, want %q", got, want)
+		}
+
+		if res, err := store.VerifyQueryChain(ctx, conn.UID); err != nil || res.Break != nil {
+			t.Errorf("chain not clean: err=%v result=%+v", err, res)
+		}
+	})
+
+	t.Run("ordinary error is stored byte for byte", func(t *testing.T) {
+		t.Parallel()
+
+		conn := createTestConnection(t, ctx, store, "errfix-plain")
+		plain := "relation \"x\" does not exist: héllo"
+		created, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: conn.UID, SQLText: "SELECT 1", ExecutedAt: time.Now(), Error: &plain,
+		})
+		if err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+
+		if got := readError(t, created.UID); got != plain {
+			t.Errorf("stored error = %q, want %q", got, plain)
+		}
+	})
+}

@@ -94,30 +94,36 @@ func TestCleanupExpiredOAuthStates(t *testing.T) {
 	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
-	// Create some expired states
-	for i := 0; i < 3; i++ {
-		_, err := store.CreateOAuthState(ctx, &OAuthState{
-			State:    "expired-" + uuid.NewString(),
-			Provider: IdentityTypeSlack,
-		}, -1*time.Hour)
+	// Every namespace that shares the table: OAuth authorize state, device
+	// authorization requests and login-exchange codes.
+	providers := []string{IdentityTypeSlack, DeviceAuthProvider, LoginExchangeProvider}
+
+	live := make(map[string]string, len(providers))
+
+	for _, provider := range providers {
+		for i := 0; i < 2; i++ {
+			_, err := store.CreateOAuthState(ctx, &OAuthState{
+				State:    "expired-" + uuid.NewString(),
+				Provider: provider,
+			}, -1*time.Hour)
+			require.NoError(t, err)
+		}
+
+		state := "valid-" + uuid.NewString()
+		_, err := store.CreateOAuthState(ctx, &OAuthState{State: state, Provider: provider}, 1*time.Hour)
 		require.NoError(t, err)
+
+		live[provider] = state
 	}
 
-	// Create a valid state
-	validState := &OAuthState{
-		State:    "valid-" + uuid.NewString(),
-		Provider: IdentityTypeSlack,
-	}
-	_, err := store.CreateOAuthState(ctx, validState, 1*time.Hour)
-	require.NoError(t, err)
-
-	// Cleanup
 	deleted, err := store.CleanupExpiredOAuthStates(ctx)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, deleted, int64(3))
+	assert.Equal(t, int64(2*len(providers)), deleted)
 
-	// Valid state should still be consumable
-	consumed, err := store.ConsumeOAuthState(ctx, validState.State)
-	require.NoError(t, err)
-	assert.Equal(t, validState.State, consumed.State)
+	for _, provider := range providers {
+		var remaining []OAuthState
+		require.NoError(t, store.db.NewSelect().Model(&remaining).Where("provider = ?", provider).Scan(ctx))
+		require.Len(t, remaining, 1, "provider %s: only the live row is kept", provider)
+		assert.Equal(t, live[provider], remaining[0].State)
+	}
 }

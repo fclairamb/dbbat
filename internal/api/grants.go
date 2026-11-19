@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -330,7 +331,7 @@ func (s *Server) postSelfRevocationReply(ctx context.Context, grantUID, userID u
 func selfRevocationReplyText(slackID string) string {
 	who := "The requester"
 	if slackID != "" {
-		who = "<@" + slackID + ">"
+		who = "<@" + notify.EscapeSlackText(slackID) + ">"
 	}
 
 	return who + " revoked this grant themselves."

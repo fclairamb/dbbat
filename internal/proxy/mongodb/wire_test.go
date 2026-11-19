@@ -1,8 +1,12 @@
 package mongodb
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
+	"log/slog"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -152,7 +156,7 @@ func TestCompressDecompressRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, opCodeCompressed, wm.opCode)
 
-		inner, gotID, err := decompressMessage(wm)
+		inner, gotID, err := decompressMessage(wm, maxWireMessageSize)
 		require.NoError(t, err)
 		assert.Equal(t, compressorID, gotID)
 		assert.Equal(t, opCodeMsg, inner.opCode)
@@ -182,7 +186,7 @@ func TestDecompressRejectsUnsupportedCompressor(t *testing.T) {
 	wm, err := readMessage(bytes.NewReader(wrapped))
 	require.NoError(t, err)
 
-	_, _, err = decompressMessage(wm)
+	_, _, err = decompressMessage(wm, maxWireMessageSize)
 	require.ErrorIs(t, err, ErrUnsupportedCompress)
 }
 
@@ -203,4 +207,130 @@ func TestReadMessageRejectsShortLength(t *testing.T) {
 
 	_, err := readMessage(bytes.NewReader(buf[:]))
 	require.ErrorIs(t, err, ErrShortMessage)
+}
+
+// compressedFrame wraps doc in an OP_MSG, then in an OP_COMPRESSED envelope,
+// and, when declared >= 0, overwrites the envelope's uncompressedSize with it.
+func compressedFrame(t *testing.T, compressorID uint8, doc any, declared int) []byte {
+	t.Helper()
+
+	original, err := buildOpMsgReply(5, 0, doc)
+	require.NoError(t, err)
+
+	wrapped, err := compressMessage(original, compressorID)
+	require.NoError(t, err)
+
+	if declared >= 0 {
+		binary.LittleEndian.PutUint32(wrapped[20:24], uint32(declared))
+	}
+
+	return wrapped
+}
+
+// sessionReading is a session whose client stream is raw, in the given
+// authentication state — enough for readClientMessage.
+func sessionReading(raw []byte, authenticated bool) *Session {
+	conn := &scriptedConn{in: bytes.NewReader(raw)}
+
+	return &Session{
+		clientConn:    conn,
+		reader:        bufio.NewReader(conn),
+		logger:        slog.New(slog.DiscardHandler),
+		ctx:           context.Background(),
+		authenticated: authenticated,
+	}
+}
+
+// Before authentication an OP_COMPRESSED frame declaring more than the
+// pre-auth cap is refused on the header alone: nothing near the declared size
+// is allocated. This used to inflate (and then copy) up to 48 MB per frame.
+//
+//nolint:paralleltest // measures process-wide allocation; a parallel test would pollute it
+func TestDecompressMessage_PreAuthRefusesOversizedDeclaration(t *testing.T) {
+	const declared = 40 * 1000 * 1000
+
+	frame := compressedFrame(t, compressorZlib, bson.D{{Key: "hello", Value: 1}}, declared)
+
+	var before, after runtime.MemStats
+
+	runtime.ReadMemStats(&before)
+
+	_, err := sessionReading(frame, false).readClientMessage()
+
+	runtime.ReadMemStats(&after)
+
+	require.ErrorIs(t, err, ErrMessageTooLarge)
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(declared/10),
+		"the declared size must not be allocated before it is refused")
+}
+
+// A frame that lies about its size — declares something small, inflates to
+// much more — stops at the declaration instead of inflating it all.
+//
+//nolint:paralleltest // measures process-wide allocation; a parallel test would pollute it
+func TestDecompressMessage_InflationStopsAtDeclaredSize(t *testing.T) {
+	big := bytes.Repeat([]byte{'a'}, 8*1024*1024)
+	frame := compressedFrame(t, compressorZlib, bson.D{{Key: "insert", Value: "c"}, {Key: "pad", Value: big}}, 1024)
+
+	wm, err := readMessage(bytes.NewReader(frame))
+	require.NoError(t, err)
+
+	var before, after runtime.MemStats
+
+	runtime.ReadMemStats(&before)
+
+	_, _, err = decompressMessage(wm, maxWireMessageSize)
+
+	runtime.ReadMemStats(&after)
+
+	require.ErrorIs(t, err, ErrCompressedSizeMismat)
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(len(big)/4),
+		"inflation must be bounded by the declared size, not by the payload")
+}
+
+// Positive control: a small compressed hello still works before
+// authentication, under either compressor.
+func TestDecompressMessage_PreAuthSmallHelloWorks(t *testing.T) {
+	t.Parallel()
+
+	for _, compressorID := range []uint8{compressorNoop, compressorZlib} {
+		frame := compressedFrame(t, compressorID, bson.D{{Key: "hello", Value: 1}, {Key: "$db", Value: "admin"}}, -1)
+
+		s := sessionReading(frame, false)
+
+		m, err := s.readClientMessage()
+		require.NoError(t, err)
+		assert.Equal(t, opCodeMsg, m.opCode)
+		assert.True(t, s.compressReplies)
+
+		body, ok := parseOpMsgBody(t, m)
+		require.True(t, ok)
+		assert.Equal(t, "hello", commandName(body))
+	}
+}
+
+// After authentication the full wire limit applies: a compressed command well
+// past the pre-auth cap is inflated, while the same frame is refused before.
+func TestDecompressMessage_PostAuthKeepsWireLimit(t *testing.T) {
+	t.Parallel()
+
+	pad := bytes.Repeat([]byte{'b'}, 4*preAuthMaxUncompressedSize)
+	doc := bson.D{{Key: "insert", Value: "c"}, {Key: "pad", Value: pad}, {Key: "$db", Value: "app"}}
+	frame := compressedFrame(t, compressorZlib, doc, -1)
+
+	_, err := sessionReading(frame, false).readClientMessage()
+	require.ErrorIs(t, err, ErrMessageTooLarge)
+
+	m, err := sessionReading(frame, true).readClientMessage()
+	require.NoError(t, err)
+
+	body, ok := parseOpMsgBody(t, m)
+	require.True(t, ok)
+	assert.Equal(t, "insert", commandName(body))
+
+	wm, err := readMessage(bytes.NewReader(compressedFrame(t, compressorZlib, doc, maxWireMessageSize+1)))
+	require.NoError(t, err)
+
+	_, _, err = decompressMessage(wm, maxWireMessageSize)
+	require.ErrorIs(t, err, ErrMessageTooLarge)
 }

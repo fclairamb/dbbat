@@ -11,13 +11,11 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -70,6 +68,10 @@ type Server struct {
 	// DBB_QUERY_TAGGING default at every session's auth. nil — the default —
 	// leaves the decision to the atomic above.
 	queryTaggingResolver *shared.QueryTaggingResolver
+
+	// preAuth is the window an unauthenticated client gets to finish its
+	// startup and login (shared.PreAuthTimeout unless a test shortens it).
+	preAuth shared.PreAuthTimer
 
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
@@ -182,10 +184,8 @@ func (s *Server) Start(addr string) error {
 
 	// Start dump cleanup goroutine if dumps are enabled
 	if s.dumpConfig.Dir != "" {
-		if err := os.MkdirAll(s.dumpConfig.Dir, 0o755); err != nil {
+		if err := os.MkdirAll(s.dumpConfig.Dir, dump.DirPerm); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to create dump directory", slog.String("dir", s.dumpConfig.Dir), slog.Any("error", err))
-		} else {
-			go s.runDumpCleanup()
 		}
 	}
 
@@ -287,7 +287,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		}
 
 		if err := clientConn.Close(); err != nil {
-			s.logger.ErrorContext(s.ctx, "failed to close client connection", slog.Any("error", err))
+			s.logger.DebugContext(s.ctx, "client close error", slog.Any("error", err))
 		}
 	}()
 
@@ -298,6 +298,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	session.cancels = s.cancels
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
+	session.preAuthTimeout = s.preAuth.Timeout()
 	session.queryTagging = s.queryTagging.Load()
 	session.queryTaggingResolver = s.queryTaggingResolver
 
@@ -320,42 +321,24 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 			return
 		}
 
-		s.logger.ErrorContext(s.ctx, "Session error", slog.Any("error", err), slog.Any("remote_addr", clientConn.RemoteAddr()))
-	}
-}
-
-const dumpCleanupInterval = 1 * time.Hour
-
-// goroutineNameDumpRetention is what a panic in a retention sweep is logged under.
-const goroutineNameDumpRetention = "postgresql dump retention sweep"
-
-// runDumpCleanup periodically cleans up old dump files.
-func (s *Server) runDumpCleanup() {
-	retention, err := time.ParseDuration(s.dumpConfig.Retention)
-	if err != nil {
-		retention = 24 * time.Hour
-	}
-
-	ticker := time.NewTicker(dumpCleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// One turn under the guard rather than the whole loop: a panic in a
-			// sweep must not take the process down, and must not retire retention
-			// for the life of the process either. See safe.RunMaintenance.
-			safe.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
-				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
-				if err != nil {
-					s.logger.ErrorContext(s.ctx, "dump cleanup failed", slog.Any("error", err))
-				} else if deleted > 0 {
-					s.logger.InfoContext(s.ctx, "cleaned up old dumps", slog.Int("deleted", deleted))
-				}
-			})
-		case <-s.shutdown:
+		// The target ended the session under us: worth recording, but not a
+		// failure of dbbat.
+		if s.logHangup(session, err, clientConn) {
 			return
 		}
+
+		// Access control doing its job — no grant, an exhausted quota, a wrong
+		// password, an unknown database — is the client's problem, already
+		// reported to it. WARN, like Oracle's "client authentication failed",
+		// so ERROR stays for what an operator has to act on.
+		if isClientRefusal(err) {
+			s.logger.WarnContext(s.ctx, "Session refused", slog.Any("error", err),
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+			return
+		}
+
+		s.logger.ErrorContext(s.ctx, "Session error", slog.Any("error", err), slog.Any("remote_addr", clientConn.RemoteAddr()))
 	}
 }
 
@@ -364,4 +347,50 @@ func (s *Server) runDumpCleanup() {
 // process wiring; nil means local-only captures, which is the default.
 func (s *Server) SetDumpUploader(uploader *dump.Uploader) {
 	s.dumpUploader = uploader
+}
+
+// clientRefusals are the authentication outcomes that are a decision, not a
+// failure: dbbat refused the client on purpose.
+var clientRefusals = []error{
+	store.ErrNoActiveGrant,
+	store.ErrServerNotFound,
+	store.ErrUserNotFound,
+	shared.ErrTargetNotFound,
+	ErrInvalidPassword,
+	ErrMissingCredentials,
+	ErrQueryLimitExceeded,
+	ErrDataLimitExceeded,
+	ErrAPIKeyOwnerMismatch,
+	ErrAPIKeyVerifyFailed,
+}
+
+func isClientRefusal(err error) bool {
+	for _, refusal := range clientRefusals {
+		if errors.Is(err, refusal) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// logHangup reports a session one side ended on its own and returns true: the
+// client at DEBUG, the target at WARN. session.logger carries connection_uid
+// once the row exists.
+func (s *Server) logHangup(session *Session, err error, clientConn net.Conn) bool {
+	if errors.Is(err, errClientHungUp) {
+		s.logger.DebugContext(s.ctx, "Client disconnected",
+			slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+		return true
+	}
+
+	if !errors.Is(err, errUpstreamClosed) {
+		return false
+	}
+
+	session.logger.WarnContext(s.ctx, "Upstream closed the session", slog.Any("error", err),
+		slog.Any("remote_addr", clientConn.RemoteAddr()))
+
+	return true
 }

@@ -185,40 +185,48 @@ func readFrame(r io.Reader, hdr []byte, total int) ([]byte, error) {
 	return raw, nil
 }
 
+// preAuthMaxUncompressedSize caps what an OP_COMPRESSED frame may inflate to
+// before the session has authenticated. hello, ping and the SASL exchange are
+// a few hundred bytes, and the compression spec forbids compressing the auth
+// commands at all; the 48 MB wire limit is for authenticated traffic only.
+const preAuthMaxUncompressedSize = 64 * 1024
+
 // decompressMessage unwraps an OP_COMPRESSED message (opcode 2012) into the
 // logical message it carries. The body layout is originalOpcode(int32) +
 // uncompressedSize(int32) + compressorId(uint8) + compressed bytes. The
 // returned message's raw is the reconstructed *uncompressed* frame, ready for
 // verbatim relay upstream (which never negotiates compression). The compressor
 // id actually used is returned so replies can mirror it.
-func decompressMessage(m *message) (*message, uint8, error) {
+//
+// maxUncompressed bounds the declared size: a frame declaring more is refused
+// before anything is inflated. The declared size is not trusted for the
+// allocation either — the output grows with the bytes actually inflated, into
+// the frame buffer itself, so there is no second copy.
+func decompressMessage(m *message, maxUncompressed int) (*message, uint8, error) {
 	if len(m.body) < opCompressedHeaderLen {
 		return nil, 0, ErrShortMessage
 	}
 
 	originalOpcode := int32(binary.LittleEndian.Uint32(m.body[0:4]))
-	uncompressedSize := int(binary.LittleEndian.Uint32(m.body[4:8]))
+	uncompressedSize := int(int32(binary.LittleEndian.Uint32(m.body[4:8])))
 	compressorID := m.body[8]
 	compressed := m.body[opCompressedHeaderLen:]
 
-	if uncompressedSize < 0 || uncompressedSize > maxWireMessageSize {
+	if uncompressedSize < 0 || uncompressedSize > maxUncompressed || uncompressedSize > maxWireMessageSize {
 		return nil, 0, fmt.Errorf("%w: %d", ErrMessageTooLarge, uncompressedSize)
 	}
 
-	innerBody, err := decompress(compressorID, compressed, uncompressedSize)
+	raw, err := decompress(compressorID, compressed, uncompressedSize, make([]byte, headerLen))
 	if err != nil {
 		return nil, 0, err
 	}
 
-	if len(innerBody) != uncompressedSize {
+	if len(raw)-headerLen != uncompressedSize {
 		return nil, 0, ErrCompressedSizeMismat
 	}
 
-	total := headerLen + len(innerBody)
-
-	raw := make([]byte, total)
+	total := len(raw)
 	writeHeader(raw, int32(total), m.requestID, m.responseTo, originalOpcode)
-	copy(raw[headerLen:], innerBody)
 
 	return &message{
 		length:     int32(total),
@@ -260,15 +268,15 @@ func compressMessage(raw []byte, compressorID uint8) ([]byte, error) {
 	return buf, nil
 }
 
-// decompress inflates data per the compressor id. Only noop and zlib are
-// supported (the only compressors dbbat negotiates).
-func decompress(compressorID uint8, data []byte, uncompressedSize int) ([]byte, error) {
+// decompress inflates data per the compressor id (noop or zlib, the only two
+// dbbat negotiates), appending to
+// dst. At most uncompressedSize+1 bytes are produced — one past the declared
+// size is enough for the caller to see the mismatch — and the buffer grows with
+// the output rather than being sized from the (attacker-chosen) declaration.
+func decompress(compressorID uint8, data []byte, uncompressedSize int, dst []byte) ([]byte, error) {
 	switch compressorID {
 	case compressorNoop:
-		out := make([]byte, len(data))
-		copy(out, data)
-
-		return out, nil
+		return append(dst, data[:min(len(data), uncompressedSize+1)]...), nil
 	case compressorZlib:
 		zr, err := zlib.NewReader(bytes.NewReader(data))
 		if err != nil {
@@ -276,14 +284,12 @@ func decompress(compressorID uint8, data []byte, uncompressedSize int) ([]byte, 
 		}
 		defer func() { _ = zr.Close() }()
 
-		// Bound inflation to the declared size + 1 so a malicious frame can't
-		// expand unbounded; the caller rejects any length != uncompressedSize.
-		out, err := io.ReadAll(io.LimitReader(zr, int64(uncompressedSize)+1))
-		if err != nil {
+		buf := bytes.NewBuffer(dst)
+		if _, err := buf.ReadFrom(io.LimitReader(zr, int64(uncompressedSize)+1)); err != nil {
 			return nil, fmt.Errorf("mongodb: zlib inflate: %w", err)
 		}
 
-		return out, nil
+		return buf.Bytes(), nil
 	default:
 		return nil, fmt.Errorf("%w: id %d", ErrUnsupportedCompress, compressorID)
 	}

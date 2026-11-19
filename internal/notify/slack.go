@@ -104,6 +104,14 @@ type GrantRequestEvent struct {
 // chat.update on follow-ups.
 type SlackPersister interface {
 	SetGrantRequestSlackMessage(ctx context.Context, uid uuid.UUID, channel, ts string) error
+	// SetGrantRequestSlackThread records that uid was posted as a reply under
+	// rootUID, with the root's coordinates.
+	SetGrantRequestSlackThread(ctx context.Context, uid, rootUID uuid.UUID, channel, ts string) error
+	// FindRenewalRoot returns the thread root an auto-approved request can
+	// reply under, or nil for "post top-level".
+	FindRenewalRoot(
+		ctx context.Context, userID, databaseID, lineageUID uuid.UUID, controls []string, since time.Time,
+	) (*store.GrantRequest, error)
 }
 
 // SlackNotifier posts Block Kit messages to a configured channel for grant
@@ -112,11 +120,20 @@ type SlackPersister interface {
 type SlackNotifier struct {
 	client        *slack.Client
 	channel       string
+	channels      map[string]string
 	publicURL     string
 	signingSecret string
 	interactive   bool
 	store         SlackPersister
 	log           *slog.Logger
+
+	// renewalWindow is how far back an auto-approved request looks for a
+	// thread root; 0 disables threading. See config.SlackNotifyConfig.
+	renewalWindow time.Duration
+	// channelIDs maps a configured channel (often a "#name") to the channel ID
+	// Slack returned for it, so a root's stored ID can be compared with the
+	// channel a definition routes to now.
+	channelIDs sync.Map
 
 	// terminationSQL gates whether NotifyTermination copies statement text
 	// into Slack — see config.SlackNotifyConfig.SQL.
@@ -164,9 +181,21 @@ func NewSlackNotifier(cfg config.SlackNotifyConfig, publicURL string, persister 
 		return nil, ErrPublicURLMissing
 	}
 
+	channels, err := cfg.ParseChannels()
+	if err != nil {
+		return nil, fmt.Errorf("parse slack notify channels: %w", err)
+	}
+
+	renewalWindow, err := cfg.ResolveRenewalWindow()
+	if err != nil {
+		return nil, fmt.Errorf("slack notify renewal window: %w", err)
+	}
+
 	return &SlackNotifier{
+		renewalWindow: renewalWindow,
 		client:        slack.New(cfg.BotToken),
 		channel:       cfg.Channel,
+		channels:      channels,
 		publicURL:     strings.TrimRight(publicURL, "/"),
 		signingSecret: cfg.SigningSecret,
 		interactive:   cfg.Interactive(),
@@ -177,6 +206,42 @@ func NewSlackNotifier(cfg config.SlackNotifyConfig, publicURL string, persister 
 		terminationWindow:  terminationCoalesceWindow,
 		terminationPending: make(map[terminationCoalesceKey]*terminationCoalesce),
 	}, nil
+}
+
+// channelFor picks the channel a grant definition's notifications go to.
+// post is false when the definition opted out with the reserved "none" key.
+// A nil definition or one without a notify_channel uses the default channel,
+// and so does a key the operator has since removed from the config (with a
+// WARN), because dropping the notification would be worse than misrouting it.
+func (n *SlackNotifier) channelFor(ctx context.Context, def *store.GrantDefinition) (string, bool) {
+	if def == nil || def.NotifyChannel == nil {
+		return n.channel, true
+	}
+
+	key := *def.NotifyChannel
+	if key == config.SlackNotifyChannelNone {
+		return "", false
+	}
+
+	if ch, ok := n.channels[key]; ok {
+		return ch, true
+	}
+
+	n.log.WarnContext(ctx, "slack notify channel not configured, using the default channel",
+		slog.String("definition", def.Slug), slog.String("notify_channel", key))
+
+	return n.channel, true
+}
+
+// holdChannelFor is channelFor for approval holds: a hold parks a statement
+// until a human decides, so "none" falls back to the default channel rather
+// than leaving a statement nobody is told about.
+func (n *SlackNotifier) holdChannelFor(ctx context.Context, def *store.GrantDefinition) string {
+	if channel, post := n.channelFor(ctx, def); post {
+		return channel
+	}
+
+	return n.channel
 }
 
 // Interactive reports whether Approve / Deny buttons are rendered and the
@@ -216,13 +281,19 @@ func (n *SlackNotifier) NotifyGrantRequest(ctx context.Context, ev GrantRequestE
 		return
 	}
 
+	target, post := n.channelFor(ctx, ev.Definition)
+
 	blocks := buildBlocks(ev, n.publicURL)
 
 	switch ev.Action { //nolint:exhaustive // non-Created actions all share the update branch in the default case
 	case GrantActionCreated:
+		if !post {
+			return
+		}
+
 		channel, ts, err := n.client.PostMessageContext(
 			ctx,
-			n.channel,
+			target,
 			slack.MsgOptionBlocks(blocks...),
 			slack.MsgOptionAsUser(true),
 		)
@@ -232,24 +303,45 @@ func (n *SlackNotifier) NotifyGrantRequest(ctx context.Context, ev GrantRequestE
 			return
 		}
 
-		if n.store != nil {
-			if err := n.store.SetGrantRequestSlackMessage(ctx, ev.Request.UID, channel, ts); err != nil {
-				n.log.WarnContext(ctx, "persist slack message failed", slog.Any("error", err))
-			}
-		}
+		n.channelIDs.Store(target, channel)
+		n.persistMessage(ctx, ev.Request.UID, channel, ts)
 
 	default:
+		// "none" silences the whole lifecycle, updates included.
+		if !post {
+			return
+		}
+
 		channel := derefString(ev.Request.SlackChannel)
 		ts := derefString(ev.Request.SlackMessageTS)
 
 		if channel == "" || ts == "" {
-			// No prior post (notifier was disabled when the request was
-			// created, or the post failed). Send a fresh message instead
-			// of dropping the update silently.
-			if _, _, err := n.client.PostMessageContext(ctx, n.channel, slack.MsgOptionBlocks(blocks...)); err != nil {
-				n.log.WarnContext(ctx, "slack post (fallback) failed", slog.Any("error", err))
+			// No prior post: an auto-approved request (it never fires Created),
+			// the notifier was disabled when the request was created, or the
+			// post failed. An auto-approved renewal replies in its chain's
+			// thread; anything else gets a fresh message, whose coordinates
+			// are kept so the request is a usable thread root and its later
+			// replies (bytes, revocation) have somewhere to land.
+			if n.replyInRenewalThread(ctx, ev, target) {
+				return
 			}
 
+			newChannel, newTS, err := n.client.PostMessageContext(ctx, target, slack.MsgOptionBlocks(blocks...))
+			if err != nil {
+				n.log.WarnContext(ctx, "slack post (fallback) failed", slog.Any("error", err))
+
+				return
+			}
+
+			n.channelIDs.Store(target, newChannel)
+			n.persistMessage(ctx, ev.Request.UID, newChannel, newTS)
+
+			return
+		}
+
+		if ev.Request.SlackThreadRootUID != nil {
+			// The stored coordinates are the root's message, not this
+			// request's: updating it would overwrite the root.
 			return
 		}
 
@@ -257,6 +349,88 @@ func (n *SlackNotifier) NotifyGrantRequest(ctx context.Context, ev GrantRequestE
 			n.log.WarnContext(ctx, "slack update failed", slog.Any("error", err))
 		}
 	}
+}
+
+func (n *SlackNotifier) persistMessage(ctx context.Context, uid uuid.UUID, channel, ts string) {
+	if n.store == nil {
+		return
+	}
+
+	if err := n.store.SetGrantRequestSlackMessage(ctx, uid, channel, ts); err != nil {
+		n.log.WarnContext(ctx, "persist slack message failed", slog.Any("error", err))
+	}
+}
+
+// sameChannel reports whether a stored channel (the ID Slack returned) is the
+// channel target names. A "#name" target is resolved through the IDs seen in
+// this process; one never seen is treated as different, which only costs a
+// top-level post.
+func (n *SlackNotifier) sameChannel(stored, target string) bool {
+	if stored == target {
+		return true
+	}
+
+	id, ok := n.channelIDs.Load(target)
+
+	return ok && id == stored
+}
+
+// replyInRenewalThread posts an auto-approved renewal as a one-line reply in
+// the thread of the first request of its chain and records the root on the
+// renewal. It reports whether the event was handled; false means "post
+// top-level" (threading off, no root, other channel, lookup failure).
+func (n *SlackNotifier) replyInRenewalThread(ctx context.Context, ev GrantRequestEvent, target string) bool {
+	if !isAutoApproved(ev) || n.renewalWindow <= 0 || n.store == nil || ev.Definition == nil || ev.Requester == nil {
+		return false
+	}
+
+	root, err := n.store.FindRenewalRoot(
+		ctx, ev.Request.UserID, ev.Request.DatabaseID, ev.Definition.LineageUID,
+		ev.Definition.Controls, time.Now().Add(-n.renewalWindow),
+	)
+	if err != nil {
+		n.log.WarnContext(ctx, "slack renewal root lookup failed, posting top-level", slog.Any("error", err))
+
+		return false
+	}
+
+	if root == nil || root.UID == ev.Request.UID {
+		return false
+	}
+
+	channel, ts := derefString(root.SlackChannel), derefString(root.SlackMessageTS)
+	if channel == "" || ts == "" || !n.sameChannel(channel, target) {
+		return false
+	}
+
+	if _, _, err := n.client.PostMessageContext(
+		ctx, channel,
+		slack.MsgOptionText(renewalText(ev, n.publicURL), false),
+		slack.MsgOptionTS(ts),
+	); err != nil {
+		n.log.WarnContext(ctx, "slack renewal reply failed, posting top-level", slog.Any("error", err))
+
+		return false
+	}
+
+	if err := n.store.SetGrantRequestSlackThread(ctx, ev.Request.UID, root.UID, channel, ts); err != nil {
+		n.log.WarnContext(ctx, "persist slack thread failed", slog.Any("error", err))
+	}
+
+	return true
+}
+
+// renewalText is the one-line thread reply for an auto-approved renewal.
+func renewalText(ev GrantRequestEvent, publicURL string) string {
+	text := fmt.Sprintf("⚡ renewed by %s for %s",
+		slackMention(ev.RequesterSlackID, userLabel(ev.Requester)),
+		formatDuration(ev.Definition.DurationSeconds))
+
+	if j := strings.TrimSpace(ev.Request.Justification); j != "" {
+		text += fmt.Sprintf(" — %q", EscapeSlackText(j))
+	}
+
+	return text + fmt.Sprintf(" · <%s/app/grant-requests|request>", publicURL)
 }
 
 // PostThreadReply posts a plain-text reply in the thread of an existing
@@ -324,7 +498,7 @@ func buildBlocks(ev GrantRequestEvent, publicURL string) []slack.Block {
 func mainSectionText(ev GrantRequestEvent) string {
 	dbName := "—"
 	if ev.Server != nil {
-		dbName = ev.Server.Name
+		dbName = EscapeSlackText(ev.Server.Name)
 	}
 
 	defName := "—"
@@ -332,7 +506,7 @@ func mainSectionText(ev GrantRequestEvent) string {
 	durationText := ""
 
 	if ev.Definition != nil {
-		defName = ev.Definition.Name
+		defName = EscapeSlackText(ev.Definition.Name)
 		durationText = formatDuration(ev.Definition.DurationSeconds)
 	}
 
@@ -344,16 +518,16 @@ func mainSectionText(ev GrantRequestEvent) string {
 	if ev.Action != GrantActionCreated && ev.Decider != nil {
 		mainText += fmt.Sprintf("\n*%s by*: %s",
 			strings.Title(string(ev.Action)), //nolint:staticcheck // titlecase short verb is fine here
-			userLabel(ev.Decider),
+			EscapeSlackText(userLabel(ev.Decider)),
 		)
 	}
 
 	if ev.Request.Justification != "" {
-		mainText += "\n*Justification*: " + ev.Request.Justification
+		mainText += "\n*Justification*: " + EscapeSlackText(ev.Request.Justification)
 	}
 
 	if ev.Request.DecisionReason != nil && *ev.Request.DecisionReason != "" {
-		mainText += "\n*Reason*: " + *ev.Request.DecisionReason
+		mainText += "\n*Reason*: " + EscapeSlackText(*ev.Request.DecisionReason)
 	}
 
 	return mainText
@@ -373,12 +547,12 @@ func mentionLine(ev GrantRequestEvent) string {
 
 	dbName := "—"
 	if ev.Server != nil {
-		dbName = ev.Server.Name
+		dbName = EscapeSlackText(ev.Server.Name)
 	}
 
 	defName := "access"
 	if ev.Definition != nil {
-		defName = ev.Definition.Name
+		defName = EscapeSlackText(ev.Definition.Name)
 	}
 
 	line := fmt.Sprintf("%s requested access on *%s* with *%s*.", requester, dbName, defName)
@@ -424,13 +598,28 @@ func actionsBlock(requestUID string) *slack.ActionBlock {
 
 // slackMention renders a Slack @-mention for a linked user (<@ID>) or falls
 // back to the plain username for users without a linked Slack identity.
-// A blank fallback yields "" so callers can skip empty entries.
+// A blank fallback yields "" so callers can skip empty entries. Both the ID
+// and the fallback are escaped: the result is meant for mrkdwn text.
 func slackMention(slackID, fallback string) string {
 	if slackID != "" {
-		return "<@" + slackID + ">"
+		return "<@" + EscapeSlackText(slackID) + ">"
 	}
 
-	return fallback
+	return EscapeSlackText(fallback)
+}
+
+// slackEscaper replaces the three characters Slack treats as control
+// sequences in mrkdwn text (mentions, links, entities).
+var slackEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// EscapeSlackText escapes the Slack mrkdwn metacharacters (&, <, >) of a
+// user-supplied string, so it renders as literal text instead of a live
+// mention (<!channel>, <@U…>) or a masked link (<https://…|click here>).
+// Apply it to every user-supplied value interpolated into mrkdwn text,
+// code spans and blocks included (Slack decodes entities there too). Never
+// apply it to plain_text objects: they would show the entities verbatim.
+func EscapeSlackText(s string) string {
+	return slackEscaper.Replace(s)
 }
 
 func userLabel(u *store.User) string {

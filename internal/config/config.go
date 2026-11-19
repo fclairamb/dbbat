@@ -9,11 +9,15 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/docker/go-units"
 	"github.com/knadh/koanf/parsers/json"
@@ -63,11 +67,27 @@ var (
 	// on for everyone.
 	ErrAuthProviderUnknown = errors.New("unknown OAuth provider in a per-provider auto-provisioning override")
 
+	// ErrSlackNotifyChannelsInvalid is returned when DBB_SLACK_NOTIFY_CHANNELS
+	// cannot be parsed into a key -> channel map.
+	ErrSlackNotifyChannelsInvalid = errors.New("DBB_SLACK_NOTIFY_CHANNELS is malformed")
+
+	// ErrTrustedProxiesInvalid is returned when DBB_TRUSTED_PROXIES holds an
+	// entry that is neither an IP address nor a CIDR. Dropping it would leave
+	// the operator's reverse proxy untrusted (every client sharing its
+	// rate-limit bucket) without saying why.
+	ErrTrustedProxiesInvalid = errors.New("DBB_TRUSTED_PROXIES must be a comma-separated list of IP addresses or CIDRs")
+
 	// ErrSlackNotifyBytesStepInvalid is returned when DBB_SLACK_NOTIFY_BYTES_STEP
 	// is not a byte count (or is negative). Silently reading it as 0 would turn
 	// off the one signal the operator just asked for.
 	ErrSlackNotifyBytesStepInvalid = errors.New(
 		"DBB_SLACK_NOTIFY_BYTES_STEP must be a non-negative byte count such as 1073741824 or 1GiB")
+
+	// ErrSlackNotifyRenewalWindowInvalid is returned when
+	// DBB_SLACK_NOTIFY_RENEWAL_WINDOW is not a non-negative Go duration.
+	// Reading it as 0 would silently turn threading off.
+	ErrSlackNotifyRenewalWindowInvalid = errors.New(
+		"DBB_SLACK_NOTIFY_RENEWAL_WINDOW must be a non-negative Go duration such as 24h, or 0 to disable")
 )
 
 // DefaultOAuthRole is the role an auto-provisioned OAuth user starts with when
@@ -110,189 +130,237 @@ type QueryStorageConfig struct {
 
 	// StoreResults enables/disables result storage globally.
 	StoreResults bool `koanf:"store_results"`
-
-	// Retention is how long query history (and the captured result rows
-	// hanging off it) is kept, as a Go duration (e.g. "720h").
-	//
-	// Empty or "0" means keep forever, and that is the default: dbbat is an
-	// audit tool, so an upgrade must never silently start deleting history.
-	// Operators opt in — "720h" (30 days) is a reasonable starting point.
-	Retention string `koanf:"retention"`
 }
 
-// DefaultQueryStorageRetention keeps query history forever. Retention is
-// opt-in: see QueryStorageConfig.Retention.
-const DefaultQueryStorageRetention = "0"
+// RetentionObject is one object's windows: when it moves to the archive and
+// when it is deleted for good. Both are Go durations. Empty means unset, "0"
+// means never.
+type RetentionObject struct {
+	// ArchiveAfter is how long after its session closed the object leaves
+	// PostgreSQL for the archive bucket. Needs DBB_ARCHIVE_URL.
+	ArchiveAfter string `koanf:"archive_after"`
 
-// RetentionDuration parses Retention into a duration. A zero or negative
-// result means "disabled — keep forever", and no sweep is scheduled.
+	// DeleteAfter is how long the object is kept before it is deleted for good.
+	DeleteAfter string `koanf:"delete_after"`
+}
+
+// RetentionConfig is every retention window, under one section and one naming
+// rule: DBB_RETENTION_<OBJECT>_<ACTION>_AFTER, config key
+// retention.<object>.<action>_after.
 //
-// A malformed value also disables the sweep rather than falling back to some
-// built-in period: this sweep permanently deletes audit data, so a typo must
-// never be interpreted as "delete more". The caller warns about it (see
-// RetentionMisconfigured).
-func (c QueryStorageConfig) RetentionDuration() time.Duration {
-	if c.Retention == "" {
-		return 0
-	}
+// Everything defaults to never (dbbat deletes nothing it was not told to
+// delete) except the local capture spool, which defaults to 24h: a spool that
+// never empties fills the disk.
+type RetentionConfig struct {
+	// Queries covers statements and the result rows captured for them.
+	Queries RetentionObject `koanf:"queries"`
 
-	d, err := time.ParseDuration(c.Retention)
-	if err != nil {
-		return 0
-	}
+	// Connections covers the closed-session ledger.
+	Connections RetentionObject `koanf:"connections"`
 
-	if d < 0 {
-		return 0
-	}
-
-	return d
+	// Dumps covers the local capture spool (DBB_DUMP_DIR).
+	Dumps RetentionObject `koanf:"dumps"`
 }
 
-// RetentionMisconfigured reports that Retention was set to something that is
-// neither empty nor a usable positive duration — i.e. retention silently ends up
-// disabled and the operator probably did not mean that.
-func (c QueryStorageConfig) RetentionMisconfigured() bool {
-	return c.Retention != "" && c.Retention != "0" && c.RetentionDuration() <= 0
+// DefaultDumpsDeleteAfter is the one default that is not "never".
+const DefaultDumpsDeleteAfter = "24h"
+
+// retentionObjects is the list of known objects, in the order of the table.
+var retentionObjects = []string{"queries", "connections", "dumps"}
+
+// retentionSettings is the list of known settings per object.
+var retentionSettings = map[string][]string{
+	"queries":     {"archive_after", "delete_after"},
+	"connections": {"delete_after"},
+	"dumps":       {"delete_after"},
 }
 
-// DefaultConnectionRetention leaves the connection window unset, which makes it
-// inherit the query window — i.e. exactly the single-window behavior that
-// predates the split. Empty, not "0": "0" would mean "keep the ledger forever"
-// and would silently stop reaping sessions on upgrade.
-const DefaultConnectionRetention = ""
-
-// ConnectionConfig holds the session-ledger settings.
-type ConnectionConfig struct {
-	// Retention is how long a **closed** connection row is kept, as a Go
-	// duration (e.g. "8760h").
-	//
-	// Deliberately separate from QueryStorageConfig.Retention: a connection is
-	// one small row per session — who, from where, to which database, under
-	// which grant — and that ledger is what a security review asks for a year
-	// later, while the statements and their captured rows are the bulk of the
-	// store and the thing an operator wants to expire after 30 or 90 days.
-	//
-	// Empty means "unset", and an unset connection window *inherits the query
-	// window*, so an upgraded deployment sweeps exactly what it swept before.
-	// An explicit "0" means "keep the ledger forever" and is the interesting
-	// combination: reap statements after N days, keep the sessions.
-	Retention string `koanf:"retention"`
+// removedRetentionNames maps the three pre-uniform keys (as koanf sees them,
+// from the file or from the environment) to the variable that replaces them.
+// This is a guard, not an alias: the old value is never read.
+var removedRetentionNames = map[string]struct{ old, replacement string }{
+	"query_storage.retention": {"DBB_QUERY_STORAGE_RETENTION (query_storage.retention)", "DBB_RETENTION_QUERIES_DELETE_AFTER (retention.queries.delete_after)"},
+	"connection.retention":    {"DBB_CONNECTION_RETENTION (connection.retention)", "DBB_RETENTION_CONNECTIONS_DELETE_AFTER (retention.connections.delete_after)"},
+	"connection_retention":    {"DBB_CONNECTION_RETENTION (connection.retention)", "DBB_RETENTION_CONNECTIONS_DELETE_AFTER (retention.connections.delete_after)"},
+	"dump.retention":          {"DBB_DUMP_RETENTION (dump.retention)", "DBB_RETENTION_DUMPS_DELETE_AFTER (retention.dumps.delete_after)"},
 }
 
-// RetentionDuration parses Retention into a duration, with the same rules as
-// QueryStorageConfig.RetentionDuration: zero, negative or malformed all mean
-// "keep forever", never a built-in fallback period.
-//
-// Note this cannot distinguish "unset" from an explicit "0" — both are 0. That
-// distinction lives in RetentionSet, and it matters: unset inherits the query
-// window, explicit "0" overrides it.
-func (c ConnectionConfig) RetentionDuration() time.Duration {
-	if c.Retention == "" {
-		return 0
+// retentionEnvKey maps retention_<object>_<setting> to its dotted key.
+func retentionEnvKey(key string) (string, bool) {
+	for _, object := range retentionObjects {
+		if rest, ok := strings.CutPrefix(key, "retention_"+object+"_"); ok {
+			return "retention." + object + "." + rest, true
+		}
 	}
 
-	d, err := time.ParseDuration(c.Retention)
-	if err != nil {
-		return 0
-	}
-
-	if d < 0 {
-		return 0
-	}
-
-	return d
+	return "", false
 }
 
-// RetentionSet reports whether the operator configured a connection window at
-// all. Unset inherits the query window (see RetentionWindows).
-func (c ConnectionConfig) RetentionSet() bool { return c.Retention != "" }
-
-// RetentionMisconfigured reports that Retention was set to something that is
-// neither empty nor a usable positive duration — the ConnectionConfig half of
-// QueryStorageConfig.RetentionMisconfigured.
-func (c ConnectionConfig) RetentionMisconfigured() bool {
-	return c.Retention != "" && c.Retention != "0" && c.RetentionDuration() <= 0
+// retentionEnvName is the environment variable of a retention key.
+func retentionEnvName(object, setting string) string {
+	return "DBB_RETENTION_" + strings.ToUpper(object) + "_" + strings.ToUpper(setting)
 }
 
-// RetentionWindows is the resolved pair of history windows: how long statements
-// (and their captured rows) are kept, and how long the closed-session ledger
-// they hang off is kept.
+// retentionProblems inspects what the operator set, defaults excluded, and
+// returns one sentence per mistake: an unknown retention key (a mistyped
+// name) or a removed one.
+func retentionProblems(explicit *koanf.Koanf) []string {
+	var problems []string
+
+	for _, key := range explicit.Keys() {
+		if r, ok := removedRetentionNames[key]; ok {
+			problems = append(problems, fmt.Sprintf(
+				"%s is no longer read, use %s", r.old, r.replacement))
+
+			continue
+		}
+
+		if !strings.HasPrefix(key, "retention.") && !strings.HasPrefix(key, "retention_") {
+			continue
+		}
+
+		if !knownRetentionKey(key) {
+			problems = append(problems, fmt.Sprintf(
+				"%q is not a retention setting (known: %s)", key, knownRetentionKeys()))
+		}
+	}
+
+	sort.Strings(problems)
+
+	return problems
+}
+
+func knownRetentionKey(key string) bool {
+	parts := strings.Split(key, ".")
+	if len(parts) != 3 || parts[0] != "retention" {
+		return false
+	}
+
+	for _, s := range retentionSettings[parts[1]] {
+		if s == parts[2] {
+			return true
+		}
+	}
+
+	return false
+}
+
+func knownRetentionKeys() string {
+	var names []string
+
+	for _, o := range retentionObjects {
+		for _, s := range retentionSettings[o] {
+			names = append(names, retentionEnvName(o, s))
+		}
+	}
+
+	return strings.Join(names, ", ")
+}
+
+// RetentionWindows is the resolved set of windows. Zero means never.
 type RetentionWindows struct {
-	// Query is DBB_QUERY_STORAGE_RETENTION, resolved. Zero disables the query
-	// sweep — history is kept forever.
-	Query time.Duration
+	// QueriesArchive moves statements' result rows to the archive after this long.
+	QueriesArchive time.Duration
 
-	// Connection is DBB_CONNECTION_RETENTION, resolved (inheriting Query when
-	// unset). Zero disables the connection sweep — the ledger is kept forever.
-	Connection time.Duration
+	// Queries deletes statements (and their captured rows) after this long.
+	Queries time.Duration
 
-	// Misconfiguration is empty when the pair is coherent. When it is not, both
-	// windows are zero — nothing is deleted — and this is the WARN the sweeper
-	// logs. It is never a startup failure: the precedent this codebase set for
-	// a retention typo is "keep everything and warn", and a proxy that refuses
-	// to start over one is a worse outcome than one that keeps history.
+	// Connections deletes the closed-session ledger after this long.
+	Connections time.Duration
+
+	// Dumps deletes local capture files after this long.
+	Dumps time.Duration
+
+	// Misconfiguration is empty when the windows are coherent. When it is not,
+	// every window is zero, nothing is deleted (dumps included), and this is the
+	// WARN logged at startup. It is never a startup failure: a proxy that keeps
+	// everything beats one that does not start.
 	Misconfiguration string
 }
 
-// Enabled reports whether either sweep has anything to do.
-func (w RetentionWindows) Enabled() bool { return w.Query > 0 || w.Connection > 0 }
+// Enabled reports whether any sweep has something to do.
+func (w RetentionWindows) Enabled() bool {
+	return w.Queries > 0 || w.Connections > 0 || w.Dumps > 0 || w.QueriesArchive > 0
+}
 
-// RetentionWindows resolves the two history windows and the rules that bind
-// them together.
+// parseRetentionWindow parses one window: empty is def, a Go duration is
+// itself, "0" is never. A negative or unparsable value is an error.
+func parseRetentionWindow(raw string, def time.Duration) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def, nil
+	}
+
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("is not a Go duration such as 720h: %w", err)
+	}
+
+	if d < 0 {
+		return 0, ErrNegativeRetention
+	}
+
+	return d, nil
+}
+
+// ErrNegativeRetention is a retention window below zero.
+var ErrNegativeRetention = errors.New("is negative")
+
+// RetentionWindows resolves the instance-level windows from the environment and
+// the file, and the rules that bind them.
 //
-// The rules exist because deleting a connection cascades to its queries and
-// their captured rows, so the connection window is an *upper* bound on the
-// query window in practice. Anything that would make the ledger shorter than
-// the statement history deletes more than the operator wrote down, which this
-// codebase treats as the one unacceptable failure mode — so it disables both
-// sweeps and warns instead of guessing.
-//
-//  1. Connection window unset -> it inherits the query window. This is the
-//     backward-compatibility rule: an upgrade sweeps exactly what it swept
-//     before, and it is why the default is not "keep the ledger forever".
-//  2. Either value malformed -> both sweeps off.
-//  3. Connection window shorter than the query window -> both sweeps off.
-//  4. Query window 0 (forever) with an explicit non-zero connection window ->
-//     both sweeps off. If statements are kept forever their parent rows must
-//     be too.
-//  5. Explicit connection window of 0 with a query window > 0 -> valid, and the
-//     point of the whole split: reap statements, keep the ledger forever.
+// When anything is wrong (a malformed or negative value, an unknown or removed
+// name, a connection window shorter than the statement window, a connection
+// window with statements kept forever) every window is zero and
+// Misconfiguration names the culprit.
 func (c *Config) RetentionWindows() RetentionWindows {
-	query := c.QueryStorage.RetentionDuration()
+	problems := slices.Clone(c.retentionProblems)
 
-	if c.QueryStorage.RetentionMisconfigured() {
-		return RetentionWindows{Misconfiguration: fmt.Sprintf(
-			"DBB_QUERY_STORAGE_RETENTION is %q, which is not a Go duration such as 720h; "+
-				"no history is deleted", c.QueryStorage.Retention)}
+	type entry struct {
+		name string
+		raw  string
+		def  time.Duration
+		dst  *time.Duration
 	}
 
-	if c.Connection.RetentionMisconfigured() {
-		return RetentionWindows{Misconfiguration: fmt.Sprintf(
-			"DBB_CONNECTION_RETENTION is %q, which is not a Go duration such as 8760h; "+
-				"no history is deleted", c.Connection.Retention)}
+	var w RetentionWindows
+
+	for _, e := range []entry{
+		{retentionEnvName("queries", "archive_after"), c.Retention.Queries.ArchiveAfter, 0, &w.QueriesArchive},
+		{retentionEnvName("queries", "delete_after"), c.Retention.Queries.DeleteAfter, 0, &w.Queries},
+		{retentionEnvName("connections", "delete_after"), c.Retention.Connections.DeleteAfter, 0, &w.Connections},
+		{retentionEnvName("dumps", "delete_after"), c.Retention.Dumps.DeleteAfter, 24 * time.Hour, &w.Dumps},
+	} {
+		d, err := parseRetentionWindow(e.raw, e.def)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s is %q, which %v", e.name, e.raw, err))
+
+			continue
+		}
+
+		*e.dst = d
 	}
 
-	if !c.Connection.RetentionSet() {
-		return RetentionWindows{Query: query, Connection: query}
+	if len(problems) == 0 && w.Connections > 0 && w.Queries <= 0 {
+		problems = append(problems, fmt.Sprintf(
+			"%s is %q while statements are kept forever: deleting a session deletes its "+
+				"statements, so this would delete history that is configured to be kept",
+			retentionEnvName("connections", "delete_after"), c.Retention.Connections.DeleteAfter))
 	}
 
-	connection := c.Connection.RetentionDuration()
-
-	if connection > 0 && query <= 0 {
-		return RetentionWindows{Misconfiguration: fmt.Sprintf(
-			"DBB_CONNECTION_RETENTION is %q while DBB_QUERY_STORAGE_RETENTION keeps query history "+
-				"forever: deleting a session deletes its statements, so this would delete history "+
-				"that is configured to be kept; no history is deleted", c.Connection.Retention)}
+	if len(problems) == 0 && w.Connections > 0 && w.Connections < w.Queries {
+		problems = append(problems, fmt.Sprintf(
+			"%s (%s) is shorter than %s (%s): deleting a session cascades to its "+
+				"statements, so this would delete history earlier than configured",
+			retentionEnvName("connections", "delete_after"), w.Connections,
+			retentionEnvName("queries", "delete_after"), w.Queries))
 	}
 
-	if connection > 0 && connection < query {
-		return RetentionWindows{Misconfiguration: fmt.Sprintf(
-			"DBB_CONNECTION_RETENTION (%s) is shorter than DBB_QUERY_STORAGE_RETENTION (%s): "+
-				"deleting a session cascades to its statements, so this would delete query history "+
-				"earlier than configured; no history is deleted", connection, query)}
+	if len(problems) > 0 {
+		return RetentionWindows{Misconfiguration: strings.Join(problems, "; ") + "; nothing is deleted"}
 	}
 
-	return RetentionWindows{Query: query, Connection: connection}
+	return w
 }
 
 // RateLimitConfig holds configuration for API rate limiting.
@@ -655,6 +723,48 @@ func splitList(s string) []string {
 	return out
 }
 
+// SlackNotifyChannelNone is the reserved notify_channel value that makes a
+// grant definition post nothing to Slack.
+const SlackNotifyChannelNone = "none"
+
+var slackChannelKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// ParseChannels turns "prod=#dbbat-prod,nonprod=#dbbat-nonprod" into
+// {"prod": "#dbbat-prod", "nonprod": "#dbbat-nonprod"}. Keys must match
+// ^[a-z0-9][a-z0-9_-]*$, values must be non-empty and the key "none" is
+// reserved. An empty setting yields an empty map; anything malformed is an
+// error so a typo stops the process instead of silently misrouting.
+func (c SlackNotifyConfig) ParseChannels() (map[string]string, error) {
+	channels := make(map[string]string)
+
+	for _, pair := range strings.Split(c.Channels, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		key, channel, found := strings.Cut(pair, "=")
+		key = strings.TrimSpace(key)
+		channel = strings.TrimSpace(channel)
+
+		switch {
+		case !found:
+			return nil, fmt.Errorf("%w: %q is not a key=channel pair", ErrSlackNotifyChannelsInvalid, pair)
+		case !slackChannelKeyPattern.MatchString(key):
+			return nil, fmt.Errorf("%w: key %q must match %s",
+				ErrSlackNotifyChannelsInvalid, key, slackChannelKeyPattern)
+		case key == SlackNotifyChannelNone:
+			return nil, fmt.Errorf("%w: key %q is reserved", ErrSlackNotifyChannelsInvalid, key)
+		case channel == "":
+			return nil, fmt.Errorf("%w: key %q has an empty channel", ErrSlackNotifyChannelsInvalid, key)
+		}
+
+		channels[key] = channel
+	}
+
+	return channels, nil
+}
+
 // SlackNotifyConfig configures outbound Slack notifications for grant
 // request events. Distinct from SlackAuthConfig (login OIDC) so deployments
 // can enable one without the other.
@@ -665,6 +775,11 @@ type SlackNotifyConfig struct {
 	// Channel is the Slack channel id or name (e.g. "#dbbat") where
 	// notifications are posted. Defaults to "#dbbat".
 	Channel string `koanf:"channel"`
+	// Channels names additional channels a grant definition can route its
+	// notifications to, as comma-separated key=channel pairs, e.g.
+	// "prod=#dbbat-prod,nonprod=#dbbat-nonprod". Channel stays the default
+	// for a definition that names none. See ParseChannels.
+	Channels string `koanf:"channels"`
 	// SigningSecret is the Slack app signing secret used to verify inbound
 	// interaction callbacks (Approve/Deny button clicks). Empty disables
 	// interactivity: messages carry no buttons and the inbound endpoint is
@@ -692,6 +807,32 @@ type SlackNotifyConfig struct {
 	// off, the default. A grant definition's notify_bytes_step overrides it.
 	// Read through ResolveBytesStep.
 	BytesStep string `koanf:"bytes_step"`
+	// RenewalWindow is how long an auto-approved grant request stays the
+	// thread root that later auto-approved requests (same user, database and
+	// definition lineage) reply under, instead of each posting a top-level
+	// message. A Go duration; "0" = off. Default 24h. Read through
+	// ResolveRenewalWindow.
+	RenewalWindow string `koanf:"renewal_window"`
+}
+
+// DefaultSlackNotifyRenewalWindow is the default for RenewalWindow.
+const DefaultSlackNotifyRenewalWindow = "24h"
+
+// ResolveRenewalWindow parses RenewalWindow. "" means the default; anything
+// that is not a non-negative duration is an error, which validate turns into
+// a startup failure.
+func (c SlackNotifyConfig) ResolveRenewalWindow() (time.Duration, error) {
+	raw := strings.TrimSpace(c.RenewalWindow)
+	if raw == "" {
+		raw = DefaultSlackNotifyRenewalWindow
+	}
+
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%w: got %q", ErrSlackNotifyRenewalWindowInvalid, c.RenewalWindow)
+	}
+
+	return d, nil
 }
 
 // ResolveBytesStep parses BytesStep. Suffixes are binary (1g = 1GiB), so
@@ -797,21 +938,15 @@ type DumpConfig struct {
 	// MaxSize is the maximum dump file size per session in bytes.
 	MaxSize int64 `koanf:"max_size"`
 
-	// Retention is the auto-delete duration for old dumps (e.g., "24h").
-	//
-	// It applies to the local spool only. When UploadURL is set, remote
-	// retention is the bucket's own lifecycle policy — dbbat never expires
-	// objects it uploaded, and never LISTs the bucket to look for them.
-	Retention string `koanf:"retention"`
-
 	// UploadURL is the blob-storage bucket finished captures are uploaded to
 	// on session close, e.g. "s3://my-bucket/dbbat-captures". Empty — the
 	// default — keeps captures on local disk only, which is the historical
 	// behavior.
 	//
-	// The scheme selects the driver (gocloud.dev/blob): "s3://" for S3 and
-	// S3-compatible stores, "file://" for a local directory (useful in tests
-	// and for a mounted volume). Any path after the bucket is used as a key
+	// The scheme selects the driver: "s3://" for S3 and any S3-compatible
+	// store, "file://" for a local directory (useful in tests and for a
+	// mounted volume). There is no gs:// or azblob:// driver (see
+	// internal/bucket). Any path after the bucket is used as a key
 	// prefix. Requires Dir: captures are always spooled locally first and
 	// uploaded once complete.
 	UploadURL string `koanf:"upload_url"`
@@ -819,8 +954,7 @@ type DumpConfig struct {
 
 // Default dump settings.
 const (
-	DefaultDumpMaxSize   = 10 * 1024 * 1024 // 10MB
-	DefaultDumpRetention = "24h"
+	DefaultDumpMaxSize = 10 * 1024 * 1024 // 10MB
 )
 
 // MySQLConfig holds configuration specific to the MySQL proxy.
@@ -982,8 +1116,16 @@ type Config struct {
 	// QueryStorage holds query result storage configuration.
 	QueryStorage QueryStorageConfig `koanf:"query_storage"`
 
-	// Connection holds the session-ledger settings, retention above all.
-	Connection ConnectionConfig `koanf:"connection"`
+	// Retention holds every retention window (queries, connections, dumps).
+	Retention RetentionConfig `koanf:"retention"`
+
+	// ArchiveURL is the bucket (s3:// or file://) result rows are archived to.
+	// Empty, the default, means archival does not exist.
+	ArchiveURL string `koanf:"archive_url"`
+
+	// retentionProblems are the mistakes found in what the operator set
+	// (unknown or removed retention names), filled by Load.
+	retentionProblems []string
 
 	// QueryTagging holds the sqlcommenter-style statement tagging settings.
 	QueryTagging QueryTaggingConfig `koanf:"query_tagging"`
@@ -1026,6 +1168,15 @@ type Config struct {
 	// instance. Used to build deep-links in Slack notifications. Required
 	// only if SlackNotify is enabled.
 	PublicURL string `koanf:"public_url"`
+
+	// TrustedProxies lists the reverse proxies (IPs or CIDRs, comma- or
+	// space-separated) whose X-Forwarded-For / X-Real-IP headers the API
+	// believes. Empty — the default — trusts nobody: the client IP is the
+	// socket peer, whatever headers it sends. That IP keys the anonymous rate
+	// limits and the access log, so trusting every peer let any client pick a
+	// fresh rate-limit bucket per request. A deployment behind an ingress sets
+	// the ingress's CIDR here. See ParseTrustedProxies.
+	TrustedProxies string `koanf:"trusted_proxies"`
 
 	// StatementTimeout is the deployment's default per-statement time limit,
 	// as a Go duration ("30s", "5m"). Empty or "0" — the default — means no
@@ -1245,10 +1396,9 @@ func defaultConfig() Config {
 			MaxResultRows:  DefaultMaxResultRows,
 			MaxResultBytes: DefaultMaxResultBytes,
 			StoreResults:   true,
-			Retention:      DefaultQueryStorageRetention,
 		},
-		Connection: ConnectionConfig{
-			Retention: DefaultConnectionRetention,
+		Retention: RetentionConfig{
+			Dumps: RetentionObject{DeleteAfter: DefaultDumpsDeleteAfter},
 		},
 		RateLimit: RateLimitConfig{
 			Enabled:               DefaultRateLimitEnabled,
@@ -1277,13 +1427,13 @@ func defaultConfig() Config {
 			GroupsClaim: DefaultOIDCGroupsClaim,
 		},
 		SlackNotify: SlackNotifyConfig{
-			Channel:      "#dbbat",
-			Terminations: true,
-			SQL:          true,
+			Channel:       "#dbbat",
+			Terminations:  true,
+			SQL:           true,
+			RenewalWindow: DefaultSlackNotifyRenewalWindow,
 		},
 		Dump: DumpConfig{
-			MaxSize:   DefaultDumpMaxSize,
-			Retention: DefaultDumpRetention,
+			MaxSize: DefaultDumpMaxSize,
 		},
 		Approval: ApprovalConfig{
 			// Off by default: a hold blocks a live database connection on a
@@ -1350,6 +1500,12 @@ func envTransform(k, v string) (string, any) {
 		return exact, v
 	}
 	// Map known prefixes to nested paths
+	// retention_<object>_<setting> -> retention.<object>.<setting>, the object
+	// taken from the known list. An unknown object stays as it is and is
+	// reported by retentionProblems.
+	if k, ok := retentionEnvKey(key); ok {
+		return k, v
+	}
 	// query_storage_* -> query_storage.*
 	if strings.HasPrefix(key, "query_storage_") {
 		return "query_storage." + strings.TrimPrefix(key, "query_storage_"), v
@@ -1435,12 +1591,6 @@ func envTransform(k, v string) (string, any) {
 // <section>_<setting> prefix onto the koanf key they configure. Each one is
 // here for its own reason:
 //
-//   - connection_retention: DBB_CONNECTION_RETENTION deliberately does not
-//     follow the <table>_storage shape its query counterpart has, and
-//     "connection" is a word too many future settings could start with for a
-//     blanket prefix rule to be safe. A silently unmapped value would read as
-//     "unset" and inherit the query window — exactly the outcome the setting
-//     exists to avoid.
 //   - slack_signing_secret: DBB_SLACK_SIGNING_SECRET is the canonical,
 //     documented name; the slack_notify_* prefix rule keeps the legacy
 //     DBB_SLACK_NOTIFY_SIGNING_SECRET working as an accepted alias.
@@ -1457,7 +1607,6 @@ func envTransform(k, v string) (string, any) {
 // Every entry is looked up before any prefix rule, which is what makes the last
 // two behave.
 var envExactKeys = map[string]string{
-	"connection_retention":  "connection.retention",
 	"slack_signing_secret":  "slack_notify.signing_secret",
 	"mssql_tls_max_version": "mssql.tls_max_version",
 	"query_tagging":         "query_tagging.enabled",
@@ -1551,6 +1700,10 @@ func validate(cfg *Config) error {
 		return err
 	}
 
+	if _, err := cfg.SlackNotify.ParseChannels(); err != nil {
+		return err
+	}
+
 	if cfg.OIDCAuth.Enabled() && (cfg.OIDCAuth.ClientID == "" || cfg.OIDCAuth.ClientSecret == "") {
 		return ErrOIDCClientCredentialsRequired
 	}
@@ -1572,7 +1725,41 @@ func validate(cfg *Config) error {
 		return err
 	}
 
+	if _, err := cfg.SlackNotify.ResolveRenewalWindow(); err != nil {
+		return err
+	}
+
+	if _, err := cfg.ParseTrustedProxies(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// ParseTrustedProxies splits TrustedProxies into the list gin's
+// SetTrustedProxies takes. Entries are separated by commas and/or whitespace;
+// each must be an IP address or a CIDR, anything else is an error validate
+// turns into a startup failure. Empty means trust nobody (nil).
+func (c *Config) ParseTrustedProxies() ([]string, error) {
+	fields := strings.FieldsFunc(c.TrustedProxies, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+
+	var out []string
+
+	for _, f := range fields {
+		if strings.Contains(f, "/") {
+			if _, err := netip.ParsePrefix(f); err != nil {
+				return nil, fmt.Errorf("%w: %q is not a valid CIDR", ErrTrustedProxiesInvalid, f)
+			}
+		} else if _, err := netip.ParseAddr(f); err != nil {
+			return nil, fmt.Errorf("%w: %q is not a valid IP address", ErrTrustedProxiesInvalid, f)
+		}
+
+		out = append(out, f)
+	}
+
+	return out, nil
 }
 
 // Load reads configuration from environment variables and optional config file.
@@ -1626,11 +1813,15 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 		return nil, err
 	}
 
+	problems := retentionProblems(explicit)
+
 	// Unmarshal into Config struct
 	cfg := &Config{}
 	if err := k.Unmarshal("", cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+
+	cfg.retentionProblems = problems
 
 	// 4. Apply CLI overrides (highest priority)
 	for _, override := range cliOverrides {

@@ -153,7 +153,7 @@ rollout-window caveat, not a live bug.
 |----------|-------------|---------|
 | `DBB_DUMP_DIR` | Directory for `.pcapng` session captures. Empty = disabled. | _disabled_ |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
-| `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration). Local captures only. | `24h` |
+| `DBB_RETENTION_DUMPS_DELETE_AFTER` | Auto-delete dumps older than this (Go duration). Local captures only. | `24h` |
 | `DBB_DUMP_UPLOAD_URL` | Blob bucket finished captures are uploaded to on session close (`s3://bucket/prefix`, `file://…`). Empty = local disk only. Requires `DBB_DUMP_DIR`. | _disabled_ |
 
 See [Session Packet Dumps](/docs/features/session-dumps) for what gets captured.
@@ -238,11 +238,16 @@ and both ends revert to cleartext TDS once login is through.
 | `DBB_QUERY_STORAGE_STORE_RESULTS` | Globally enable result-row capture | `true` |
 | `DBB_QUERY_STORAGE_MAX_RESULT_ROWS` | Max rows captured per query | `100000` |
 | `DBB_QUERY_STORAGE_MAX_RESULT_BYTES` | Max bytes captured per query | `104857600` (100 MB) |
-| `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history and its captured rows past this Go duration. `0` keeps everything forever. | `0` (recommended: `720h`) |
-| `DBB_CONNECTION_RETENTION` | Auto-delete **closed** connections — the session ledger — once they disconnected longer ago than this. Unset inherits the query window above; `0` keeps sessions forever. Must be ≥ the query window. | Inherits `DBB_QUERY_STORAGE_RETENTION` |
+| `DBB_RETENTION_QUERIES_DELETE_AFTER` | Auto-delete query history and its captured rows past this Go duration. `0` keeps everything forever. | never (recommended: `720h`) |
+| `DBB_RETENTION_CONNECTIONS_DELETE_AFTER` | Auto-delete **closed** connections — the session ledger — once they disconnected longer ago than this. Unset or `0` keeps sessions forever. Must be ≥ the statement window. | never |
 
 Retention is **opt-in**: upgrading dbbat never starts deleting audit history on
-its own. The per-query caps above bound one query's capture; retention bounds
+its own. Every window is a Go duration named `DBB_RETENTION_<OBJECT>_<ACTION>_AFTER`
+(config key `retention.<object>.<action>_after`); `0` means never. The one default
+that is not "never" is the local capture spool (`24h`). Anything wrong (a malformed
+or negative value, an unknown `DBB_RETENTION_*` name, one of the three
+pre-uniform names, which are never read)
+zeroes every window and logs a startup WARN: nothing is deleted. The WARN names the replacement variable. The per-query caps above bound one query's capture; retention bounds
 the accumulation of every query ever proxied.
 
 There are two windows because the two things expire on different schedules.
@@ -250,9 +255,9 @@ Statements and their captured rows are the bulk of the store and can hold
 customer data, so an operator wants them gone after 30 or 90 days.
 A connection is one small row per session — who, from where, to which database,
 under which grant — and that ledger is what a security review asks for a year
-later. `DBB_CONNECTION_RETENTION=8760h` with
-`DBB_QUERY_STORAGE_RETENTION=720h` keeps a year of sessions and a month of
-statements; `DBB_CONNECTION_RETENTION=0` keeps the ledger forever.
+later. `DBB_RETENTION_CONNECTIONS_DELETE_AFTER=8760h` with
+`DBB_RETENTION_QUERIES_DELETE_AFTER=720h` keeps a year of sessions and a month of
+statements; `DBB_RETENTION_CONNECTIONS_DELETE_AFTER=0` keeps the ledger forever.
 
 The connection window can never be **shorter** than the query window, because
 deleting a session deletes its statements — that would expire history earlier
@@ -418,6 +423,25 @@ and the slow logs are exact.
 | `DBB_RATE_LIMIT_REQUESTS_PER_MINUTE` | Requests per minute per authenticated user | `60` |
 | `DBB_RATE_LIMIT_REQUESTS_PER_MINUTE_ANON` | Requests per minute per source IP (unauthenticated) | `10` |
 | `DBB_RATE_LIMIT_BURST` | Short-burst tolerance | `10` |
+| `DBB_TRUSTED_PROXIES` | Reverse proxies (IPs or CIDRs, comma-separated) allowed to set the client IP through `X-Forwarded-For` / `X-Real-IP`. A malformed entry fails startup | empty (trust nobody) |
+
+The anonymous limit is keyed on the client IP, which is also the `client_ip` of
+the access log. By default dbbat trusts **no** proxy: the client IP is the
+address of the TCP peer, and forwarded headers are ignored, so a client cannot
+pick a fresh rate-limit bucket by rewriting `X-Forwarded-For`.
+
+Behind a reverse proxy or a Kubernetes ingress, that peer is the proxy, so every
+client would share one bucket. Declare the proxy's address range instead — for
+the Helm chart, `config.trustedProxies` set to the ingress controller's pod CIDR
+(for example `10.42.0.0/16` on k3s):
+
+```yaml
+config:
+  trustedProxies: "10.42.0.0/16"
+```
+
+Only list addresses that are really your proxies: any peer in the list can
+claim to be any client.
 
 ### Password Hashing (Argon2id)
 
@@ -556,7 +580,8 @@ required, and the approval gets its own audit trail tagged `via: auto_approve`
 | Variable | Description |
 |----------|-------------|
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Bot user OAuth token (`xoxb-…`). Empty disables notifications. |
-| `DBB_SLACK_NOTIFY_CHANNEL` | Channel id or `#name` to post to (default `#dbbat`). Required when the bot token is set. |
+| `DBB_SLACK_NOTIFY_CHANNEL` | Default channel id or `#name` to post to (default `#dbbat`). Required when the bot token is set. |
+| `DBB_SLACK_NOTIFY_CHANNELS` | Optional named channels, as comma-separated `key=channel` pairs (`prod=#dbbat-prod,nonprod=#dbbat-nonprod`). A grant definition picks one with its Slack channel setting (`notify_channel`); `none` posts nothing for that definition. Keys match `[a-z0-9][a-z0-9_-]*`. |
 | `DBB_PUBLIC_URL` | Externally reachable base URL, used for the "Review in dbbat" deep-link. Required when the bot token is set, unless the `public.web_ui_url` parameter is set (see [Global Parameters](#global-parameters)) — that parameter takes precedence when both are present. |
 | `DBB_SLACK_SIGNING_SECRET` | App signing secret. When set, notification messages carry **✅ Approve / ❌ Deny** buttons and DBBat serves `POST /api/v1/slack/interactions` to receive clicks. Empty keeps the link-through-UI flow (no buttons, no inbound endpoint). Requires the bot token — setting it without one fails at startup. The legacy name `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted as an alias; if both are set, the canonical `DBB_SLACK_SIGNING_SECRET` wins. |
 | `DBB_SLACK_NOTIFY_APP_TOKEN` | App-level token (`xapp-…`, scope `connections:write`). When set, DBBat opens an outbound **Socket Mode** connection and receives Approve/Deny clicks over it — no inbound reachability or signing secret needed. Renders the buttons on its own. Requires the bot token — setting it without one fails at startup. |
@@ -620,6 +645,24 @@ only the transport differs. Socket Mode and the HTTP endpoint can both be
 configured; at the Slack app level, enabling Socket Mode makes Slack deliver over
 the socket and ignore the request URL.
 
+#### Routing notifications per grant definition (optional)
+
+By default every notification goes to `DBB_SLACK_NOTIFY_CHANNEL`. To keep
+auto-approved, low-risk grants from burying the requests a human has to approve,
+name more channels and pick one per grant definition:
+
+```
+DBB_SLACK_NOTIFY_CHANNELS=prod=#dbbat-prod,nonprod=#dbbat-nonprod
+```
+
+A definition's Slack channel (`notify_channel` in the API) is then empty (the
+default channel), `none` (post nothing) or one of those keys. Grant requests,
+terminations, byte notices and approval holds all follow it. An approval hold on a
+`none` definition still goes to the default channel, so a held statement is never
+parked unseen. Follow-ups on a request stay in the channel it was first posted
+in. If a key is removed from the configuration, definitions that still name it
+use the default channel and a warning is logged at startup.
+
 #### Session termination notifications (optional)
 
 When a bot token is configured, DBBat also posts to `DBB_SLACK_NOTIFY_CHANNEL`
@@ -666,6 +709,20 @@ in 12 min). The traffic is not blocked."
 
 See [the soft limit on bytes](/docs/features/access-control#byte-soft-limit) for
 how the bytes are counted.
+
+### Auto-approved renewals
+
+Automated clients often re-request the same auto-approved grant many times a
+day. With a renewal window, a request that renews an earlier auto-approved one
+(same user, database and definition, with the same `read_only` / `block_ddl` /
+`block_copy` controls, the earlier grant still active or ended within the
+window) is posted as a one-line reply in the thread of the first request, rather
+than as a new channel message. Requests that need a human decision always stay
+top-level, and the thread root rolls over once it is older than the window.
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_SLACK_NOTIFY_RENEWAL_WINDOW` | A Go duration. Default `24h`; `0` turns threading off. A negative or malformed value is a startup failure. |
 
 ## Configuration File
 

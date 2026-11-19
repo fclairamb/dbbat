@@ -12,7 +12,7 @@ func TestDumpEnvVars(t *testing.T) {
 	t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	t.Setenv("DBB_DUMP_DIR", "/tmp/test-dumps")
 	t.Setenv("DBB_DUMP_MAX_SIZE", "999")
-	t.Setenv("DBB_DUMP_RETENTION", "48h")
+	t.Setenv("DBB_RETENTION_DUMPS_DELETE_AFTER", "48h")
 	t.Setenv("DBB_DUMP_UPLOAD_URL", "s3://captures/dbbat")
 
 	cfg, err := Load(LoadOptions{})
@@ -20,7 +20,7 @@ func TestDumpEnvVars(t *testing.T) {
 
 	assert.Equal(t, "/tmp/test-dumps", cfg.Dump.Dir)
 	assert.Equal(t, int64(999), cfg.Dump.MaxSize)
-	assert.Equal(t, "48h", cfg.Dump.Retention)
+	assert.Equal(t, "48h", cfg.Retention.Dumps.DeleteAfter)
 	assert.Equal(t, "s3://captures/dbbat", cfg.Dump.UploadURL)
 }
 

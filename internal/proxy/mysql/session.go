@@ -108,6 +108,10 @@ type Session struct {
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
+	// usage is this session's share of its grant's quota consumption, so the
+	// grant's quotas are one budget across all its sessions. Nil when the
+	// grant has no quota.
+	usage *cache.UsageHandle
 	// liveSession is signaled when an admin ends *this* session. Registered in
 	// recordConnection rather than next to the revocation handle at auth,
 	// because it is keyed by the connection uid, which does not exist until the
@@ -226,6 +230,15 @@ func (s *Session) Run() error {
 	// bytes. It is disarmed the moment the handshake is over.
 	limited := newPreAuthLimitedConn(s.clientConn)
 
+	// The handshake also runs under the pre-auth window. go-mysql reads and
+	// writes the greeting, the optional TLS upgrade and the auth exchange
+	// inside NewCustomizedConn with no deadline of its own, so it is set on
+	// the conn underneath before the call and lifted once it returns: a socket
+	// that says nothing would otherwise hold this goroutine forever.
+	if err := shared.ArmPreAuthDeadline(s.clientConn, s.server.preAuth.Timeout()); err != nil {
+		return fmt.Errorf("set pre-auth deadline: %w", err)
+	}
+
 	conn, err := s.server.gomysqlServer.NewCustomizedConn(limited, authHandler, commandHandler)
 
 	limited.disarm()
@@ -245,6 +258,12 @@ func (s *Session) Run() error {
 		}
 
 		return fmt.Errorf("MySQL handshake: %w", err)
+	}
+
+	// Authenticated: an established session may sit idle for as long as the
+	// client keeps it open. The upstream dial below carries its own timeout.
+	if err := shared.ClearPreAuthDeadline(s.clientConn); err != nil {
+		return fmt.Errorf("clear pre-auth deadline: %w", err)
 	}
 
 	s.serverConn = conn
@@ -453,12 +472,15 @@ func (s *Session) recordConnection() error {
 	s.liveSession = s.server.store.Sessions().Register(conn.UID)
 	s.guard.WithTermination(s.liveSession)
 
+	// The quota refresh reads this connection from memory, not the store.
+	s.usage.SetConnection(conn.UID)
+
 	dbName := ""
 	if s.database != nil {
 		dbName = s.database.Name
 	}
 
-	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, s.grant, conn.UID, s.user, dbName)
+	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, shared.ApprovalDialectMySQL, s.grant, conn.UID, s.user, dbName)
 	s.stream = shared.NewStreamPublisher(s.server.approvalDeps, conn.UID, s.user, dbName).
 		WithApprovals(s.approvalGate)
 	s.stream.Connection(s.ctx, shared.ConnectionOpened)
@@ -473,6 +495,8 @@ func (s *Session) deregisterRevocation() {
 	if s.connection != nil {
 		s.server.store.Sessions().Deregister(s.connection.UID, s.liveSession)
 	}
+
+	s.usage.Release()
 
 	if s.grant == nil || s.revocation == nil {
 		return

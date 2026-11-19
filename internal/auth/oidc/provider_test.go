@@ -273,6 +273,7 @@ func TestExchangeCodeHappyPath(t *testing.T) {
 
 	assert.Equal(t, "user-42", user.ProviderID)
 	assert.Equal(t, "alice@example.com", user.Email, "email is normalized to lower case")
+	assert.True(t, user.EmailVerified, "email_verified: true must reach the OAuthUser")
 	assert.Equal(t, "Alice Example", user.DisplayName)
 	assert.Equal(t, "https://example.test/alice.png", user.AvatarURL)
 	assert.Equal(t, "verifier-xyz", issuer.tokenForm().Get("code_verifier"),
@@ -602,6 +603,23 @@ func TestExchangeCodeRejectsUnverifiedEmail(t *testing.T) {
 
 	_, err := p.ExchangeCodeWithVerifier(t.Context(), "auth-code", "https://dbbat.test/cb", "v")
 	require.ErrorIs(t, err, ErrEmailNotVerified)
+}
+
+// TestExchangeCodeAbsentEmailVerifiedIsNotVerified: an issuer that omits the
+// claim is accepted, but its email must not count as verified, since that is
+// what gates linking onto an existing account by email.
+func TestExchangeCodeAbsentEmailVerifiedIsNotVerified(t *testing.T) {
+	t.Parallel()
+
+	issuer := newTestIssuer(t)
+	delete(issuer.claims, "email_verified")
+
+	p := issuer.provider(t)
+
+	user, err := p.ExchangeCodeWithVerifier(t.Context(), "auth-code", "https://dbbat.test/cb", "v")
+	require.NoError(t, err)
+	assert.Equal(t, "alice@example.com", user.Email)
+	assert.False(t, user.EmailVerified)
 }
 
 func TestExchangeCodeEnforcesEmailDomainAllowlist(t *testing.T) {

@@ -3,6 +3,7 @@ import { useAuditEvents, useUsers, type AuditEvent } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
+import { UnverifiedBadge } from "@/components/shared/UnverifiedBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -81,9 +82,15 @@ function AuditPage() {
       key: "event_type",
       header: "Event",
       cell: (e) => (
+        <div className="flex items-center gap-2">
         <Badge variant={getEventBadgeVariant(e.event_type)}>
           {e.event_type}
         </Badge>
+        <UnverifiedBadge
+          chained={e.chained}
+          testId={`audit-unverified-badge-${e.uid}`}
+        />
+        </div>
       ),
     },
     {

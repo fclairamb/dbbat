@@ -32,7 +32,7 @@ func TestQueryEventCarriesTheHoldOutcome(t *testing.T) {
 		PollInterval: 10 * time.Millisecond,
 	}
 
-	gate := NewApprovalGate(deps, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{`(?i)DELETE`}}}, connUID, user, "prod")
+	gate := NewApprovalGate(deps, ApprovalDialectStandard, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{`(?i)DELETE`}}}, connUID, user, "prod")
 	publisher := NewStreamPublisher(deps, connUID, user, "prod").WithApprovals(gate)
 
 	sub := broker.Subscribe(func(string, *events.Event) bool { return true }, 64)
@@ -113,7 +113,7 @@ func TestQueryEventWithoutAHoldCarriesNoResolver(t *testing.T) {
 	user := &store.User{UID: uuid.New(), Username: "alice"}
 
 	deps := ApprovalDeps{Enabled: true, Broker: broker}
-	gate := NewApprovalGate(deps, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{`(?i)DELETE`}}}, connUID, user, "prod")
+	gate := NewApprovalGate(deps, ApprovalDialectStandard, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{`(?i)DELETE`}}}, connUID, user, "prod")
 	publisher := NewStreamPublisher(deps, connUID, user, "prod").WithApprovals(gate)
 
 	// A resolution for *another* statement is remembered by the gate.
@@ -151,7 +151,7 @@ func TestResolutionForIgnoresOtherQueries(t *testing.T) {
 		t.Fatal("a nil gate must resolve nothing")
 	}
 
-	gate = NewApprovalGate(ApprovalDeps{}, nil, uuid.New(), nil, "")
+	gate = NewApprovalGate(ApprovalDeps{}, ApprovalDialectStandard, nil, uuid.New(), nil, "")
 
 	if gate.ResolutionFor(uuid.New()) != nil {
 		t.Fatal("a gate that resolved nothing must report nothing")

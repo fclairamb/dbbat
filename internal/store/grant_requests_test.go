@@ -481,3 +481,125 @@ func TestGetGrantRequestByResultingGrant(t *testing.T) {
 		t.Errorf("unknown grant: err = %v, want ErrGrantRequestNotFound", err)
 	}
 }
+
+// renewalFixture files, auto-approves and posts (Slack coordinates set) one
+// request for the given user/server/definition and returns it.
+func renewalFixture(
+	t *testing.T, ctx context.Context, s *Store, user *User, db *Server, def *GrantDefinition,
+) (*GrantRequest, *Grant) {
+	t.Helper()
+
+	req, err := s.CreateGrantRequest(ctx, &GrantRequest{
+		UserID: user.UID, GrantDefinitionID: def.UID, DatabaseID: db.UID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	grant, updated, err := s.AutoApproveGrantRequest(ctx, req.UID, user.UID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetGrantRequestSlackMessage(ctx, updated.UID, "C1", "1.1"); err != nil {
+		t.Fatal(err)
+	}
+
+	return updated, grant
+}
+
+func TestFindRenewalRoot(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	admin, user, db, def := setupRequestFixtures(t, ctx, s, "renewal")
+	controls := []string{ControlReadOnly}
+	since := time.Now().Add(-24 * time.Hour)
+
+	find := func(u *User, d *Server, lineage uuid.UUID, c []string, at time.Time) *GrantRequest {
+		t.Helper()
+
+		root, err := s.FindRenewalRoot(ctx, u.UID, d.UID, lineage, c, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return root
+	}
+
+	if find(user, db, def.LineageUID, controls, since) != nil {
+		t.Fatal("no request yet: want no root")
+	}
+
+	first, grant := renewalFixture(t, ctx, s, user, db, def)
+
+	if got := find(user, db, def.LineageUID, controls, since); got == nil || got.UID != first.UID {
+		t.Fatalf("root = %v, want %v", got, first.UID)
+	}
+
+	// Other user, database, lineage and controls never match.
+	other, err := s.CreateUser(ctx, "renewal_other", "hash", []string{RoleConnector})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherDB, err := s.CreateServer(ctx, &Server{
+		Name: "renewal_other_db", Host: "localhost", Port: 5432, DatabaseName: "db",
+		Username: "u", Password: "p", SSLMode: "disable",
+	}, testEncryptionKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if find(other, db, def.LineageUID, controls, since) != nil {
+		t.Error("other user matched")
+	}
+
+	if find(user, otherDB, def.LineageUID, controls, since) != nil {
+		t.Error("other database matched")
+	}
+
+	if find(user, db, uuid.New(), controls, since) != nil {
+		t.Error("other lineage matched")
+	}
+
+	if find(user, db, def.LineageUID, []string{ControlReadOnly, ControlBlockDDL}, since) != nil {
+		t.Error("different controls must break the chain")
+	}
+
+	// A renewal posted as a reply is never a root.
+	second, _ := renewalFixture(t, ctx, s, user, db, def)
+	if err := s.SetGrantRequestSlackThread(ctx, second.UID, first.UID, "C1", "1.1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := find(user, db, def.LineageUID, controls, since); got == nil || got.UID != first.UID {
+		t.Fatalf("a reply row was returned as root: %v", got)
+	}
+
+	// Window edges: root older than since rolls over.
+	if find(user, db, def.LineageUID, controls, time.Now().Add(time.Minute)) != nil {
+		t.Error("root older than the window must not be returned")
+	}
+
+	// Revoked grant: still a root while the revocation is inside the window.
+	if err := s.RevokeGrant(ctx, grant.UID, admin.UID); err != nil {
+		t.Fatal(err)
+	}
+
+	if find(user, db, def.LineageUID, controls, since) == nil {
+		t.Error("recently revoked grant should still be a root")
+	}
+
+	// ... and not once it ended before since.
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE access_grants SET revoked_at = now() - interval '48 hours' WHERE uid = ?", grant.UID); err != nil {
+		t.Fatal(err)
+	}
+
+	if find(user, db, def.LineageUID, controls, since) != nil {
+		t.Error("grant revoked before the window must not be a root")
+	}
+}

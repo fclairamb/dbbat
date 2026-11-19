@@ -57,13 +57,9 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	// Check rate limit BEFORE verifying credentials
-	// Skip rate limiting in test mode
-	if !s.isTestMode() {
-		if allowed, retryAfter := s.authFailureTracker.checkRateLimit(req.Username); !allowed {
-			writeRateLimited(c, retryAfter)
-			return
-		}
+	// Per-source backoff BEFORE verifying credentials (the username ceiling only refuses wrong passwords, in failAuth)
+	if !s.checkAuthThrottle(c, req.Username) {
+		return
 	}
 
 	ctx := c.Request.Context()
@@ -71,21 +67,19 @@ func (s *Server) handleLogin(c *gin.Context) {
 	// Look up user
 	user, err := s.store.GetUserByUsername(ctx, req.Username)
 	if err != nil {
-		s.authFailureTracker.recordFailure(req.Username)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
+		s.failAuth(c, req.Username, "invalid credentials")
 		return
 	}
 
 	// Verify password
 	valid, err := crypto.VerifyPassword(user.PasswordHash, req.Password)
 	if err != nil || !valid {
-		s.authFailureTracker.recordFailure(req.Username)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
+		s.failAuth(c, req.Username, "invalid credentials")
 		return
 	}
 
 	// Reset failure count on successful login
-	s.authFailureTracker.resetFailures(req.Username)
+	s.noteAuthSuccess(c, req.Username)
 
 	// Check if password change is required BEFORE creating a session
 	// Users with unchanged passwords cannot login - they must change password first
@@ -213,13 +207,9 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 		return
 	}
 
-	// Check rate limit BEFORE verifying credentials
-	// Skip rate limiting in test mode
-	if !s.isTestMode() {
-		if allowed, retryAfter := s.authFailureTracker.checkRateLimit(req.Username); !allowed {
-			writeRateLimited(c, retryAfter)
-			return
-		}
+	// Per-source backoff BEFORE verifying credentials (the username ceiling only refuses wrong passwords, in failAuth)
+	if !s.checkAuthThrottle(c, req.Username) {
+		return
 	}
 
 	ctx := c.Request.Context()
@@ -227,21 +217,19 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 	// Look up user
 	user, err := s.store.GetUserByUsername(ctx, req.Username)
 	if err != nil {
-		s.authFailureTracker.recordFailure(req.Username)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid username or current password")
+		s.failAuth(c, req.Username, "Invalid username or current password")
 		return
 	}
 
 	// Verify current password
 	valid, err := crypto.VerifyPassword(user.PasswordHash, req.CurrentPassword)
 	if err != nil || !valid {
-		s.authFailureTracker.recordFailure(req.Username)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid username or current password")
+		s.failAuth(c, req.Username, "Invalid username or current password")
 		return
 	}
 
 	// Reset failure count on successful credential verification
-	s.authFailureTracker.resetFailures(req.Username)
+	s.noteAuthSuccess(c, req.Username)
 
 	// Validate new password strength
 	if len(req.NewPassword) < minPasswordLength {
@@ -302,38 +290,30 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		// Username provided - authenticate via username
 		rateLimitKey = req.Username
 
-		// Check rate limit BEFORE verifying credentials
-		if !s.isTestMode() {
-			if allowed, retryAfter := s.authFailureTracker.checkRateLimit(rateLimitKey); !allowed {
-				writeRateLimited(c, retryAfter)
-				return
-			}
+		// Per-source backoff BEFORE verifying credentials (the username ceiling only refuses wrong passwords, in failAuth)
+		if !s.checkAuthThrottle(c, rateLimitKey) {
+			return
 		}
 
 		var err error
 		authUser, err = s.store.GetUserByUsername(ctx, req.Username)
 		if err != nil {
-			s.authFailureTracker.recordFailure(rateLimitKey)
-			writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid username or current password")
+			s.failAuth(c, rateLimitKey, "Invalid username or current password")
 			return
 		}
 	} else {
 		// No username - user is changing their own password, use target UID
 		rateLimitKey = targetUID.String()
 
-		// Check rate limit BEFORE verifying credentials
-		if !s.isTestMode() {
-			if allowed, retryAfter := s.authFailureTracker.checkRateLimit(rateLimitKey); !allowed {
-				writeRateLimited(c, retryAfter)
-				return
-			}
+		// Per-source backoff BEFORE verifying credentials (the username ceiling only refuses wrong passwords, in failAuth)
+		if !s.checkAuthThrottle(c, rateLimitKey) {
+			return
 		}
 
 		var err error
 		authUser, err = s.store.GetUserByUID(ctx, targetUID)
 		if err != nil {
-			s.authFailureTracker.recordFailure(rateLimitKey)
-			writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid current password")
+			s.failAuth(c, rateLimitKey, "Invalid current password")
 			return
 		}
 	}
@@ -341,13 +321,12 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 	// Verify the authenticating user's password
 	valid, err := crypto.VerifyPassword(authUser.PasswordHash, req.CurrentPassword)
 	if err != nil || !valid {
-		s.authFailureTracker.recordFailure(rateLimitKey)
-		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid current password")
+		s.failAuth(c, rateLimitKey, "Invalid current password")
 		return
 	}
 
 	// Reset failure count on successful credential verification
-	s.authFailureTracker.resetFailures(rateLimitKey)
+	s.noteAuthSuccess(c, rateLimitKey)
 
 	// Get the target user whose password will be changed
 	// If no username was provided, authUser IS the target user (already looked up by targetUID)
