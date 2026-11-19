@@ -2097,9 +2097,15 @@ func TestQueryChainStampsHeadOnOrphanReconcile(t *testing.T) {
 	store.SetRunID("live-run")
 	require.NoError(t, store.RegisterInstance(ctx))
 
+	var woken []uuid.UUID
+
+	store.SetConnectionClosedHook(func(serverUID uuid.UUID, _ time.Time) { woken = append(woken, serverUID) })
+
 	reclaimed, err := store.ReclaimDeadInstanceConnections(ctx)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), reclaimed, "the dead run's connection must be reconciled")
+	require.Equal(t, []uuid.UUID{conn.DatabaseID}, woken,
+		"the crash reconcile must wake the retention sweeper, once per server")
 
 	closed, err := store.GetConnectionByUID(ctx, conn.UID)
 	require.NoError(t, err)

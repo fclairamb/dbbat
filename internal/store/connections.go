@@ -519,14 +519,36 @@ func noLiveOwner() string {
 // connection at a time — see writeConnectionAudit for why the audit write must
 // not be able to roll a completed reconcile back.
 func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *bun.UpdateQuery) (int64, error) {
-	var uids []uuid.UUID
+	var (
+		uids    []uuid.UUID
+		servers []uuid.UUID
+	)
+
+	// Scanned as rows, not a slice of structs: the two columns are all the
+	// reconcile needs back.
+	var closedRows []struct {
+		UID        uuid.UUID `bun:"uid"`
+		DatabaseID uuid.UUID `bun:"database_id"`
+	}
+
+	split := func() {
+		uids = make([]uuid.UUID, 0, len(closedRows))
+		servers = make([]uuid.UUID, 0, len(closedRows))
+
+		for _, r := range closedRows {
+			uids = append(uids, r.UID)
+			servers = append(servers, r.DatabaseID)
+		}
+	}
 
 	if !s.ChainEnabled() {
-		if err := scope(s.orphanCloseQuery(s.db)).Returning("uid").Scan(ctx, &uids); err != nil {
+		if err := scope(s.orphanCloseQuery(s.db)).Returning("uid, database_id").Scan(ctx, &closedRows); err != nil {
 			return 0, fmt.Errorf("failed to close orphaned connections: %w", err)
 		}
 
+		split()
 		s.recordReconciledCloses(ctx, uids)
+		s.wakeRetention(servers)
 
 		return int64(len(uids)), nil
 	}
@@ -534,11 +556,13 @@ func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *
 	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// Reset per attempt: RunInTx does not retry, but a partially filled
 		// slice from a failed statement must not survive into the audit pass.
-		uids = nil
+		closedRows = nil
 
-		if err := scope(s.orphanCloseQuery(tx)).Returning("uid").Scan(ctx, &uids); err != nil {
+		if err := scope(s.orphanCloseQuery(tx)).Returning("uid, database_id").Scan(ctx, &closedRows); err != nil {
 			return fmt.Errorf("failed to close orphaned connections: %w", err)
 		}
+
+		split()
 
 		if len(uids) == 0 {
 			return nil
@@ -551,8 +575,32 @@ func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *
 	}
 
 	s.recordReconciledCloses(ctx, uids)
+	s.wakeRetention(servers)
 
 	return int64(len(uids)), nil
+}
+
+// wakeRetention tells the retention sweeper that the reconcile closed sessions
+// on these servers, once per server: they are now due their windows like any
+// session closed by CloseConnection.
+func (s *Store) wakeRetention(servers []uuid.UUID) {
+	hook := s.connectionClosed.Load()
+	if hook == nil {
+		return
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(servers))
+	now := time.Now()
+
+	for _, id := range servers {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+
+		seen[id] = struct{}{}
+
+		(*hook)(id, now)
+	}
 }
 
 // orphanCloseQuery builds the reconcile's UPDATE, minus the scope predicate its

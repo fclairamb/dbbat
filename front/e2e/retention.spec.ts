@@ -143,4 +143,41 @@ test.describe("Retention", () => {
       "hours",
     );
   });
+
+  // The e2e server has no archive bucket, so no connection can really be
+  // archived: the API answers are faked and what is checked is the badge.
+  test("an archived connection is badged in the list and on its page", async ({
+    authenticatedPage: page,
+  }) => {
+    const uid = "3f1b0c9e-0000-4000-8000-0000000000a1";
+    const at = new Date().toISOString();
+    const base = {
+      uid,
+      user_id: "3f1b0c9e-0000-4000-8000-000000000003",
+      database_id: "3f1b0c9e-0000-4000-8000-000000000004",
+      source_ip: "127.0.0.1",
+      connected_at: at,
+      last_activity_at: at,
+      disconnected_at: at,
+      queries: 0,
+      bytes_transferred: 0,
+    };
+
+    await page.route(/\/api\/v1\/connections(\?.*)?$/, (route) =>
+      route.fulfill({
+        json: { connections: [{ ...base, archived_at: at }] },
+      }),
+    );
+    await page.route(`**/api/v1/connections/${uid}`, (route) =>
+      route.fulfill({
+        json: { ...base, archived_at: at, rows_location: "archive" },
+      }),
+    );
+
+    await page.goto("connections");
+    await expect(page.getByTestId("connection-archived-badge")).toBeVisible();
+
+    await page.goto(`connections/${uid}`);
+    await expect(page.getByTestId("connection-archived-badge")).toBeVisible();
+  });
 });
