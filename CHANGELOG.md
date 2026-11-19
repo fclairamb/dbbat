@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.33.1](https://github.com/fclairamb/dbbat/compare/v0.33.0...v0.33.1) (2026-11-19)
+
+
+### Security
+
+* **auth:** the SSO identity-link callback is bound to the browser that started the link ([#515](https://github.com/fclairamb/dbbat/issues/515)) ([e949402](https://github.com/fclairamb/dbbat/commit/e9494026a267aa9c8bf27c081323ff4217ce6965))
+* **oracle:** logins without `AUTH_PASSWORD` must prove they hold the key ([#518](https://github.com/fclairamb/dbbat/issues/518)) ([27f20ef](https://github.com/fclairamb/dbbat/commit/27f20ef51e5c6d2225794865edc47a0d454a28e0))
+* **mssql:** a dynamic-SQL procedure name written bracketed or quoted (`[sp_executesql]`, `"sp_executesql"`) is refused instead of slipping past the grant checks ([#516](https://github.com/fclairamb/dbbat/issues/516)) ([319afa2](https://github.com/fclairamb/dbbat/commit/319afa2838777c8fb8bf59c10281c938ec1d0b5c))
+* **audit:** the `user.updated` audit entry no longer records the password ([#517](https://github.com/fclairamb/dbbat/issues/517)) ([b806b5b](https://github.com/fclairamb/dbbat/commit/b806b5b068ddf60b3297f03618751de00e1d199a))
+
 ## [0.33.0](https://github.com/fclairamb/dbbat/compare/v0.32.3...v0.33.0) (2026-11-19)
 
 
