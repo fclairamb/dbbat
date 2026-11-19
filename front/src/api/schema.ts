@@ -356,6 +356,10 @@ export interface paths {
          *     (it never logs anyone in), refuses an identity already linked to
          *     another user with 409, records `user.identity_linked` with
          *     `method: session`, and redirects the browser to the profile page.
+         *     The response also sets an HttpOnly `dbbat_link_nonce` cookie scoped
+         *     to the provider's callback path; the callback links only when the
+         *     browser presents it, so the flow completes in the browser that
+         *     started it and nowhere else.
          *     Web session only: API keys are refused.
          */
         post: operations["linkOidcIdentity"];
@@ -381,6 +385,10 @@ export interface paths {
          *     (it never logs anyone in), refuses an identity already linked to
          *     another user with 409, records `user.identity_linked` with
          *     `method: session`, and redirects the browser to the profile page.
+         *     The response also sets an HttpOnly `dbbat_link_nonce` cookie scoped
+         *     to the provider's callback path; the callback links only when the
+         *     browser presents it, so the flow completes in the browser that
+         *     started it and nowhere else.
          *     Web session only: API keys are refused.
          */
         post: operations["linkSlackIdentity"];

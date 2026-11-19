@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -25,6 +28,48 @@ const identityLinkMethodSession = "session"
 
 // profilePath is where the link flow starts and ends.
 const profilePath = "/profile"
+
+// linkNonceCookie carries the nonce binding a link flow to the browser that
+// started it. Scoped to the provider's callback path, HttpOnly, and SameSite=Lax
+// so it rides the identity provider's top-level redirect back to us.
+const linkNonceCookie = "dbbat_link_nonce"
+
+// linkNonceHash is what the state row stores: the cookie itself never touches
+// the database.
+func linkNonceHash(nonce string) string {
+	sum := sha256.Sum256([]byte(nonce))
+
+	return hex.EncodeToString(sum[:])
+}
+
+// setLinkNonceCookie sets (maxAge > 0) or clears (maxAge < 0) the link nonce.
+func (s *Server) setLinkNonceCookie(c *gin.Context, providerName, value string, maxAge int) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     linkNonceCookie,
+		Value:    value,
+		Path:     callbackPath(providerName),
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   requestScheme(c.Request) == "https",
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// linkNonceMatches reports whether the callback request carries the nonce
+// cookie of the link flow that minted state, and clears the cookie. A state row
+// without a nonce hash never matches: every link flow mints one.
+func (s *Server) linkNonceMatches(c *gin.Context, providerName string, state *store.OAuthState) bool {
+	want := stateMetadataOf(state).LinkNonceHash
+	got, err := c.Cookie(linkNonceCookie)
+
+	s.setLinkNonceCookie(c, providerName, "", -1)
+
+	if want == "" || err != nil || got == "" {
+		return false
+	}
+
+	return subtle.ConstantTimeCompare([]byte(linkNonceHash(got)), []byte(want)) == 1
+}
 
 // OAuthLinkResponse is the body of POST /auth/{provider}/link.
 type OAuthLinkResponse struct {
