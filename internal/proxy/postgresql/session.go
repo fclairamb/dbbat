@@ -208,6 +208,7 @@ type Session struct {
 	upstreamTLS           bool                    // Whether the proxy→upstream leg ended up encrypted
 	guard                 *shared.LimitGuard      // Mid-stream time/bandwidth limit enforcement
 	revocation            *cache.RevocationHandle // Signaled when this session's grant is revoked mid-flight
+	usage                 *cache.UsageHandle      // This session's share of its grant's quota consumption (nil: no quota)
 	liveSession           *cache.SessionHandle    // Signaled when an admin ends *this* session (POST /connections/{uid}/terminate)
 
 	// queryTagging is this session's tagging decision, taken once at auth:
@@ -561,6 +562,11 @@ func (s *Session) proxyMessages() error {
 	// relaying such a request from another replica — signals.
 	s.liveSession = s.store.Sessions().Register(s.connectionUID)
 
+	// And add it to its grant's shared consumption reading, so the grant's
+	// quotas are one budget across all its sessions. Released in cleanup.
+	s.usage = shared.RegisterGrantUsage(s.store.Usage(), s.grant, s.bytesFromClient, s.bytesToClient)
+	s.usage.SetConnection(s.connectionUID)
+
 	// Build the limit guard once the grant is known, then run a watchdog that
 	// tears the session down if a limit is crossed (or the grant is revoked)
 	// while a query is blocked producing no traffic (the inline check in
@@ -568,6 +574,7 @@ func (s *Session) proxyMessages() error {
 	// error frame).
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag()).
+		WithUsage(s.usage).
 		WithTermination(s.liveSession).
 		WithStatementTimeout(s.statementLimit, shared.StatementTimeoutGrace, &s.statementClock)
 
@@ -575,7 +582,7 @@ func (s *Session) proxyMessages() error {
 	// per-statement cost of the (overwhelmingly common) no-pattern case is a
 	// single nil check on the hot path.
 	s.approvalGate = shared.NewApprovalGate(
-		s.approvalDeps, s.grant, s.connectionUID, s.user, s.database.Name,
+		s.approvalDeps, shared.ApprovalDialectStandard, s.grant, s.connectionUID, s.user, s.database.Name,
 	)
 	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, s.database.Name).
 		WithApprovals(s.approvalGate)
@@ -2005,6 +2012,7 @@ func (s *Session) cleanup() {
 	}
 
 	s.store.Sessions().Deregister(s.connectionUID, s.liveSession)
+	s.usage.Release()
 
 	if s.dumpWriter != nil {
 		if err := s.dumpWriter.Close(); err != nil {

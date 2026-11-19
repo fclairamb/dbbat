@@ -238,6 +238,19 @@ function ConnectionDetailPage() {
             ) : (
               <Badge variant="default">Active</Badge>
             )}
+            {connection.rows_location === "archive" && (
+              <Badge variant="outline" data-testid="connection-archived-badge">
+                Archived
+              </Badge>
+            )}
+            {connection.rows_location === "deleted" && (
+              <Badge
+                variant="outline"
+                data-testid="connection-archive-deleted-badge"
+              >
+                Archive deleted
+              </Badge>
+            )}
           </>
         }
       />

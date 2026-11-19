@@ -1110,10 +1110,10 @@ Walks the per-connection query chains. **Requires admin role.**
 ```
 
 `chains_with_truncated_prefix` counts chains missing their oldest statements but
-still holding some — what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a
+still holding some — what `DBB_RETENTION_QUERIES_DELETE_AFTER` leaves behind on a
 long-lived session. `chains_emptied_by_retention` counts the sessions that
 window emptied completely, which is the ordinary state of every closed session
-between `DBB_QUERY_STORAGE_RETENTION` and a longer `DBB_CONNECTION_RETENTION`.
+between `DBB_RETENTION_QUERIES_DELETE_AFTER` and a longer `DBB_RETENTION_CONNECTIONS_DELETE_AFTER`.
 Both are expected housekeeping, not tampering, and they are separate numbers so
 the second cannot hide the first. The response never contains SQL text,
 parameters or any other statement content.

@@ -295,7 +295,14 @@ func setupFixtureWith(ctx context.Context, t *testing.T, dumpDir, sslMode string
 	pgPort, _ := pgContainer.MappedPort(ctx, "5432")
 	pgDSN := fmt.Sprintf("postgres://test:test@%s:%s/dbbat_test?sslmode=disable", pgHost, pgPort.Port())
 
-	dataStore, err := store.New(ctx, pgDSN)
+	encKey := make([]byte, 32)
+	for i := range encKey {
+		encKey[i] = byte(i + 1)
+	}
+
+	// The encryption key also seeds the audit/query chain key, as it does in a
+	// served process: without it ChainEnabled is false and nothing is chained.
+	dataStore, err := store.New(ctx, pgDSN, store.Options{EncryptionKey: encKey})
 	require.NoError(t, err)
 	t.Cleanup(func() { dataStore.Close() })
 	require.NoError(t, dataStore.Migrate(ctx))
@@ -305,11 +312,6 @@ func setupFixtureWith(ctx context.Context, t *testing.T, dumpDir, sslMode string
 
 	user, err := dataStore.CreateUser(ctx, fixtureUser, hash, []string{"connector"})
 	require.NoError(t, err)
-
-	encKey := make([]byte, 32)
-	for i := range encKey {
-		encKey[i] = byte(i + 1)
-	}
 
 	db, err := dataStore.CreateServer(ctx, &store.Server{
 		Name:         testDBName,
@@ -330,7 +332,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, dumpDir, sslMode string
 
 	dumpCfg := config.DumpConfig{}
 	if dumpDir != "" {
-		dumpCfg = config.DumpConfig{Dir: dumpDir, MaxSize: config.DefaultDumpMaxSize, Retention: config.DefaultDumpRetention}
+		dumpCfg = config.DumpConfig{Dir: dumpDir, MaxSize: config.DefaultDumpMaxSize}
 	}
 
 	proxy, err := NewServer(dataStore, encKey, queryStorage, dumpCfg, nil, config.MongoConfig{}, slog.Default())
@@ -1148,13 +1150,22 @@ func TestIntegration_UpstreamAppNameCarriesConnectionUID(t *testing.T) {
 
 	require.NoError(t, client.Ping(ctx, nil))
 
+	// Ask mongod itself, over a direct root connection: currentOp is not on
+	// the proxy allowlist, so it cannot go through dbbat. $all includes the
+	// idle upstream connection dbbat holds for this session.
+	direct := f.dialUpstreamDirect(ctx)
+
 	var result struct {
 		Inprog []bson.M `bson:"inprog"`
 	}
-	require.NoError(t, client.Database("admin").
-		RunCommand(ctx, bson.D{{Key: "currentOp", Value: 1}, {Key: "$ownOps", Value: true}}).
+	require.NoError(t, direct.Database("admin").
+		RunCommand(ctx, bson.D{
+			{Key: "currentOp", Value: 1},
+			{Key: "$all", Value: true},
+			{Key: "appName", Value: bson.D{{Key: "$regex", Value: "^dbbat/"}}},
+		}).
 		Decode(&result))
-	require.NotEmpty(t, result.Inprog)
+	require.NotEmpty(t, result.Inprog, "mongod saw no connection whose appName starts with dbbat/")
 
 	appName, _ := result.Inprog[0]["appName"].(string)
 

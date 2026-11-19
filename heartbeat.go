@@ -22,6 +22,7 @@ const (
 	goroutineNameOpenStamps    = "open query chain stamp refresh"
 	goroutineNameTerminations  = "session termination poll"
 	goroutineNameGrantBytes    = "grant byte soft limit sweep"
+	goroutineNameGrantUsage    = "grant quota usage refresh"
 )
 
 // instanceHeartbeat keeps this process's row in the instance registry fresh.
@@ -238,6 +239,12 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 	grantBytes := time.NewTicker(store.GrantBytesSweepInterval)
 	defer grantBytes.Stop()
 
+	// The quota refresh: what makes one replica's sessions see the traffic of
+	// a grant's sessions on the others. Its tick is the cross-replica lag of a
+	// grant's quotas. See cache.UsageRegistry.
+	grantUsage := time.NewTicker(store.GrantUsageRefreshInterval)
+	defer grantUsage.Stop()
+
 	// Every unit of work runs under safe.RunMaintenance, per turn and
 	// individually. This is a goroutine of its own, so no recover reaches it and
 	// an unguarded panic in any of these store calls would end the process with
@@ -263,6 +270,8 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 			h.guarded(ctx, goroutineNameTerminations, func() { h.pollTerminations(ctx) })
 		case <-grantBytes.C:
 			h.guarded(ctx, goroutineNameGrantBytes, func() { h.sweepGrantBytes(ctx) })
+		case <-grantUsage.C:
+			h.guarded(ctx, goroutineNameGrantUsage, func() { h.refreshGrantUsage(ctx) })
 		case <-h.stop:
 			return
 		}
@@ -442,6 +451,15 @@ func (h *instanceHeartbeat) sweepGrantBytes(ctx context.Context) {
 			slog.Int64("total_bytes", ev.Total),
 			slog.Int64("step_bytes", ev.Step),
 			slog.Int64("steps", ev.Steps))
+	}
+}
+
+// refreshGrantUsage re-reads the consumption of the grants with live
+// quota-bearing sessions here. A failure keeps the previous reading; the next
+// tick tries again.
+func (h *instanceHeartbeat) refreshGrantUsage(ctx context.Context) {
+	if err := h.store.RefreshGrantUsage(ctx); err != nil {
+		h.logger.WarnContext(ctx, "failed to refresh grant quota usage", slog.Any("error", err))
 	}
 }
 

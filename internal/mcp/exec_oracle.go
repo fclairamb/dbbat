@@ -8,6 +8,8 @@ import (
 	"strconv"
 
 	goora "github.com/sijms/go-ora/v3"
+
+	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 )
 
 // executeOracle runs one statement against the Oracle proxy listener.
@@ -45,7 +47,9 @@ func executeOracle(ctx context.Context, addr string, req ExecRequest) (*QueryRes
 		"PROGRAM": mcpApplicationName,
 	})
 
-	db := sql.OpenDB(goora.NewConnector(dsn))
+	// The recovering wrapper turns a go-ora panic during login into an error
+	// for this execution rather than relying on the server's recover.
+	db := sql.OpenDB(upstream.RecoveringOracleConnector(goora.NewConnector(dsn)))
 
 	// One statement, one loopback session. Pooling would keep a proxy session —
 	// and the connection row that goes with it — alive past the execution that

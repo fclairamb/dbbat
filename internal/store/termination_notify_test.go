@@ -93,7 +93,7 @@ func TestNotifyTermination_IncludedReasonsFire(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return notifier.count() == 3
-	}, 2*time.Second, 10*time.Millisecond, "all three included reasons should reach the notifier")
+	}, 30*time.Second, 10*time.Millisecond, "all three included reasons should reach the notifier")
 }
 
 // TestNotifyTermination_NilNotifierTolerated is the store-side half of "the
@@ -137,21 +137,32 @@ func TestNotifyTermination_DoesNotDelayTheCaller(t *testing.T) {
 	conn, err := s.CreateConnection(ctx, user.UID, db.UID, "10.0.0.12")
 	require.NoError(t, err)
 
-	start := time.Now()
-	require.NoError(t, s.CloseConnectionWithReason(ctx, conn.UID, Termination{
-		Reason: TerminationStatementTimeout,
-		Limit:  30 * time.Second,
-	}))
-	elapsed := time.Since(start)
+	// The notifier stays parked until after the close returns, so the close
+	// returning at all proves it does not wait for the notifier. No latency
+	// bound: that would measure database speed under load, not the contract.
+	closed := make(chan error, 1)
 
-	require.Less(t, elapsed, 500*time.Millisecond, "the close must return long before the blocked notifier ever would")
+	go func() {
+		closed <- s.CloseConnectionWithReason(ctx, conn.UID, Termination{
+			Reason: TerminationStatementTimeout,
+			Limit:  30 * time.Second,
+		})
+	}()
+
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(time.Minute):
+		t.Fatal("the close is waiting for the blocked notifier")
+	}
+
 	require.Equal(t, 0, notifier.count(), "the notifier is still parked, so nothing has landed yet")
 
 	close(block)
 
 	require.Eventually(t, func() bool {
 		return notifier.count() == 1
-	}, 2*time.Second, 10*time.Millisecond, "unblocking the notifier lets the parked call complete")
+	}, 30*time.Second, 10*time.Millisecond, "unblocking the notifier lets the parked call complete")
 
 	ev := notifier.first()
 	require.Equal(t, conn.UID, ev.Connection.UID)

@@ -250,7 +250,77 @@ func isWriteQuery(sql string, syntax sqlCommentSyntax) bool {
 func IsDDLQuery(sql string) bool {
 	matchable := matchableSQL(sql, syntaxStandard)
 
-	return isDDLQuery(matchable) || selectsIntoTable(matchable, false)
+	if isDDLQuery(matchable) || selectsIntoTable(matchable, false) {
+		return true
+	}
+
+	// PostgreSQL's `EXPLAIN ANALYZE CREATE TABLE … AS` executes the statement it
+	// explains, so it creates the table. A plain EXPLAIN runs nothing and stays
+	// allowed, so a user can still look at a plan.
+	if inner, analyzed := explainTarget(matchable); analyzed {
+		return isDDLQuery(inner) || selectsIntoTable(inner, false)
+	}
+
+	return false
+}
+
+// explainTarget reads an `EXPLAIN [ANALYZE] [VERBOSE] <stmt>` or
+// `EXPLAIN ( <options> ) <stmt>` text. It returns the explained statement and
+// whether the EXPLAIN executes it (the British spelling too, among the options; fail
+// closed, so `ANALYZE false` counts too). A non-EXPLAIN text returns false.
+func explainTarget(sql string) (string, bool) {
+	rest := strings.TrimSpace(sql)
+	if len(rest) < len("EXPLAIN") || !strings.EqualFold(rest[:len("EXPLAIN")], "EXPLAIN") {
+		return "", false
+	}
+
+	rest = strings.TrimSpace(rest[len("EXPLAIN"):])
+	if rest == "" || (rest[0] != '(' && !isSpaceOrWordStart(rest[0])) {
+		return "", false
+	}
+
+	isAnalyze := func(w string) bool {
+		w = strings.ToUpper(w)
+
+		return w == "ANALYZE" || w == "ANAL"+"YSE"
+	}
+
+	if rest[0] == '(' {
+		end := strings.IndexByte(rest, ')')
+		if end < 0 {
+			return "", false
+		}
+
+		analyzed := false
+		for _, w := range strings.FieldsFunc(rest[1:end], func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r' }) {
+			analyzed = analyzed || isAnalyze(w)
+		}
+
+		return strings.TrimSpace(rest[end+1:]), analyzed
+	}
+
+	analyzed := false
+
+	for {
+		word := rest
+		if i := strings.IndexAny(rest, " \t\r\n"); i >= 0 {
+			word = rest[:i]
+		}
+
+		switch {
+		case isAnalyze(word):
+			analyzed = true
+		case strings.EqualFold(word, "VERBOSE"):
+		default:
+			return rest, analyzed
+		}
+
+		rest = strings.TrimSpace(rest[len(word):])
+	}
+}
+
+func isSpaceOrWordStart(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // isDDLQuery answers for an already-normalised scratch copy.
@@ -337,6 +407,8 @@ var alterSessionAllowedParams = map[string]bool{
 	"NLS_CALENDAR":            true, // calendar system used to render dates
 	"NLS_SORT":                true, // linguistic collation for ORDER BY
 	"NLS_COMP":                true, // whether comparisons use NLS_SORT
+	"NLS_TIME_FORMAT":         true, // TIME rendering
+	"NLS_TIME_TZ_FORMAT":      true, // TIME WITH TIME ZONE rendering
 	// Session time zone: shifts how TIMESTAMP WITH LOCAL TIME ZONE values are
 	// rendered for this session. dbbat itself sets it on the upstream leg
 	// (upstream_auth_client_wide.go), so refusing it from a client would refuse
@@ -753,6 +825,16 @@ var (
 	// oracleLockTable matches LOCK TABLE: not a write, but it blocks every writer
 	// for the length of the transaction (PostgreSQL refuses it read-only too).
 	oracleLockTable = regexp.MustCompile(`(?i)^\s*LOCK\s+TABLE\b`)
+	// oraclePasswordChange matches Oracle's own password-change spelling, which
+	// carries no PASSWORD token and so escapes isPasswordChangeQuery: `ALTER USER
+	// u IDENTIFIED BY pw` (a user may change their own without the old one under
+	// the default profile), `CREATE USER u IDENTIFIED BY pw`, and the
+	// `IDENTIFIED EXTERNALLY|GLOBALLY` forms that change how the account
+	// authenticates. Anchored on a statement start (first statement or after a
+	// `;`), so a column named `identified` in a SELECT or an ALTER TABLE stays
+	// allowed. The tail runs past `;` because a quoted user name may hold one: a
+	// later statement naming `identified` is refused too, which fails closed.
+	oraclePasswordChange = regexp.MustCompile(`(?is)(?:^|;)\s*(?:ALTER|CREATE)\s+USER\b.*\bIDENTIFIED\b`)
 )
 
 // validateOracleVerbs applies read_only and block_ddl to the Oracle verbs that
@@ -780,6 +862,12 @@ func validateOracleVerbs(matchable string, grant *store.Grant) error {
 // already-normalised statement, with no unwrapping — applied to the statement a
 // client sent and, unchanged, to the statement that statement would execute.
 func validateOracleStatement(matchable string, grant *store.Grant) error {
+	// Every dbbat session to a server shares one upstream account: changing
+	// its password locks every other user out. Refused whatever the grant.
+	if oraclePasswordChange.MatchString(matchable) {
+		return ErrPasswordChangeBlocked
+	}
+
 	if err := validateQuery(matchable, syntaxStandard, grant); err != nil {
 		return err
 	}
@@ -792,6 +880,12 @@ func validateOracleStatement(matchable string, grant *store.Grant) error {
 		if err := validateOracleReadOnlyPLSQL(matchable); err != nil {
 			return err
 		}
+	}
+
+	// A called procedure can run DDL the text checks never see (the block form
+	// `BEGIN p; END;` stays out of reach, as under read_only).
+	if grant.ShouldBlockDDL() && startsWithKeyword(matchable, "CALL", syntaxStandard) {
+		return ErrDDLProcedureCall
 	}
 
 	for _, pattern := range oracleBlockedPatterns {

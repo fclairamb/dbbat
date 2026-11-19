@@ -99,14 +99,14 @@ func TestCheckQuotas_Expiry(t *testing.T) {
 	if err := checkQuotas(&store.Grant{
 		ExpiresAt:  time.Now().Add(-time.Minute),
 		Definition: &store.GrantDefinition{},
-	}); !errors.Is(err, shared.ErrGrantExpired) {
+	}, nil); !errors.Is(err, shared.ErrGrantExpired) {
 		t.Fatalf("checkQuotas() expired grant = %v, want ErrGrantExpired", err)
 	}
 
 	if err := checkQuotas(&store.Grant{
 		ExpiresAt:  time.Now().Add(time.Hour),
 		Definition: &store.GrantDefinition{},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("checkQuotas() live grant = %v, want nil", err)
 	}
 }

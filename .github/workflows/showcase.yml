@@ -58,13 +58,13 @@ jobs:
         with:
           fetch-depth: 0 # the manifest records the commit it captured from
 
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@v7.1.0
         with:
           go-version: "1.27.4"
 
       - uses: oven-sh/setup-bun@v2.2.0
         with:
-          bun-version: "1.4.4"
+          bun-version: "1.4.5"
 
       - name: Install ffmpeg
         run: |
@@ -142,13 +142,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@v7.1.0
         with:
           go-version: "1.27.4"
 
       - uses: oven-sh/setup-bun@v2.2.0
         with:
-          bun-version: "1.4.4"
+          bun-version: "1.4.5"
 
       - name: Cache Playwright browsers
         uses: actions/cache@v6.1.0

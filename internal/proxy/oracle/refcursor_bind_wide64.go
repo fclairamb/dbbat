@@ -112,13 +112,13 @@ const (
 // One id, not a list: see the note at the top of this file for why a walk
 // anchored on a scan must not take a second chance after a descriptor that did
 // not land.
-func refCursorIDsInBindOutputWide64(ttcPayload []byte) []uint16 {
+func refCursorIDsInBindOutputWide64(ttcPayload []byte, pre23 bool) []uint16 {
 	start, ok := bindOutputBodyStartWide64(ttcPayload)
 	if !ok {
 		return nil
 	}
 
-	id, next, ok := wide64RefCursorDescriptor(ttcPayload, start)
+	id, next, ok := wide64RefCursorDescriptor(ttcPayload, start, pre23)
 	if !ok {
 		return nil
 	}
@@ -203,12 +203,12 @@ func bindOutputBodyStartWide64(ttc []byte) (int, bool) {
 // (wide64TypeOID) is that field's, not every empty DLC's — which is measured
 // here, on this descriptor, and is why the pad lives in one function rather
 // than in dcursor.dlc.
-func wide64RefCursorDescriptor(ttc []byte, start int) (uint16, int, bool) {
+func wide64RefCursorDescriptor(ttc []byte, start int, pre23 bool) (uint16, int, bool) {
 	if start < 0 || start > len(ttc) {
 		return 0, 0, false
 	}
 
-	c := &dcursor{buf: ttc, pos: start, wide: true, wide64: true}
+	c := &dcursor{buf: ttc, pos: start, wide: true, wide64: true, pre23: pre23}
 
 	c.byte()  // descriptor length, informational: the fields below are self-sizing
 	c.intw(4) // max row size

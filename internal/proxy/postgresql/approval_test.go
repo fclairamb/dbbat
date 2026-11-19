@@ -178,7 +178,7 @@ func heldSession(t *testing.T, patterns []string) (*Session, net.Conn, *fakeHold
 	}
 
 	sess.approvalGate = shared.NewApprovalGate(
-		sess.approvalDeps, grant, uuid.New(), &store.User{UID: uuid.New(), Username: "alice"}, "prod",
+		sess.approvalDeps, shared.ApprovalDialectStandard, grant, uuid.New(), &store.User{UID: uuid.New(), Username: "alice"}, "prod",
 	)
 
 	return sess, client, st, reg
@@ -541,4 +541,27 @@ func indexOf(haystack, needle string) int {
 	}
 
 	return -1
+}
+
+// TestCommentedStatementIsHeld: a comment between the keywords must not carry
+// a statement past its approval pattern (2026-11-16 scan, M1).
+func TestCommentedStatementIsHeld(t *testing.T) {
+	t.Parallel()
+
+	sess, _, st, reg := heldSession(t, []string{`(?i)DELETE\s+FROM\s+orders`})
+
+	errc := make(chan error, 1)
+	go func() { errc <- sess.handleQuery(&pgproto3.Query{String: "DELETE/**/FROM -- x\n orders"}) }()
+
+	pending := st.waitPending(t)
+	reg.Resolve(approval.Decision{QueryUID: pending.UID, Status: store.ApprovalDenied, ByName: "bob"})
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, shared.ErrApprovalDenied) {
+			t.Fatalf("got %v, want a denial", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("held statement never returned")
+	}
 }

@@ -679,6 +679,7 @@ func (s *Session) recordBlockedQuery(sqlText string, params *store.QueryParamete
 	// does on the three protocols that already recorded refusals.
 	if s.grant != nil {
 		s.grant.QueryCount++
+		s.usage.AddQueries(1)
 	}
 }
 
@@ -770,6 +771,7 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 func (s *Session) chargeQueryQuota() {
 	if s.grant != nil {
 		s.grant.QueryCount++
+		s.usage.AddQueries(1)
 	}
 }
 

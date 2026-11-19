@@ -9,12 +9,17 @@ import {
   useUpdateServerGroup,
   useDeleteServerGroup,
   useDatabases,
+  useInstance,
   type ServerGroup,
   type CreateServerGroupRequest,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { MultiSelect } from "@/components/shared/MultiSelect";
+import {
+  RetentionFields,
+  type RetentionSeconds,
+} from "@/components/shared/RetentionDuration";
 import { ApproverGroupPickers } from "@/components/shared/ApproverGroupPickers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -237,6 +242,15 @@ function ServerGroupDialog({
     editing?.query_approver_user_group_uids ?? []
   );
 
+  const { data: instance } = useInstance();
+  const archiveEnabled = instance?.resolved_retention?.archive_enabled ?? false;
+  const [archiveAfter, setArchiveAfter] = useState<RetentionSeconds>(
+    editing?.archive_after_seconds ?? null
+  );
+  const [deleteAfter, setDeleteAfter] = useState<RetentionSeconds>(
+    editing?.delete_after_seconds ?? null
+  );
+
   const create = useCreateServerGroup({
     onSuccess: () => {
       toast.success("Server group created");
@@ -268,6 +282,14 @@ function ServerGroupDialog({
       access_approver_user_group_uids: accessApproverUids,
       query_approver_user_group_uids: queryApproverUids,
     };
+
+    // Absent leaves a window alone, so only what changed goes on the wire.
+    if (archiveAfter !== (editing?.archive_after_seconds ?? null)) {
+      body.archive_after_seconds = archiveAfter;
+    }
+    if (deleteAfter !== (editing?.delete_after_seconds ?? null)) {
+      body.delete_after_seconds = deleteAfter;
+    }
 
     if (editing) {
       update.mutate({ uid: editing.uid, body });
@@ -369,6 +391,16 @@ function ServerGroupDialog({
             querySelected={queryApproverUids}
             onQueryChange={setQueryApproverUids}
             testIdPrefix="server-group"
+          />
+          <RetentionFields
+            archive={archiveAfter}
+            onArchiveChange={setArchiveAfter}
+            del={deleteAfter}
+            onDeleteChange={setDeleteAfter}
+            originalDelete={editing?.delete_after_seconds}
+            archiveEnabled={archiveEnabled}
+            testIdPrefix="server-group"
+            inheritNote="A server's own window overrides the group's. When several groups hold a server, the longest delete window and the shortest archive window win."
           />
         </div>
         <DialogFooter>

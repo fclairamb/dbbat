@@ -767,7 +767,8 @@ func TestVerifyRowChains_LeaksNothing(t *testing.T) {
 
 	sweepFields := []string{
 		"chain", "verified", "captures", "rows",
-		"unverifiable_pre_migration_rows", "checked_at", "cached",
+		"unverifiable_pre_migration_rows", "chains_archived", "chains_archive_deleted",
+		"checked_at", "cached",
 	}
 
 	sweep := doChainVerify(router, token, "/api/v1/audit/verify/rows")
