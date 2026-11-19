@@ -525,7 +525,7 @@ func (s *Store) CleanupRetention(ctx context.Context, policy SweepPolicy) (Sweep
 		}
 	}
 
-	// Servers with no statement window at all still honour a ledger window,
+	// Servers with no statement window at all still honor a ledger window,
 	// except that the ledger never goes before the statements.
 	return result, nil
 }

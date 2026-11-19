@@ -227,3 +227,51 @@ func (s *Server) auditRetention(c *gin.Context, eventType string, details map[st
 		Details:     raw,
 	})
 }
+
+// retentionEditAllowed validates the retention fields of a server edit against
+// the stored values and writes the 400 itself.
+func (s *Server) retentionEditAllowed(c *gin.Context, archive, del store.OptionalSeconds, current *store.Server) bool {
+	if msg := s.validateRetentionSeconds(archive, del, current.ArchiveAfterSeconds, current.DeleteAfterSeconds); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return false
+	}
+
+	return true
+}
+
+// wakeRetentionIfEdited wakes the sweeper when a request touched a window:
+// policy edits apply to data already stored.
+func (s *Server) wakeRetentionIfEdited(archive, del store.OptionalSeconds) {
+	if archive.Set || del.Set {
+		s.wakeRetention()
+	}
+}
+
+// applyGroupRetention validates and stores the windows of a server group edit,
+// mirroring them onto the in-memory group, and writes the error itself.
+func (s *Server) applyGroupRetention(c *gin.Context, group *store.ServerGroup, archive, del store.OptionalSeconds) bool {
+	ctx := c.Request.Context()
+
+	if msg := s.validateRetentionSeconds(archive, del, group.ArchiveAfterSeconds, group.DeleteAfterSeconds); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return false
+	}
+
+	if err := s.store.SetServerGroupRetention(ctx, group.UID, archive, del); err != nil {
+		writeInternalError(c, s.logger, err, "failed to set server group retention")
+
+		return false
+	}
+
+	if archive.Set {
+		group.ArchiveAfterSeconds = archive.Value
+	}
+
+	if del.Set {
+		group.DeleteAfterSeconds = del.Value
+	}
+
+	return true
+}

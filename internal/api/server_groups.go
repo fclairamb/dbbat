@@ -300,13 +300,6 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 		return
 	}
 
-	if msg := s.validateRetentionSeconds(req.ArchiveAfterSeconds, req.DeleteAfterSeconds,
-		group.ArchiveAfterSeconds, group.DeleteAfterSeconds); msg != "" {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
-
-		return
-	}
-
 	group.Name = req.Name
 	group.Description = req.Description
 	// Live, like membership: this immediately changes who may decide grant
@@ -327,18 +320,8 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 		return
 	}
 
-	if err := s.store.SetServerGroupRetention(ctx, group.UID, req.ArchiveAfterSeconds, req.DeleteAfterSeconds); err != nil {
-		writeInternalError(c, s.logger, err, "failed to set server group retention")
-
+	if !s.applyGroupRetention(c, group, req.ArchiveAfterSeconds, req.DeleteAfterSeconds) {
 		return
-	}
-
-	if req.ArchiveAfterSeconds.Set {
-		group.ArchiveAfterSeconds = req.ArchiveAfterSeconds.Value
-	}
-
-	if req.DeleteAfterSeconds.Set {
-		group.DeleteAfterSeconds = req.DeleteAfterSeconds.Value
 	}
 
 	// A nil member_uids means "don't touch membership"; an explicit (even

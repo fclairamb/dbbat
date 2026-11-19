@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/api"
 	"github.com/fclairamb/dbbat/internal/archive"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
@@ -57,6 +59,30 @@ type retentionSweeper struct {
 	// server). Refreshed at startup, after a policy edit and hourly.
 	activeMu sync.RWMutex
 	active   bool
+}
+
+// startRetention opens the archive bucket (nil when DBB_ARCHIVE_URL is unset,
+// the default: archival does not exist) and starts the one retention sweeper of
+// the process. The sweeper always exists: a window can be set from the UI while
+// the process runs.
+func startRetention(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	apiServer *api.Server,
+	logger *slog.Logger,
+) (*retentionSweeper, error) {
+	archiver, err := archive.Open(ctx, cfg.ArchiveURL, dataStore, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open the archive: %w", err)
+	}
+
+	apiServer.SetArchive(archiver)
+
+	sweeper := startRetentionSweeper(ctx, cfg, dataStore, archiver, logger)
+	apiServer.SetRetentionWaker(sweeper.Wake)
+
+	return sweeper, nil
 }
 
 // startRetentionSweeper starts the sweeper. It always returns a sweeper.

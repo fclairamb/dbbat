@@ -1233,7 +1233,9 @@ func (s *Store) capturedQueryUIDs(ctx context.Context, connectionUID *uuid.UUID)
 // countArchivedCaptures counts the captures (statements with a row chain head)
 // whose connection's rows were archived, split by whether the archive object
 // still exists.
-func (s *Store) countArchivedCaptures(ctx context.Context, connectionUID *uuid.UUID) (archived, deleted int64, err error) {
+func (s *Store) countArchivedCaptures(ctx context.Context, connectionUID *uuid.UUID) (int64, int64, error) {
+	var archived, deleted int64
+
 	q := s.db.NewSelect().
 		TableExpr("queries AS q").
 		ColumnExpr("count(*) FILTER (WHERE c.archive_deleted_at IS NULL)").

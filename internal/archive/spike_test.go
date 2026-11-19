@@ -59,5 +59,4 @@ func TestSpikeFormat(t *testing.T) {
 	if dir := os.Getenv("DBB_SPIKE_DIR"); dir != "" {
 		require.NoError(t, os.WriteFile(dir+"/rows.parquet", big, 0o600))
 	}
-
 }

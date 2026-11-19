@@ -17,7 +17,6 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/fclairamb/dbbat/internal/api"
-	"github.com/fclairamb/dbbat/internal/archive"
 	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
@@ -228,6 +227,17 @@ func loadConfigWithCLI(flags *cliFlags) (*config.Config, error) {
 	return config.Load(opts, buildCLIOverrides(flags))
 }
 
+// warnStatementTimeout says out loud that a malformed statement timeout
+// disables the limit rather than shortening it (see Config.StatementTimeout):
+// the operator asked for a bound and silently has none.
+func warnStatementTimeout(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
+	if cfg.StatementTimeoutMisconfigured() {
+		logger.WarnContext(ctx, "Invalid DBB_STATEMENT_TIMEOUT, no instance-wide statement limit is applied",
+			slog.String("value", cfg.StatementTimeout),
+			slog.String("hint", "use a Go duration such as 30s or 5m"))
+	}
+}
+
 func runServer(ctx context.Context, flags *cliFlags) error {
 	// Load configuration first
 	cfg, err := loadConfigWithCLI(flags)
@@ -365,29 +375,14 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		MaxSize:    cfg.AuthCache.MaxSize,
 	})
 
-	// A malformed statement timeout disables the limit rather than shortening
-	// it (see Config.StatementTimeout), so it has to be said out loud: the
-	// operator asked for a bound and silently has none.
-	if cfg.StatementTimeoutMisconfigured() {
-		logger.WarnContext(ctx, "Invalid DBB_STATEMENT_TIMEOUT, no instance-wide statement limit is applied",
-			slog.String("value", cfg.StatementTimeout),
-			slog.String("hint", "use a Go duration such as 30s or 5m"))
-	}
+	warnStatementTimeout(ctx, cfg, logger)
 
 	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader, logger)
 
-	// The archive bucket (nil when DBB_ARCHIVE_URL is unset, the default: archival
-	// does not exist).
-	archiver, err := archive.Open(ctx, cfg.ArchiveURL, dataStore, logger)
+	sweeper, err := startRetention(ctx, cfg, dataStore, apiServer, logger)
 	if err != nil {
-		return fmt.Errorf("failed to open the archive: %w", err)
+		return err
 	}
-	apiServer.SetArchive(archiver)
-
-	// One retention sweeper for the whole process. It always exists: a window can
-	// be set from the UI while the process runs.
-	sweeper := startRetentionSweeper(ctx, cfg, dataStore, archiver, logger)
-	apiServer.SetRetentionWaker(sweeper.Wake)
 
 	// Expired OAuth/device/login-exchange states are purged whatever the
 	// retention settings: unauthenticated endpoints create them.

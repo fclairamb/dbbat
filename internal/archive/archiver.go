@@ -264,7 +264,7 @@ func (a *Archiver) ArchiveConnection(ctx context.Context, cand store.ArchiveCand
 		PolicyGroups:  cand.ArchiveWindow.GroupUIDs,
 	}
 
-	// Cancelling this context aborts the blob write without committing a
+	// Canceling this context aborts the blob write without committing a
 	// partial object.
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -321,7 +321,7 @@ func (a *Archiver) ArchiveConnection(ctx context.Context, cand store.ArchiveCand
 			ConnectionUID: uidBytes(cand.UID),
 			QueryUID:      uidBytes(r.QueryUID),
 			RowUID:        uidBytes(r.RowUID),
-			RowNumber:     int32(r.RowNumber), //nolint:gosec // row numbers are bounded by MaxResultRows
+			RowNumber:     int32(r.RowNumber),
 			RowData:       string(r.RowData),
 			RowSizeBytes:  r.RowSizeBytes,
 		})
@@ -415,15 +415,24 @@ func (a *Archiver) deleteObject(ctx context.Context, key string) error {
 		return fmt.Errorf("delete archive object: %w", err)
 	}
 
-	if dir := a.fileDir(); dir != "" {
-		for p := path.Dir(key); p != "." && p != "/" && p != "v1/rows" && p != "v1"; p = path.Dir(p) {
-			if err := os.Remove(filepath.Join(dir, filepath.FromSlash(p))); err != nil {
-				break
-			}
-		}
-	}
+	a.removeEmptyDirs(key)
 
 	return nil
+}
+
+// removeEmptyDirs removes the server= and date= directories of a deleted key
+// when empty (os.Remove refuses a directory that still has entries).
+func (a *Archiver) removeEmptyDirs(key string) {
+	dir := a.fileDir()
+	if dir == "" {
+		return
+	}
+
+	for p := path.Dir(key); p != "." && p != "/" && p != "v1/rows" && p != "v1"; p = path.Dir(p) {
+		if os.Remove(filepath.Join(dir, filepath.FromSlash(p))) != nil {
+			return
+		}
+	}
 }
 
 // fileDir is the directory behind a file:// archive, "" for any other bucket.

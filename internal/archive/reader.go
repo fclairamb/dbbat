@@ -27,6 +27,7 @@ const WholeObjectLimit = 8 << 20
 var (
 	ErrObjectMissing = errors.New("archive object is missing from the bucket")
 	ErrHashMismatch  = errors.New("archive object does not match the SHA-256 sealed in the audit chain")
+	ErrBadMetadata   = errors.New("archive object has bad metadata")
 )
 
 // Object identifies one archive object, as recorded on the connection row.
@@ -45,26 +46,7 @@ type file struct {
 // it over range requests.
 func open(ctx context.Context, b *blob.Bucket, o Object) (*file, error) {
 	if o.Size <= WholeObjectLimit {
-		data, err := b.ReadAll(ctx, o.Key)
-		if err != nil {
-			if gcerrors.Code(err) == gcerrors.NotFound {
-				return nil, fmt.Errorf("%w: %s", ErrObjectMissing, o.Key)
-			}
-
-			return nil, fmt.Errorf("read archive object: %w", err)
-		}
-
-		sum := sha256.Sum256(data)
-		if o.SHA256 != "" && hex.EncodeToString(sum[:]) != o.SHA256 {
-			return nil, fmt.Errorf("%w: %s", ErrHashMismatch, o.Key)
-		}
-
-		pf, err := parquet.OpenFile(bytes.NewReader(data), int64(len(data)))
-		if err != nil {
-			return nil, fmt.Errorf("open archive object: %w", err)
-		}
-
-		return &file{f: pf}, nil
+		return openWhole(ctx, b, o)
 	}
 
 	pf, err := parquet.OpenFile(&rangeReaderAt{ctx: ctx, b: b, key: o.Key}, o.Size)
@@ -73,6 +55,22 @@ func open(ctx context.Context, b *blob.Bucket, o Object) (*file, error) {
 			return nil, fmt.Errorf("%w: %s", ErrObjectMissing, o.Key)
 		}
 
+		return nil, fmt.Errorf("open archive object: %w", err)
+	}
+
+	return &file{f: pf}, nil
+}
+
+// openWhole fetches the whole object in one GET, checks its SHA-256 and reads
+// it from memory.
+func openWhole(ctx context.Context, b *blob.Bucket, o Object) (*file, error) {
+	data, err := Download(ctx, b, o)
+	if err != nil {
+		return nil, err
+	}
+
+	pf, err := parquet.OpenFile(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
 		return nil, fmt.Errorf("open archive object: %w", err)
 	}
 
@@ -175,7 +173,7 @@ func ReadQueryRows(
 
 	raw, ok := f.metadata(MetaQueryOffsets)
 	if !ok {
-		return QueryRows{}, fmt.Errorf("archive object %s has no %s metadata", o.Key, MetaQueryOffsets)
+		return QueryRows{}, fmt.Errorf("%w: %s has no %s", ErrBadMetadata, o.Key, MetaQueryOffsets)
 	}
 
 	var offsets map[string][2]int64

@@ -185,6 +185,17 @@ var removedRetentionNames = map[string]struct{ old, replacement string }{
 	"dump.retention":          {"DBB_DUMP_RETENTION (dump.retention)", "DBB_RETENTION_DUMPS_DELETE_AFTER (retention.dumps.delete_after)"},
 }
 
+// retentionEnvKey maps retention_<object>_<setting> to its dotted key.
+func retentionEnvKey(key string) (string, bool) {
+	for _, object := range retentionObjects {
+		if rest, ok := strings.CutPrefix(key, "retention_"+object+"_"); ok {
+			return "retention." + object + "." + rest, true
+		}
+	}
+
+	return "", false
+}
+
 // retentionEnvName is the environment variable of a retention key.
 func retentionEnvName(object, setting string) string {
 	return "DBB_RETENTION_" + strings.ToUpper(object) + "_" + strings.ToUpper(setting)
@@ -1492,10 +1503,8 @@ func envTransform(k, v string) (string, any) {
 	// retention_<object>_<setting> -> retention.<object>.<setting>, the object
 	// taken from the known list. An unknown object stays as it is and is
 	// reported by retentionProblems.
-	for _, object := range retentionObjects {
-		if rest, ok := strings.CutPrefix(key, "retention_"+object+"_"); ok {
-			return "retention." + object + "." + rest, v
-		}
+	if k, ok := retentionEnvKey(key); ok {
+		return k, v
 	}
 	// query_storage_* -> query_storage.*
 	if strings.HasPrefix(key, "query_storage_") {

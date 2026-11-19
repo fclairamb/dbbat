@@ -26,7 +26,7 @@ import (
 var (
 	containerOnce sync.Once
 	containerDSN  string
-	containerErr  error
+	errContainer  error
 )
 
 // testStore returns a store on a shared PostgreSQL container. Tests in this
@@ -46,16 +46,16 @@ func testStore(t *testing.T) *store.Store {
 					WithOccurrence(2).WithStartupTimeout(90*time.Second)),
 		)
 		if err != nil {
-			containerErr = err
+			errContainer = err
 
 			return
 		}
 
-		containerDSN, containerErr = c.ConnectionString(ctx, "sslmode=disable")
+		containerDSN, errContainer = c.ConnectionString(ctx, "sslmode=disable")
 	})
 
-	if containerErr != nil {
-		t.Skipf("postgres container unavailable: %v", containerErr)
+	if errContainer != nil {
+		t.Skipf("postgres container unavailable: %v", errContainer)
 	}
 
 	s, err := store.New(context.Background(), containerDSN)
@@ -189,7 +189,7 @@ func longestComponent(k string) int {
 	return longest
 }
 
-func TestArchiveRoundTrip(t *testing.T) {
+func TestArchiveRoundTrip(t *testing.T) { //nolint:paralleltest // sequential tests share one database
 	s := testStore(t)
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -283,7 +283,7 @@ func TestArchiveRoundTrip(t *testing.T) {
 }
 
 // Nothing is archived while the window has not elapsed, and without a window.
-func TestArchiveRespectsWindows(t *testing.T) {
+func TestArchiveRespectsWindows(t *testing.T) { //nolint:paralleltest // sequential tests share one database
 	s := testStore(t)
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -307,7 +307,7 @@ func TestArchiveRespectsWindows(t *testing.T) {
 
 // Archive deletion removes the object, the empty directories, and leaves a
 // chained entry; the ledger row stays.
-func TestArchiveDeletion(t *testing.T) {
+func TestArchiveDeletion(t *testing.T) { //nolint:paralleltest // sequential tests share one database
 	s := testStore(t)
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -357,7 +357,7 @@ func TestArchiveDeletion(t *testing.T) {
 
 // A failing bucket never turns into deletion: the archive fails, the rows stay,
 // and the statements are not deleted past their delete window either.
-func TestArchiveFailureKeepsRows(t *testing.T) {
+func TestArchiveFailureKeepsRows(t *testing.T) { //nolint:paralleltest // sequential tests share one database
 	s := testStore(t)
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -392,7 +392,7 @@ func TestArchiveFailureKeepsRows(t *testing.T) {
 }
 
 // An archived connection's row chains are not walked and not a break.
-func TestVerifyRowChainsCountsArchived(t *testing.T) {
+func TestVerifyRowChainsCountsArchived(t *testing.T) { //nolint:paralleltest // sequential tests share one database
 	s := testStore(t)
 	ctx := context.Background()
 	dir := t.TempDir()

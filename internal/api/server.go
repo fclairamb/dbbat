@@ -96,16 +96,16 @@ type Server struct {
 	chainVerify *chainVerifyCache
 }
 
-// SetDumpStorage installs the blob store holding uploaded session captures, so
-// downloads can fall back to it when the capture is no longer (or never was) in
-// this replica's local spool. Called by the process wiring; nil is fine and
-// means local-only captures.
+// SetArchive installs the archive that archived result rows are read back from.
+// Nil is fine and means no archive bucket is configured.
 func (s *Server) SetArchive(a *archive.Archiver) {
 	s.archiver = a
 }
 
-// SetDumpStorage installs the blob store holding uploaded session captures (see
-// SetArchive for the archive of result rows).
+// SetDumpStorage installs the blob store holding uploaded session captures, so
+// downloads can fall back to it when the capture is no longer (or never was) in
+// this replica's local spool. Called by the process wiring; nil is fine and
+// means local-only captures.
 func (s *Server) SetDumpStorage(uploader *dump.Uploader) {
 	s.dumpStorage = uploader
 }

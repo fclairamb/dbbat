@@ -544,9 +544,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		return
 	}
 
-	if msg := s.validateRetentionSeconds(req.ArchiveAfterSeconds, req.DeleteAfterSeconds,
-		current.ArchiveAfterSeconds, current.DeleteAfterSeconds); msg != "" {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+	if !s.retentionEditAllowed(c, req.ArchiveAfterSeconds, req.DeleteAfterSeconds, current) {
 		return
 	}
 
@@ -585,10 +583,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		return
 	}
 
-	if req.ArchiveAfterSeconds.Set || req.DeleteAfterSeconds.Set {
-		// Policy edits apply to data already stored: wake the sweeper now.
-		s.wakeRetention()
-	}
+	s.wakeRetentionIfEdited(req.ArchiveAfterSeconds, req.DeleteAfterSeconds)
 
 	// Log audit event
 	currentUser := getCurrentUser(c)

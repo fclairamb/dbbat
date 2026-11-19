@@ -39,21 +39,27 @@ func loadRetention(t *testing.T, env map[string]string, yaml string) *Config {
 
 // Each row of the names table: the variable sets the key, and the key alone
 // (in the config file) sets the same window.
-func TestRetentionNames(t *testing.T) {
+func TestRetentionNames(t *testing.T) { //nolint:paralleltest // t.Setenv cannot run in parallel
 	rows := []struct {
 		env  string
 		yaml string
 		get  func(RetentionWindows) time.Duration
 	}{
-		{"DBB_RETENTION_QUERIES_DELETE_AFTER", "retention:\n  queries:\n    delete_after: 720h\n",
-			func(w RetentionWindows) time.Duration { return w.Queries }},
-		{"DBB_RETENTION_QUERIES_ARCHIVE_AFTER", "retention:\n  queries:\n    archive_after: 720h\n",
-			func(w RetentionWindows) time.Duration { return w.QueriesArchive }},
-		{"DBB_RETENTION_DUMPS_DELETE_AFTER", "retention:\n  dumps:\n    delete_after: 720h\n",
-			func(w RetentionWindows) time.Duration { return w.Dumps }},
+		{
+			"DBB_RETENTION_QUERIES_DELETE_AFTER", "retention:\n  queries:\n    delete_after: 720h\n",
+			func(w RetentionWindows) time.Duration { return w.Queries },
+		},
+		{
+			"DBB_RETENTION_QUERIES_ARCHIVE_AFTER", "retention:\n  queries:\n    archive_after: 720h\n",
+			func(w RetentionWindows) time.Duration { return w.QueriesArchive },
+		},
+		{
+			"DBB_RETENTION_DUMPS_DELETE_AFTER", "retention:\n  dumps:\n    delete_after: 720h\n",
+			func(w RetentionWindows) time.Duration { return w.Dumps },
+		},
 	}
 
-	for _, r := range rows {
+	for _, r := range rows { //nolint:paralleltest // t.Setenv cannot run in parallel
 		t.Run(r.env, func(t *testing.T) {
 			w := loadRetention(t, map[string]string{r.env: "720h"}, "").RetentionWindows()
 			assert.Empty(t, w.Misconfiguration)
@@ -80,7 +86,7 @@ func TestRetentionNames(t *testing.T) {
 }
 
 // Nothing set: statements and connections are never deleted, dumps at 24h.
-func TestRetentionDefaults(t *testing.T) {
+func TestRetentionDefaults(t *testing.T) { //nolint:paralleltest // t.Setenv cannot run in parallel
 	w := loadRetention(t, nil, "").RetentionWindows()
 
 	assert.Empty(t, w.Misconfiguration)
@@ -90,7 +96,7 @@ func TestRetentionDefaults(t *testing.T) {
 	assert.Equal(t, 24*time.Hour, w.Dumps)
 }
 
-func TestRetentionZeroMeansNever(t *testing.T) {
+func TestRetentionZeroMeansNever(t *testing.T) { //nolint:paralleltest // t.Setenv cannot run in parallel
 	w := loadRetention(t, map[string]string{"DBB_RETENTION_DUMPS_DELETE_AFTER": "0"}, "").RetentionWindows()
 
 	assert.Empty(t, w.Misconfiguration)
@@ -99,21 +105,35 @@ func TestRetentionZeroMeansNever(t *testing.T) {
 
 // Each kind of mistake: every window is zero (dumps included) and the problem
 // names the culprit.
-func TestRetentionMistakes(t *testing.T) {
+func TestRetentionMistakes(t *testing.T) { //nolint:paralleltest // t.Setenv cannot run in parallel
 	cases := []struct {
 		name  string
 		env   map[string]string
 		yaml  string
 		culpr string
 	}{
-		{"not a duration", map[string]string{"DBB_RETENTION_QUERIES_DELETE_AFTER": "30d"}, "",
-			"DBB_RETENTION_QUERIES_DELETE_AFTER"},
-		{"negative", map[string]string{"DBB_RETENTION_DUMPS_DELETE_AFTER": "-1h"}, "",
-			"DBB_RETENTION_DUMPS_DELETE_AFTER"},
-		{"unknown name in env", map[string]string{"DBB_RETENTION_QUERY_DELETE_AFTER": "720h"}, "",
-			"retention_query_delete_after"},
-		{"unknown name in file", nil, "retention:\n  queries:\n    delete_afte: 720h\n",
-			"retention.queries.delete_afte"},
+		{
+			"not a duration",
+			map[string]string{"DBB_RETENTION_QUERIES_DELETE_AFTER": "30d"},
+			"",
+			"DBB_RETENTION_QUERIES_DELETE_AFTER",
+		},
+		{
+			"negative",
+			map[string]string{"DBB_RETENTION_DUMPS_DELETE_AFTER": "-1h"},
+			"",
+			"DBB_RETENTION_DUMPS_DELETE_AFTER",
+		},
+		{
+			"unknown name in env",
+			map[string]string{"DBB_RETENTION_QUERY_DELETE_AFTER": "720h"},
+			"",
+			"retention_query_delete_after",
+		},
+		{
+			"unknown name in file", nil, "retention:\n  queries:\n    delete_afte: 720h\n",
+			"retention.queries.delete_afte",
+		},
 		{"connection shorter than queries", map[string]string{
 			"DBB_RETENTION_QUERIES_DELETE_AFTER":     "720h",
 			"DBB_RETENTION_CONNECTIONS_DELETE_AFTER": "24h",
@@ -123,7 +143,7 @@ func TestRetentionMistakes(t *testing.T) {
 		}, "", "kept forever"},
 	}
 
-	for _, tc := range cases {
+	for _, tc := range cases { //nolint:paralleltest // t.Setenv cannot run in parallel
 		t.Run(tc.name, func(t *testing.T) {
 			w := loadRetention(t, tc.env, tc.yaml).RetentionWindows()
 
@@ -139,7 +159,7 @@ func TestRetentionMistakes(t *testing.T) {
 
 // Each removed name, in the environment and in the file: every window is zero,
 // the problem gives the new name, and the old value is never read.
-func TestRetentionRemovedNames(t *testing.T) {
+func TestRetentionRemovedNames(t *testing.T) { //nolint:paralleltest // t.Setenv cannot run in parallel
 	cases := []struct {
 		name        string
 		env         map[string]string
@@ -154,7 +174,7 @@ func TestRetentionRemovedNames(t *testing.T) {
 		{"dump file", nil, "dump:\n  retention: 720h\n", "retention.dumps.delete_after"},
 	}
 
-	for _, tc := range cases {
+	for _, tc := range cases { //nolint:paralleltest // t.Setenv cannot run in parallel
 		t.Run(tc.name, func(t *testing.T) {
 			w := loadRetention(t, tc.env, tc.yaml).RetentionWindows()
 
@@ -168,7 +188,7 @@ func TestRetentionRemovedNames(t *testing.T) {
 
 // The docs and the OpenAPI file never mention the three removed names. They
 // may appear in the changelog, the guard's map and the tests.
-func TestRemovedRetentionNamesAreGoneFromDocs(t *testing.T) {
+func TestRemovedRetentionNamesAreGoneFromDocs(t *testing.T) { //nolint:paralleltest // t.Setenv cannot run in parallel
 	removed := []string{"DBB_QUERY_STORAGE_RETENTION", "DBB_CONNECTION_RETENTION", "DBB_DUMP_RETENTION"}
 	roots := []string{"../../CLAUDE.md", "../../README.md", "../../website/docs", "../../docs", "../api/openapi.yml"}
 
