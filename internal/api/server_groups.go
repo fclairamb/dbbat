@@ -134,6 +134,12 @@ func (s *Server) handleCreateServerGroup(c *gin.Context) {
 		return
 	}
 
+	if msg := s.validateRetentionSeconds(req.ArchiveAfterSeconds, req.DeleteAfterSeconds, nil, nil); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
 	created, err := s.store.CreateServerGroup(ctx, &store.ServerGroup{
 		Name:                        req.Name,
 		Description:                 req.Description,
@@ -153,6 +159,10 @@ func (s *Server) handleCreateServerGroup(c *gin.Context) {
 		return
 	}
 
+	if !s.applyGroupRetention(c, created, req.ArchiveAfterSeconds, req.DeleteAfterSeconds) {
+		return
+	}
+
 	if len(req.MemberUIDs) > 0 {
 		if err := s.store.SetServerGroupMembers(ctx, created.UID, req.MemberUIDs); err != nil {
 			writeInternalError(c, s.logger, err, "failed to set server group members")
@@ -167,7 +177,11 @@ func (s *Server) handleCreateServerGroup(c *gin.Context) {
 		"member_uids":                     req.MemberUIDs,
 		"access_approver_user_group_uids": created.AccessApproverUserGroupUIDs,
 		"query_approver_user_group_uids":  created.QueryApproverUserGroupUIDs,
+		"archive_after_seconds":           created.ArchiveAfterSeconds,
+		"delete_after_seconds":            created.DeleteAfterSeconds,
 	})
+
+	s.wakeRetention()
 
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
 		EventType:   "server_group.created",
@@ -345,6 +359,8 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 		"member_uids":                     req.MemberUIDs,
 		"access_approver_user_group_uids": group.AccessApproverUserGroupUIDs,
 		"query_approver_user_group_uids":  group.QueryApproverUserGroupUIDs,
+		"archive_after_seconds":           group.ArchiveAfterSeconds,
+		"delete_after_seconds":            group.DeleteAfterSeconds,
 	})
 
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{

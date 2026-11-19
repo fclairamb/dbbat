@@ -268,6 +268,44 @@ func (s *Store) ListArchivesDueForDeletion(
 	return due, nil
 }
 
+// ArchiveStillDue re-resolves the delete window of one archived connection at
+// this instant and reports whether its archive is still due for deletion. The
+// sweeper calls it right before deleting each object: the list it iterates was
+// read earlier in the pass, and an operator may have lengthened (or set to
+// never) the window since. An object is irreversible, so the policy is read
+// again, live, at the last moment.
+func (s *Store) ArchiveStillDue(ctx context.Context, ref ConnectionArchiveRef, now time.Time) (bool, error) {
+	var conn Connection
+
+	err := s.db.NewSelect().Model(&conn).
+		Column("uid", "database_id", "disconnected_at").
+		Where("uid = ?", ref.ConnectionUID).
+		Where("archived_at IS NOT NULL").
+		Where("archive_deleted_at IS NULL").
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("re-read archived connection: %w", err)
+	}
+
+	instance, err := s.InstanceRetention(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	resolved, err := s.ResolveRetentionByServers(ctx, []uuid.UUID{conn.DatabaseID}, instance)
+	if err != nil {
+		return false, err
+	}
+
+	window := resolved[conn.DatabaseID].Delete.Duration
+
+	return window > 0 && conn.DisconnectedAt != nil && conn.DisconnectedAt.Before(now.Add(-window)), nil
+}
+
 // MarkArchiveDeleted appends the chained connection.archive_deleted entry and
 // records the deletion on the connection row.
 func (s *Store) MarkArchiveDeleted(ctx context.Context, ref ConnectionArchiveRef) error {

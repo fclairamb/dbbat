@@ -79,6 +79,15 @@ func startRetention(
 
 	apiServer.SetArchive(archiver)
 
+	// After an hour of failing passes the archiver calls this once per outage.
+	if archiver != nil {
+		if notifier := apiServer.Notifier(); notifier != nil {
+			archiver.OnPersistentFailure = func(cause error) {
+				notifier.NotifyArchiveFailure(context.WithoutCancel(ctx), cause)
+			}
+		}
+	}
+
 	sweeper := startRetentionSweeper(ctx, cfg, dataStore, archiver, logger)
 	apiServer.SetRetentionWaker(sweeper.Wake)
 

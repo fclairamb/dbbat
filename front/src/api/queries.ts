@@ -1606,6 +1606,29 @@ export function useInstance() {
   });
 }
 
+export function useUpdateInstanceRetention(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { archive_after: string; delete_after: string }) => {
+      const response = await apiClient.PUT("/instance/retention", { body });
+      if (response.error) {
+        throw new Error(
+          (response.error as { message?: string }).message ||
+            "Failed to save retention"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["instance"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
 export function useUpdateInstancePublic(options?: {
   onSuccess?: () => void;
   onError?: (error: Error) => void;

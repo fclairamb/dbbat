@@ -197,7 +197,20 @@ function ConnectionsPage() {
       header: "Status",
       cell: (c) =>
         c.disconnected_at ? (
-          <Badge variant="secondary">Disconnected</Badge>
+          <span className="flex gap-1">
+            <Badge variant="secondary">Disconnected</Badge>
+            {c.archive_deleted_at ? (
+              <Badge variant="outline" data-testid="connection-archive-deleted-badge">
+                Archive deleted
+              </Badge>
+            ) : (
+              c.archived_at && (
+                <Badge variant="outline" data-testid="connection-archived-badge">
+                  Archived
+                </Badge>
+              )
+            )}
+          </span>
         ) : (
           <Badge variant="default">Active</Badge>
         ),

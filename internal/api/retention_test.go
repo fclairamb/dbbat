@@ -159,3 +159,51 @@ func TestServerRetentionTriState(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.Nil(t, read().Data.DeleteAfterSeconds)
 }
+
+func TestServerGroupRetentionWindows(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	createTestUser(t, dataStore, "admin-ret3", "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-ret3", "adminpass123")
+
+	router := retentionRouter(server)
+	router.POST("/api/v1/server-groups", server.requireAdmin(), server.handleCreateServerGroup)
+	router.PATCH("/api/v1/server-groups/:uid", server.requireAdmin(), server.handleUpdateServerGroup)
+
+	type group struct {
+		Data struct {
+			UID                string `json:"uid"`
+			DeleteAfterSeconds *int64 `json:"delete_after_seconds"`
+		}
+	}
+
+	// A window given at creation is stored.
+	w := doRetention(t, router, http.MethodPost, "/api/v1/server-groups", token,
+		`{"name":"ret-grp","delete_after_seconds":7200}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var g group
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &g.Data))
+	require.NotNil(t, g.Data.DeleteAfterSeconds)
+	assert.Equal(t, int64(7200), *g.Data.DeleteAfterSeconds)
+
+	// A negative window is refused, and creates nothing.
+	w = doRetention(t, router, http.MethodPost, "/api/v1/server-groups", token,
+		`{"name":"ret-grp-bad","delete_after_seconds":-1}`)
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+
+	// Absent leaves it alone, null inherits again.
+	url := "/api/v1/server-groups/" + g.Data.UID
+	w = doRetention(t, router, http.MethodPatch, url, token, `{"name":"ret-grp"}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &g.Data))
+	require.NotNil(t, g.Data.DeleteAfterSeconds)
+
+	w = doRetention(t, router, http.MethodPatch, url, token, `{"name":"ret-grp","delete_after_seconds":null}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	g = group{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &g.Data))
+	assert.Nil(t, g.Data.DeleteAfterSeconds)
+}

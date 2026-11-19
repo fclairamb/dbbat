@@ -409,3 +409,49 @@ func TestVerifyRowChainsCountsArchived(t *testing.T) { //nolint:paralleltest // 
 		require.ErrorIs(t, err, store.ErrChainKeyUnavailable)
 	}
 }
+
+// An archive is deleted against the policy as it is when the object goes, not
+// as it was when the pass listed it: a window lengthened (or set to never)
+// between the listing and the delete protects the object.
+func TestArchiveDeletionRechecksPolicy(t *testing.T) { //nolint:paralleltest // sequential tests share one database
+	s := testStore(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	key := make([]byte, 32)
+
+	// Archived, never deleted.
+	f := newFixture(t, s, "recheck", i64(1), nil, []int{2}, 3*time.Hour)
+	a := openArchiver(t, s, dir)
+
+	res, err := a.Pass(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.Archived)
+
+	ref, err := s.GetConnectionArchive(ctx, f.conn.UID)
+	require.NoError(t, err)
+
+	cref := store.ConnectionArchiveRef{ConnectionUID: f.conn.UID, Key: ref.Key}
+
+	due, err := s.ArchiveStillDue(ctx, cref, time.Now())
+	require.NoError(t, err)
+	assert.False(t, due, "no delete window: never due")
+
+	// The operator sets a 2h window: due.
+	require.NoError(t, s.UpdateServer(ctx, f.server.UID, store.ServerUpdate{
+		DeleteAfter: store.OptionalSeconds{Set: true, Value: i64(7200)},
+	}, key))
+
+	due, err = s.ArchiveStillDue(ctx, cref, time.Now())
+	require.NoError(t, err)
+	assert.True(t, due)
+
+	// ...and then lengthens it to a week before the object is deleted.
+	require.NoError(t, s.UpdateServer(ctx, f.server.UID, store.ServerUpdate{
+		DeleteAfter: store.OptionalSeconds{Set: true, Value: i64(7 * 24 * 3600)},
+	}, key))
+
+	due, err = s.ArchiveStillDue(ctx, cref, time.Now())
+	require.NoError(t, err)
+	assert.False(t, due, "the lengthened window protects the archive")
+	assert.Len(t, listFiles(t, dir), 1)
+}

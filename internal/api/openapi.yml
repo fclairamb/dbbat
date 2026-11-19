@@ -4816,6 +4816,20 @@ components:
 
             Read live at decision time: editing this changes who may decide
             immediately, including for statements already parked.
+        archive_after_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            Archive window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never,
+            a positive value is the duration.
+        delete_after_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            Delete window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never,
+            a positive value is the duration.
         created_by:
           type: string
           format: uuid
@@ -4904,6 +4918,20 @@ components:
             Group-level fallback for who may release **approval holds** on this
             group's servers. Same write semantics as
             `access_approver_user_group_uids`.
+        archive_after_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            Archive window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never,
+            a positive value is the duration.
+        delete_after_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            Delete window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never,
+            a positive value is the duration.
       required:
         - name
 
@@ -5051,6 +5079,23 @@ components:
             User groups allowed to release **approval holds** on statements
             against this server, under the same fallback chain. Neither approver
             kind implies the other.
+        archive_after_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            Archive window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never,
+            a positive value is the duration.
+        delete_after_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            Delete window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never,
+            a positive value is the duration.
+        effective_retention:
+          $ref: '#/components/schemas/ResolvedRetention'
+          description: Both windows resolved with their source. Present on GET /servers/{uid} only.
         connection_test:
           allOf:
             - $ref: '#/components/schemas/ConnectionTestResult'
@@ -5523,6 +5568,20 @@ components:
             Replaces the server's approval-hold approver list. Same semantics —
             and it applies to statements *already parked*, since resolution is
             live at decision time.
+        archive_after_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            Archive window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never,
+            a positive value is the duration.
+        delete_after_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            Delete window in seconds, one-second resolution. Null inherits (server group, then instance), 0 means never,
+            a positive value is the duration.
         test_connection:
           type: boolean
           description: |
@@ -6812,6 +6871,14 @@ components:
           format: date-time
           nullable: true
           description: Connection end time (null if still connected)
+        archived_at:
+          type: string
+          format: date-time
+          description: When the captured result rows moved to the archive bucket (absent until then)
+        archive_deleted_at:
+          type: string
+          format: date-time
+          description: When the archive object was deleted at its delete window (absent until then)
         queries:
           type: integer
           format: int64
@@ -6910,6 +6977,12 @@ components:
               description: >-
                 The grant named by `grant_uid`, or null when `grant_uid` is
                 null or the grant it names could not be resolved.
+            rows_location:
+              type: string
+              enum: [store, archive, deleted]
+              description: >-
+                Where the captured result rows are: PostgreSQL (`store`), the
+                archive bucket (`archive`) or deleted with the archive (`deleted`).
             statements_retained:
               type: boolean
               description: |
@@ -7818,6 +7891,12 @@ components:
           $ref: '#/components/schemas/ResolvedInstanceLimits'
         resolved_tagging:
           $ref: '#/components/schemas/ResolvedInstanceTagging'
+        retention:
+          $ref: '#/components/schemas/InstanceRetention'
+          nullable: true
+          description: Only present for admin callers
+        resolved_retention:
+          $ref: '#/components/schemas/ResolvedInstanceRetention'
         notify_channels:
           type: array
           items:
@@ -7834,6 +7913,49 @@ components:
         - resolved
         - resolved_limits
         - resolved_tagging
+        - resolved_retention
+
+    InstanceRetention:
+      type: object
+      description: The raw retention.queries.* parameters, Go durations, empty when unset.
+      properties:
+        archive_after:
+          type: string
+        delete_after:
+          type: string
+      required: [archive_after, delete_after]
+
+    ResolvedInstanceRetention:
+      type: object
+      properties:
+        archive_after_seconds: {type: integer, format: int64}
+        archive_after_source: {type: string, description: '"parameter", "env" or empty'}
+        delete_after_seconds: {type: integer, format: int64}
+        delete_after_source: {type: string, description: '"parameter", "env" or empty'}
+        archive_enabled:
+          type: boolean
+          description: True when DBB_ARCHIVE_URL is set.
+      required: [archive_after_seconds, archive_after_source, delete_after_seconds, delete_after_source, archive_enabled]
+
+    RetentionWindow:
+      type: object
+      properties:
+        seconds: {type: integer, format: int64}
+        source:
+          type: string
+          description: '"server", "server_group", "instance", or empty when nothing sets a window'
+        server_group_uids:
+          type: array
+          items: {type: string, format: uuid}
+        instance_source: {type: string}
+      required: [seconds, source]
+
+    ResolvedRetention:
+      type: object
+      properties:
+        archive: {$ref: '#/components/schemas/RetentionWindow'}
+        delete: {$ref: '#/components/schemas/RetentionWindow'}
+      required: [archive, delete]
 
     InstanceTagging:
       type: object

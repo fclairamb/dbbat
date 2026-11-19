@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -212,4 +213,31 @@ func TestNotifyTermination_DistinctKeysDoNotCoalesce(t *testing.T) {
 	n.NotifyTermination(context.Background(), quota)
 
 	require.Equal(t, 2, f.postCount(), "distinct reasons must each post immediately")
+}
+
+var errBucketUnreachable = errors.New("bucket unreachable")
+
+func TestNotifyArchiveFailure_PostsToTheDefaultChannel(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeSlack(t)
+	n := newTestTerminationNotifier(f, false, time.Minute)
+
+	n.NotifyArchiveFailure(context.Background(), errBucketUnreachable)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	require.Len(t, f.postCalls, 1)
+	require.Equal(t, "C123", f.postCalls[0].Get("channel"))
+	require.Contains(t, f.postCalls[0].Get("text"), "bucket unreachable")
+	require.Contains(t, f.postCalls[0].Get("text"), "DBB_ARCHIVE_URL")
+}
+
+func TestNotifyArchiveFailure_NilNotifierIsANoOp(t *testing.T) {
+	t.Parallel()
+
+	var n *SlackNotifier
+
+	require.NotPanics(t, func() { n.NotifyArchiveFailure(context.Background(), errBucketUnreachable) })
 }

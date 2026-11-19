@@ -380,6 +380,21 @@ func (a *Archiver) deleteDue(ctx context.Context, instance store.InstanceRetenti
 			return done, false, ctx.Err()
 		}
 
+		// The list was read earlier in the pass: an edit since then may have
+		// lengthened the window, and deleting an object cannot be undone.
+		still, err := a.store.ArchiveStillDue(ctx, ref, time.Now())
+		if err != nil {
+			if firstEr == nil {
+				firstEr = err
+			}
+
+			continue
+		}
+
+		if !still {
+			continue
+		}
+
 		if err := a.deleteObject(ctx, ref.Key); err != nil {
 			a.logger.ErrorContext(ctx, "archive deletion failed",
 				slog.String("connection", ref.ConnectionUID.String()), slog.Any("error", err))
