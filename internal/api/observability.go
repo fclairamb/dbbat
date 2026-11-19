@@ -611,6 +611,8 @@ func (s *Server) handleListAudit(c *gin.Context) {
 		return
 	}
 
+	redactAuditPasswords(events)
+
 	successResponse(c, gin.H{"audit_events": events})
 }
 
