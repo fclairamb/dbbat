@@ -22,6 +22,9 @@ type CreateUserRequest struct {
 	Roles    []string `json:"roles"`
 }
 
+// auditEventUserUpdated is written by PUT /users/:uid.
+const auditEventUserUpdated = "user.updated"
+
 // UpdateUserRequest represents the request to update a user
 type UpdateUserRequest struct {
 	Password *string  `json:"password"`
@@ -298,12 +301,13 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		s.setMongoVerifier(c, uid, *req.Password)
 	}
 
-	// Log audit event
+	// Log audit event. Never the request itself: it carries the plaintext
+	// password.
 	details, _ := json.Marshal(map[string]interface{}{
-		"updated_fields": req,
+		"updated_fields": userUpdateForAudit(req),
 	})
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
-		EventType:   "user.updated",
+		EventType:   auditEventUserUpdated,
 		UserID:      &uid,
 		PerformedBy: &currentUser.UID,
 		Details:     details,
@@ -481,4 +485,83 @@ func (s *Server) handleDeleteUser(c *gin.Context) {
 	})
 
 	successResponse(c, gin.H{"message": "user deleted"})
+}
+
+// userUpdateForAudit is what a user.updated audit entry records of a
+// PUT /users/:uid: the fields that changed, with the password reduced to the
+// fact that it changed.
+func userUpdateForAudit(req UpdateUserRequest) map[string]any {
+	out := map[string]any{
+		"roles":           req.Roles,
+		"user_group_uids": req.UserGroupUIDs,
+	}
+
+	if req.Password != nil {
+		out["password_changed"] = true
+	}
+
+	return out
+}
+
+// redactAuditPasswords masks, in place, the plaintext password that
+// user.updated entries written before userUpdateForAudit carried under
+// updated_fields.password. Only the served copy changes: the stored row (and
+// its MAC) is untouched, so the chain still verifies.
+func redactAuditPasswords(events []store.AuditLog) {
+	for i := range events {
+		if events[i].EventType != auditEventUserUpdated || len(events[i].Details) == 0 {
+			continue
+		}
+
+		if redacted, ok := redactUserUpdatedDetails(events[i].Details); ok {
+			events[i].Details = redacted
+		}
+	}
+}
+
+// redactUserUpdatedDetails returns details without updated_fields.password,
+// and whether it had to change anything. A non-null password becomes
+// password_changed: true. Details it cannot parse are replaced outright rather
+// than served as they are: they may hold the password in a shape this does not
+// recognize.
+func redactUserUpdatedDetails(details json.RawMessage) (json.RawMessage, bool) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(details, &doc); err != nil {
+		return json.RawMessage(`{"redacted":true}`), true
+	}
+
+	rawFields, ok := doc["updated_fields"]
+	if !ok {
+		return details, false
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rawFields, &fields); err != nil {
+		return json.RawMessage(`{"redacted":true}`), true
+	}
+
+	password, ok := fields["password"]
+	if !ok {
+		return details, false
+	}
+
+	delete(fields, "password")
+
+	if string(password) != "null" {
+		fields["password_changed"] = json.RawMessage("true")
+	}
+
+	encodedFields, err := json.Marshal(fields)
+	if err != nil {
+		return json.RawMessage(`{"redacted":true}`), true
+	}
+
+	doc["updated_fields"] = encodedFields
+
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return json.RawMessage(`{"redacted":true}`), true
+	}
+
+	return out, true
 }
