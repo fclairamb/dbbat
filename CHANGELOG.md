@@ -5,17 +5,21 @@
 
 ### ⚠ BREAKING CHANGES
 
-* uniform retention settings, windows per server, rows archive to object storage ([#512](https://github.com/fclairamb/dbbat/issues/512))
+* **retention:** `DBB_QUERY_STORAGE_RETENTION`, `DBB_CONNECTION_RETENTION` and `DBB_DUMP_RETENTION` (and their config keys) are removed, not aliased. A deployment that still sets one starts, deletes nothing and logs a WARN giving the new `DBB_RETENTION_<OBJECT>_<ACTION>_AFTER` name ([#512](https://github.com/fclairamb/dbbat/issues/512))
+* **storage:** bucket URLs accept only `s3://` and `file://`; `gs://` and `azblob://` are refused at startup ([#512](https://github.com/fclairamb/dbbat/issues/512))
 
 ### Features
 
-* uniform retention settings, windows per server, rows archive to object storage ([#512](https://github.com/fclairamb/dbbat/issues/512)) ([9a3608b](https://github.com/fclairamb/dbbat/commit/9a3608bd4003f459013558904cce431f3426cd47))
-
+* **retention:** uniform retention settings, windows per server, rows archive to object storage ([#512](https://github.com/fclairamb/dbbat/issues/512)) ([9a3608b](https://github.com/fclairamb/dbbat/commit/9a3608bd4003f459013558904cce431f3426cd47))
+  * One `retention` config section; every window defaults to never, so nothing is archived or deleted until configured
+  * Delete windows set per instance, server group and server, resolved live (the longest window across groups wins), with `PUT /instance/retention` and `effective_retention` on `GET /servers/{uid}`
+  * After `archive_after`, a closed session's captured rows move to `DBB_ARCHIVE_URL` as one hash-checked Parquet file per connection, still readable through `GET /queries/{uid}/rows` and downloadable from `GET /connections/{uid}/archive/rows`; archive and delete steps are audited
+  * UI: Retention card in Settings, duration fields in the server and server-group dialogs, Archived badge on connections
 
 ### Bug Fixes
 
-* **deps:** update module github.com/go-sql-driver/mysql to v1.10.2 ([#510](https://github.com/fclairamb/dbbat/issues/510)) ([02cd01b](https://github.com/fclairamb/dbbat/commit/02cd01b894f194c93883354ed377b80b87b164d6))
-* **deps:** update module github.com/microsoft/go-mssqldb to v1.12.0 ([#514](https://github.com/fclairamb/dbbat/issues/514)) ([0610af2](https://github.com/fclairamb/dbbat/commit/0610af278055ca707c352776b2a145d7a237bda2))
+* **server-groups:** `POST /server-groups` no longer ignores retention windows on create ([#512](https://github.com/fclairamb/dbbat/issues/512)) ([9a3608b](https://github.com/fclairamb/dbbat/commit/9a3608bd4003f459013558904cce431f3426cd47))
+* **deps:** update github.com/go-sql-driver/mysql to v1.10.2 and github.com/microsoft/go-mssqldb to v1.12.0 ([#510](https://github.com/fclairamb/dbbat/issues/510), [#514](https://github.com/fclairamb/dbbat/issues/514))
 
 ## [0.32.3](https://github.com/fclairamb/dbbat/compare/v0.32.2...v0.32.3) (2026-11-17)
 
