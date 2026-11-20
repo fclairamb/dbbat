@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.33.2](https://github.com/fclairamb/dbbat/compare/v0.33.1...v0.33.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/gopacket/gopacket to v1.8.0 ([#525](https://github.com/fclairamb/dbbat/issues/525)) ([cf187f6](https://github.com/fclairamb/dbbat/commit/cf187f6b39c7d76bca24ceb2722364e47681c7b7))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.10.1 ([#522](https://github.com/fclairamb/dbbat/issues/522)) ([8d83e55](https://github.com/fclairamb/dbbat/commit/8d83e55eba767d57e531ed110fdff47e88ee0303))
+
 ## [0.33.1](https://github.com/fclairamb/dbbat/compare/v0.33.0...v0.33.1) (2026-11-19)
 
 
