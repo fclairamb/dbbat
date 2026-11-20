@@ -156,6 +156,18 @@ func startOracleContainerWith(t *testing.T, hostGateway bool) (testcontainers.Co
 	return container, host, int(port.Num())
 }
 
+// directOracleDSN is the DSN of a go-ora session opened straight on the test
+// container, bypassing dbbat. Fast login stays off, as in
+// upstream.ConnectOracle: go-ora v3 caches the server's fast-login cookie
+// process-wide and replays it on every later connection, which Oracle 23.26.4
+// (gvenzl/oracle-free:23-slim since 2026-11-17) answers by closing the socket.
+// Only the first connection of the process got through, so
+// TestIntegration_ConcurrentSessions failed every night (sijms/go-ora#732).
+func directOracleDSN(host string, port int) string {
+	return fmt.Sprintf("oracle://system:oracle@%s/%s?FAST+LOGIN=false",
+		net.JoinHostPort(host, strconv.Itoa(port)), oracleTestService())
+}
+
 // buildTNSConnect constructs a TNS Connect packet payload for the given service
 // name. It used to live in upstream_auth.go, but upstream connection setup now
 // goes through go-ora, so the only remaining user is this raw-socket test.
@@ -219,7 +231,7 @@ func TestIntegration_OracleContainer(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
+	dsn := directOracleDSN(host, port)
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
@@ -362,12 +374,12 @@ func TestIntegration_ConcurrentSessions(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
+	dsn := directOracleDSN(host, port)
 
-	// "DATABASE IS READY TO USE!" can come out before the listener serves the
-	// PDB reliably: ten connections dialled at once then lose one to an EOF
-	// (nightly run of 2026-11-18). Wait for a single session to get through
-	// first, so the test measures concurrency, not the container's start-up.
+	// Wait for a single session to get through first, so the test measures
+	// concurrency, not the container's start-up. The EOFs of the nightly runs
+	// of 2026-11-18 to 20 were not a start-up race but go-ora's fast-login
+	// cookie: see directOracleDSN.
 	warm, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
@@ -410,7 +422,7 @@ func TestIntegration_LargeResultSet(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
+	dsn := directOracleDSN(host, port)
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
@@ -433,7 +445,7 @@ func TestIntegration_MultipleDataTypes(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
+	dsn := directOracleDSN(host, port)
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
@@ -469,7 +481,7 @@ func TestIntegration_VersionDetection(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
+	dsn := directOracleDSN(host, port)
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
