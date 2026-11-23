@@ -408,8 +408,13 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 func loginThrottleFactory(
 	tracker *cache.AuthFailureTracker, dataStore *store.Store, logger *slog.Logger, enforce bool,
 ) func(listener string) *shared.LoginThrottle {
+	var auditStore shared.LoginAuditStore
+	if dataStore != nil {
+		auditStore = dataStore
+	}
+
 	return func(listener string) *shared.LoginThrottle {
-		return shared.NewLoginThrottle(tracker, dataStore, logger, listener, enforce)
+		return shared.NewLoginThrottle(tracker, auditStore, logger, listener, enforce)
 	}
 }
 
