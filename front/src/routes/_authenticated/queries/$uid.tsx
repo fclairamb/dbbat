@@ -251,6 +251,16 @@ function QueryDetailPage() {
                 Rows dropped
               </Badge>
             )}
+            {rowsData?.verified === false && (
+              <Badge
+                variant="outline"
+                className="border-amber-500 text-amber-600"
+                data-testid="archived-rows-unverified-badge"
+                title="These rows come from an archive object sealed before per-chunk digests existed and too large to fetch whole: they could not be checked against the SHA-256 sealed in the audit chain."
+              >
+                Unverified archive
+              </Badge>
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent>

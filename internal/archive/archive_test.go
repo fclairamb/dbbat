@@ -228,12 +228,16 @@ func TestArchiveRoundTrip(t *testing.T) { //nolint:paralleltest // sequential te
 	assert.Equal(t, hex.EncodeToString(sum[:]), ref.SHA256, "the sealed hash is the file's hash")
 	assert.Equal(t, int64(len(data)), ref.Bytes)
 
-	obj := Object{Key: ref.Key, Size: ref.Bytes, SHA256: ref.SHA256}
+	assert.Zero(t, ref.ChunkBytes, "a small object is fetched whole: no chunk digests")
+	assert.Empty(t, ref.ChunkSHA256)
+
+	obj := Object{Key: ref.Key, Size: ref.Bytes, SHA256: ref.SHA256, ConnectionUID: f.conn.UID}
 
 	// Each statement's rows come back, in order, bit-exact JSON, with paging.
 	page, err := ReadQueryRows(ctx, a.Bucket(), obj, f.queries[0], 0, 100)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), page.Total)
+	assert.True(t, page.Verified)
 	require.Len(t, page.Rows, 3)
 
 	for i, r := range page.Rows {

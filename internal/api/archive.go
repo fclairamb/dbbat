@@ -101,6 +101,12 @@ func (s *Server) archivedQueryRows(c *gin.Context, queryUID uuid.UUID, cursor st
 			return nil, true
 		}
 
+		if cur.Offset < 0 {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid cursor")
+
+			return nil, true
+		}
+
 		offset = cur.Offset
 	}
 
@@ -111,14 +117,19 @@ func (s *Server) archivedQueryRows(c *gin.Context, queryUID uuid.UUID, cursor st
 	}
 
 	page, err := archive.ReadQueryRows(ctx, s.archiver.Bucket(),
-		archive.Object{Key: ref.Key, Size: ref.Bytes, SHA256: ref.SHA256}, queryUID, offset, limit+1)
+		archive.Object{
+			Key: ref.Key, Size: ref.Bytes, SHA256: ref.SHA256,
+			ChunkBytes: ref.ChunkBytes, ChunkSHA256: ref.ChunkSHA256,
+			ConnectionUID: query.ConnectionID,
+		}, queryUID, offset, limit+1)
 	if err != nil {
 		s.writeArchiveError(c, err)
 
 		return nil, true
 	}
 
-	result := &store.QueryRowsResult{Rows: make([]store.QueryRow, 0, limit), TotalRows: page.Total}
+	verified := page.Verified
+	result := &store.QueryRowsResult{Rows: make([]store.QueryRow, 0, limit), TotalRows: page.Total, Verified: &verified}
 
 	var size int64
 

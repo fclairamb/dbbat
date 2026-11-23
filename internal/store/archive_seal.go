@@ -297,9 +297,11 @@ func (s *Store) sealedConnectionArchive(ctx context.Context, conn *Connection) (
 	}
 
 	return &ConnectionArchive{
-		Key:    rec.seal.Key,
-		Bytes:  rec.seal.Bytes,
-		SHA256: rec.seal.SHA256,
-		Rows:   rec.seal.Rows,
+		Key:         rec.seal.Key,
+		Bytes:       rec.seal.Bytes,
+		SHA256:      rec.seal.SHA256,
+		Rows:        rec.seal.Rows,
+		ChunkBytes:  rec.seal.ChunkBytes,
+		ChunkSHA256: rec.seal.ChunkSHA256,
 	}, nil
 }

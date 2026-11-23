@@ -150,6 +150,12 @@ type ArchiveSeal struct {
 	SHA256        string    `json:"sha256"`
 	Rows          int64     `json:"rows"`
 	Statements    int64     `json:"statements"`
+	// ChunkBytes and ChunkSHA256 are the SHA-256 of every ChunkBytes-long
+	// chunk of an object larger than the whole-fetch limit, so a range read
+	// checks what it touches. Absent from smaller objects and from entries
+	// sealed before they existed.
+	ChunkBytes  int64    `json:"chunk_bytes,omitempty"`
+	ChunkSHA256 []string `json:"chunk_sha256,omitempty"`
 	// Policy says which window applied and from which level.
 	PolicySeconds int64       `json:"policy_archive_after_seconds"`
 	PolicySource  string      `json:"policy_source"`
@@ -342,6 +348,10 @@ type ConnectionArchive struct {
 	Bytes  int64
 	SHA256 string
 	Rows   int64
+	// ChunkBytes and ChunkSHA256 are the sealed per-chunk digests, empty when
+	// the entry has none (see ArchiveSeal).
+	ChunkBytes  int64
+	ChunkSHA256 []string
 }
 
 // GetConnectionArchive returns the archive reference of a connection, or

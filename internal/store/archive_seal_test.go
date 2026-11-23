@@ -207,3 +207,31 @@ func TestRowChainsExcuseOnlyASealedArchiveDeletion(t *testing.T) {
 	require.NotNil(t, result.Break, "an unsealed deletion must not hide the missing rows")
 	require.Equal(t, int64(0), result.ArchiveDeleted)
 }
+
+// The per-chunk digests a range read checks come from the sealed entry, and an
+// entry sealed without them (before they existed) reads back without any.
+func TestConnectionArchiveCarriesSealedChunkDigests(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := archiveTestConnection(t, ctx, store, "arch_chunks")
+	seal := testArchiveSeal(conn)
+	seal.ChunkBytes = 1 << 20
+	seal.ChunkSHA256 = []string{strings.Repeat("cd", 32), strings.Repeat("ef", 32)}
+	require.NoError(t, store.SealAndCommitArchive(ctx, seal))
+
+	ref, err := store.GetConnectionArchive(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Equal(t, seal.ChunkBytes, ref.ChunkBytes)
+	require.Equal(t, seal.ChunkSHA256, ref.ChunkSHA256)
+
+	legacy, _ := archiveTestConnection(t, ctx, store, "arch_legacy")
+	archiveNormally(t, ctx, store, legacy)
+
+	ref, err = store.GetConnectionArchive(ctx, legacy.UID)
+	require.NoError(t, err)
+	require.Zero(t, ref.ChunkBytes)
+	require.Empty(t, ref.ChunkSHA256)
+}

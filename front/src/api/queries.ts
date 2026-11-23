@@ -1274,6 +1274,8 @@ export type QueryRowsResult = {
   next_cursor?: string;
   has_more: boolean;
   total_rows: number;
+  // Set only on archived rows: false when they could not be checked.
+  verified?: boolean;
 };
 
 export function useQueryRows(
