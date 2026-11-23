@@ -18,13 +18,28 @@ const legacyFileExt = ".dbbat-dump"
 // since they are otherwise unreadable and invisible to this sweep.
 // Returns the number of files deleted.
 func CleanupOldFiles(dir string, retention time.Duration) (int, error) {
+	removed, err := CleanupOldFilesDetailed(dir, retention)
+
+	return len(removed), err
+}
+
+// RemovedFile is a capture file the sweep deleted.
+type RemovedFile struct {
+	// Name is the file name, "<connection-uid>.pcapng" for a capture.
+	Name string
+	Size int64
+}
+
+// CleanupOldFilesDetailed is CleanupOldFiles, returning what it deleted so the
+// caller can account for each capture.
+func CleanupOldFilesDetailed(dir string, retention time.Duration) ([]RemovedFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0, fmt.Errorf("read dump dir: %w", err)
+		return nil, fmt.Errorf("read dump dir: %w", err)
 	}
 
 	cutoff := time.Now().Add(-retention)
-	deleted := 0
+	var removed []RemovedFile
 
 	for _, e := range entries {
 		if e.IsDir() {
@@ -42,10 +57,10 @@ func CleanupOldFiles(dir string, retention time.Duration) (int, error) {
 
 		if info.ModTime().Before(cutoff) {
 			if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
-				deleted++
+				removed = append(removed, RemovedFile{Name: e.Name(), Size: info.Size()})
 			}
 		}
 	}
 
-	return deleted, nil
+	return removed, nil
 }

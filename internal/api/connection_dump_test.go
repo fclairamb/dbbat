@@ -366,3 +366,110 @@ func TestGetConnectionDump_ViewerTokenForbidden(t *testing.T) {
 	w := doDumpRequest(router, http.MethodGet, viewerToken, conn.UID.String())
 	require.Equal(t, http.StatusForbidden, w.Code, "response body: %s", w.Body.String())
 }
+
+// dumpDeletedEntries returns the dump.deleted audit entries, decoded.
+func dumpDeletedEntries(t *testing.T, dataStore *store.Store) []map[string]any {
+	t.Helper()
+
+	typ := store.AuditEventDumpDeleted
+	events, err := dataStore.ListAuditEvents(t.Context(), store.AuditFilter{EventType: &typ})
+	require.NoError(t, err)
+
+	out := make([]map[string]any, 0, len(events))
+
+	for _, e := range events {
+		var d map[string]any
+		require.NoError(t, json.Unmarshal(e.Details, &d))
+
+		d["_performed_by"] = e.PerformedBy
+		out = append(out, d)
+	}
+
+	return out
+}
+
+func TestDeleteConnectionDump_WritesAnAuditEntry(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	suffix := "dumpaudit"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
+
+	localConn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
+	require.NoError(t, err)
+
+	remoteConn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.2")
+	require.NoError(t, err)
+
+	spool, uploader := enableDumpStorage(t, server, dataStore)
+	key := uploadCapture(t, dataStore, uploader, spool, remoteConn.UID, "remote-capture-bytes")
+
+	localPath := filepath.Join(spool, localConn.UID.String()+dump.FileExt)
+	require.NoError(t, os.WriteFile(localPath, []byte("local"), 0o600))
+
+	router := newDumpTestRouter(server)
+	require.Equal(t, http.StatusNoContent,
+		doDumpRequest(router, http.MethodDelete, token, localConn.UID.String()).Code)
+	require.Equal(t, http.StatusNoContent,
+		doDumpRequest(router, http.MethodDelete, token, remoteConn.UID.String()).Code)
+
+	byUID := map[string]map[string]any{}
+	for _, e := range dumpDeletedEntries(t, dataStore) {
+		uid, ok := e["connection_uid"].(string)
+		require.True(t, ok)
+
+		byUID[uid] = e
+	}
+
+	require.Len(t, byUID, 2)
+
+	local := byUID[localConn.UID.String()]
+	require.Equal(t, []any{"local"}, local["locations"])
+	require.Equal(t, "api", local["source"])
+	require.InDelta(t, 5, local["size_bytes"], 0)
+	require.NotNil(t, local["_performed_by"])
+
+	actor, ok := local["_performed_by"].(*uuid.UUID)
+	require.True(t, ok)
+	require.Equal(t, admin.UID, *actor)
+
+	remote := byUID[remoteConn.UID.String()]
+	require.Equal(t, []any{"remote"}, remote["locations"])
+	require.Equal(t, key, remote["key"])
+	require.InDelta(t, len("remote-capture-bytes"), remote["size_bytes"], 0)
+}
+
+func TestDeleteConnectionDump_FailureWritesNoEntry(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	suffix := "dumpnoaudit"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+	db := createTestDBEntry(t, dataStore, "db_"+suffix, true)
+
+	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
+	require.NoError(t, err)
+
+	spool, _ := enableDumpStorage(t, server, dataStore)
+	router := newDumpTestRouter(server)
+
+	// Nothing to delete: 404, no entry.
+	require.Equal(t, http.StatusNotFound,
+		doDumpRequest(router, http.MethodDelete, token, conn.UID.String()).Code)
+
+	// A path that cannot be removed (a non-empty directory under the capture's
+	// name) is a failed delete.
+	path := filepath.Join(spool, conn.UID.String()+dump.FileExt)
+	require.NoError(t, os.MkdirAll(filepath.Join(path, "x"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(path, "x", "f"), []byte("f"), 0o600))
+
+	require.Equal(t, http.StatusInternalServerError,
+		doDumpRequest(router, http.MethodDelete, token, conn.UID.String()).Code)
+
+	require.Empty(t, dumpDeletedEntries(t, dataStore))
+}

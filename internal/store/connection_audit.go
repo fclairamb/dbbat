@@ -66,6 +66,12 @@ const (
 	// connection was deleted at its delete window.
 	AuditEventConnectionArchiveDeleted = "connection.archive_deleted"
 
+	// AuditEventDumpDeleted is written when a connection's session capture is
+	// deleted, by an admin through the API or by the retention sweeper
+	// (details.source "retention", no PerformedBy). It is an ordinary visible
+	// entry: a capture is evidence, and its disappearance must be accounted for.
+	AuditEventDumpDeleted = "dump.deleted"
+
 	// AuditEventConnectionTerminateRequested is written when an admin asks for
 	// a session to end, by the replica that served the API call.
 	//

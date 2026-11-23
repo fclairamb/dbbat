@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -838,14 +839,27 @@ func (s *Server) handleDeleteConnectionDump(c *gin.Context) {
 		return
 	}
 
+	var (
+		locations []string
+		sizeBytes int64
+		sizeKnown bool
+	)
+
 	if loc.localInfo != nil {
 		if err := os.Remove(loc.localPath); err != nil && !os.IsNotExist(err) {
 			writeInternalError(c, s.logger, err, "failed to delete dump")
 			return
 		}
+
+		locations = append(locations, "local")
+		sizeBytes, sizeKnown = loc.localInfo.Size(), true
 	}
 
 	if loc.remoteKey != "" {
+		if size, err := s.dumpStorage.Stat(c.Request.Context(), loc.remoteKey); err == nil && !sizeKnown {
+			sizeBytes, sizeKnown = size, true
+		}
+
 		if err := s.dumpStorage.Delete(c.Request.Context(), loc.remoteKey); err != nil {
 			writeInternalError(c, s.logger, err, "failed to delete dump")
 			return
@@ -855,7 +869,49 @@ func (s *Server) handleDeleteConnectionDump(c *gin.Context) {
 			writeInternalError(c, s.logger, err, "failed to delete dump")
 			return
 		}
+
+		locations = append(locations, "remote")
 	}
 
+	s.auditDumpDeleted(c, uid, locations, loc.remoteKey, sizeBytes, sizeKnown)
+
 	c.Status(http.StatusNoContent)
+}
+
+// auditDumpDeleted writes the chained dump.deleted entry. A failure to write it
+// is logged, not returned: the capture is already gone.
+func (s *Server) auditDumpDeleted(
+	c *gin.Context, uid uuid.UUID, locations []string, key string, size int64, sizeKnown bool,
+) {
+	details := map[string]any{
+		"connection_uid": uid,
+		"source":         "api",
+		"locations":      locations,
+	}
+
+	if key != "" {
+		details["key"] = key
+	}
+
+	if sizeKnown {
+		details["size_bytes"] = size
+	}
+
+	raw, err := json.Marshal(details)
+	if err != nil {
+		s.logger.ErrorContext(c.Request.Context(), "failed to encode the dump deletion audit entry",
+			slog.Any("error", err))
+
+		return
+	}
+
+	event := &store.AuditEvent{EventType: store.AuditEventDumpDeleted, Details: raw}
+	if user := getCurrentUser(c); user != nil {
+		event.PerformedBy = &user.UID
+	}
+
+	if err := s.store.LogAuditEvent(c.Request.Context(), event); err != nil {
+		s.logger.ErrorContext(c.Request.Context(), "failed to record the dump deletion",
+			slog.Any("error", err))
+	}
 }

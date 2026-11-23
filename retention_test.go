@@ -1,12 +1,17 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 func newIdleSweeper() *retentionSweeper {
@@ -59,4 +64,32 @@ func TestSweeperStaysOffWithoutPolicy(t *testing.T) {
 	// recovered by safe.RunMaintenance when there is none).
 	s.onConnectionClosed(uuid.New(), time.Now())
 	assert.Len(t, s.wakeCh, 1)
+}
+
+// Retention expiry accounts for each capture: source "retention", no actor,
+// the connection UID read from the file name and the size it had.
+func TestDumpDeletedEventsFromRetention(t *testing.T) {
+	t.Parallel()
+
+	uid := uuid.New()
+	events := dumpDeletedEvents([]dump.RemovedFile{
+		{Name: uid.String() + dump.FileExt, Size: 42},
+		{Name: "legacy-leftover.dump", Size: 7},
+	})
+	require.Len(t, events, 2)
+
+	var first map[string]any
+	require.NoError(t, json.Unmarshal(events[0].Details, &first))
+
+	assert.Equal(t, store.AuditEventDumpDeleted, events[0].EventType)
+	assert.Nil(t, events[0].PerformedBy)
+	assert.Equal(t, "retention", first["source"])
+	assert.Equal(t, uid.String(), first["connection_uid"])
+	assert.InDelta(t, 42, first["size_bytes"], 0)
+	assert.Equal(t, []any{"local"}, first["locations"])
+
+	var second map[string]any
+	require.NoError(t, json.Unmarshal(events[1].Details, &second))
+	assert.NotContains(t, second, "connection_uid")
+	assert.Equal(t, "legacy-leftover.dump", second["file"])
 }
