@@ -31,3 +31,7 @@ So for exactly the busy sessions large enough to matter, someone who can rewrite
 ## Open questions
 
 - Per-chunk digests in the seal (exact, more data in `audit_log`) or a higher whole-fetch ceiling (simpler, still unverified past it)? Recommended: chunk digests. The ceiling only moves the gap.
+
+## Resolved open questions
+
+- Use per-chunk digests in the seal, so every ranged read is verified; do not just raise the whole-fetch ceiling, which only moves the gap. (autopilot: recommended answer)

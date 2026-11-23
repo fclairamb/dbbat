@@ -55,3 +55,7 @@ So an attacker on the network opens connections in a loop against any username (
 ## Open questions
 
 - Should the proxy and API failures share one counter per username, or keep separate ones? Recommended: share it. It's the same secret, and two counters double the guessing budget.
+
+## Resolved open questions
+
+- Proxy and API login failures share one counter per username: same secret, and two counters would double the guessing budget. (autopilot: recommended answer)
