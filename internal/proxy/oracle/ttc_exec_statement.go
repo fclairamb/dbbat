@@ -236,6 +236,8 @@ func execSQLLengthFieldFor(body []byte, wide64 bool) (execSQLLenField, bool) {
 // statement and refuses zero, the re-execution reading wants zero and nothing
 // else.
 type execThinHeaderFields struct {
+	// options is the execute-options word (parse, bind, execute, fetch…).
+	options int
 	// cursorID is the cursor the exec names, as the header declares it. It is
 	// 0 on a parse that asks the server to allocate one.
 	cursorID int
@@ -259,8 +261,7 @@ func execThinHeader(body []byte) (execThinHeaderFields, bool) {
 		pos = 4
 	}
 
-	// options
-	_, n := readCompressedInt(body[pos:])
+	options, n := readCompressedInt(body[pos:])
 	if n == 0 {
 		return execThinHeaderFields{}, false
 	}
@@ -293,6 +294,7 @@ func execThinHeader(body []byte) (execThinHeaderFields, bool) {
 	}
 
 	return execThinHeaderFields{
+		options:  options,
 		cursorID: cursorID,
 		sqlLen:   execSQLLenField{value: sqlLen, at: pos, width: n, kind: stmtLenCompressed},
 	}, true

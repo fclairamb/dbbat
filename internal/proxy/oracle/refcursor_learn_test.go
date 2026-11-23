@@ -110,7 +110,7 @@ func TestLearnRefCursorIDs_LeavesAnUnlearnedCursorRefused(t *testing.T) {
 	s.learnRefCursorIDs(refCursorBindOutput)
 
 	require.ErrorIs(t, s.handlePiggybackReexec(buildPiggybackReexec(31)), ErrUnknownCursor)
-	require.ErrorIs(t, s.handleCursorReexec(31), ErrUnknownCursor)
+	require.ErrorIs(t, s.handleCursorReexec(31, nil), ErrUnknownCursor)
 }
 
 // TestLearnRefCursorIDs_OnlyRunsWhereABindOutputCanExist pins the two gates that

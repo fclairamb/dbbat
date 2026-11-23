@@ -268,8 +268,8 @@ func TestBindCaptureAnchorsOnTheWireBytes(t *testing.T) {
 	require.Equal(t, 1, countBindPlaceholders(result.SQL),
 		"the fixture must reach the bind scan at all")
 
-	assert.Nil(t, result.BindValues,
-		"no bind value sits past the statement, so none may be reported: %q", result.BindValues)
+	assert.Nil(t, result.Binds.first(),
+		"no bind value sits past the statement, so none may be reported: %q", result.Binds.first())
 }
 
 // TestFindSQLInPayloadWordBoundary pins the half of the fix that *narrows* the

@@ -71,11 +71,11 @@ func recordedReexecs(t *testing.T, name string) ([][]byte, []uint16) {
 			continue
 		}
 
-		cursorID, err := decodeCursorReexec(ttc)
+		reexec, err := decodeCursorReexec(ttc)
 		require.NoErrorf(t, err, "recorded re-execution must decode: % x", ttc)
 
 		payloads = append(payloads, ttc)
-		cursorIDs = append(cursorIDs, cursorID)
+		cursorIDs = append(cursorIDs, reexec.CursorID)
 	}
 
 	return payloads, cursorIDs

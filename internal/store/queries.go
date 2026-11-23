@@ -81,7 +81,8 @@ func storableError(s *string) *string {
 	return &repaired
 }
 
-// storableParameters repairs the decoded parameter values before they are
+// storableParameters repairs the decoded parameter values — the batch rows
+// included — before they are
 // marshaled to the `parameters` jsonb column, where a NUL (encoded as \u0000)
 // would make the whole insert fail. Raw holds base64 and is left alone. The
 // caller's value is never mutated: a copy is returned when anything changes.
@@ -90,30 +91,62 @@ func storableParameters(params *QueryParameters) *QueryParameters {
 		return nil
 	}
 
-	var values []string
+	values, changed := storableValues(params.Values)
 
-	for i, v := range params.Values {
-		repaired := storableText(v)
-		if repaired == v {
+	var batch [][]string
+
+	for i, row := range params.Batch {
+		repaired, rowChanged := storableValues(row)
+		if !rowChanged {
 			continue
 		}
 
-		if values == nil {
-			values = make([]string, len(params.Values))
-			copy(values, params.Values)
+		if batch == nil {
+			batch = make([][]string, len(params.Batch))
+			copy(batch, params.Batch)
 		}
 
-		values[i] = repaired
+		batch[i] = repaired
 	}
 
-	if values == nil {
+	if !changed && batch == nil {
 		return params
 	}
 
 	clone := *params
 	clone.Values = values
 
+	if batch != nil {
+		clone.Batch = batch
+	}
+
 	return &clone
+}
+
+// storableValues is storableText over a row of values, returning the input
+// itself, unchanged, when nothing needed repairing.
+func storableValues(in []string) ([]string, bool) {
+	var out []string
+
+	for i, v := range in {
+		repaired := storableText(v)
+		if repaired == v {
+			continue
+		}
+
+		if out == nil {
+			out = make([]string, len(in))
+			copy(out, in)
+		}
+
+		out[i] = repaired
+	}
+
+	if out == nil {
+		return in, false
+	}
+
+	return out, true
 }
 
 // jsonNULEscape is how a NUL character appears inside a JSON string once

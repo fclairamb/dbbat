@@ -124,7 +124,7 @@ func TestBlockedCursorReexecution_IsPersisted(t *testing.T) {
 	// Narrow the grant, then re-execute the very same cursor.
 	s.grant = &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
 
-	require.Error(t, s.handleCursorReexec(11), "the re-execution must be refused")
+	require.Error(t, s.handleCursorReexec(11, nil), "the re-execution must be refused")
 
 	got := recorder.awaitCreated(t)
 	assertBlockedOracleRow(t, got, sql, "read-only")

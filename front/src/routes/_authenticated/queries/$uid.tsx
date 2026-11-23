@@ -228,6 +228,53 @@ function QueryDetailPage() {
         </Card>
       )}
 
+      {query.parameters?.batch && query.parameters.batch.length > 0 && (
+        <Card data-testid="query-batch">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <span>
+                Batch (
+                {query.parameters.batch_size ?? query.parameters.batch.length}{" "}
+                rows)
+              </span>
+              {query.parameters.batch_truncated && (
+                <Badge
+                  variant="outline"
+                  data-testid="query-batch-truncated"
+                  title={`The execution bound ${query.parameters.batch_size} rows; the first ${query.parameters.batch.length} are kept.`}
+                >
+                  Truncated
+                </Badge>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="max-h-96 overflow-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-20">Row</TableHead>
+                  {query.parameters.batch[0].map((_, i) => (
+                    <TableHead key={i}>${i + 1}</TableHead>
+                  ))}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {query.parameters.batch.map((row, r) => (
+                  <TableRow key={r} data-testid="query-batch-row">
+                    <TableCell className="font-mono">{r + 1}</TableCell>
+                    {row.map((value, i) => (
+                      <TableCell key={i} className="font-mono">
+                        {value}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">

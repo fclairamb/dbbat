@@ -690,6 +690,17 @@ type QueryParameters struct {
 	Raw         []string `json:"raw,omitempty"`          // Base64-encoded raw bytes
 	FormatCodes []int16  `json:"format_codes,omitempty"` // 0=text, 1=binary
 	TypeOIDs    []uint32 `json:"type_oids,omitempty"`    // PostgreSQL type OIDs
+
+	// Batch holds every bind row of an array execution (python-oracledb's
+	// executemany, a JDBC batch, go-ora's bulk bind), one row per iteration in
+	// wire order, when the execution ran more than one. Values is then
+	// Batch[0]. Oracle only so far.
+	Batch [][]string `json:"batch,omitempty"`
+	// BatchSize is how many bind rows the execution carried. It equals
+	// len(Batch) unless the batch was cut at the capture limit, which
+	// BatchTruncated then says.
+	BatchSize      int  `json:"batch_size,omitempty"`
+	BatchTruncated bool `json:"batch_truncated,omitempty"`
 }
 
 // Query represents a query execution record

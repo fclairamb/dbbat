@@ -210,9 +210,9 @@ func TestBuildPiggybackReexecIsDecodedAsARexecution(t *testing.T) {
 
 	require.True(t, IsPiggybackCursorReexec(frame), "the fixture must be recognized as a re-execution")
 
-	cursorID, err := decodeCursorReexec(frame)
+	reexec, err := decodeCursorReexec(frame)
 	require.NoError(t, err)
-	assert.Equal(t, uint16(7), cursorID)
+	assert.Equal(t, uint16(7), reexec.CursorID)
 }
 
 // reexecOps are the two frames that name a cursor and carry nothing else: the

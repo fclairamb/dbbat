@@ -791,6 +791,41 @@ Frame layout (`decodeCursorReexec`), identical for both sub-ops:
 The four integers must consume the frame exactly; a trailing byte means it is
 some other sub-op and it is left alone.
 
+#### A re-execution carries its binds, and an executemany carries all of them
+
+The four integers behind a `03 04` / `03 4e` header are the cursor id, the
+iteration count and two option words. A statement with binds does not end
+there: python-oracledb thin (`_write_reexecute_message`) and go-ora
+(`Stmt.write`) both follow them with one row per iteration, each the `0x07`
+row-data marker and the values. `decodeCursorReexec` used to demand that the
+frame end after the four integers, so every re-execution of a statement with
+binds was refused as "not a re-execution" and went upstream **unlogged and
+ungated**. Measured on a real session (2026-11-23): an `execute()` loop of 3 757
+`UPDATE`s was recorded as the 8 parses among them, each with the binds of its
+first row and `rows_affected = 1`.
+
+An `executemany` is the same idea on the parse: one `03 5e` whose `al8i4[1]`
+(the array behind the statement text) is the iteration count, and whose tail
+holds that many bind rows behind the bind metadata. `extractExecBinds` reads
+exactly that many from the tail; a call that also fetches is a query, where
+`al8i4[1]` is the prefetch size and one bind row follows. The second run of an
+executemany on the same cursor is a `03 04` with the iteration count and all
+the rows.
+
+What is stored: `parameters.values` is the first bind row, and an execution of
+more than one iteration also carries `parameters.batch` (every row, at most
+1 000), `batch_size` and `batch_truncated`. `rows_affected` is the server's
+total over the batch. Recording: `testdata/python_thin_array_dml.pcapng`
+(`TestCapture_PythonThinArrayDML`, synthetic values), replayed by
+`array_dml_replay_test.go`.
+
+A python-oracledb DML re-execution is answered by a **standalone** `0x04`
+reporting success without the end-of-call bit, which no reading accepted. It
+completes the call now outside a row stream, under the same bounds
+`findPlausibleOERInResponse` applies (`completeFromStandaloneStatusOER`);
+`TestDumpReplay_BitlessStatusOEREndsItsCall` checks across the corpus that every
+packet it accepts is the server's last before the client speaks again.
+
 #### Learning the cursor id
 
 Only the legacy `OALL8` carries the cursor id on the *request*. The piggyback
@@ -1788,7 +1823,15 @@ The `ORA-01403: no data found` string appears in the **last** continuation packe
 
 Each column value is length-prefixed:
 - `0x00` = NULL
-- `0x01-0xFD` = length, followed by that many bytes of value data
+- `0x01-0xFC` = length, followed by that many bytes of value data
+- `0xFE` = the CLR long form: chunks (`chunkLen chunk`)* then a zero-length
+  terminator, chunk lengths in the session's CLR dialect (TTC compressed ints
+  under the big-chunk capability, single bytes otherwise, ub4 LE on OCI). The
+  server uses it for any value past 252 bytes, and for short values it converts
+  to the client's character set: a production 19c with a single-byte database
+  charset sent every accented `VARCHAR2` as `fe 01 0a <10 bytes> 01 01 <1 byte> 00`.
+  Read as a 254-byte length, it stored hex and dropped the rest of the packet
+  (`readLongFormScalarColumn`).
 - Values can be strings (ASCII), Oracle NUMBER, Oracle DATE, or other types
 
 Rows use **column-level compression**: a row sends values only for the columns
@@ -1800,6 +1843,13 @@ two rows says which columns the next row carries:
   bytes and is parsed structurally — **not** by scanning to the `0x07`
   terminator, because a bitmask byte can itself be `0x07` (columns 0,1,2 → mask
   `0x07`); scanning would truncate the descriptor and corrupt the next row.
+
+A thin continuation packet opens with a ROW_HEADER (`06 flags numCols iter
+numIters bufLen bitVectorLen [len bitVector] rxhrid 07`) whose bit vector names
+the columns of its first row. It is walked (`compressedContinuationRowStart`),
+not scanned for the first `0x07`: on a three-column fetch that bit vector is
+`0x07`, and the scan read a phantom row out of the header at every packet
+boundary.
 
 The same stream — both the func `0x10` QueryResult row area and func `0x06`
 continuation packets — is decoded by `parseRowStream` in `ttc_decode.go`.

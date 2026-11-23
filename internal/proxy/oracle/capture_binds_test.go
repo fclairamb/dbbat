@@ -43,11 +43,11 @@ func TestDumpReplay_Binds(t *testing.T) {
 		}
 
 		res, derr := decodePiggybackExecSQL(ttc, false)
-		if derr != nil || len(res.BindValues) == 0 {
+		if derr != nil || len(res.Binds.first()) == 0 {
 			continue
 		}
 
-		got = res.BindValues
+		got = res.Binds.first()
 	}
 
 	require.Equal(t, []string{"42", "hello"}, got,

@@ -2719,12 +2719,12 @@ func (s *session) gateUnnameableStatement(ttcPayload []byte, sql string) bool {
 	// against the statement, so a teardown is not a refusal that vanished.
 	err := s.book(func() error {
 		if err := s.checkQuotas(); err != nil {
-			return s.refuseStatement(sql, nil, err)
+			return s.refuseStatement(sql, execBinds{}, err)
 		}
 
 		if s.grant != nil {
 			if err := shared.ValidateOracleQuery(sql, s.grant); err != nil {
-				return s.refuseStatement(sql, nil, err)
+				return s.refuseStatement(sql, execBinds{}, err)
 			}
 		}
 
@@ -3566,6 +3566,8 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 
 	info := decodeErrorOER(shape, ttcPayload)
 	if info == nil {
+		s.completeFromStandaloneStatusOER(shape, ttcPayload)
+
 		return
 	}
 
@@ -3574,6 +3576,32 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 	}
 
 	s.completeQueryFromOER(info)
+}
+
+// completeFromStandaloneStatusOER ends the call on the bit-less success status
+// python-oracledb thin gets back from a DML re-execution: a standalone func
+// 0x04, CallStatus without the end-of-call bit, the row count in curRowNumber.
+//
+// decodeOERAt refuses it for want of the bit, and decodeErrorOER for want of an
+// error, so until re-executions with binds were read it never mattered; once
+// they were, every execution of an execute() loop stayed pending until the next
+// one flushed it, recorded with no row count at all.
+//
+// The bound is the one handleResponse's out-of-stream fall-through already
+// completes on (findPlausibleOERInResponse), applied where it is strongest: at
+// byte 0, the packet's own function code, with no row stream open, so the
+// payload cannot be row bytes. A session that learned the fixed-width encoding
+// is not offered the compressed reading, as locatePlausibleOER does not.
+//
+// Callers hold trackerMu.
+func (s *session) completeFromStandaloneStatusOER(shape oerShape, ttcPayload []byte) {
+	if s.tracker.pendingQuery == nil || s.rowStreamActive() || (shape.tailLearned && shape.fixedWidth) {
+		return
+	}
+
+	if info, _ := decodeOERFieldsAt(ttcPayload, 0); plausibleStatusOER(info) {
+		s.completeQueryFromOER(info)
+	}
 }
 
 // statusOERMayEndTheCall gates decodeOERAt's bit-less half — the fixed-width
