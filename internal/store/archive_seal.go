@@ -74,7 +74,7 @@ func (s *Store) loadArchiveSeals(ctx context.Context, connectionUID *uuid.UUID) 
 
 	q := s.db.NewSelect().
 		Model(&rows).
-		Where("event_type IN (?)", bun.In([]string{AuditEventConnectionArchived, AuditEventConnectionArchiveDeleted})).
+		Where("event_type IN (?)", bun.List([]string{AuditEventConnectionArchived, AuditEventConnectionArchiveDeleted})).
 		OrderExpr("chain_seq ASC NULLS FIRST, created_at ASC")
 
 	if connectionUID != nil {
