@@ -1661,7 +1661,7 @@ func (s *Session) proxyUpstreamToClient() error {
 // check on the client's statement can miss a spelling the server still accepts,
 // so a copy the server starts anyway ends the session before the client sees it.
 func (s *Session) refuseUpstreamCopy(msg pgproto3.BackendMessage) error {
-	if !s.grant.ShouldBlockCopy() {
+	if s.grant == nil || !s.grant.ShouldBlockCopy() {
 		return nil
 	}
 
