@@ -44,6 +44,8 @@ func (s *Server) writeArchiveError(c *gin.Context, err error) {
 		msg = "archive object missing: " + err.Error()
 	case errors.Is(err, archive.ErrHashMismatch):
 		msg = "archive object corrupted: " + err.Error()
+	case errors.Is(err, store.ErrArchiveSealMismatch):
+		msg = "archive reference tampered with: " + err.Error()
 	default:
 		msg = "archive read failed: " + err.Error()
 	}
@@ -69,6 +71,12 @@ func (s *Server) archivedQueryRows(c *gin.Context, queryUID uuid.UUID, cursor st
 	if err != nil {
 		if errors.Is(err, store.ErrArchiveNotFound) || errors.Is(err, store.ErrConnectionNotFound) {
 			return nil, false
+		}
+
+		if errors.Is(err, store.ErrArchiveSealMismatch) {
+			s.writeArchiveError(c, err)
+
+			return nil, true
 		}
 
 		writeInternalError(c, s.logger, err, "failed to read the connection archive")
@@ -159,6 +167,12 @@ func (s *Server) handleGetConnectionArchiveRows(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, store.ErrArchiveNotFound) || errors.Is(err, store.ErrConnectionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "this connection has no archive")
+
+			return
+		}
+
+		if errors.Is(err, store.ErrArchiveSealMismatch) {
+			s.writeArchiveError(c, err)
 
 			return
 		}

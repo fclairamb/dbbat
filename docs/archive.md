@@ -103,5 +103,15 @@ saying which. Objects up to 8 MiB are fetched whole and checked against the
 sealed SHA-256; larger ones are read through range requests (not hash checked).
 `GET /connections/{uid}/archive/rows` downloads the raw object.
 
+The key, size and SHA-256 a read uses come from the chained
+`connection.archived` entry, which must agree with the connection row. A row
+whose archive columns have no authentic entry, or disagree with it, is never
+read (502, `archive reference tampered with`), and an object without a sealed
+hash is a hash mismatch, never an unchecked read.
+
 The audit verifier counts `chains_archived` and `chains_archive_deleted` and does
-not treat their missing rows as a break.
+not treat their missing rows as a break, but only for connections whose archive
+(and deletion) is sealed: the excuse is only as strong as its seal. `archived_at`
+set on a row with no matching `connection.archived` entry excuses nothing, and an
+entry that disagrees with the row is a break. See
+[the audit chain](audit-chain.md#archived-captures).

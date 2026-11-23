@@ -30,7 +30,8 @@ var (
 	ErrBadMetadata   = errors.New("archive object has bad metadata")
 )
 
-// Object identifies one archive object, as recorded on the connection row.
+// Object identifies one archive object, as sealed in its connection.archived
+// audit entry (see store.GetConnectionArchive).
 type Object struct {
 	Key    string
 	Size   int64
@@ -202,8 +203,13 @@ func ReadQueryRows(
 	return QueryRows{Rows: rows, Total: pos[1]}, nil
 }
 
-// Download returns the whole object, hash checked.
+// Download returns the whole object, hash checked. An object without a hash
+// is never served unchecked: it is ErrHashMismatch.
 func Download(ctx context.Context, b *blob.Bucket, o Object) ([]byte, error) {
+	if o.SHA256 == "" {
+		return nil, fmt.Errorf("%w: %s has no sealed SHA-256", ErrHashMismatch, o.Key)
+	}
+
 	data, err := b.ReadAll(ctx, o.Key)
 	if err != nil {
 		if gcerrors.Code(err) == gcerrors.NotFound {
@@ -214,7 +220,7 @@ func Download(ctx context.Context, b *blob.Bucket, o Object) ([]byte, error) {
 	}
 
 	sum := sha256.Sum256(data)
-	if o.SHA256 != "" && hex.EncodeToString(sum[:]) != o.SHA256 {
+	if hex.EncodeToString(sum[:]) != o.SHA256 {
 		return nil, fmt.Errorf("%w: %s", ErrHashMismatch, o.Key)
 	}
 

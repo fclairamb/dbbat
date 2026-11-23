@@ -168,11 +168,13 @@ type RowChainsResult struct {
 	// verified — the same treatment pre-anchor audit rows get.
 	Unchained int64
 	// Archived is how many captures were not walked because their connection's
-	// rows live in the archive bucket (archived_at set): not a break. Their
-	// object's SHA-256 is sealed in a connection.archived audit entry, and no
+	// rows live in the archive bucket: not a break. archived_at alone excuses
+	// nothing (it carries no MAC): an authentic connection.archived entry must
+	// exist and agree with the row's key, SHA-256, size and row count. No
 	// bucket access is needed. ArchiveDeleted is the same for connections whose
-	// archive was deleted at its delete window (a connection.archive_deleted
-	// entry excuses the missing rows).
+	// archive was deleted at its delete window, which also takes an authentic
+	// connection.archive_deleted entry naming the sealed key. See
+	// archive_seal.go.
 	Archived       int64
 	ArchiveDeleted int64
 	Break          *ChainBreak
@@ -1125,14 +1127,20 @@ func (s *Store) VerifyRowChains(ctx context.Context, connectionUID *uuid.UUID) (
 
 	result.Unchained = unchained
 
-	archived, deleted, err := s.countArchivedCaptures(ctx, connectionUID)
+	excuses, err := s.judgeArchivedConnections(ctx, connectionUID)
 	if err != nil {
 		return result, err
 	}
 
-	result.Archived, result.ArchiveDeleted = archived, deleted
+	result.Archived, result.ArchiveDeleted = excuses.archived, excuses.archiveDeleted
 
-	uids, err := s.capturedQueryUIDs(ctx, connectionUID)
+	if excuses.brk != nil {
+		result.Break = excuses.brk
+
+		return result, nil
+	}
+
+	uids, err := s.capturedQueryUIDs(ctx, connectionUID, excuses.excused)
 	if err != nil {
 		return result, err
 	}
@@ -1199,12 +1207,22 @@ func (s *Store) CountUnchainedCapturedRows(ctx context.Context, queryUID uuid.UU
 // stamped head. The second half is what makes deleting a capture wholesale
 // detectable: a query whose rows were all removed has nothing left to enumerate
 // from query_rows, but its stamp still claims a head.
-func (s *Store) capturedQueryUIDs(ctx context.Context, connectionUID *uuid.UUID) ([]uuid.UUID, error) {
-	var uids []uuid.UUID
+//
+// The captures of an excused connection (one whose rows went to a sealed
+// archive, see judgeArchivedConnections) are left out: they have no rows left
+// in query_rows by design. An archived_at without a matching seal excuses
+// nothing.
+func (s *Store) capturedQueryUIDs(
+	ctx context.Context, connectionUID *uuid.UUID, excused map[uuid.UUID]struct{},
+) ([]uuid.UUID, error) {
+	var found []struct {
+		UID          uuid.UUID `bun:"uid"`
+		ConnectionID uuid.UUID `bun:"connection_id"`
+	}
 
 	q := s.db.NewSelect().
 		Model((*Query)(nil)).
-		Column("uid").
+		Column("uid", "connection_id").
 		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
 			return q.
 				Where("q.row_chain_mac IS NOT NULL").
@@ -1215,44 +1233,25 @@ func (s *Store) capturedQueryUIDs(ctx context.Context, connectionUID *uuid.UUID)
 		}).
 		Order("q.uid ASC")
 
-	// A connection whose rows were archived has none left in query_rows by
-	// design: it is counted apart (countArchivedCaptures), not walked.
-	q = q.Where("q.connection_id NOT IN (SELECT uid FROM connections WHERE archived_at IS NOT NULL)")
-
 	if connectionUID != nil {
 		q = q.Where("q.connection_id = ?", *connectionUID)
 	}
 
-	if err := q.Scan(ctx, &uids); err != nil {
+	if err := q.Scan(ctx, &found); err != nil {
 		return nil, fmt.Errorf("failed to list captures: %w", err)
 	}
 
+	uids := make([]uuid.UUID, 0, len(found))
+
+	for _, f := range found {
+		if _, ok := excused[f.ConnectionID]; ok {
+			continue
+		}
+
+		uids = append(uids, f.UID)
+	}
+
 	return uids, nil
-}
-
-// countArchivedCaptures counts the captures (statements with a row chain head)
-// whose connection's rows were archived, split by whether the archive object
-// still exists.
-func (s *Store) countArchivedCaptures(ctx context.Context, connectionUID *uuid.UUID) (int64, int64, error) {
-	var archived, deleted int64
-
-	q := s.db.NewSelect().
-		TableExpr("queries AS q").
-		ColumnExpr("count(*) FILTER (WHERE c.archive_deleted_at IS NULL)").
-		ColumnExpr("count(*) FILTER (WHERE c.archive_deleted_at IS NOT NULL)").
-		Join("JOIN connections AS c ON c.uid = q.connection_id").
-		Where("c.archived_at IS NOT NULL").
-		Where("q.row_chain_mac IS NOT NULL")
-
-	if connectionUID != nil {
-		q = q.Where("c.uid = ?", *connectionUID)
-	}
-
-	if err := q.Scan(ctx, &archived, &deleted); err != nil {
-		return 0, 0, fmt.Errorf("failed to count archived captures: %w", err)
-	}
-
-	return archived, deleted, nil
 }
 
 // VerifyRowChain walks one capture's result-row chain.

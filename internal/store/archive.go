@@ -345,7 +345,9 @@ type ConnectionArchive struct {
 }
 
 // GetConnectionArchive returns the archive reference of a connection, or
-// ErrArchiveNotFound when its rows are not in the archive.
+// ErrArchiveNotFound when its rows are not in the archive. The reference is
+// taken from the chained connection.archived entry, which must agree with the
+// connection row: ErrArchiveSealMismatch otherwise.
 func (s *Store) GetConnectionArchive(ctx context.Context, connectionUID uuid.UUID) (*ConnectionArchive, error) {
 	conn := new(Connection)
 
@@ -365,18 +367,9 @@ func (s *Store) GetConnectionArchive(ctx context.Context, connectionUID uuid.UUI
 		return nil, ErrArchiveNotFound
 	}
 
-	out := &ConnectionArchive{Key: *conn.ArchiveKey}
-	if conn.ArchiveRowsBytes != nil {
-		out.Bytes = *conn.ArchiveRowsBytes
-	}
+	conn.UID = connectionUID
 
-	if conn.ArchiveRowsSHA256 != nil {
-		out.SHA256 = *conn.ArchiveRowsSHA256
-	}
-
-	if conn.ArchiveRowsCount != nil {
-		out.Rows = *conn.ArchiveRowsCount
-	}
-
-	return out, nil
+	// The reference comes from the sealed entry, never from the unsealed
+	// columns alone: see archive_seal.go.
+	return s.sealedConnectionArchive(ctx, conn)
 }
