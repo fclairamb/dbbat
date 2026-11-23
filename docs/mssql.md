@@ -258,6 +258,17 @@ The text is derived from the *class* of failure only, never from the underlying
 error, so store errors, upstream hostnames and driver internals never cross the
 client leg.
 
+### Login throttle
+
+Password logins share the REST API's login throttle and its counters: after
+three failures from one address the address is refused, before the password is
+checked, with the ordinary authentication error, for an escalating delay (5 s up
+to 5 min); a username that reaches 100 failures in an hour, from all addresses,
+is audited as `auth.failure_ceiling` with `"listener": "mssql"`. API keys are not
+throttled. The backoff is keyed on the TCP peer address: behind a TCP load
+balancer (no PROXY protocol support) every client shares the balancer's address.
+See the security page of the website docs (Database listeners).
+
 ## The upstream leg
 
 `internal/proxy/mssql/upstream.go`, with the `ssl_mode` policy in

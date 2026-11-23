@@ -50,6 +50,18 @@ is configurable per database via the `mongo_auth_source` API field (stored in
 the generic `servers.protocol_data` jsonb column) for targets whose proxy
 user lives in a different auth database.
 
+### Login throttle
+
+Password logins share the REST API's login throttle and its counters: after
+three failures from one address the address is refused, before the password is
+checked, with the ordinary authentication error, for an escalating delay (5 s up
+to 5 min); a username that reaches 100 failures in an hour, from all addresses,
+is audited as `auth.failure_ceiling` with `"listener": "mongodb"`. API keys are not
+throttled. It covers both `PLAIN` and `SCRAM-SHA-256`, in front of the fixed
+250 ms delay every failed authentication reply is held for. The backoff is keyed on the TCP peer address: behind a TCP load
+balancer (no PROXY protocol support) every client shares the balancer's address.
+See the security page of the website docs (Database listeners).
+
 ### Target-database resolution
 
 Mongo has no pre-auth database field, so the SASL `authSource` carries the dbbat

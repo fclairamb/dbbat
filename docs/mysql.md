@@ -46,6 +46,17 @@ Clients that explicitly pin their auth plugin to `mysql_clear_password` (legacy 
 
 The PG proxy accepts DBBat API keys (prefix `dbb_`) as the password. The MySQL proxy does the same: when the proxy receives a "password" starting with the API key prefix, it verifies it as an API key instead of a user password.
 
+## Login throttle
+
+Password logins share the REST API's login throttle and its counters: after
+three failures from one address the address is refused, before the password is
+checked, with the ordinary authentication error, for an escalating delay (5 s up
+to 5 min); a username that reaches 100 failures in an hour, from all addresses,
+is audited as `auth.failure_ceiling` with `"listener": "mysql"`. API keys are not
+throttled. The backoff is keyed on the TCP peer address: behind a TCP load
+balancer (no PROXY protocol support) every client shares the balancer's address.
+See the security page of the website docs (Database listeners).
+
 ## TLS Handling: Termination at the Proxy
 
 DBBat **terminates TLS** at the proxy. When a client sends an `SSLRequest` packet during the handshake, the proxy upgrades the connection to TLS before reading credentials. Inside the TLS tunnel, the same handshake flow proceeds.
