@@ -178,7 +178,10 @@ type Session struct {
 	// session ends. nil = local-only captures (the default).
 	dumpUploader *dump.Uploader
 	authCache    *cache.AuthCache
-	tlsConfig    *tls.Config // nil when TLS is disabled
+	// loginThrottle refuses password checks from a source in login backoff
+	// and counts the failures (see shared.LoginThrottle). nil throttles nothing.
+	loginThrottle *shared.LoginThrottle
+	tlsConfig     *tls.Config // nil when TLS is disabled
 
 	// Session state
 	user     *store.User

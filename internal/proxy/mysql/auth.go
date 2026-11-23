@@ -72,7 +72,7 @@ func (p *dbbatAuthProvider) Authenticate(c *gomysqlserver.Conn, plugin string, a
 		return err
 	}
 
-	return p.verifyCredentials(username, password)
+	return p.verifyCredentials(username, password, shared.SourceIP(c.RemoteAddr()))
 }
 
 // extractPlaintext recovers the cleartext password (or API key) from the
@@ -100,14 +100,26 @@ func (p *dbbatAuthProvider) extractPlaintext(c *gomysqlserver.Conn, plugin strin
 }
 
 // verifyCredentials checks the cleartext against the user's Argon2id hash,
-// or interprets it as an API key when it carries the dbb_ prefix.
-func (p *dbbatAuthProvider) verifyCredentials(username, password string) error {
+// or interprets it as an API key when it carries the dbb_ prefix. sourceIP is
+// the client's address, the key of the login throttle: a source in backoff is
+// refused before any hash is computed, with the same ErrAccessDenied a wrong
+// password gets. API keys are not throttled.
+func (p *dbbatAuthProvider) verifyCredentials(username, password, sourceIP string) error {
 	if isAPIKey(password) {
 		return p.authenticateAPIKey(username, password)
 	}
 
-	user, err := p.server.store.GetUserByUsername(p.server.ctx, username)
+	ctx := p.server.ctx
+	throttle := p.server.loginThrottle
+
+	user, err := p.server.store.GetUserByUsername(ctx, username)
 	if err != nil {
+		throttle.Failure(ctx, username, sourceIP)
+
+		return gomysqlserver.ErrAccessDenied
+	}
+
+	if !throttle.Allow(ctx, user.Username, sourceIP) {
 		return gomysqlserver.ErrAccessDenied
 	}
 
@@ -117,14 +129,18 @@ func (p *dbbatAuthProvider) verifyCredentials(username, password string) error {
 	)
 
 	if p.server.authCache != nil {
-		valid, verr = p.server.authCache.VerifyPassword(p.server.ctx, user.UID.String(), password, user.PasswordHash)
+		valid, verr = p.server.authCache.VerifyPassword(ctx, user.UID.String(), password, user.PasswordHash)
 	} else {
 		valid, verr = crypto.VerifyPassword(user.PasswordHash, password)
 	}
 
 	if verr != nil || !valid {
+		throttle.Failure(ctx, user.Username, sourceIP)
+
 		return gomysqlserver.ErrAccessDenied
 	}
+
+	throttle.Success(ctx, user.Username, sourceIP)
 
 	return nil
 }

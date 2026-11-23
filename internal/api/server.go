@@ -52,7 +52,7 @@ type Server struct {
 	stopped            bool
 	httpServer         *http.Server
 	rateLimiter        *RateLimiter
-	authFailureTracker *authFailureTracker
+	authFailureTracker *cache.AuthFailureTracker
 	authCache          *cache.AuthCache
 	config             *config.Config
 	// retentionWake wakes the retention sweeper (see SetRetentionWaker).
@@ -199,7 +199,7 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 		encryptionKey:      encryptionKey,
 		logger:             logger,
 		rateLimiter:        rateLimiter,
-		authFailureTracker: newAuthFailureTracker(),
+		authFailureTracker: cache.NewAuthFailureTracker(),
 		authCache:          authCache,
 		config:             cfg,
 		oauthProviders:     oauthProviders,
@@ -1054,6 +1054,14 @@ func getContentType(path string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+// AuthFailureTracker exposes the login throttle's counters so the process
+// wiring can hand the very same instance to the proxy listeners: a dbbat
+// password is one secret whichever port it is guessed on, and two counters
+// would double the guessing budget.
+func (s *Server) AuthFailureTracker() *cache.AuthFailureTracker {
+	return s.authFailureTracker
 }
 
 // Notifier exposes the server's Slack client so the process wiring can build
