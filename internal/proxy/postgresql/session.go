@@ -1517,7 +1517,7 @@ func (s *Session) ensureRowSink(query *pendingQuery) *shared.QuerySink {
 
 // proxyUpstreamToClient proxies messages from upstream to client.
 //
-//nolint:cyclop // Protocol handling with many message types inherently has high complexity
+//nolint:cyclop,gocognit // Protocol handling with many message types inherently has high complexity
 func (s *Session) proxyUpstreamToClient() error {
 	defer s.markUpstreamRelayEnded()
 
