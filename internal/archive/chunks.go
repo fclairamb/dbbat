@@ -113,7 +113,7 @@ func (r *verifiedReaderAt) failure() error {
 
 func (r *verifiedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
-		return 0, errors.New("archive object: negative offset")
+		return 0, fmt.Errorf("%w: negative offset %d", ErrBadMetadata, off)
 	}
 
 	n := 0

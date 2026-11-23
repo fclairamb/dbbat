@@ -241,7 +241,7 @@ func TestReadQueryRowsRejectsRecordsOfAnotherStatement(t *testing.T) {
 	ctx, bucket := testBucket(t)
 
 	pointAtOther := func(offsets map[string][2]int64) {
-		var keys []string
+		keys := make([]string, 0, len(offsets))
 		for k := range offsets {
 			keys = append(keys, k)
 		}
