@@ -165,6 +165,6 @@ func TestSourceIP(t *testing.T) {
 
 	assert.Equal(t, "192.0.2.7", SourceIP(&net.TCPAddr{IP: net.ParseIP("192.0.2.7"), Port: 5432}))
 	assert.Equal(t, "2001:db8::1", SourceIP(&net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 3306}))
-	assert.Equal(t, "", SourceIP(nil))
+	assert.Empty(t, SourceIP(nil))
 	assert.Equal(t, "pipe", SourceIP(&net.UnixAddr{Name: "pipe", Net: "unix"}))
 }

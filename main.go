@@ -377,14 +377,10 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	warnStatementTimeout(ctx, cfg, logger)
 
-	// The proxies count login failures in the API's own tracker: a dbbat
-	// password is one secret whichever port it is guessed on. Test mode counts
-	// but never refuses, as the API skips its backoff there.
-	loginThrottles := loginThrottleFactory(apiServer.AuthFailureTracker(), dataStore, logger,
-		cfg.RunMode != config.RunModeTest)
-
-	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader,
-		loginThrottles, logger)
+	// The proxies count login failures in the API's own tracker; test mode
+	// counts but never refuses, as the API skips its backoff there.
+	loginThrottles := loginThrottleFactory(apiServer.AuthFailureTracker(), dataStore, logger, cfg.RunMode != config.RunModeTest)
+	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader, loginThrottles, logger)
 
 	sweeper, err := startRetention(ctx, cfg, dataStore, apiServer, logger)
 	if err != nil {
@@ -404,7 +400,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 }
 
 // loginThrottleFactory returns the constructor of each listener's login
-// throttle, all of them on the one tracker the REST API uses.
+// throttle, all of them on the one tracker the REST API uses: a dbbat password
+// is one secret whichever port it is guessed on, and two counters would double
+// the guessing budget.
 func loginThrottleFactory(
 	tracker *cache.AuthFailureTracker, dataStore *store.Store, logger *slog.Logger, enforce bool,
 ) func(listener string) *shared.LoginThrottle {
