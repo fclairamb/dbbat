@@ -819,6 +819,15 @@ total over the batch. Recording: `testdata/python_thin_array_dml.pcapng`
 (`TestCapture_PythonThinArrayDML`, synthetic values), replayed by
 `array_dml_replay_test.go`.
 
+**NVARCHAR2 / NCHAR.** A column whose describe carries charset form 2
+(`csfrm`, the national character set) sends its values in the database's
+national charset, AL16UTF16 on Oracle Free, i.e. UTF-16BE. dbbat decodes those
+to text instead of storing the UTF-16 bytes as hex (an NCHAR keeps the server's
+blank padding). Recordings: `testdata/python_thin_nvarchar2.pcapng` and
+`testdata/go_ora_nvarchar2.pcapng` (`TestCapture_PythonThinNVarchar2`,
+`TestCapture_GoOraNVarchar2`; a VARCHAR2, NVARCHAR2 and NCHAR column holding
+`Bâtiment 1`), replayed by `national_charset_replay_test.go`.
+
 A python-oracledb DML re-execution is answered by a **standalone** `0x04`
 reporting success without the end-of-call bit, which no reading accepted. It
 completes the call now outside a row stream, under the same bounds
