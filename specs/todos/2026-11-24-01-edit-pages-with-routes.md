@@ -103,3 +103,9 @@ demoting yourself") or for a one-shot reveal (the new API key secret in `ShowKey
 - **One `servers/$uid` page, or keep rename / approvers / SSH as separate routes
   (`servers/$uid/approvers`)?** Recommended: one page with sections, one Save per section
   where the API calls are separate today.
+
+## Resolved open questions
+
+- **Create forms too, or edit only?** Both: create and edit forms move to routes together (autopilot: recommended answer).
+- **Small one-field forms (global parameter, request access, assign grant, create API key)?** Make them pages too, for consistency: anything we edit has a route (autopilot: recommended answer).
+- **One `servers/$uid` page or separate routes?** One `servers/$uid` page with sections, one Save per section where the API calls are separate today (autopilot: recommended answer).
