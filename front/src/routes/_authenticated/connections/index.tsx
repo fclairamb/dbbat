@@ -13,6 +13,8 @@ import {
   ObservabilityFilterBar,
   type ObservabilityFilters,
 } from "@/components/shared/ObservabilityFilterBar";
+import { SortHeader } from "@/components/shared/SortHeader";
+import { parseSortSearch, type SortState } from "@/lib/sort";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
@@ -26,10 +28,13 @@ import { formatBytes } from "@/lib/utils";
 
 const DEFAULT_PAGE_SIZE = 50;
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
+const SORT_KEYS = ["duration", "queries", "bytes_transferred"] as const;
 
 /** Search params, minus pagination — the filters proper. */
-type ConnectionSearch = ObservabilityFilters & {
+type ConnectionSearch = ObservabilityFilters & SortState & {
   before?: string;
+  /** Row offset: pages a non-default sort, where the uid cursor does not hold. */
+  offset?: number;
   size: number;
 };
 
@@ -50,13 +55,15 @@ export const Route = createFileRoute("/_authenticated/connections/")({
     grant_uid: asString(search.grant_uid),
     grant_provenance: asString(search.grant_provenance),
     uid_suffix: asString(search.uid_suffix),
+    ...parseSortSearch(search, SORT_KEYS),
+    offset: Number(search.offset) > 0 ? Number(search.offset) : undefined,
   }),
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
   const search = Route.useSearch();
-  const { before, size, active, uid_suffix } = search;
+  const { before, size, active, uid_suffix, sort, order, offset } = search;
   const navigate = Route.useNavigate();
   // Generic navigate, not Route.useNavigate: this one leaves the connections
   // list's own search schema for the detail route's `$uid` param.
@@ -66,6 +73,9 @@ function ConnectionsPage() {
   const { data: connections, isLoading, refetch } = useConnections({
     before,
     limit: size,
+    sort,
+    order,
+    offset,
     active,
     user_id: search.user_id,
     database_id: search.database_id,
@@ -99,7 +109,7 @@ function ConnectionsPage() {
   // of the list.
   const applyFilters = (patch: ObservabilityFilters) => {
     navigate({
-      search: (prev) => ({ ...prev, ...patch, before: undefined }),
+      search: (prev) => ({ ...prev, ...patch, before: undefined, offset: undefined }),
       replace: true,
     });
   };
@@ -108,7 +118,21 @@ function ConnectionsPage() {
   // extra data exposed by fetching without a user_id/database_id filter here.
   const { data: grants } = useGrants();
 
-  const isFirstPage = !before;
+  // Changing the sort goes back to the first page.
+  const applySort = (next: SortState) => {
+    navigate({
+      search: (prev) => ({ ...prev, ...next, before: undefined, offset: undefined }),
+      replace: true,
+    });
+  };
+
+  const isFirstPage = !before && !offset;
+  // The uid cursor only holds for the default order; a sorted list pages by offset.
+  const sorted = !!sort;
+  const currentSort: SortState = { sort, order };
+  const sortTitle = (label: string, key: string) => (
+    <SortHeader label={label} sortKey={key} current={currentSort} onSort={applySort} />
+  );
 
   const previousFirstUid = useRef<string | null>(null);
 
@@ -217,7 +241,7 @@ function ConnectionsPage() {
     },
     {
       key: "duration",
-      header: "Duration",
+      header: sortTitle("Duration", "duration"),
       cell: (c) => {
         const end = c.disconnected_at
           ? new Date(c.disconnected_at)
@@ -239,12 +263,12 @@ function ConnectionsPage() {
     },
     {
       key: "queries",
-      header: "Queries",
+      header: sortTitle("Queries", "queries"),
       cell: (c) => <span>{c.queries}</span>,
     },
     {
       key: "bytes",
-      header: "Data",
+      header: sortTitle("Data", "bytes_transferred"),
       cell: (c) => <span>{formatBytes(c.bytes_transferred)}</span>,
     },
     {
@@ -313,7 +337,7 @@ function ConnectionsPage() {
             >
               <Link
                 to="/connections"
-                search={(prev) => ({ ...prev, before: undefined, size: opt })}
+                search={(prev) => ({ ...prev, before: undefined, offset: undefined, size: opt })}
               >
                 {opt}
               </Link>
@@ -326,18 +350,27 @@ function ConnectionsPage() {
             <Button variant="outline" size="sm" asChild>
               <Link
                 to="/connections"
-                search={(prev) => ({ ...prev, before: undefined, size })}
+                search={(prev) => ({
+                  ...prev,
+                  before: undefined,
+                  offset: sorted && offset && offset > size ? offset - size : undefined,
+                  size,
+                })}
               >
                 <ChevronLeft className="h-4 w-4 mr-1" />
                 Newer
               </Link>
             </Button>
           )}
-          {hasMore && lastUid && (
+          {hasMore && (sorted || lastUid) && (
             <Button variant="outline" size="sm" asChild>
               <Link
                 to="/connections"
-                search={(prev) => ({ ...prev, before: lastUid, size })}
+                search={(prev) =>
+                  sorted
+                    ? { ...prev, before: undefined, offset: (offset ?? 0) + size, size }
+                    : { ...prev, before: lastUid, size }
+                }
               >
                 Older
                 <ChevronRight className="h-4 w-4 ml-1" />

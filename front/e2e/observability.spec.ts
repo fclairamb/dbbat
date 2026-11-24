@@ -1233,3 +1233,76 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     });
   });
 });
+
+test.describe("sortable lists", () => {
+  for (const [page, key] of [
+    ["connections", "duration"],
+    ["queries", "duration_ms"],
+  ] as const) {
+    test(`${page}: Duration title cycles desc, asc, default and survives a reload`, async ({
+      authenticatedPage,
+    }) => {
+      await authenticatedPage.goto(page);
+      await authenticatedPage.waitForLoadState("networkidle");
+
+      const header = authenticatedPage.getByTestId(`sort-${key}`);
+      await expect(header).toBeVisible();
+      await expect(header).toHaveAttribute("data-sort-state", "none");
+
+      await header.click();
+      await expect(authenticatedPage).toHaveURL(
+        new RegExp(`[?&]sort=${key}(&|$)`),
+      );
+      await expect(authenticatedPage).toHaveURL(/[?&]order=desc/);
+      await expect(header).toHaveAttribute("data-sort-state", "desc");
+
+      // The sort lives in the URL: a reload keeps it.
+      await authenticatedPage.reload();
+      await authenticatedPage.waitForLoadState("networkidle");
+      await expect(authenticatedPage.getByTestId(`sort-${key}`)).toHaveAttribute(
+        "data-sort-state",
+        "desc",
+      );
+
+      await authenticatedPage.getByTestId(`sort-${key}`).click();
+      await expect(authenticatedPage).toHaveURL(/[?&]order=asc/);
+      await expect(authenticatedPage.getByTestId(`sort-${key}`)).toHaveAttribute(
+        "data-sort-state",
+        "asc",
+      );
+
+      await authenticatedPage.getByTestId(`sort-${key}`).click();
+      await expect(authenticatedPage).not.toHaveURL(/[?&]sort=/);
+      await expect(authenticatedPage).not.toHaveURL(/[?&]order=/);
+      await expect(authenticatedPage.getByTestId(`sort-${key}`)).toHaveAttribute(
+        "data-sort-state",
+        "none",
+      );
+    });
+  }
+
+  test("connections: sorting by Queries orders the rows by the API", async ({
+    authenticatedPage,
+  }) => {
+    const responses: number[][] = [];
+    authenticatedPage.on("response", async (res) => {
+      if (res.url().includes("/api/v1/connections?") && res.url().includes("sort=queries")) {
+        const body = await res.json();
+        responses.push(
+          (body.connections as { queries: number }[]).map((c) => c.queries),
+        );
+      }
+    });
+
+    await authenticatedPage.goto("connections?sort=queries&order=desc");
+    await authenticatedPage.waitForLoadState("networkidle");
+    await expect(authenticatedPage.getByTestId("sort-queries")).toHaveAttribute(
+      "data-sort-state",
+      "desc",
+    );
+
+    expect(responses.length).toBeGreaterThan(0);
+    const values = responses[responses.length - 1];
+    expect(values).toEqual([...values].sort((a, b) => b - a));
+  });
+});

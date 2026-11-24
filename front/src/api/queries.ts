@@ -1098,6 +1098,9 @@ export function useConnections(filters?: SessionFilters & {
   before?: string;
   limit?: number;
   offset?: number;
+  /** `connected_at` (default), `duration`, `queries` or `bytes_transferred`. */
+  sort?: string;
+  order?: "asc" | "desc";
   /**
    * Still-open sessions only. Connections-only (a statement has no such
    * state), and server-side like the rest: `true` selects every live session,
@@ -1234,6 +1237,9 @@ export function useQueries(
     before?: string;
     limit?: number;
     offset?: number;
+    /** `executed_at` (default), `duration_ms` or `rows_affected`. */
+    sort?: string;
+    order?: "asc" | "desc";
   },
   options?: { enabled?: boolean }
 ) {
