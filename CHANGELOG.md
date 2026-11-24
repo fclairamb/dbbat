@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.33.2](https://github.com/fclairamb/dbbat/compare/v0.33.1...v0.33.2) (2026-11-24)
+
+
+### Security
+
+* **proxy:** PostgreSQL, MySQL, SQL Server and MongoDB logins are throttled like the REST API's (backoff per username and source IP, one counter shared with the API), `audit verify --rows` only skips archived rows behind a valid `connection.archived` seal, `COPY` followed by a tab, newline or parenthesis is caught by `block_copy`, capture deletions are audited (`dump.deleted`), and large archives are verified chunk by chunk on range reads ([#528](https://github.com/fclairamb/dbbat/issues/528)) ([d9ab31d](https://github.com/fclairamb/dbbat/commit/d9ab31d8609af1b39612ca4e6b258df46017be1f))
+
+### Bug Fixes
+
+* **oracle:** every re-execution and every `executemany` bind row is logged, and long-form row values are decoded ([#529](https://github.com/fclairamb/dbbat/issues/529)) ([f0600ad](https://github.com/fclairamb/dbbat/commit/f0600adca31e7ad1eb38dad1edf1814cde16700a))
+* **oracle:** python-oracledb thin-mode rows are typed, national-charset text (`NCHAR`, `NVARCHAR2`, `NCLOB`) is captured, and every statement-less batch row is recorded ([#530](https://github.com/fclairamb/dbbat/issues/530)) ([ecd6d3d](https://github.com/fclairamb/dbbat/commit/ecd6d3d73455d229274a92be07473365192d05cb))
+* **deps:** gopacket v1.8.0, mongo-driver v2.10.1 ([#525](https://github.com/fclairamb/dbbat/issues/525), [#522](https://github.com/fclairamb/dbbat/issues/522))
+
 ## [0.33.1](https://github.com/fclairamb/dbbat/compare/v0.33.0...v0.33.1) (2026-11-19)
 
 
