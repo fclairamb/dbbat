@@ -138,3 +138,43 @@ func TestParseColumnDescribes_Fallback(t *testing.T) {
 	// A describe header claiming columns but with no record bytes must bail.
 	assert.Nil(t, parseColumnDescribes([]byte{0x10, 0x00, 0x01, 0x02, 0x01, 0x03, 0x00}, oerShape{}))
 }
+
+// TestParseColumnDescribes_PythonThinNumberScale pins the describes of
+// python-oracledb thin against 23ai, whose NUMBER columns spell the scale as one
+// signed byte (0x81, the -127 float sentinel) instead of the compressed int
+// go-ora and JDBC send. Read the old way the scale swallowed the first byte of
+// the max-length, every record after it drifted and the whole describe was
+// discarded, leaving ColumnTypes empty and row values typed by guesswork.
+func TestParseColumnDescribes_PythonThinNumberScale(t *testing.T) {
+	t.Parallel()
+
+	td := loadTestDump(t, "python_thin_array_dml.pcapng")
+
+	cases := []struct {
+		marker string
+		want   []columnDesc
+	}{
+		{"SELECT id, name FROM dbbat_array_dml WHERE id BETWEEN", []columnDesc{
+			{"ID", tnsTypeNUMBER}, {"NAME", tnsTypeVARCHAR},
+		}},
+		{"SELECT id, note, name FROM dbbat_array_dml", []columnDesc{
+			{"ID", tnsTypeNUMBER}, {"NOTE", tnsTypeVARCHAR}, {"NAME", tnsTypeVARCHAR},
+		}},
+	}
+
+	for _, tc := range cases {
+		ttc := firstQueryResultFor(t, td, tc.marker)
+
+		assert.Equal(t, tc.want, parseColumnDescribes(ttc, oerShape{}), tc.marker)
+
+		result := decodeQueryResultV2(ttc, oerShape{}, lobRowLocator)
+		require.NotNil(t, result, tc.marker)
+
+		types := make([]int, len(tc.want))
+		for i, d := range tc.want {
+			types[i] = d.Type
+		}
+
+		assert.Equal(t, types, result.ColumnTypes, tc.marker)
+	}
+}

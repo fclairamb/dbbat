@@ -77,7 +77,22 @@ func parseColumnDescribes(ttcPayload []byte, shape oerShape) []columnDesc {
 		return cols
 	}
 
-	return parseColumnDescribesMode(ttcPayload, true, shape)
+	if cols := parseColumnDescribesMode(ttcPayload, true, shape); cols != nil {
+		return cols
+	}
+
+	// Last resort: python-oracledb thin against 23ai spells the scale of a
+	// NUMBER-family column as a single signed byte (0x81 for the -127 float
+	// sentinel) where go-ora and the JDBC driver send a compressed int
+	// (0x81 0x7f). Read as a compressed int, the 0x81 swallows the first byte
+	// of the max-length that follows and the record drifts. It is tried last,
+	// so no payload that parses under the compressed-int reading is ever
+	// re-read.
+	if cols := parseColumnDescribesScale(ttcPayload, false, shape, true); cols != nil {
+		return cols
+	}
+
+	return parseColumnDescribesScale(ttcPayload, true, shape, true)
 }
 
 // parseColumnDescribesMode decodes the column records using either the classic
@@ -86,6 +101,12 @@ func parseColumnDescribes(ttcPayload []byte, shape oerShape) []columnDesc {
 // the count is implausible, a record runs off the end, or a decoded type code is
 // not a known TNSType (a strong signal of a misaligned parse).
 func parseColumnDescribesMode(ttcPayload []byte, modern bool, shape oerShape) []columnDesc {
+	return parseColumnDescribesScale(ttcPayload, modern, shape, false)
+}
+
+// parseColumnDescribesScale is parseColumnDescribesMode with the scale encoding
+// of NUMBER-family columns chosen: a compressed int, or one signed byte.
+func parseColumnDescribesScale(ttcPayload []byte, modern bool, shape oerShape, byteScale bool) []columnDesc {
 	count, start, ok := describeWireLayout(ttcPayload, shape)
 	if !ok || count <= 0 || count > 1000 {
 		return nil
@@ -93,7 +114,7 @@ func parseColumnDescribesMode(ttcPayload []byte, modern bool, shape oerShape) []
 
 	c := &dcursor{
 		buf: ttcPayload, pos: start, wide: shape.fixedWidth, wide64: shape.fixedWidth64,
-		pre23: shape.serverPredates(ttcFieldVersion23_1),
+		pre23: shape.serverPredates(ttcFieldVersion23_1), byteScale: byteScale,
 	}
 	cols := make([]columnDesc, 0, count)
 
@@ -308,6 +329,9 @@ type dcursor struct {
 	// column record ends in wide64ColumnRecordTailLenPre23 bytes rather than
 	// wide64ColumnRecordTailLen.
 	pre23 bool
+	// byteScale reads a NUMBER-family column's scale as one signed byte instead
+	// of a compressed int; see parseColumnDescribes.
+	byteScale bool
 }
 
 // skip advances past n bytes that are read by no field, failing the cursor if
@@ -468,7 +492,7 @@ func parseColumnDescribe(c *dcursor, modern bool) (string, int) {
 		// Measured on a NUMBER(10,2) (precision 10, scale 2 in consecutive
 		// bytes) and on `1/3`, whose scale byte is 0x81 = -127.
 		c.byte()
-	case numberScaleTypes[dataType]:
+	case numberScaleTypes[dataType] && !c.byteScale:
 		c.intw(2) // scale (compressed)
 	default:
 		c.byte() // scale
