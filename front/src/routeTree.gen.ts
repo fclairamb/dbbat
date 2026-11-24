@@ -30,6 +30,8 @@ import { Route as AuthenticatedServerGroupsIndexRouteImport } from './routes/_au
 import { Route as AuthenticatedServerGroupsUidRouteImport } from './routes/_authenticated/server-groups/$uid'
 import { Route as AuthenticatedServerGroupsNewRouteImport } from './routes/_authenticated/server-groups/new'
 import { Route as AuthenticatedServersIndexRouteImport } from './routes/_authenticated/servers/index'
+import { Route as AuthenticatedServersUidRouteImport } from './routes/_authenticated/servers/$uid'
+import { Route as AuthenticatedServersNewRouteImport } from './routes/_authenticated/servers/new'
 import { Route as AuthenticatedSettingsIndexRouteImport } from './routes/_authenticated/settings/index'
 import { Route as AuthenticatedUserGroupsIndexRouteImport } from './routes/_authenticated/user-groups/index'
 import { Route as AuthenticatedUserGroupsUidRouteImport } from './routes/_authenticated/user-groups/$uid'
@@ -156,6 +158,16 @@ const AuthenticatedServersIndexRoute =
     path: '/servers/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedServersUidRoute = AuthenticatedServersUidRouteImport.update({
+  id: '/servers/$uid',
+  path: '/servers/$uid',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedServersNewRoute = AuthenticatedServersNewRouteImport.update({
+  id: '/servers/new',
+  path: '/servers/new',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 const AuthenticatedSettingsIndexRoute =
   AuthenticatedSettingsIndexRouteImport.update({
     id: '/settings/',
@@ -207,6 +219,8 @@ export interface FileRoutesByFullPath {
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
   '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
+  '/servers/$uid': typeof AuthenticatedServersUidRoute
+  '/servers/new': typeof AuthenticatedServersNewRoute
   '/user-groups/$uid': typeof AuthenticatedUserGroupsUidRoute
   '/user-groups/new': typeof AuthenticatedUserGroupsNewRoute
   '/users/$uid': typeof AuthenticatedUsersUidRoute
@@ -236,6 +250,8 @@ export interface FileRoutesByTo {
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
   '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
+  '/servers/$uid': typeof AuthenticatedServersUidRoute
+  '/servers/new': typeof AuthenticatedServersNewRoute
   '/user-groups/$uid': typeof AuthenticatedUserGroupsUidRoute
   '/user-groups/new': typeof AuthenticatedUserGroupsNewRoute
   '/users/$uid': typeof AuthenticatedUsersUidRoute
@@ -267,6 +283,8 @@ export interface FileRoutesById {
   '/_authenticated/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/_authenticated/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
   '/_authenticated/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
+  '/_authenticated/servers/$uid': typeof AuthenticatedServersUidRoute
+  '/_authenticated/servers/new': typeof AuthenticatedServersNewRoute
   '/_authenticated/user-groups/$uid': typeof AuthenticatedUserGroupsUidRoute
   '/_authenticated/user-groups/new': typeof AuthenticatedUserGroupsNewRoute
   '/_authenticated/users/$uid': typeof AuthenticatedUsersUidRoute
@@ -298,6 +316,8 @@ export interface FileRouteTypes {
     | '/queries/$uid'
     | '/server-groups/$uid'
     | '/server-groups/new'
+    | '/servers/$uid'
+    | '/servers/new'
     | '/user-groups/$uid'
     | '/user-groups/new'
     | '/users/$uid'
@@ -327,6 +347,8 @@ export interface FileRouteTypes {
     | '/queries/$uid'
     | '/server-groups/$uid'
     | '/server-groups/new'
+    | '/servers/$uid'
+    | '/servers/new'
     | '/user-groups/$uid'
     | '/user-groups/new'
     | '/users/$uid'
@@ -357,6 +379,8 @@ export interface FileRouteTypes {
     | '/_authenticated/queries/$uid'
     | '/_authenticated/server-groups/$uid'
     | '/_authenticated/server-groups/new'
+    | '/_authenticated/servers/$uid'
+    | '/_authenticated/servers/new'
     | '/_authenticated/user-groups/$uid'
     | '/_authenticated/user-groups/new'
     | '/_authenticated/users/$uid'
@@ -530,6 +554,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedServersIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/servers/$uid': {
+      id: '/_authenticated/servers/$uid'
+      path: '/servers/$uid'
+      fullPath: '/servers/$uid'
+      preLoaderRoute: typeof AuthenticatedServersUidRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/servers/new': {
+      id: '/_authenticated/servers/new'
+      path: '/servers/new'
+      fullPath: '/servers/new'
+      preLoaderRoute: typeof AuthenticatedServersNewRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/settings/': {
       id: '/_authenticated/settings/'
       path: '/settings'
@@ -592,6 +630,8 @@ interface AuthenticatedRouteChildren {
   AuthenticatedQueriesUidRoute: typeof AuthenticatedQueriesUidRoute
   AuthenticatedServerGroupsUidRoute: typeof AuthenticatedServerGroupsUidRoute
   AuthenticatedServerGroupsNewRoute: typeof AuthenticatedServerGroupsNewRoute
+  AuthenticatedServersUidRoute: typeof AuthenticatedServersUidRoute
+  AuthenticatedServersNewRoute: typeof AuthenticatedServersNewRoute
   AuthenticatedUserGroupsUidRoute: typeof AuthenticatedUserGroupsUidRoute
   AuthenticatedUserGroupsNewRoute: typeof AuthenticatedUserGroupsNewRoute
   AuthenticatedUsersUidRoute: typeof AuthenticatedUsersUidRoute
@@ -621,6 +661,8 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedQueriesUidRoute: AuthenticatedQueriesUidRoute,
   AuthenticatedServerGroupsUidRoute: AuthenticatedServerGroupsUidRoute,
   AuthenticatedServerGroupsNewRoute: AuthenticatedServerGroupsNewRoute,
+  AuthenticatedServersUidRoute: AuthenticatedServersUidRoute,
+  AuthenticatedServersNewRoute: AuthenticatedServersNewRoute,
   AuthenticatedUserGroupsUidRoute: AuthenticatedUserGroupsUidRoute,
   AuthenticatedUserGroupsNewRoute: AuthenticatedUserGroupsNewRoute,
   AuthenticatedUsersUidRoute: AuthenticatedUsersUidRoute,

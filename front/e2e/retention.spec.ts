@@ -63,7 +63,7 @@ test.describe("Retention", () => {
     await page.goto("server-groups");
     await page.waitForLoadState("networkidle");
     await page.getByTestId("create-server-group-button").click();
-    await page.waitForSelector('[role="dialog"]');
+    await expect(page.getByTestId("server-group-name")).toBeVisible();
     await page.getByTestId("server-group-name").fill(name);
 
     // Unset inherits: no warning.
@@ -86,7 +86,7 @@ test.describe("Retention", () => {
     // Reopen: the value comes back in its largest unit.
     const row = page.locator("tr", { hasText: name });
     await row.locator('[data-testid^="edit-server-group-"]').click();
-    await page.waitForSelector('[role="dialog"]');
+    await expect(page.getByTestId("server-group-name")).toBeVisible();
     await expect(page.getByTestId("server-group-delete-after-amount")).toHaveValue(
       "30",
     );
@@ -115,7 +115,7 @@ test.describe("Retention", () => {
     await expect(row).toBeVisible({ timeout: 10000 });
     await row.locator('[data-testid^="database-edit-"]').click();
 
-    const dialog = page.getByTestId("database-edit-dialog");
+    const dialog = page.getByTestId("database-edit-section");
     await expect(dialog).toBeVisible();
 
     // 2 hours, written as hours and read back as hours.

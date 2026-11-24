@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 interface FormPageProps {
   /** data-testid of the page container, e.g. "edit-user-page". */
   testId: string;
-  title: string;
+  title: React.ReactNode;
   description?: React.ReactNode;
   /** List route the back link and Cancel return to. */
   backTo: string;
@@ -106,5 +106,59 @@ export function EntityNotFound({
         <Link to={backTo}>{backLabel}</Link>
       </Button>
     </div>
+  );
+}
+
+/**
+ * One independently-saved block of a multi-part edit page (the server page):
+ * its own form, its own Save, because the API calls behind the sections are
+ * separate and sending one section's fields with another's would break the
+ * "send only what moved" logic.
+ */
+export function FormSection({
+  testId,
+  title,
+  description,
+  onSubmit,
+  submitLabel,
+  submitTestId,
+  submitting,
+  submitDisabled,
+  children,
+}: {
+  testId: string;
+  title: React.ReactNode;
+  description?: React.ReactNode;
+  onSubmit: (e: React.FormEvent) => void;
+  submitLabel: string;
+  submitTestId: string;
+  submitting?: boolean;
+  submitDisabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      className="rounded-lg border bg-card p-6"
+      data-testid={testId}
+    >
+      <form onSubmit={onSubmit} className="max-w-2xl space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold">{title}</h2>
+          {description && (
+            <p className="text-sm text-muted-foreground">{description}</p>
+          )}
+        </div>
+        <div className="space-y-4">{children}</div>
+        <div className="flex justify-end">
+          <Button
+            type="submit"
+            disabled={submitting || submitDisabled}
+            data-testid={submitTestId}
+          >
+            {submitLabel}
+          </Button>
+        </div>
+      </form>
+    </section>
   );
 }
