@@ -168,11 +168,16 @@ const (
 
 // trackedCursor tracks a parsed cursor and its SQL.
 type trackedCursor struct {
-	cursorID   uint16
-	sql        string
-	bindValues []string
-	parsedAt   time.Time
-	columns    []columnDef // Column definitions from first response (for multi-fetch)
+	cursorID uint16
+	sql      string
+	parsedAt time.Time
+	columns  []columnDef // Column definitions from first response (for multi-fetch)
+
+	// binds are what the execution that created this entry bound. Only a REF
+	// cursor reads them back: its drives carry no binds of their own and are
+	// recorded against the call that opened it. Every other execution records
+	// its own (pendingOracleQuery.binds).
+	binds execBinds
 
 	// fromRefCursorBind marks an entry learned from a call's bind output rather
 	// than from a parse dbbat saw — a `SYS_REFCURSOR` (see learnRefCursorIDs).
@@ -203,6 +208,7 @@ type oracleQueryTracker struct {
 // pendingOracleQuery tracks a query in progress (between OALL8/OFETCH and response).
 type pendingOracleQuery struct {
 	cursor         *trackedCursor
+	binds          execBinds // what this execution bound: its own, never the parse's
 	startTime      time.Time
 	capturedBytes  int64
 	rowNumber      int
@@ -308,7 +314,7 @@ func markPartialStatement(sql string) string {
 // actually saw.
 //
 // Callers hold trackerMu (refuseStatement bumps the in-session query counter).
-func (s *session) gatePartialStatement(truncated bool, sql string, binds []string) error {
+func (s *session) gatePartialStatement(truncated bool, sql string, binds execBinds) error {
 	if !truncated {
 		return nil
 	}
@@ -336,7 +342,7 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		// the SQL that cursor holds rather than forwarded.
 		var noSQL *OALL8NoSQLError
 		if errors.As(err, &noSQL) {
-			return s.handleCursorReexec(noSQL.CursorID)
+			return s.handleCursorReexec(noSQL.CursorID, nil)
 		}
 
 		s.logger.WarnContext(s.ctx, "failed to decode OALL8", slog.Any("error", err))
@@ -351,7 +357,7 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 	s.logger.DebugContext(s.ctx, "intercepted OALL8",
 		slog.String("sql", truncateSQL(result.SQL, 200)),
 		slog.Uint64("cursor_id", uint64(result.CursorID)),
-		slog.Int("bind_count", len(result.BindValues)),
+		slog.Int("bind_count", len(result.Binds.first())),
 	)
 
 	if err := s.book(func() error {
@@ -360,12 +366,12 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		// parks a statement on a human. Recorded like any other refusal now that the
 		// decode has produced the SQL to record it against.
 		if err := s.checkQuotas(); err != nil {
-			return s.refuseStatement(result.SQL, result.BindValues, err)
+			return s.refuseStatement(result.SQL, result.Binds, err)
 		}
 
 		// A statement dbbat holds only a prefix of never reaches the validators
 		// as if it were the whole statement.
-		if err := s.gatePartialStatement(result.Truncated, result.SQL, result.BindValues); err != nil {
+		if err := s.gatePartialStatement(result.Truncated, result.SQL, result.Binds); err != nil {
 			return err
 		}
 
@@ -377,7 +383,7 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 					slog.Any("error", err),
 				)
 
-				return s.refuseStatement(result.SQL, result.BindValues, err)
+				return s.refuseStatement(result.SQL, result.Binds, err)
 			}
 		}
 
@@ -400,10 +406,10 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 
 	// Track the cursor
 	cursor := &trackedCursor{
-		cursorID:   result.CursorID,
-		sql:        result.SQL,
-		bindValues: result.BindValues,
-		parsedAt:   time.Now(),
+		cursorID: result.CursorID,
+		sql:      result.SQL,
+		binds:    result.Binds,
+		parsedAt: time.Now(),
 	}
 
 	return s.book(func() error {
@@ -412,6 +418,7 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		// Start pending query and persist immediately
 		s.tracker.pendingQuery = &pendingOracleQuery{
 			cursor:    cursor,
+			binds:     result.Binds,
 			startTime: time.Now(),
 		}
 
@@ -439,13 +446,19 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 // Without this, an approval decision and every statement-shaped control applied
 // to the *parse* only: a client that parsed once and re-executed the same
 // cursor got one hold and then a free run for the rest of the session.
-func (s *session) handleCursorReexec(cursorID uint16) error {
+//
+// frame is the message itself, for the bind row a statement-less `03 5e` still
+// carries at its tail (nil for the SQL-less OALL8, whose binds dbbat does not
+// read).
+func (s *session) handleCursorReexec(cursorID uint16, frame []byte) error {
 	cursor, ok := s.lookupCursor(cursorID)
 	if !ok {
 		return s.refuseUnknownCursor(cursorID)
 	}
 
-	return s.regateCursor(cursor)
+	binds, _ := findBindRowsFromTail(frame, 0, countBindPlaceholders(cursor.sql), 1)
+
+	return s.regateCursor(cursor, binds)
 }
 
 // refuseUnknownCursor decides what to do with a re-execution naming a cursor
@@ -533,11 +546,18 @@ func (s *session) hasStatementControls() bool {
 // refuseUnknownCursor even when the grant is also exhausted. That refusal is
 // the more specific and the more security-relevant one, and burying it under a
 // quota error would make it harder to diagnose.
-func (s *session) regateCursor(cursor *trackedCursor) error {
-	// sql and bindValues are fixed when the cursor is built and never rewritten,
-	// so they are safe to read here; cursorID is not — learnCursorID fills it in
+//
+// binds are this execution's, read off its own frame. A REF cursor's drives
+// carry none and fall back to the call's.
+func (s *session) regateCursor(cursor *trackedCursor, binds execBinds) error {
+	// sql and binds are fixed when the cursor is built and never rewritten, so
+	// they are safe to read here; cursorID is not — learnCursorID fills it in
 	// from the upstream leg — hence the log line inside the locked step below.
 	sql := cursor.sql
+
+	if len(binds.rows) == 0 && binds.count == 0 && cursor.fromRefCursorBind {
+		binds = cursor.binds
+	}
 
 	if err := s.book(func() error {
 		s.logger.DebugContext(s.ctx, logMsgReexecGated,
@@ -548,7 +568,7 @@ func (s *session) regateCursor(cursor *trackedCursor) error {
 		// Quota, expiry and revocation — recorded against the SQL the cursor holds,
 		// which is the only place this execution's statement text exists.
 		if err := s.checkQuotas(); err != nil {
-			return s.refuseStatement(sql, cursor.bindValues, err)
+			return s.refuseStatement(sql, binds, err)
 		}
 
 		// Access control check
@@ -559,7 +579,7 @@ func (s *session) regateCursor(cursor *trackedCursor) error {
 					slog.Any("error", err),
 				)
 
-				return s.refuseStatement(sql, cursor.bindValues, err)
+				return s.refuseStatement(sql, binds, err)
 			}
 		}
 
@@ -581,6 +601,7 @@ func (s *session) regateCursor(cursor *trackedCursor) error {
 	return s.book(func() error {
 		s.tracker.pendingQuery = &pendingOracleQuery{
 			cursor:    cursor,
+			binds:     binds,
 			startTime: time.Now(),
 		}
 
@@ -626,19 +647,19 @@ func (s *session) regateCursor(cursor *trackedCursor) error {
 // docs/oracle.md, "Cursor-id learning", and
 // TestIntegration_CursorIDLearningMissRate.
 func (s *session) handlePiggybackReexec(ttcPayload []byte) error {
-	cursorID, err := decodeCursorReexec(ttcPayload)
+	reexec, err := decodeCursorReexec(ttcPayload)
 	if err != nil {
 		s.logger.DebugContext(s.ctx, "failed to decode piggyback cursor re-execution", slog.Any("error", err))
 
 		return nil
 	}
 
-	cursor, ok := s.lookupCursor(cursorID)
+	cursor, ok := s.lookupCursor(reexec.CursorID)
 	if !ok {
-		return s.refuseUnknownCursor(cursorID)
+		return s.refuseUnknownCursor(reexec.CursorID)
 	}
 
-	return s.regateCursor(cursor)
+	return s.regateCursor(cursor, reexecBinds(reexec, countBindPlaceholders(cursor.sql)))
 }
 
 // learnCursorID records the cursor id the server assigned to the statement
@@ -794,7 +815,7 @@ func (s *session) learnRefCursorIDs(ttcPayload []byte) {
 		s.rememberCursor(id, &trackedCursor{
 			cursorID:          id,
 			sql:               sql,
-			bindValues:        pending.cursor.bindValues,
+			binds:             pending.binds,
 			parsedAt:          time.Now(),
 			fromRefCursorBind: true,
 		})
@@ -847,7 +868,7 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		// `03 4e` / `03 04` piggyback. See execNoStatementCursor.
 		var noSQL *PiggybackExecNoSQLError
 		if errors.As(err, &noSQL) {
-			return s.handleCursorReexec(noSQL.CursorID)
+			return s.handleCursorReexec(noSQL.CursorID, ttcPayload)
 		}
 
 		s.logger.DebugContext(s.ctx, "failed to decode piggyback exec", slog.Any("error", err))
@@ -866,11 +887,11 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 	if err := s.book(func() error {
 		// Quota, expiry and revocation first — see handleOALL8.
 		if err := s.checkQuotas(); err != nil {
-			return s.refuseStatement(result.SQL, result.BindValues, err)
+			return s.refuseStatement(result.SQL, result.Binds, err)
 		}
 
 		// See handleOALL8: a prefix is not put through the validators.
-		if err := s.gatePartialStatement(result.Truncated, result.SQL, result.BindValues); err != nil {
+		if err := s.gatePartialStatement(result.Truncated, result.SQL, result.Binds); err != nil {
 			return err
 		}
 
@@ -882,7 +903,7 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 					slog.Any("error", err),
 				)
 
-				return s.refuseStatement(result.SQL, result.BindValues, err)
+				return s.refuseStatement(result.SQL, result.Binds, err)
 			}
 		}
 
@@ -902,14 +923,15 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 
 	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
-		sql:        result.SQL,
-		bindValues: result.BindValues,
-		parsedAt:   time.Now(),
+		sql:      result.SQL,
+		binds:    result.Binds,
+		parsedAt: time.Now(),
 	}
 
 	return s.book(func() error {
 		s.tracker.pendingQuery = &pendingOracleQuery{
 			cursor:    cursor,
+			binds:     result.Binds,
 			startTime: time.Now(),
 		}
 
@@ -946,7 +968,7 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 		// execute declaring no statement is a re-execution of a tracked cursor.
 		var noSQL *PiggybackExecNoSQLError
 		if errors.As(err, &noSQL) {
-			return s.handleCursorReexec(noSQL.CursorID)
+			return s.handleCursorReexec(noSQL.CursorID, ttcPayload)
 		}
 
 		s.logger.DebugContext(s.ctx, "failed to decode JDBC exec", slog.Any("error", err))
@@ -972,11 +994,11 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 		// Quota, expiry and revocation first — see handleOALL8. Recorded against the
 		// normalized text, like the control refusal below it.
 		if err := s.checkQuotas(); err != nil {
-			return s.refuseStatement(sql, result.BindValues, err)
+			return s.refuseStatement(sql, result.Binds, err)
 		}
 
 		// See handleOALL8: a prefix is not put through the validators.
-		if err := s.gatePartialStatement(result.Truncated, sql, result.BindValues); err != nil {
+		if err := s.gatePartialStatement(result.Truncated, sql, result.Binds); err != nil {
 			return err
 		}
 
@@ -988,7 +1010,7 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 					slog.Any("error", err),
 				)
 
-				return s.refuseStatement(sql, result.BindValues, err)
+				return s.refuseStatement(sql, result.Binds, err)
 			}
 		}
 
@@ -1010,12 +1032,14 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
 		sql:      sql,
+		binds:    result.Binds,
 		parsedAt: time.Now(),
 	}
 
 	return s.book(func() error {
 		s.tracker.pendingQuery = &pendingOracleQuery{
 			cursor:    cursor,
+			binds:     result.Binds,
 			startTime: time.Now(),
 		}
 
@@ -1245,7 +1269,7 @@ func (s *session) persistQueryRecord() {
 		ConnectionID: s.connectionUID,
 		SQLText:      pending.cursor.sql,
 		ExecutedAt:   pending.startTime,
-		Parameters:   formatOracleBinds(pending.cursor.bindValues),
+		Parameters:   pending.binds.parameters(),
 	}
 
 	created, err := s.store.CreateQuery(s.ctx, query)
@@ -1264,7 +1288,7 @@ func (s *session) persistQueryRecord() {
 // the refusal unchanged, so a caller reads as `return s.refuseStatement(...)`.
 //
 // Callers hold trackerMu (it bumps the in-session query counter).
-func (s *session) refuseStatement(sql string, binds []string, refusal error) error {
+func (s *session) refuseStatement(sql string, binds execBinds, refusal error) error {
 	s.recordBlockedQuery(sql, binds, refusal)
 
 	return refusal
@@ -1288,7 +1312,7 @@ func (s *session) refuseStatement(sql string, binds []string, refusal error) err
 // owed its own completion.
 //
 // Callers hold trackerMu (it bumps the in-session query counter).
-func (s *session) recordBlockedQuery(sql string, binds []string, refusal error) {
+func (s *session) recordBlockedQuery(sql string, binds execBinds, refusal error) {
 	if refusal == nil || s.completionStore == nil || s.connectionUID == uuid.Nil {
 		return
 	}
@@ -1303,7 +1327,7 @@ func (s *session) recordBlockedQuery(sql string, binds []string, refusal error) 
 		ExecutedAt:   time.Now(),
 		DurationMs:   &duration,
 		RowsAffected: &rowsAffected,
-		Parameters:   formatOracleBinds(binds),
+		Parameters:   binds.parameters(),
 		// Last gate before the store: never persist an "error" that is not
 		// readable text. See shared.SanitizeQueryError.
 		Error: shared.SanitizeQueryError(s.ctx, s.logger, &errText),
@@ -1412,7 +1436,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 			DurationMs:       &duration,
 			RowsAffected:     rowsAffected,
 			Error:            queryError,
-			Parameters:       formatOracleBinds(pending.cursor.bindValues),
+			Parameters:       pending.binds.parameters(),
 			ResultsTruncated: pending.truncated,
 		}
 
@@ -1510,17 +1534,6 @@ const oerMaxMessageLen = 240
 // sendOracleError sends an ORA-01031 (insufficient privileges) error to the client.
 func (s *session) sendOracleError(queryErr error) error {
 	return s.writeTTCError(1031, queryErr.Error())
-}
-
-// formatOracleBinds formats bind values for storage.
-func formatOracleBinds(values []string) *store.QueryParameters {
-	if len(values) == 0 {
-		return nil
-	}
-
-	return &store.QueryParameters{
-		Values: values,
-	}
 }
 
 // truncateSQL truncates SQL for logging purposes.

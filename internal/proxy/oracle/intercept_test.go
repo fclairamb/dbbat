@@ -63,7 +63,7 @@ func TestHandleOALL8_WithBindValues(t *testing.T) {
 
 	cursor := s.tracker.cursors[2]
 	require.NotNil(t, cursor)
-	assert.Equal(t, []string{"10"}, cursor.bindValues)
+	assert.Equal(t, []string{"10"}, cursor.binds.first())
 }
 
 func TestHandleOALL8_ReadOnlyBlocks(t *testing.T) {
@@ -332,13 +332,13 @@ func TestTruncateSQL(t *testing.T) {
 
 func TestFormatOracleBinds_Empty(t *testing.T) {
 	t.Parallel()
-	assert.Nil(t, formatOracleBinds(nil))
-	assert.Nil(t, formatOracleBinds([]string{}))
+	assert.Nil(t, execBinds{}.parameters())
+	assert.Nil(t, singleBindRow([]string{}).parameters())
 }
 
 func TestFormatOracleBinds_WithValues(t *testing.T) {
 	t.Parallel()
-	params := formatOracleBinds([]string{"a", "b"})
+	params := singleBindRow([]string{"a", "b"}).parameters()
 	require.NotNil(t, params)
 	assert.Equal(t, []string{"a", "b"}, params.Values)
 }

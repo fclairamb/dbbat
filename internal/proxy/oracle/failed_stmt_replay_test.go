@@ -315,18 +315,21 @@ func TestHandleOERStatus_RecordsTheORATextOfEveryRecordedFailure(t *testing.T) {
 }
 
 // TestHandleOERStatus_RelaxationIsErrorsOnly pins the width of the change. The
-// bit still guards everything it guarded before *except* a proven diagnostic:
-// a bit-less standalone OER reporting success, or end-of-data, still completes
-// nothing, because there is no ORA text to prove those bytes with.
+// bit still guards everything it guarded before *except* a proven diagnostic
+// and, outside a row stream, a plausible status (completeFromStandaloneStatusOER):
+// a bit-less standalone OER reporting success mid-fetch, or one naming no
+// cursor, still completes nothing, because there is no ORA text to prove those
+// bytes with.
 func TestHandleOERStatus_RelaxationIsErrorsOnly(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		oer  []byte
+		name     string
+		oer      []byte
+		midFetch bool
 	}{
-		{name: "success", oer: pythonThinOERBytes},
-		{name: "end of data", oer: buildOER(2, 57186, 0, oraNoDataFound)},
+		{name: "success, mid-fetch", oer: pythonThinOERBytes, midFetch: true},
+		{name: "end of data naming no cursor", oer: buildOER(2, 57186, 0, oraNoDataFound)},
 		{name: "a code with no diagnostic behind it", oer: buildOER(2, 57186, 0, 942)},
 	}
 
@@ -335,7 +338,11 @@ func TestHandleOERStatus_RelaxationIsErrorsOnly(t *testing.T) {
 			t.Parallel()
 
 			s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
-			require.NoError(t, s.handleOALL8(buildOALL8("UPDATE emp SET sal = 1", nil, 4)))
+			require.NoError(t, s.handleOALL8(buildOALL8("SELECT sal FROM emp", nil, 4)))
+
+			if tc.midFetch {
+				s.tracker.pendingQuery.cursor.columns = []columnDef{{Name: "SAL"}}
+			}
 
 			s.handleOERStatus(tc.oer)
 

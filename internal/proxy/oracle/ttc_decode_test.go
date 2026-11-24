@@ -125,7 +125,7 @@ func TestDecodeOALL8_SimpleSELECT(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT * FROM employees WHERE id = :1", result.SQL)
 	assert.Equal(t, uint16(7), result.CursorID)
-	assert.Equal(t, []string{"42"}, result.BindValues)
+	assert.Equal(t, []string{"42"}, result.Binds.first())
 }
 
 func TestDecodeOALL8_NoBinds(t *testing.T) {
@@ -135,7 +135,7 @@ func TestDecodeOALL8_NoBinds(t *testing.T) {
 	result, err := decodeOALL8(payload)
 	require.NoError(t, err)
 	assert.Equal(t, "SELECT SYSDATE FROM DUAL", result.SQL)
-	assert.Empty(t, result.BindValues)
+	assert.Empty(t, result.Binds.first())
 }
 
 func TestDecodeOALL8_MultipleBinds(t *testing.T) {
@@ -147,7 +147,7 @@ func TestDecodeOALL8_MultipleBinds(t *testing.T) {
 	result, err := decodeOALL8(payload)
 	require.NoError(t, err)
 	assert.Equal(t, sql, result.SQL)
-	assert.Equal(t, binds, result.BindValues)
+	assert.Equal(t, binds, result.Binds.first())
 }
 
 func TestDecodeOALL8_PLSQLBlock(t *testing.T) {
@@ -207,7 +207,7 @@ func TestDecodeOALL8_UnicodeSQL(t *testing.T) {
 	result, err := decodeOALL8(payload)
 	require.NoError(t, err)
 	assert.Equal(t, sql, result.SQL)
-	assert.Equal(t, []string{"Éric"}, result.BindValues)
+	assert.Equal(t, []string{"Éric"}, result.Binds.first())
 }
 
 func TestDecodeOALL8_NullBindValue(t *testing.T) {
@@ -216,8 +216,8 @@ func TestDecodeOALL8_NullBindValue(t *testing.T) {
 	payload := buildOALL8WithNulls("UPDATE t SET col = :1 WHERE id = :2", []interface{}{nil, 42}, 3)
 	result, err := decodeOALL8(payload)
 	require.NoError(t, err)
-	assert.Equal(t, "NULL", result.BindValues[0])
-	assert.Equal(t, "42", result.BindValues[1])
+	assert.Equal(t, "NULL", result.Binds.first()[0])
+	assert.Equal(t, "42", result.Binds.first()[1])
 }
 
 func TestDecodeOALL8_BinaryBindValue(t *testing.T) {
@@ -226,7 +226,7 @@ func TestDecodeOALL8_BinaryBindValue(t *testing.T) {
 	payload := buildOALL8WithBinaryBind("INSERT INTO t (raw_col) VALUES (:1)", []byte{0xDE, 0xAD, 0xBE, 0xEF}, 4)
 	result, err := decodeOALL8(payload)
 	require.NoError(t, err)
-	assert.Equal(t, "deadbeef", result.BindValues[0])
+	assert.Equal(t, "deadbeef", result.Binds.first()[0])
 }
 
 func TestDecodeOALL8_CorruptPayload(t *testing.T) {

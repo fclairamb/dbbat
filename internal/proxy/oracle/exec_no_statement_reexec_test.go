@@ -323,7 +323,13 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// `96 24 96 96`, no substitution, because a column that is already a LONG
 	// has nothing to be re-declared as. python_thin_long.pcapng is absent
 	// because python-oracledb thin sends no define there at all.
+	//
+	// python_thin_array_dml.pcapng's one is python-oracledb re-running an
+	// UPDATE whose bind got longer than the buffer it was declared with: the
+	// metadata has to be sent again, so the re-execution takes the full execute
+	// op, with the cursor id and no statement, its bind row at the tail.
 	assert.Equal(t, map[string]int{
+		"python_thin_array_dml.pcapng": 1,
 		"ojdbc6_legacy.pcapng":         1,
 		"go_ora_refcursor.pcapng":      3,
 		"jdbc_thin_refcursor.pcapng":   3,
