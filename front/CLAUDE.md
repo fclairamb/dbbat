@@ -163,7 +163,7 @@ Tests automatically capture screenshots at key points:
 
 - **Login flow**: Login page, error states, successful login
 - **Navigation**: Each main section (users, databases, grants, etc.)
-- **CRUD operations**: Create dialogs, list views, detail pages
+- **CRUD operations**: list views, and a page with its own route for every form that creates or edits an entity (`<entity>/new`, `<entity>/$uid`; shared form in `src/components/<entity>/`, chrome in `FormPage`). A dialog stays only for a confirmation or a one-shot reveal (the new API key secret).
 - **Error states**: Failures and validation errors
 
 Screenshots are saved to `test-results/screenshots/`.
@@ -412,7 +412,7 @@ Always add `data-testid` attributes to interactive elements and key UI component
 - **Cards/Containers**: Add `data-testid` to important layout elements
 - **Navigation**: Add `data-testid` to nav links and menu items
 
-Naming convention: Use kebab-case descriptive names (e.g., `login-submit`, `user-create-dialog`, `session-expired-alert`).
+Naming convention: Use kebab-case descriptive names (e.g., `login-submit`, `user-create-page`, `session-expired-alert`).
 
 Example:
 ```tsx

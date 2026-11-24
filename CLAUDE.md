@@ -457,11 +457,11 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   (409) while anything references it.
 - **A server row is editable; its protocol is not.** `PUT /servers/{uid}`
   takes host, port, database/service name, credentials, `ssl_mode`, `listable`,
-  the tunnel and the name, and the admin UI's edit dialog offers all of them
-  (the name in its own dialog, for its own warning). Editing does **not**
+  the tunnel and the name, and the admin UI's `servers/$uid` page offers all of
+  them (the name in its own section, for its own warning). Editing does **not**
   re-issue anything: every grant already covering the row reaches the new
   target on the next connect, sessions already open stay on the upstream they
-  dialed, and `GET /servers/{uid}/references` is what the dialog counts that
+  dialed, and `GET /servers/{uid}/references` is what the page counts that
   with — live grants (anchored **or** group-bound, under the auth path's own
   liveness predicate) and the server groups carrying the row. Same trade as
   live server-group membership, same answer: warn at the point of edit rather
