@@ -2424,7 +2424,7 @@ paths:
     post:
       tags:
         - Grant Requests
-      summary: Cancel grant request (requester or admin)
+      summary: Cancel grant request (requester only)
       operationId: cancelGrantRequest
       responses:
         '200':

@@ -541,8 +541,8 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Approve/deny are authorized in the handler, not by middleware:
 			// an admin decides anything, and an access approver resolved off
 			// the target server (or its server groups) decides that server's
-			// requests — never their own. Cancel is open to the requester
-			// (handler enforces ownership).
+			// requests — never their own. Cancel is the requester's alone,
+			// admins included (handler enforces ownership).
 			grantReqs := authenticated.Group("/grant-requests")
 			grantReqs.POST("", s.handleCreateGrantRequest)
 			grantReqs.GET("", s.handleListGrantRequests)

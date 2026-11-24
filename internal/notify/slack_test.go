@@ -430,7 +430,7 @@ func TestNotifier_CreatedInteractiveRendersButtonsAndMentions(t *testing.T) {
 		}
 	}
 	// Action buttons present with our action IDs.
-	for _, want := range []string{ActionApprove, ActionDeny} {
+	for _, want := range []string{ActionApprove, ActionDeny, ActionCancel} {
 		if !strings.Contains(blocks, want) {
 			t.Errorf("blocks missing action_id %q: %s", want, blocks)
 		}

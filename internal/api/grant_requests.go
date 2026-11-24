@@ -614,7 +614,7 @@ type decideOutcome struct {
 	Request *store.GrantRequest
 	Grant   *store.Grant             // nil for deny
 	Event   notify.GrantRequestEvent // the event already fired to the notifier
-	Action  notify.GrantAction       // approved | denied
+	Action  notify.GrantAction       // approved | denied | GrantActionCancelled
 }
 
 // ErrRequestOutOfScope is returned when a pending request no longer matches
@@ -878,7 +878,7 @@ func (s *Server) handleDenyGrantRequest(c *gin.Context) {
 	successResponse(c, outcome.Request)
 }
 
-// handleCancelGrantRequest — requester (or admin) only, while pending.
+// handleCancelGrantRequest — requester only, while pending.
 func (s *Server) handleCancelGrantRequest(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
@@ -903,13 +903,13 @@ func (s *Server) handleCancelGrantRequest(c *gin.Context) {
 		return
 	}
 
-	if !currentUser.IsAdmin() && existing.UserID != currentUser.UID {
-		writeError(c, http.StatusForbidden, ErrCodeForbidden, "only the requester or an admin can cancel")
+	if !mayCancelGrantRequest(currentUser, existing) {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "only the requester can cancel their request")
 
 		return
 	}
 
-	updated, err := s.store.CancelGrantRequest(ctx, uid, currentUser.UID)
+	outcome, err := s.cancelGrantRequest(ctx, uid, currentUser, decisionSourceWeb)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidTransition) {
 			writeError(c, http.StatusConflict, ErrCodeConflict, "grant request is not pending")
@@ -922,20 +922,42 @@ func (s *Server) handleCancelGrantRequest(c *gin.Context) {
 		return
 	}
 
-	details, _ := json.Marshal(map[string]any{
+	successResponse(c, outcome.Request)
+}
+
+// mayCancelGrantRequest is the one cancel gate, shared by REST and Slack:
+// only the requester withdraws their own request. Admins and access
+// approvers deny instead, so the record says who said no.
+func mayCancelGrantRequest(user *store.User, req *store.GrantRequest) bool {
+	if user == nil || req == nil {
+		return false
+	}
+
+	return req.UserID == user.UID
+}
+
+// cancelGrantRequest runs the shared cancel flow (store + audit + notify),
+// returning the raw store error unmapped. The caller authorizes first.
+func (s *Server) cancelGrantRequest(ctx context.Context, uid uuid.UUID, by *store.User, source decisionSource) (*decideOutcome, error) {
+	updated, err := s.store.CancelGrantRequest(ctx, uid, by.UID)
+	if err != nil {
+		return nil, err
+	}
+
+	details := decisionDetails(map[string]any{
 		"grant_request_uid": updated.UID,
-	})
+	}, source)
 
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
 		EventType:   "grant_request.cancelled",
 		UserID:      &updated.UserID,
-		PerformedBy: &currentUser.UID,
+		PerformedBy: &by.UID,
 		Details:     details,
 	})
 
-	ev := s.loadEventContext(ctx, updated, currentUser)
+	ev := s.loadEventContext(ctx, updated, by)
 	ev.Action = notify.GrantActionCancelled
-	s.notifyAsync(ev)
+	s.notifyAsync(ev) //nolint:contextcheck // notifyAsync detaches by design
 
-	successResponse(c, updated)
+	return &decideOutcome{Request: updated, Event: ev, Action: notify.GrantActionCancelled}, nil
 }
