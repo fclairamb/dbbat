@@ -226,3 +226,70 @@ func TestListQueriesSortTieFallsBackToUIDDesc(t *testing.T) {
 		assert.Equal(t, []uuid.UUID{second, first}, got, order)
 	}
 }
+
+// setConnQueries stamps the sort key of a seeded connection.
+func (f *obsFixture) setConnQueries(t *testing.T, uid uuid.UUID, queries int) {
+	t.Helper()
+
+	_, err := f.store.db.ExecContext(f.ctx, "UPDATE connections SET queries = ? WHERE uid = ?", queries, uid)
+	require.NoError(t, err)
+}
+
+// TestListConnectionsSortComposesWithFilters asserts that a sort neither
+// widens nor narrows a filter, for the server group, provenance and user
+// filters: the filter picks the rows, the sort only orders them.
+func TestListConnectionsSortComposesWithFilters(t *testing.T) {
+	t.Parallel()
+
+	f := newObsFixture(t, "sortfilter")
+
+	require.NoError(t, f.store.AddServerToGroup(f.ctx, f.group.UID, f.dbA.UID))
+	require.NoError(t, f.store.AddServerToGroup(f.ctx, f.group.UID, f.dbB.UID))
+
+	approvedGrant := f.requestedGrant(t, false)
+	autoGrant := f.requestedGrant(t, true)
+	directGrant := f.grant(t, f.dbA.UID)
+
+	approved := f.session(t, f.dbA.UID, &approvedGrant.UID)
+	auto := f.session(t, f.dbA.UID, &autoGrant.UID)
+	direct := f.session(t, f.dbB.UID, &directGrant.UID)
+	outside := f.session(t, f.dbC.UID, nil) // not in the group, no grant
+
+	other, _ := createTestUserAndDatabase(t, f.ctx, f.store, "sortfilter_other")
+	foreign, err := f.store.CreateConnection(f.ctx, other.UID, f.dbA.UID, "10.0.0.2")
+	require.NoError(t, err)
+
+	f.setConnQueries(t, approved.UID, 10)
+	f.setConnQueries(t, auto.UID, 30)
+	f.setConnQueries(t, direct.UID, 20)
+	f.setConnQueries(t, outside.UID, 40)
+	f.setConnQueries(t, foreign.UID, 50)
+
+	list := func(filter ConnectionFilter, order string) []uuid.UUID {
+		filter.Sort, filter.Order = ConnectionSortQueries, order
+
+		return connUIDs(t, f.ctx, f.store, filter)
+	}
+
+	// Server group: the two group servers' sessions of both users, never C.
+	group := ConnectionFilter{ServerGroupUID: &f.group.UID}
+	assert.Equal(t, []uuid.UUID{foreign.UID, auto.UID, direct.UID, approved.UID}, list(group, SortDesc))
+	assert.Equal(t, []uuid.UUID{approved.UID, direct.UID, auto.UID, foreign.UID}, list(group, SortAsc))
+
+	// Provenance: only the approved and direct sessions, ungranted excluded.
+	prov := ConnectionFilter{GrantProvenance: []GrantProvenance{GrantProvenanceApproved, GrantProvenanceDirect}}
+	assert.Equal(t, []uuid.UUID{direct.UID, approved.UID}, list(prov, SortDesc))
+	assert.Equal(t, []uuid.UUID{approved.UID, direct.UID}, list(prov, SortAsc))
+
+	// User: the filter changes the selection even when a sort is applied.
+	mine := ConnectionFilter{UserID: &f.user.UID}
+	assert.Equal(t, []uuid.UUID{outside.UID, auto.UID, direct.UID, approved.UID}, list(mine, SortDesc))
+
+	theirs := ConnectionFilter{UserID: &other.UID}
+	assert.Equal(t, []uuid.UUID{foreign.UID}, list(theirs, SortDesc))
+	assert.NotContains(t, list(theirs, SortAsc), approved.UID)
+
+	// Filters AND together under a sort.
+	both := ConnectionFilter{UserID: &other.UID, ServerGroupUID: &f.group.UID}
+	assert.Equal(t, []uuid.UUID{foreign.UID}, list(both, SortDesc))
+}
