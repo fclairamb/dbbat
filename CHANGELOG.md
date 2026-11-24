@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.33.2](https://github.com/fclairamb/dbbat/compare/v0.33.1...v0.33.2) (2026-11-24)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/gopacket/gopacket to v1.8.0 ([#525](https://github.com/fclairamb/dbbat/issues/525)) ([cf187f6](https://github.com/fclairamb/dbbat/commit/cf187f6b39c7d76bca24ceb2722364e47681c7b7))
+* **deps:** update module go.mongodb.org/mongo-driver/v2 to v2.10.1 ([#522](https://github.com/fclairamb/dbbat/issues/522)) ([8d83e55](https://github.com/fclairamb/dbbat/commit/8d83e55eba767d57e531ed110fdff47e88ee0303))
+* **oracle:** log every re-execution and executemany bind row, decode long-form row values ([#529](https://github.com/fclairamb/dbbat/issues/529)) ([f0600ad](https://github.com/fclairamb/dbbat/commit/f0600adca31e7ad1eb38dad1edf1814cde16700a))
+* **oracle:** type python-oracledb thin rows, capture national-charset text, record every statement-less batch row ([#530](https://github.com/fclairamb/dbbat/issues/530)) ([ecd6d3d](https://github.com/fclairamb/dbbat/commit/ecd6d3d73455d229274a92be07473365192d05cb))
+* **proxy:** throttle proxy logins, seal the archive excuse in row-chain verification, and close smaller control gaps ([#528](https://github.com/fclairamb/dbbat/issues/528)) ([d9ab31d](https://github.com/fclairamb/dbbat/commit/d9ab31d8609af1b39612ca4e6b258df46017be1f))
+
 ## [0.33.1](https://github.com/fclairamb/dbbat/compare/v0.33.0...v0.33.1) (2026-11-19)
 
 
