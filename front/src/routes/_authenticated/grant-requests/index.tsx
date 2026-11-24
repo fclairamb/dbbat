@@ -18,6 +18,16 @@ import {
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -93,9 +103,16 @@ function GrantRequestsPage() {
     onError: (e) => toast.error(e.message),
   });
   const cancel = useCancelGrantRequest({
-    onSuccess: () => toast.success("Cancelled"),
-    onError: (e) => toast.error(e.message),
+    onSuccess: () => {
+      toast.success("Request withdrawn");
+      setWithdrawing(null);
+    },
+    onError: (e) => {
+      toast.error(e.message);
+      setWithdrawing(null);
+    },
   });
+  const [withdrawing, setWithdrawing] = useState<GrantRequest | null>(null);
   const updateDefinition = useUpdateGrantDefinition({
     onError: (e) => toast.error(e.message),
   });
@@ -270,9 +287,10 @@ function GrantRequestsPage() {
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => cancel.mutate(r.uid)}
+                onClick={() => setWithdrawing(r)}
                 data-testid={`cancel-${r.uid}`}
-                title="Cancel"
+                title="Withdraw request"
+                aria-label="Withdraw request"
               >
                 <Ban className="h-4 w-4" />
               </Button>
@@ -336,6 +354,37 @@ function GrantRequestsPage() {
             : "No grant requests yet."
         }
       />
+
+      <AlertDialog
+        open={withdrawing !== null}
+        onOpenChange={(open) => {
+          if (!open) setWithdrawing(null);
+        }}
+      >
+        <AlertDialogContent data-testid="withdraw-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Withdraw this request?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The request will be cancelled and approvers can no longer act on
+              it. You can file a new one at any time.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="withdraw-keep">
+              Keep request
+            </AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="withdraw-confirm"
+              onClick={(e) => {
+                e.preventDefault();
+                if (withdrawing) cancel.mutate(withdrawing.uid);
+              }}
+            >
+              Withdraw request
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <DenyDialog
         request={denying}
