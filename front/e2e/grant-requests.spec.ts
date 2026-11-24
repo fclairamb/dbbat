@@ -12,13 +12,13 @@ const DEFS_URL = "grant-definitions";
 
 async function openCreateDialog(page: Page) {
   await page.getByTestId("create-grant-definition-button").click();
-  await expect(page.getByTestId("new-definition-page")).toBeVisible();
+  await page.waitForSelector('[role="dialog"]');
   await expect(page.getByTestId("grant-definition-name")).toBeVisible();
 }
 
 async function submitDialog(page: Page) {
   await page.getByTestId("grant-definition-submit").click();
-  await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
+  await expect(page.locator('[role="dialog"]')).toBeHidden();
 }
 
 async function submitRequest(
@@ -28,7 +28,7 @@ async function submitRequest(
   await page.goto("grant-requests");
   await page.waitForLoadState("networkidle");
   await page.getByTestId("request-grant-button").click();
-  await expect(page.getByTestId("new-grant-request-page")).toBeVisible();
+  await page.waitForSelector('[role="dialog"]');
 
   await page.getByTestId("grant-request-definition").click();
   await page.getByRole("option", { name: opts.definitionName }).click();
@@ -38,7 +38,7 @@ async function submitRequest(
 
   await page.getByTestId("grant-request-justification").fill(opts.justification);
   await page.getByTestId("grant-request-submit").click();
-  await expect(page.getByTestId("new-grant-request-page")).toHaveCount(0);
+  await expect(page.locator('[role="dialog"]')).toBeHidden();
 }
 
 test.describe("Grant Requests: approve and enable auto-approve", () => {
@@ -114,27 +114,5 @@ test.describe("Grant Requests: approve and enable auto-approve", () => {
     for (const row of await rows.all()) {
       await expect(row).toContainText("approved");
     }
-  });
-});
-
-test.describe("Grant Requests: request page route", () => {
-  test("the request page opens by URL, survives reload and back returns to the list", async ({
-    authenticatedPage: page,
-  }) => {
-    await page.goto("grant-requests/new");
-    await expect(page.getByTestId("new-grant-request-page")).toBeVisible();
-    await page.reload();
-    await expect(page.getByTestId("grant-request-definition")).toBeVisible();
-
-    await page.goto("grant-requests");
-    await page.getByTestId("request-grant-button").click();
-    await expect(page).toHaveURL(/\/grant-requests\/new$/);
-    await page.goBack();
-    await expect(page).toHaveURL(/\/grant-requests\/?$/);
-    await expect(page.getByTestId("new-grant-request-page")).toHaveCount(0);
-
-    await page.getByTestId("request-grant-button").click();
-    await page.getByTestId("form-cancel").click();
-    await expect(page).toHaveURL(/\/grant-requests\/?$/);
   });
 });

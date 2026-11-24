@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, afterSectionSave } from "./fixtures";
 
 /**
  * Retention settings: the instance card, and the windows on a server group.
@@ -63,7 +63,7 @@ test.describe("Retention", () => {
     await page.goto("server-groups");
     await page.waitForLoadState("networkidle");
     await page.getByTestId("create-server-group-button").click();
-    await expect(page.getByTestId("server-group-name")).toBeVisible();
+    await page.waitForSelector('[role="dialog"]');
     await page.getByTestId("server-group-name").fill(name);
 
     // Unset inherits: no warning.
@@ -127,7 +127,7 @@ test.describe("Retention", () => {
     await expect(page.getByTestId("database-edit-delete-warning")).toBeVisible();
 
     await page.getByTestId("database-edit-submit").click();
-    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+    await afterSectionSave(page);
 
     await page.reload();
     await page.waitForLoadState("networkidle");

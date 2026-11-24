@@ -12,6 +12,8 @@ import {
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogTrigger } from "@/components/ui/dialog";
+import { UserGroupForm } from "@/components/user-groups/UserGroupForm";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,6 +33,7 @@ export const Route = createFileRoute("/_authenticated/user-groups/")({
 
 function UserGroupsPage() {
   const { user } = useAuth();
+  const [createOpen, setCreateOpen] = useState(false);
   const isAdmin = canManageUserGroups(user?.roles);
 
   const { data: groups = [], isLoading } = useUserGroups({ enabled: isAdmin });
@@ -130,12 +133,15 @@ function UserGroupsPage() {
         description="Organizational groups (data-analysts, SRE, …) used to scope grant definitions. Distinct from roles, which are functional."
         actions={
           isAdmin && (
-            <Button asChild data-testid="create-user-group-button">
-              <Link to="/user-groups/new">
-                <Plus className="h-4 w-4 mr-2" />
-                New Group
-              </Link>
-            </Button>
+            <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+              <DialogTrigger asChild>
+                <Button data-testid="create-user-group-button">
+                  <Plus className="h-4 w-4 mr-2" />
+                  New Group
+                </Button>
+              </DialogTrigger>
+              {createOpen && <UserGroupForm editing={null} onDone={() => setCreateOpen(false)} />}
+            </Dialog>
           )
         }
       />

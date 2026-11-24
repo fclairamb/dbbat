@@ -37,7 +37,7 @@ test.describe("Users Management", () => {
 
       // Take screenshot of create user dialog/form
       await authenticatedPage.screenshot({
-        path: "test-results/screenshots/users-create-page.png",
+        path: "test-results/screenshots/users-create-dialog.png",
       });
 
       // Look for form fields
@@ -316,24 +316,6 @@ test.describe("Users Management", () => {
     await expect(adminRow.getByText("Never", { exact: true })).toBeVisible();
   });
 
-  test("create user page creates a user and returns to the list", async ({
-    authenticatedPage: page,
-  }) => {
-    const username = `page-user-${Date.now()}`;
-    await page.goto("users");
-    await page.waitForLoadState("networkidle");
-    await page.getByTestId("create-user-button").click();
-    await expect(page.getByTestId("create-user-page")).toBeVisible();
-    await expect(page).toHaveURL(/\/users\/new$/);
-
-    await page.locator("#username").fill(username);
-    await page.locator("#password").fill("a-Long-passw0rd!");
-    await page.getByTestId("create-user-submit").click();
-
-    await expect(page).toHaveURL(/\/users\/?$/);
-    await expect(page.getByTestId(`edit-user-${username}`)).toBeVisible();
-  });
-
   test("edit page opens by URL, survives reload and back returns to the list", async ({
     authenticatedPage: page,
   }) => {
@@ -375,8 +357,6 @@ test.describe("Users Management", () => {
 
   test("a viewer is refused on the user edit routes", async ({ page }) => {
     await loginAs(page, "viewer", "viewer");
-    await page.goto("users/new");
-    await expect(page.getByText("Access Denied")).toBeVisible();
     await page.goto("users/00000000-0000-0000-0000-000000000000");
     await expect(page.getByText("Access Denied")).toBeVisible();
   });

@@ -21,11 +21,22 @@ import { ApproverGroupPickers } from "@/components/shared/ApproverGroupPickers";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-/** Create/edit form for a server group, shared by `new` and `$uid`. */
-export function ServerGroupForm({ editing }: { editing: ServerGroup | null }) {
+/**
+ * Form for a server group: the `$uid` edit page renders it as a page, the
+ * create dialog of the list wraps it in a Dialog.
+ */
+export function ServerGroupForm({
+  editing,
+  onDone,
+}: {
+  editing: ServerGroup | null;
+  /** Create mode only: close the dialog the form is rendered in. */
+  onDone?: () => void;
+}) {
   const navigate = useNavigate();
   const { data: servers = [] } = useDatabases();
-  const onClose = () => navigate({ to: "/server-groups" });
+  const onClose = () =>
+    onDone ? onDone() : navigate({ to: "/server-groups" });
 
   const [name, setName] = useState(editing?.name ?? "");
   const [description, setDescription] = useState(editing?.description ?? "");
@@ -97,7 +108,8 @@ export function ServerGroupForm({ editing }: { editing: ServerGroup | null }) {
 
   return (
     <FormPage
-      testId={editing ? "edit-server-group-page" : "new-server-group-page"}
+      dialog={!editing}
+      testId={editing ? "edit-server-group-page" : undefined}
       title={editing ? "Edit server group" : "New server group"}
       description="A grant definition scopes on server groups instead of listing servers, and a grant binds to the group it was issued under."
       backTo="/server-groups"

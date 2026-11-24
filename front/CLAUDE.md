@@ -163,7 +163,7 @@ Tests automatically capture screenshots at key points:
 
 - **Login flow**: Login page, error states, successful login
 - **Navigation**: Each main section (users, databases, grants, etc.)
-- **CRUD operations**: list views, and a page with its own route for every form that creates or edits an entity (`<entity>/new`, `<entity>/$uid`; shared form in `src/components/<entity>/`, chrome in `FormPage`). A dialog stays only for a confirmation or a one-shot reveal (the new API key secret).
+- **CRUD operations**: list views, create dialogs, and a page with its own route for every form that edits an existing entity (`<entity>/$uid`; the form lives in `src/components/<entity>/`, the page chrome in `FormPage`)
 - **Error states**: Failures and validation errors
 
 Screenshots are saved to `test-results/screenshots/`.
@@ -412,7 +412,7 @@ Always add `data-testid` attributes to interactive elements and key UI component
 - **Cards/Containers**: Add `data-testid` to important layout elements
 - **Navigation**: Add `data-testid` to nav links and menu items
 
-Naming convention: Use kebab-case descriptive names (e.g., `login-submit`, `user-create-page`, `session-expired-alert`).
+Naming convention: Use kebab-case descriptive names (e.g., `login-submit`, `user-create-dialog`, `session-expired-alert`).
 
 Example:
 ```tsx
@@ -425,7 +425,25 @@ Example:
 </Alert>
 ```
 
-### Calling the API
+### Forms: edit is a page, create is a dialog
+
+- A form that **edits an existing entity** is a page with its own route (`users/$uid`,
+  `user-groups/$uid`, `servers/$uid`, `server-groups/$uid`, `grant-definitions/$uid`,
+  `settings/parameters/$key`), so it can be linked, reloaded and reached with the back
+  button. The list's Edit action is a `<Link>`. Pages load the entity by uid, show a
+  loading state and a not-found state (`EntityNotFound`), and refuse non-admins like the list.
+- A form that **creates** an entity stays a `Dialog` opened from the list page. Where
+  create and edit share fields (user group, server group, grant definition), the form is one
+  component in `src/components/<entity>/`: the edit page renders it as a page, the create
+  dialog renders it with `FormPage`'s `dialog` prop.
+- Dialogs also stay for confirmations (delete, revoke, deactivate, rename) and one-shot
+  reveals (the new API key secret).
+- `servers/$uid` is one page with independent sections (details, edit, rename, approvers,
+  SSH tunnel); each section has its own Save and stays on the page, so saving one leaves
+  the others' unsaved changes alone. Renaming asks for confirmation.
+- Edit page testids are `*-page` / `*-section`; create dialogs keep their dialog testids.
+
+## Calling the API
 
 1. Use the `apiClient` from `src/api/client.ts`
 2. All types are automatically inferred from the OpenAPI schema

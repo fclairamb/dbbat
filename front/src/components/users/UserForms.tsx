@@ -25,6 +25,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -115,10 +123,8 @@ function RoleCheckboxes({
   );
 }
 
-/** Create form for a user (the `new` route). */
-export function CreateUserForm() {
-  const navigate = useNavigate();
-  const onClose = () => navigate({ to: "/users" });
+/** Create dialog for a user (opened from the list). */
+export function CreateUserDialog({ onClose }: { onClose: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [roles, setRoles] = useState<UserRole[]>(["connector"]);
@@ -143,46 +149,52 @@ export function CreateUserForm() {
   };
 
   return (
-    <FormPage
-      testId="create-user-page"
-      title="Create User"
-      description="Add a new user to the system."
-      backTo="/users"
-      backLabel="Users"
-      onSubmit={handleSubmit}
-      onCancel={onClose}
-      submitLabel="Create"
-      submitTestId="create-user-submit"
-      submitting={createUser.isPending}
-      submitDisabled={roles.length === 0}
-    >
-      <div className="max-w-xl space-y-4">
-        <div className="space-y-2">
-          <Label htmlFor="username">Username</Label>
-          <Input
-            id="username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            required
+    <DialogContent data-testid="create-user-dialog">
+      <form onSubmit={handleSubmit}>
+        <DialogHeader>
+          <DialogTitle>Create User</DialogTitle>
+          <DialogDescription>Add a new user to the system.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <div className="space-y-2">
+            <Label htmlFor="username">Username</Label>
+            <Input
+              id="username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="password">Password</Label>
+            <Input
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </div>
+          <RoleCheckboxes
+            idPrefix="create-user"
+            roles={roles}
+            onChange={setRoles}
           />
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="password">Password</Label>
-          <Input
-            id="password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-          />
-        </div>
-        <RoleCheckboxes
-          idPrefix="create-user"
-          roles={roles}
-          onChange={setRoles}
-        />
-      </div>
-    </FormPage>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            disabled={createUser.isPending || roles.length === 0}
+            data-testid="create-user-submit"
+          >
+            Create
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
   );
 }
 

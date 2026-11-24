@@ -17,10 +17,10 @@ import { test, expect, loginAs } from "./fixtures";
 
 const DEFS_URL = "grant-definitions";
 
-/** Open the "New Definition" page and wait for it to be interactive. */
+/** Open the "New Definition" dialog and wait for it to be interactive. */
 async function openCreateDialog(page: Page) {
   await page.getByTestId("create-grant-definition-button").click();
-  await expect(page.getByTestId("new-definition-page")).toBeVisible();
+  await page.waitForSelector('[role="dialog"]');
   await expect(page.getByTestId("grant-definition-name")).toBeVisible();
 }
 
@@ -319,7 +319,7 @@ test.describe("Grant Definition inline auto-approve toggle", () => {
 
     const name = `E2E AutoApprove ${Date.now()}`;
 
-    // Create a manual (non-auto-approve) definition via the page.
+    // Create a manual (non-auto-approve) definition via the dialog.
     await openCreateDialog(page);
     await fillDefinition(page, {
       name,
@@ -352,7 +352,7 @@ test.describe("Grant Definition inline auto-approve toggle", () => {
     await page.goto("grant-requests");
     await page.waitForLoadState("networkidle");
     await page.getByTestId("request-grant-button").click();
-    await expect(page.getByTestId("new-grant-request-page")).toBeVisible();
+    await page.waitForSelector('[role="dialog"]');
 
     await page.getByTestId("grant-request-definition").click();
     await page.getByRole("option", { name }).click();
@@ -364,7 +364,7 @@ test.describe("Grant Definition inline auto-approve toggle", () => {
       .getByTestId("grant-request-justification")
       .fill("E2E auto-approve verification");
     await page.getByTestId("grant-request-submit").click();
-    await expect(page.getByTestId("new-grant-request-page")).toHaveCount(0);
+    await expect(page.locator('[role="dialog"]')).toBeHidden();
 
     // Switch to "All" so the (already-resolved) request is visible, then
     // confirm it shows as approved, not pending.
@@ -692,8 +692,6 @@ test.describe("Grant Definition routes", () => {
 
   test("a viewer is refused on the edit routes", async ({ page }) => {
     await loginAs(page, "viewer", "viewer");
-    await page.goto(`${DEFS_URL}/new`);
-    await expect(page.getByText("Access Denied")).toBeVisible();
     await page.goto(`${DEFS_URL}/00000000-0000-0000-0000-000000000000`);
     await expect(page.getByText("Access Denied")).toBeVisible();
   });

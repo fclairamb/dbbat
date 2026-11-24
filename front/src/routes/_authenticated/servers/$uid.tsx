@@ -48,6 +48,9 @@ function ServerPage() {
   if (!ready) return <PageLoader />;
 
   const goBack = () => navigate({ to: "/servers" });
+  // Each section saves on its own and stays on the page, so the unsaved edits
+  // of the other sections are still there.
+  const refreshed = () => {};
   const db = databases?.find((d) => d.uid === uid);
   const tunnel = tunnelServers?.find((t) => t.uid === uid);
 
@@ -80,27 +83,27 @@ function ServerPage() {
         {db && canUpdate && isFullDatabase(db) && (
           <>
             <div id="edit">
-              <EditDatabaseForm key={`edit-${db.uid}`} server={db} onClose={goBack} />
+              <EditDatabaseForm key={`edit-${db.uid}`} server={db} onSaved={refreshed} />
             </div>
             <div id="rename">
-              <RenameServerForm key={`rename-${db.uid}`} server={db} onClose={goBack} />
+              <RenameServerForm key={`rename-${db.uid}`} server={db} onSaved={refreshed} />
             </div>
             <div id="approvers">
               <EditServerApproversForm
                 key={`approvers-${db.uid}`}
                 server={db}
-                onClose={goBack}
+                onSaved={refreshed}
               />
             </div>
           </>
         )}
         {db && canUpdate && !isFullDatabase(db) && (
           <div id="rename">
-            <RenameServerForm key={`rename-${db.uid}`} server={db} onClose={goBack} />
+            <RenameServerForm key={`rename-${db.uid}`} server={db} onSaved={refreshed} />
           </div>
         )}
         {tunnel && canUpdate && (
-          <EditSSHServerForm key={tunnel.uid} server={tunnel} onClose={goBack} />
+          <EditSSHServerForm key={tunnel.uid} server={tunnel} onSaved={refreshed} />
         )}
       </div>
 

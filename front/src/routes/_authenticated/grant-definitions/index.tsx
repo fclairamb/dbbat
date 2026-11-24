@@ -13,6 +13,8 @@ import {
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogTrigger } from "@/components/ui/dialog";
+import { GrantDefinitionForm } from "@/components/grant-definitions/GrantDefinitionForm";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -56,6 +58,7 @@ function formatDuration(seconds: number): string {
 
 function GrantDefinitionsPage() {
   const { user } = useAuth();
+  const [createOpen, setCreateOpen] = useState(false);
   const isAdmin = canManageGrantDefinitions(user?.roles);
 
   // Deactivated definitions are permanent (hard deletion is refused while
@@ -324,12 +327,15 @@ function GrantDefinitionsPage() {
                 />
                 <Label htmlFor="showDeactivated">Show deactivated</Label>
               </div>
-              <Button asChild data-testid="create-grant-definition-button">
-                <Link to="/grant-definitions/new">
-                  <Plus className="h-4 w-4 mr-2" />
-                  New Definition
-                </Link>
-              </Button>
+              <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+                <DialogTrigger asChild>
+                  <Button data-testid="create-grant-definition-button">
+                    <Plus className="h-4 w-4 mr-2" />
+                    New Definition
+                  </Button>
+                </DialogTrigger>
+                {createOpen && <GrantDefinitionForm editing={null} onDone={() => setCreateOpen(false)} />}
+              </Dialog>
             </div>
           )
         }

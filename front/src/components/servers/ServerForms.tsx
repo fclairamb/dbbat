@@ -2,9 +2,6 @@ import {
   useState,
 } from "react";
 import {
-  useNavigate,
-} from "@tanstack/react-router";
-import {
   FormPage,
   FormSection,
 } from "@/components/shared/FormPage";
@@ -76,12 +73,20 @@ import {
   Alert,
   AlertDescription,
 } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 
-/** Add-server form (the `new` route). */
-export function CreateServerForm() {
-  const navigate = useNavigate();
-  const onClose = () => navigate({ to: "/servers" });
+/** Add-server form, rendered in the create dialog of the servers list. */
+export function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
   const [protocol, setProtocol] = useState<Protocol>("postgresql");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -192,7 +197,8 @@ export function CreateServerForm() {
 
   return (
     <FormPage
-      testId="create-server-page"
+      dialog
+      dialogClassName="max-w-md"
       title={<>Add Server</>}
       description={<>Configure a new target database connection.</>}
       backTo="/servers"
@@ -672,10 +678,10 @@ export function ServerDetailsSection({ db }: { db: DatabaseItem }) {
  */
 export function EditServerApproversForm({
   server,
-  onClose,
+  onSaved,
 }: {
   server: Database;
-  onClose: () => void;
+  onSaved: () => void;
 }) {
   const [accessApproverUids, setAccessApproverUids] = useState<string[]>(
     server.access_approver_user_group_uids ?? [],
@@ -687,7 +693,7 @@ export function EditServerApproversForm({
   const updateServer = useUpdateDatabase(server.uid, {
     onSuccess: () => {
       toast.success("Approvers updated");
-      onClose();
+      onSaved();
     },
     onError: (error) => {
       toast.error(error.message);
@@ -733,26 +739,32 @@ export function EditServerApproversForm({
 
 export function RenameServerForm({
   server,
-  onClose,
+  onSaved,
 }: {
   server: DatabaseItem;
-  onClose: () => void;
+  onSaved: () => void;
 }) {
   const [name, setName] = useState(server.name);
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   const renameServer = useUpdateDatabase(server.uid, {
     onSuccess: () => {
       toast.success(`Renamed to "${name}"`);
-      onClose();
+      setConfirmOpen(false);
+      onSaved();
     },
     onError: (error) => {
+      setConfirmOpen(false);
       toast.error(error.message);
     },
   });
 
+  // Saving this section is confirmed: the name is the connection target, so
+  // the warning gets its own step instead of sitting beside the other fields.
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    renameServer.mutate({ name });
+    setConfirmOpen(true);
   };
 
   return (
@@ -776,6 +788,34 @@ export function RenameServerForm({
             onChange={setName}
           />
       </div>
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent data-testid="database-rename-confirm-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Rename "{server.name}"?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Clients connect with the name: every saved connection string
+              still using "{server.name}" stops resolving. The new name is "
+              {name}". Your other unsaved changes on this page are not saved
+              by this.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="database-rename-confirm-cancel">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="database-rename-confirm"
+              disabled={renameServer.isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                renameServer.mutate({ name });
+              }}
+            >
+              Rename
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </FormSection>
   );
 }
@@ -849,10 +889,10 @@ function TargetMoveWarning({
  */
 export function EditDatabaseForm({
   server,
-  onClose,
+  onSaved,
 }: {
   server: Database;
-  onClose: () => void;
+  onSaved: () => void;
 }) {
   const isOracle = server.protocol === "oracle";
   const isMongo = server.protocol === "mongodb";
@@ -919,7 +959,8 @@ export function EditDatabaseForm({
         }
       }
 
-      onClose();
+      setPassword("");
+      onSaved();
     },
     onError: (error) => {
       toast.error(error.message);
@@ -1178,10 +1219,10 @@ export function EditDatabaseForm({
 
 export function EditSSHServerForm({
   server,
-  onClose,
+  onSaved,
 }: {
   server: Database;
-  onClose: () => void;
+  onSaved: () => void;
 }) {
   const [name, setName] = useState(server.name);
   const [description, setDescription] = useState(server.description || "");
@@ -1217,7 +1258,10 @@ export function EditSSHServerForm({
   const updateServer = useUpdateDatabase(server.uid, {
     onSuccess: () => {
       toast.success(`${kindLabel} updated successfully`);
-      onClose();
+      setPassword("");
+      setSshPrivateKey("");
+      setSshPassphrase("");
+      onSaved();
     },
     onError: (error) => {
       toast.error(error.message);

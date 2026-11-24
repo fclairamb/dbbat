@@ -3,7 +3,6 @@ import {
 } from "react";
 import {
   createFileRoute,
-  Link,
   useNavigate,
 } from "@tanstack/react-router";
 import {
@@ -28,6 +27,8 @@ import {
 import {
   useAuth,
 } from "@/contexts/AuthContext";
+import { Dialog, DialogTrigger } from "@/components/ui/dialog";
+import { CreateDatabaseDialog } from "@/components/servers/ServerForms";
 import {
   canCreateDatabase,
   canDeleteDatabase,
@@ -75,6 +76,7 @@ function ServersPage() {
   const { user } = useAuth();
   const { data: databases, isLoading } = useDatabases();
   const navigate = useNavigate();
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [deleteDb, setDeleteDb] = useState<DatabaseItem | null>(null);
 
   const canCreate = canCreateDatabase(user?.roles);
@@ -401,26 +403,30 @@ function ServersPage() {
         title="Servers"
         description="Manage target database configurations and SSH bastions"
         actions={
-          canCreate ? (
-            <Button asChild data-testid="add-database-button">
-              <Link to="/servers/new">
+          <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+            <DialogTrigger asChild>
+              <PermissionButton
+                data-testid="add-database-button"
+                disabled={!canCreate}
+                disabledReason={getDisabledReason(
+                  "create-database",
+                  user?.roles,
+                )}
+                enabledTooltip={getActionTooltip("create-database")}
+              >
                 <Plus className="mr-2 h-4 w-4" />
                 Add Server
-              </Link>
-            </Button>
-          ) : (
-            <PermissionButton
-              data-testid="add-database-button"
-              disabled
-              disabledReason={getDisabledReason(
-                "create-database",
-                user?.roles,
-              )}
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              Add Server
-            </PermissionButton>
-          )
+              </PermissionButton>
+            </DialogTrigger>
+            {/* Mounted only while open: left mounted, the closed DialogContent
+                keeps its form state (reopening it after a create showed the
+                previous server's host and password) and its overlay stays in
+                the DOM for the whole fade-out, where it can swallow a click on
+                this very trigger. */}
+            {isCreateOpen && (
+              <CreateDatabaseDialog onClose={() => setIsCreateOpen(false)} />
+            )}
+          </Dialog>
         }
       />
 

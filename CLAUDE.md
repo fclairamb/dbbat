@@ -60,7 +60,7 @@ This list is enforced by the `scopes:` input of `.github/workflows/semantic-pr.y
 - **CLI**: `urfave/cli/v3`
 - **Config**: `knadh/koanf`
 - **Logging**: `log/slog`
-- **Frontend**: React 19 + TypeScript + Vite (see `front/CLAUDE.md`)
+- **Frontend**: React 19 + TypeScript + Vite (see `front/CLAUDE.md`). Edit forms are pages with their own route (`<entity>/$uid`); create forms are dialogs on the list page
 - **Capture format**: Protocol-agnostic pcapng, readable by tcpdump/Wireshark (`docs/dump-format.md`)
 - **Live stream + approvals**: WebSocket event stream and pattern-triggered approval holds (`docs/approvals.md`)
 - **Tamper-evident audit trail**: `audit_log`, `queries` and `query_rows` are HMAC-chained with a key HKDF-derived from `DBB_KEY`; `dbbat audit verify` walks the chains (`docs/audit-chain.md`)
@@ -458,7 +458,7 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
 - **A server row is editable; its protocol is not.** `PUT /servers/{uid}`
   takes host, port, database/service name, credentials, `ssl_mode`, `listable`,
   the tunnel and the name, and the admin UI's `servers/$uid` page offers all of
-  them (the name in its own section, for its own warning). Editing does **not**
+  them (the name in its own section, for its own warning and confirmation). Editing does **not**
   re-issue anything: every grant already covering the row reaches the new
   target on the next connect, sessions already open stay on the upstream they
   dialed, and `GET /servers/{uid}/references` is what the page counts that

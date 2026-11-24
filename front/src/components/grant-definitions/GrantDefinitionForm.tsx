@@ -71,11 +71,15 @@ function slugify(input: string): string {
  */
 export function GrantDefinitionForm({
   editing,
+  onDone,
 }: {
   editing: GrantDefinition | null;
+  /** Create mode only: close the dialog the form is rendered in. */
+  onDone?: () => void;
 }) {
   const navigate = useNavigate();
-  const onClose = () => navigate({ to: "/grant-definitions" });
+  const onClose = () =>
+    onDone ? onDone() : navigate({ to: "/grant-definitions" });
   const [name, setName] = useState(editing?.name ?? "");
   const [slug, setSlug] = useState(editing?.slug ?? "");
   // "Linked until touched": the slug auto-derives from the name as the
@@ -392,7 +396,8 @@ export function GrantDefinitionForm({
 
   return (
     <FormPage
-      testId={editing ? "edit-definition-page" : "new-definition-page"}
+      dialog={!editing}
+      testId={editing ? "edit-definition-page" : undefined}
       title={editing ? "Edit definition" : "New definition"}
       description={
         <span data-testid="definition-page-description">

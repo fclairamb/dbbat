@@ -12,9 +12,9 @@ import { test, expect, loginAs } from "./fixtures";
 const GROUPS_URL = "user-groups";
 const DEFS_URL = "grant-definitions";
 
-async function openCreateGroupPage(page: Page) {
+async function openCreateGroupDialog(page: Page) {
   await page.getByTestId("create-user-group-button").click();
-  await expect(page.getByTestId("new-user-group-page")).toBeVisible();
+  await page.waitForSelector('[role="dialog"]');
   await expect(page.getByTestId("user-group-name")).toBeVisible();
 }
 
@@ -28,7 +28,7 @@ test.describe("User Groups", () => {
     await page.waitForLoadState("networkidle");
     await expect(page).toHaveURL(/\/user-groups/);
 
-    await openCreateGroupPage(page);
+    await openCreateGroupDialog(page);
     await page.getByTestId("user-group-name").fill(name);
     await page
       .getByTestId("user-group-description")
@@ -60,7 +60,7 @@ test.describe("User Groups", () => {
     await page.goto(GROUPS_URL);
     await page.waitForLoadState("networkidle");
 
-    await openCreateGroupPage(page);
+    await openCreateGroupDialog(page);
     await page.getByTestId("user-group-name").fill(groupName);
     await page.getByTestId("user-group-submit").click();
     await expect(page.getByText(groupName)).toBeVisible();
@@ -69,7 +69,7 @@ test.describe("User Groups", () => {
     await page.waitForLoadState("networkidle");
 
     await page.getByTestId("create-grant-definition-button").click();
-    await expect(page.getByTestId("new-definition-page")).toBeVisible();
+    await page.waitForSelector('[role="dialog"]');
 
     const groupPicker = page.getByTestId("grant-definition-user-groups");
     await expect(groupPicker).toBeVisible();
@@ -96,7 +96,7 @@ test.describe("User Groups", () => {
 
     await page.goto(GROUPS_URL);
     await page.waitForLoadState("networkidle");
-    await openCreateGroupPage(page);
+    await openCreateGroupDialog(page);
     await page.getByTestId("user-group-name").fill(groupName);
     await page.getByTestId("user-group-submit").click();
     await expect(page.getByText(groupName)).toBeVisible();
@@ -104,7 +104,7 @@ test.describe("User Groups", () => {
     await page.goto(DEFS_URL);
     await page.waitForLoadState("networkidle");
     await page.getByTestId("create-grant-definition-button").click();
-    await expect(page.getByTestId("new-definition-page")).toBeVisible();
+    await page.waitForSelector('[role="dialog"]');
 
     await page.getByTestId("grant-definition-name").fill(defName);
     await page.getByTestId("grant-definition-duration-value").fill("2");
@@ -138,7 +138,7 @@ test.describe("User Groups", () => {
     const name = `deeplink-${Date.now()}`;
     await page.goto(GROUPS_URL);
     await page.waitForLoadState("networkidle");
-    await openCreateGroupPage(page);
+    await openCreateGroupDialog(page);
     await page.getByTestId("user-group-name").fill(name);
     await page.getByTestId("user-group-submit").click();
     await expect(page).toHaveURL(/\/user-groups\/?$/);
@@ -170,8 +170,6 @@ test.describe("User Groups", () => {
 
   test("a viewer is refused on the edit routes", async ({ page }) => {
     await loginAs(page, "viewer", "viewer");
-    await page.goto(`${GROUPS_URL}/new`);
-    await expect(page.getByText("Access Denied")).toBeVisible();
     await page.goto(`${GROUPS_URL}/00000000-0000-0000-0000-000000000000`);
     await expect(page.getByText("Access Denied")).toBeVisible();
   });

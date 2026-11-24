@@ -12,6 +12,8 @@ import {
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogTrigger } from "@/components/ui/dialog";
+import { ServerGroupForm } from "@/components/server-groups/ServerGroupForm";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,6 +33,7 @@ export const Route = createFileRoute("/_authenticated/server-groups/")({
 
 function ServerGroupsPage() {
   const { user } = useAuth();
+  const [createOpen, setCreateOpen] = useState(false);
   const isAdmin = canManageServerGroups(user?.roles);
 
   const { data: groups = [], isLoading } = useServerGroups({ enabled: isAdmin });
@@ -142,12 +145,15 @@ function ServerGroupsPage() {
         description="Named sets of database servers (the analytics replicas, all staging databases, …). Grant definitions scope on them, and grants bind to them — so membership is what decides reach."
         actions={
           isAdmin && (
-            <Button asChild data-testid="create-server-group-button">
-              <Link to="/server-groups/new">
-                <Plus className="h-4 w-4 mr-2" />
-                New Group
-              </Link>
-            </Button>
+            <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+              <DialogTrigger asChild>
+                <Button data-testid="create-server-group-button">
+                  <Plus className="h-4 w-4 mr-2" />
+                  New Group
+                </Button>
+              </DialogTrigger>
+              {createOpen && <ServerGroupForm editing={null} onDone={() => setCreateOpen(false)} />}
+            </Dialog>
           )
         }
       />

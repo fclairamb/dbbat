@@ -14,8 +14,18 @@ import { MultiSelect } from "@/components/shared/MultiSelect";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-/** Create/edit form for a user group, shared by `new` and `$uid`. */
-export function UserGroupForm({ editing }: { editing: UserGroup | null }) {
+/**
+ * Form for a user group: the `$uid` edit page renders it as a page, the create
+ * dialog of the list wraps it in a Dialog.
+ */
+export function UserGroupForm({
+  editing,
+  onDone,
+}: {
+  editing: UserGroup | null;
+  /** Create mode only: close the dialog the form is rendered in. */
+  onDone?: () => void;
+}) {
   const navigate = useNavigate();
   const { data: users = [] } = useUsers();
 
@@ -25,7 +35,7 @@ export function UserGroupForm({ editing }: { editing: UserGroup | null }) {
     editing?.member_uids ?? []
   );
 
-  const goBack = () => navigate({ to: "/user-groups" });
+  const goBack = () => (onDone ? onDone() : navigate({ to: "/user-groups" }));
 
   const create = useCreateUserGroup({
     onSuccess: () => {
@@ -60,7 +70,8 @@ export function UserGroupForm({ editing }: { editing: UserGroup | null }) {
 
   return (
     <FormPage
-      testId={editing ? "edit-user-group-page" : "new-user-group-page"}
+      dialog={!editing}
+      testId={editing ? "edit-user-group-page" : undefined}
       title={editing ? "Edit group" : "New group"}
       description="Groups let a grant definition apply to a subset of users instead of everyone."
       backTo="/user-groups"

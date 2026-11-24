@@ -39,6 +39,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { Dialog, DialogTrigger } from "@/components/ui/dialog";
+import { CreateUserDialog } from "@/components/users/UserForms";
 import { ResetPasswordDialog } from "@/components/shared/ResetPasswordDialog";
 import { Plus, Trash2, KeyRound, Pencil } from "lucide-react";
 import { toast } from "sonner";
@@ -51,6 +53,7 @@ export const Route = createFileRoute("/_authenticated/users/")({
 function UsersPage() {
   const { user } = useAuth();
   const { data: users, isLoading } = useUsers();
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [deleteUser, setDeleteUser] = useState<User | null>(null);
   const [resetPasswordUser, setResetPasswordUser] = useState<User | null>(null);
 
@@ -298,23 +301,19 @@ function UsersPage() {
         title="Users"
         description="Manage user accounts"
         actions={
-          canCreate ? (
-            <Button asChild data-testid="create-user-button">
-              <Link to="/users/new">
+          <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+            <DialogTrigger asChild>
+              <PermissionButton
+                disabled={!canCreate}
+                disabledReason={getDisabledReason("create-user", user?.roles)}
+                enabledTooltip={getActionTooltip("create-user")}
+              >
                 <Plus className="mr-2 h-4 w-4" />
                 Create User
-              </Link>
-            </Button>
-          ) : (
-            <PermissionButton
-              disabled
-              disabledReason={getDisabledReason("create-user", user?.roles)}
-              data-testid="create-user-button"
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              Create User
-            </PermissionButton>
-          )
+              </PermissionButton>
+            </DialogTrigger>
+            <CreateUserDialog onClose={() => setIsCreateOpen(false)} />
+          </Dialog>
         }
       />
 

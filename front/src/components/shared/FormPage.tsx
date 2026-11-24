@@ -1,10 +1,25 @@
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft, SearchX } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface FormPageProps {
   /** data-testid of the page container, e.g. "edit-user-page". */
-  testId: string;
+  testId?: string;
+  /**
+   * Render as the content of a create dialog instead of a page: same form
+   * body, wrapped in a DialogContent. Edit forms are pages, create forms are
+   * dialogs, and both share one form component.
+   */
+  dialog?: boolean;
+  /** Extra classes for the DialogContent in dialog mode. */
+  dialogClassName?: string;
   title: React.ReactNode;
   description?: React.ReactNode;
   /** List route the back link and Cancel return to. */
@@ -27,6 +42,8 @@ interface FormPageProps {
  */
 export function FormPage({
   testId,
+  dialog,
+  dialogClassName,
   title,
   description,
   backTo,
@@ -40,6 +57,38 @@ export function FormPage({
   onCancel,
   children,
 }: FormPageProps) {
+  if (dialog) {
+    return (
+      <DialogContent data-testid={testId} className={dialogClassName}>
+        <form onSubmit={onSubmit}>
+          <DialogHeader>
+            <DialogTitle>{title}</DialogTitle>
+            {description && <DialogDescription>{description}</DialogDescription>}
+          </DialogHeader>
+          <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
+            {children}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onCancel}
+              data-testid={cancelTestId}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={submitting || submitDisabled}
+              data-testid={submitTestId}
+            >
+              {submitLabel}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    );
+  }
   return (
     <div className="container mx-auto py-6" data-testid={testId}>
       <Link

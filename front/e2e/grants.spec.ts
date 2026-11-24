@@ -4,7 +4,7 @@ import { test, expect, loginAs } from "./fixtures";
  * A grant is an instance of a grant definition: the admin picks a definition,
  * a user and a database, and the shape (controls, quotas, approval gating,
  * duration) comes from the definition. There is deliberately no ad-hoc grant
- * form any more, so these tests drive the Assign Grant page rather than the
+ * form any more, so these tests drive the Assign Grant dialog rather than the
  * old Create Grant one.
  */
 test.describe("Access Grants Management", () => {
@@ -25,14 +25,14 @@ test.describe("Access Grants Management", () => {
     expect(content).toBeTruthy();
   });
 
-  test("the assign page asks for a definition, a user and a database", async ({
+  test("the assign dialog asks for a definition, a user and a database", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("grants");
     await authenticatedPage.waitForLoadState("networkidle");
 
     await authenticatedPage.getByTestId("assign-grant-button").click();
-    await expect(authenticatedPage.getByTestId("assign-grant-page")).toBeVisible();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
 
     await expect(
       authenticatedPage.getByTestId("assign-grant-definition")
@@ -43,7 +43,7 @@ test.describe("Access Grants Management", () => {
     ).toBeVisible();
 
     await authenticatedPage.screenshot({
-      path: "test-results/screenshots/grants-assign-page.png",
+      path: "test-results/screenshots/grants-assign-dialog.png",
     });
   });
 
@@ -54,7 +54,7 @@ test.describe("Access Grants Management", () => {
     await authenticatedPage.waitForLoadState("networkidle");
 
     await authenticatedPage.getByTestId("assign-grant-button").click();
-    await expect(authenticatedPage.getByTestId("assign-grant-page")).toBeVisible();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
 
     // The old form let an admin invent a grant here. That is exactly what this
     // change removed, so its inputs must be gone — not merely unused.
@@ -77,7 +77,7 @@ test.describe("Access Grants Management", () => {
     await authenticatedPage.waitForLoadState("networkidle");
 
     await authenticatedPage.getByTestId("assign-grant-button").click();
-    await expect(authenticatedPage.getByTestId("assign-grant-page")).toBeVisible();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
 
     await authenticatedPage.getByTestId("assign-grant-definition").click();
     await authenticatedPage.getByRole("option").first().click();
@@ -101,7 +101,7 @@ test.describe("Access Grants Management", () => {
     await authenticatedPage.waitForLoadState("networkidle");
 
     await authenticatedPage.getByTestId("assign-grant-button").click();
-    await expect(authenticatedPage.getByTestId("assign-grant-page")).toBeVisible();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
 
     const startsAtInput = authenticatedPage.locator(
       'input[type="datetime-local"]#startsAt'
@@ -359,34 +359,5 @@ test.describe("Self-revocation", () => {
       headers,
     });
     expect((await after.json()).revoked_at).toBeTruthy();
-  });
-
-  test("the assign page opens by URL, survives reload and back returns to the list", async ({
-    authenticatedPage: page,
-  }) => {
-    await page.goto("grants/new");
-    await expect(page.getByTestId("assign-grant-page")).toBeVisible();
-    await page.reload();
-    await expect(page.getByTestId("assign-grant-page")).toBeVisible();
-    await expect(page.getByTestId("assign-grant-definition")).toBeVisible();
-
-    await page.goto("grants");
-    await page.getByTestId("assign-grant-button").click();
-    await expect(page).toHaveURL(/\/grants\/new$/);
-    await page.goBack();
-    await expect(page).toHaveURL(/\/grants\/?$/);
-    await expect(page.getByTestId("assign-grant-page")).toHaveCount(0);
-
-    // Cancel also returns to the list without assigning anything.
-    await page.getByTestId("assign-grant-button").click();
-    await page.getByTestId("form-cancel").click();
-    await expect(page).toHaveURL(/\/grants\/?$/);
-  });
-
-  test("a non-admin is refused on the assign route", async ({ page }) => {
-    await loginAs(page, "viewer", "viewer");
-    await page.goto("grants/new");
-    await expect(page.getByText("Access Denied")).toBeVisible();
-    await expect(page.getByTestId("assign-grant-page")).toHaveCount(0);
   });
 });

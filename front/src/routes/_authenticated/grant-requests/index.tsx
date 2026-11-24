@@ -1,17 +1,14 @@
 import { useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
-import {
-  Plus,
-  Check,
-  X,
-  Ban,
-  ShieldCheck,
-} from "lucide-react";
+import { createFileRoute } from "@tanstack/react-router";
+import { Plus, Check, X, Ban, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
+
 import {
   useGrantRequests,
+  useGrantDefinitions,
   useDatabases,
   useUsers,
+  useCreateGrantRequest,
   useApproveGrantRequest,
   useDenyGrantRequest,
   useCancelGrantRequest,
@@ -30,8 +27,20 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useAuth } from "@/contexts/AuthContext";
 import { canApproveGrantRequest, canRequestGrant } from "@/lib/permissions";
 import { APPROVER_HAT } from "@/lib/approvers";
@@ -60,6 +69,7 @@ function GrantRequestsPage() {
     r.approver_role === "admin" || r.approver_role === "server_approver";
 
   const [tab, setTab] = useState<"pending" | "all">("pending");
+  const [createOpen, setCreateOpen] = useState(false);
   const [denying, setDenying] = useState<GrantRequest | null>(null);
 
   const { data: requests = [], isLoading } = useGrantRequests(
@@ -283,12 +293,15 @@ function GrantRequestsPage() {
         }
         actions={
           canRequest && (
-            <Button asChild data-testid="request-grant-button">
-              <Link to="/grant-requests/new">
-                <Plus className="h-4 w-4 mr-2" />
-                Request access
-              </Link>
-            </Button>
+            <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+              <DialogTrigger asChild>
+                <Button data-testid="request-grant-button">
+                  <Plus className="h-4 w-4 mr-2" />
+                  Request access
+                </Button>
+              </DialogTrigger>
+              <CreateRequestDialog onClose={() => setCreateOpen(false)} />
+            </Dialog>
           )
         }
       />
@@ -329,6 +342,157 @@ function GrantRequestsPage() {
         onClose={() => setDenying(null)}
       />
     </div>
+  );
+}
+
+function CreateRequestDialog({ onClose }: { onClose: () => void }) {
+  const { data: definitions = [] } = useGrantDefinitions({ active_only: true });
+  const { data: databases = [] } = useDatabases();
+
+  const [definitionId, setDefinitionId] = useState("");
+  const [databaseId, setDatabaseId] = useState("");
+  const [justification, setJustification] = useState("");
+
+  const selectedDefinition = definitions.find((d) => d.uid === definitionId);
+  const justificationRequired = selectedDefinition?.auto_approve ?? false;
+
+  // The API resolves a definition's server-group scope to the concrete
+  // databases currently in scope (scoped_database_uids), so the picker
+  // narrows for every requester — not just admins, who are the only ones who
+  // could previously read /server-groups to compute this themselves.
+  //
+  // null/omitted means the definition is unscoped: every database is in
+  // scope. A present array — which may be empty — is the resolved set;
+  // treating null and [] the same here would be wrong in both directions
+  // (hiding every database, or offering every database when none are
+  // actually in scope). The server still enforces the scope on submit (403
+  // on an out-of-scope pick) — this is a convenience, never the control.
+  const scopedDatabaseUids = selectedDefinition?.scoped_database_uids ?? null;
+  const selectableDatabases =
+    scopedDatabaseUids === null
+      ? databases
+      : databases.filter((d) => scopedDatabaseUids.includes(d.uid));
+
+  // Switching to a definition that excludes the currently picked database
+  // must clear the stale selection rather than submit it.
+  if (
+    databaseId &&
+    !selectableDatabases.some((d) => d.uid === databaseId)
+  ) {
+    setDatabaseId("");
+  }
+
+  const create = useCreateGrantRequest({
+    onSuccess: (req) => {
+      toast.success(
+        req.status === "approved"
+          ? "Request submitted and auto-approved — access is active now."
+          : "Request submitted"
+      );
+      onClose();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    create.mutate({
+      grant_definition_id: definitionId,
+      database_id: databaseId,
+      justification,
+    });
+  };
+
+  return (
+    <DialogContent>
+      <form onSubmit={onSubmit}>
+        <DialogHeader>
+          <DialogTitle>Request access</DialogTitle>
+          <DialogDescription>
+            {justificationRequired
+              ? "This definition auto-approves requests — access will be active immediately after you submit."
+              : "Pick a grant definition and a database. An admin will approve or deny."}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <div className="space-y-2">
+            <Label>Definition</Label>
+            <Select
+              value={definitionId}
+              onValueChange={setDefinitionId}
+              required
+            >
+              <SelectTrigger data-testid="grant-request-definition">
+                <SelectValue placeholder="Select a definition" />
+              </SelectTrigger>
+              <SelectContent>
+                {definitions.map((d) => (
+                  <SelectItem key={d.uid} value={d.uid}>
+                    {d.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label>Database</Label>
+            <Select
+              value={databaseId}
+              onValueChange={setDatabaseId}
+              required
+            >
+              <SelectTrigger data-testid="grant-request-database">
+                <SelectValue
+                  placeholder={
+                    selectableDatabases.length === 0 && definitionId
+                      ? "No database in this definition's scope"
+                      : "Select a database"
+                  }
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {selectableDatabases.map((d) => (
+                  <SelectItem key={d.uid} value={d.uid}>
+                    {d.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="justification">
+              Justification {justificationRequired ? "" : "(optional)"}
+            </Label>
+            <Textarea
+              id="justification"
+              value={justification}
+              onChange={(e) => setJustification(e.target.value)}
+              maxLength={1000}
+              required={justificationRequired}
+              placeholder="Investigating bug X, need read-only access for an hour."
+              data-testid="grant-request-justification"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            disabled={
+              create.isPending ||
+              !definitionId ||
+              !databaseId ||
+              (justificationRequired && !justification.trim())
+            }
+            data-testid="grant-request-submit"
+          >
+            Submit
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
   );
 }
 
