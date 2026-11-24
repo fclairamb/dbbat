@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, loginAs } from "./fixtures";
 
 test.describe("Settings — instance configuration", () => {
   test("local listeners are grouped into HTTP and TCP sections", async ({
@@ -172,5 +172,77 @@ test.describe("Settings — instance-wide statement timeout", () => {
     await expect(
       authenticatedPage.getByTestId("limits-section")
     ).toContainText("nothing is configured");
+  });
+});
+
+test.describe("Settings — parameter edit route", () => {
+  // Saving the public settings stores parameters, so the raw list is never
+  // empty afterwards.
+  async function seedParameter(page: import("@playwright/test").Page) {
+    await page.goto("settings");
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("public-host-input").fill("params.example.com");
+    await page.getByTestId("save-public-settings-btn").click();
+    await expect(page.getByText(/settings saved/i)).toBeVisible({
+      timeout: 10000,
+    });
+  }
+
+  async function openFirstParameter(page: import("@playwright/test").Page) {
+    await page.getByTestId("raw-parameters-section").getByText("Raw parameters").click();
+    await page
+      .getByTestId("raw-parameters-section")
+      .locator('[data-testid^="edit-parameter-"]')
+      .first()
+      .click();
+    await expect(page.getByTestId("edit-parameter-page")).toBeVisible();
+  }
+
+  test("the edit page opens by URL, survives reload and back returns to settings", async ({
+    authenticatedPage: page,
+  }) => {
+    await seedParameter(page);
+    await openFirstParameter(page);
+    const url = page.url();
+    expect(url).toMatch(/\/settings\/parameters\/[^/]+$/);
+    const value = await page.getByTestId("parameter-value").inputValue();
+
+    await page.reload();
+    await expect(page.getByTestId("parameter-value")).toHaveValue(value);
+
+    await page.goto(url);
+    await expect(page.getByTestId("parameter-value")).toHaveValue(value);
+
+    // An unsaved edit is dropped when going back.
+    await page.getByTestId("parameter-value").fill("never-saved");
+    await page.getByTestId("form-cancel").click();
+    await expect(page).toHaveURL(/\/settings\/?$/);
+    await expect(page.getByText("never-saved")).toHaveCount(0);
+  });
+
+  test("saving a parameter returns to settings", async ({
+    authenticatedPage: page,
+  }) => {
+    await seedParameter(page);
+    await openFirstParameter(page);
+    const value = await page.getByTestId("parameter-value").inputValue();
+    await page.getByTestId("parameter-value").fill(value);
+    await page.getByTestId("parameter-submit").click();
+    await expect(page.getByText("Parameter updated")).toBeVisible();
+    await expect(page).toHaveURL(/\/settings\/?$/);
+  });
+
+  test("an unknown parameter shows the not-found state", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto("settings/parameters/nope:nothing");
+    await expect(page.getByTestId("entity-not-found")).toBeVisible();
+    await expect(page.getByTestId("parameter-value")).toHaveCount(0);
+  });
+
+  test("a viewer is refused on the parameter edit route", async ({ page }) => {
+    await loginAs(page, "viewer", "viewer");
+    await page.goto("settings/parameters/nope:nothing");
+    await expect(page.getByText("Access Denied")).toBeVisible();
   });
 });

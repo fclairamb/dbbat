@@ -42,6 +42,7 @@ import { Route as AuthenticatedUserGroupsNewRouteImport } from './routes/_authen
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
 import { Route as AuthenticatedUsersUidRouteImport } from './routes/_authenticated/users/$uid'
 import { Route as AuthenticatedUsersNewRouteImport } from './routes/_authenticated/users/new'
+import { Route as AuthenticatedSettingsParametersKeyRouteImport } from './routes/_authenticated/settings/parameters.$key'
 
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
   id: '/_authenticated',
@@ -226,6 +227,12 @@ const AuthenticatedUsersNewRoute = AuthenticatedUsersNewRouteImport.update({
   path: '/users/new',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedSettingsParametersKeyRoute =
+  AuthenticatedSettingsParametersKeyRouteImport.update({
+    id: '/settings/parameters/$key',
+    path: '/settings/parameters/$key',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
@@ -260,6 +267,7 @@ export interface FileRoutesByFullPath {
   '/settings/': typeof AuthenticatedSettingsIndexRoute
   '/user-groups/': typeof AuthenticatedUserGroupsIndexRoute
   '/users/': typeof AuthenticatedUsersIndexRoute
+  '/settings/parameters/$key': typeof AuthenticatedSettingsParametersKeyRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
@@ -294,6 +302,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AuthenticatedSettingsIndexRoute
   '/user-groups': typeof AuthenticatedUserGroupsIndexRoute
   '/users': typeof AuthenticatedUsersIndexRoute
+  '/settings/parameters/$key': typeof AuthenticatedSettingsParametersKeyRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -330,6 +339,7 @@ export interface FileRoutesById {
   '/_authenticated/settings/': typeof AuthenticatedSettingsIndexRoute
   '/_authenticated/user-groups/': typeof AuthenticatedUserGroupsIndexRoute
   '/_authenticated/users/': typeof AuthenticatedUsersIndexRoute
+  '/_authenticated/settings/parameters/$key': typeof AuthenticatedSettingsParametersKeyRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -366,6 +376,7 @@ export interface FileRouteTypes {
     | '/settings/'
     | '/user-groups/'
     | '/users/'
+    | '/settings/parameters/$key'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
@@ -400,6 +411,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/user-groups'
     | '/users'
+    | '/settings/parameters/$key'
   id:
     | '__root__'
     | '/_authenticated'
@@ -435,6 +447,7 @@ export interface FileRouteTypes {
     | '/_authenticated/settings/'
     | '/_authenticated/user-groups/'
     | '/_authenticated/users/'
+    | '/_authenticated/settings/parameters/$key'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -675,6 +688,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedUsersNewRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/settings/parameters/$key': {
+      id: '/_authenticated/settings/parameters/$key'
+      path: '/settings/parameters/$key'
+      fullPath: '/settings/parameters/$key'
+      preLoaderRoute: typeof AuthenticatedSettingsParametersKeyRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
   }
 }
 
@@ -710,6 +730,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedSettingsIndexRoute: typeof AuthenticatedSettingsIndexRoute
   AuthenticatedUserGroupsIndexRoute: typeof AuthenticatedUserGroupsIndexRoute
   AuthenticatedUsersIndexRoute: typeof AuthenticatedUsersIndexRoute
+  AuthenticatedSettingsParametersKeyRoute: typeof AuthenticatedSettingsParametersKeyRoute
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
@@ -745,6 +766,8 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedSettingsIndexRoute: AuthenticatedSettingsIndexRoute,
   AuthenticatedUserGroupsIndexRoute: AuthenticatedUserGroupsIndexRoute,
   AuthenticatedUsersIndexRoute: AuthenticatedUsersIndexRoute,
+  AuthenticatedSettingsParametersKeyRoute:
+    AuthenticatedSettingsParametersKeyRoute,
 }
 
 const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
