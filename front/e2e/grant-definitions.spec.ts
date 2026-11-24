@@ -364,7 +364,7 @@ test.describe("Grant Definition inline auto-approve toggle", () => {
       .getByTestId("grant-request-justification")
       .fill("E2E auto-approve verification");
     await page.getByTestId("grant-request-submit").click();
-    await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
+    await expect(page.getByTestId("new-grant-request-page")).toHaveCount(0);
 
     // Switch to "All" so the (already-resolved) request is visible, then
     // confirm it shows as approved, not pending.
