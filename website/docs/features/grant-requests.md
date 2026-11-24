@@ -114,7 +114,7 @@ Each row of `GET /api/v1/grant-requests` reports `approver_role` for the calling
 
 ### Who Gets Notified
 
-When Slack notifications are configured, the pending message @-mentions every admin **and** every member of the access-approver groups resolved for the target server, de-duplicated. The Approve / Deny buttons authorize against exactly the rule above — clicking one as somebody who may not decide returns an ephemeral refusal — and both Slack transports (the inbound signing-secret endpoint and Socket Mode) go through the same check. The same message carries a 🚫 Withdraw button for the requester: it runs the cancel rule, so anyone other than the requester, admins included, gets an ephemeral refusal. The message's deep link lands on the grant-requests page, which now lists an approver's decidable requests alongside their own.
+When Slack notifications are configured, the pending message @-mentions every admin **and** every member of the access-approver groups resolved for the target server, de-duplicated. The Approve / Deny buttons authorize against exactly the rule above — clicking one as somebody who may not decide returns an ephemeral refusal — and both Slack transports (the inbound signing-secret endpoint and Socket Mode) go through the same check. The same message carries a 🚫 Withdraw (requester only) button: it runs the cancel rule, so anyone other than the requester, admins included, gets an ephemeral refusal. The message's deep link lands on the grant-requests page, which now lists an approver's decidable requests alongside their own.
 
 ## Auto-Approval
 

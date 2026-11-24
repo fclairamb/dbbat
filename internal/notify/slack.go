@@ -599,10 +599,10 @@ func actionsBlock(requestUID string) *slack.ActionBlock {
 
 	withdraw := slack.NewButtonBlockElement(
 		ActionCancel, requestUID,
-		slack.NewTextBlockObject("plain_text", "🚫 Withdraw", true, false),
+		slack.NewTextBlockObject("plain_text", "🚫 Withdraw (requester only)", true, false),
 	).WithConfirm(slack.NewConfirmationBlockObject(
-		slack.NewTextBlockObject("plain_text", "Withdraw your request?", false, false),
-		slack.NewTextBlockObject("plain_text", "This cancels the request. It cannot be undone.", false, false),
+		slack.NewTextBlockObject("plain_text", "Withdraw this request?", false, false),
+		slack.NewTextBlockObject("plain_text", "Only the person who made this request can withdraw it. This cancels it and cannot be undone.", false, false),
 		slack.NewTextBlockObject("plain_text", "Withdraw", false, false),
 		slack.NewTextBlockObject("plain_text", "Keep", false, false),
 	))
