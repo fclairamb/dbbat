@@ -51,6 +51,8 @@ const (
 	msgOutOfScope      = "The grant definition's scope no longer covers this user or database, " +
 		"so this request can't be approved. Create a direct grant instead."
 	msgDecideFailed = "Something went wrong deciding this request. Try again from the dbbat UI."
+	// msgNotRequester answers a Withdraw click from anyone but the requester.
+	msgNotRequester = "Only the person who made this request can withdraw it."
 )
 
 // slackDecider is the slice of decision behavior the interaction handler
@@ -70,6 +72,11 @@ type slackDecider interface {
 	// with decisionSourceSlack, returning the raw store error unmapped.
 	approve(ctx context.Context, uid uuid.UUID, decider *store.User) (*decideOutcome, error)
 	deny(ctx context.Context, uid uuid.UUID, decider *store.User) (*decideOutcome, error)
+	// mayCancelRequest is the Withdraw gate — the requester only — the
+	// same mayCancelGrantRequest the REST cancel handler runs.
+	mayCancelRequest(ctx context.Context, user *store.User, requestUID uuid.UUID) bool
+	// cancel runs the shared cancel flow with decisionSourceSlack.
+	cancel(ctx context.Context, uid uuid.UUID, by *store.User) (*decideOutcome, error)
 	// rerenderRequest re-posts the current message state for a request so
 	// stale buttons vanish after a losing/late click. Best-effort.
 	rerenderRequest(ctx context.Context, uid uuid.UUID)
@@ -233,7 +240,7 @@ func parseSlackInteraction(body []byte) (slack.InteractionCallback, error) {
 }
 
 // slackDecisionFromCallback extracts the (action, request UID) from a
-// block_actions callback carrying one of our two action IDs. It returns
+// block_actions callback carrying one of our approve/deny/withdraw action IDs. It returns
 // ok=false for any other interaction type, action ID, or a non-UUID value —
 // the caller then no-ops with a 200.
 func slackDecisionFromCallback(cb slack.InteractionCallback) (notify.GrantAction, uuid.UUID, bool) {
@@ -253,6 +260,8 @@ func slackDecisionFromCallback(cb slack.InteractionCallback) (notify.GrantAction
 			action = notify.GrantActionApproved
 		case notify.ActionDeny:
 			action = notify.GrantActionDenied
+		case notify.ActionCancel:
+			action = notify.GrantActionCancelled
 		default:
 			continue
 		}
@@ -293,7 +302,15 @@ func (s *Server) processSlackDecision(
 		return
 	}
 
-	if !decider.mayDecideRequest(ctx, user, requestUID) {
+	// Withdraw has its own gate: the requester is exactly who approve/deny
+	// refuses, and exactly who may cancel.
+	if action == notify.GrantActionCancelled {
+		if !decider.mayCancelRequest(ctx, user, requestUID) {
+			s.postEphemeral(ctx, responseURL, msgNotRequester)
+
+			return
+		}
+	} else if !decider.mayDecideRequest(ctx, user, requestUID) {
 		s.postEphemeral(ctx, responseURL, msgNotApprover)
 
 		return
@@ -301,11 +318,13 @@ func (s *Server) processSlackDecision(
 
 	var outcome *decideOutcome
 
-	switch action { //nolint:exhaustive // only approve/deny reach here (filtered in slackDecisionFromCallback)
+	switch action { //nolint:exhaustive // only approve/deny/cancel reach here (filtered in slackDecisionFromCallback)
 	case notify.GrantActionApproved:
 		outcome, err = decider.approve(ctx, requestUID, user)
 	case notify.GrantActionDenied:
 		outcome, err = decider.deny(ctx, requestUID, user)
+	case notify.GrantActionCancelled:
+		outcome, err = decider.cancel(ctx, requestUID, user)
 	default:
 		return
 	}
@@ -416,6 +435,32 @@ func (s *Server) deny(ctx context.Context, uid uuid.UUID, decider *store.User) (
 	return s.denyGrantRequest(ctx, uid, decider, "", decisionSourceSlack)
 }
 
+// mayCancelRequest re-reads the request and runs mayCancelGrantRequest — the
+// same gate as the REST cancel handler. A request that no longer exists lets
+// the click through, so cancel reports "no longer exists" instead of telling
+// the requester they aren't the requester; there is nothing left to cancel.
+// Any other read error refuses: letting it through could cancel on a retry
+// that the owner check never saw.
+func (s *Server) mayCancelRequest(ctx context.Context, user *store.User, requestUID uuid.UUID) bool {
+	req, err := s.store.GetGrantRequest(ctx, requestUID)
+	if errors.Is(err, store.ErrGrantRequestNotFound) {
+		return true
+	}
+
+	if err != nil {
+		s.logger.WarnContext(ctx, "slack interaction: withdraw gate lookup failed",
+			slog.String("grant_request_uid", requestUID.String()), slog.Any("error", err))
+
+		return false
+	}
+
+	return mayCancelGrantRequest(user, req)
+}
+
+func (s *Server) cancel(ctx context.Context, uid uuid.UUID, by *store.User) (*decideOutcome, error) {
+	return s.cancelGrantRequest(ctx, uid, by, decisionSourceSlack)
+}
+
 // rerenderRequest fetches the request's current state and re-fires the
 // notifier so the message rebuilds without buttons. Used when a click
 // arrives for an already-decided request.
@@ -477,7 +522,11 @@ func threadReplyText(action notify.GrantAction, deciderSlackID string, decider *
 	case notify.GrantActionDenied:
 		return fmt.Sprintf("❌ This request has been *denied* by %s.", who)
 	case notify.GrantActionCancelled:
-		return "🚫 This request has been *cancelled* by the requester." //nolint:misspell // matches DB lifecycle
+		if deciderSlackID == "" && decider == nil {
+			who = "the requester"
+		}
+
+		return fmt.Sprintf("🚫 This request has been *withdrawn* by %s.", who)
 	default:
 		return ""
 	}
