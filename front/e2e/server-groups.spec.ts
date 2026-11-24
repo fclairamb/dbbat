@@ -1,5 +1,5 @@
 import { type Page } from "@playwright/test";
-import { test, expect } from "./fixtures";
+import { test, expect, loginAs } from "./fixtures";
 
 /**
  * Coverage for server groups — the unit rights are scoped on.
@@ -127,5 +127,47 @@ test.describe("Server Groups", () => {
     await expect(row).toBeVisible();
     await expect(row.getByText("1 server group")).toBeVisible();
     await expect(row.getByText("all users")).toBeVisible();
+  });
+
+  test("server group edit page opens by URL, survives reload and back returns to the list", async ({
+    authenticatedPage: page,
+  }) => {
+    const name = `deeplink-${Date.now()}`;
+    await page.goto(GROUPS_URL);
+    await page.waitForLoadState("networkidle");
+    await openCreateGroupDialog(page);
+    await page.getByTestId("server-group-name").fill(name);
+    await page.getByTestId("server-group-submit").click();
+    await expect(page).toHaveURL(/\/server-groups\/?$/);
+
+    const row = page.locator("tr", { hasText: name });
+    await row.locator('[data-testid^="edit-server-group-"]').click();
+    await expect(page.getByTestId("edit-server-group-page")).toBeVisible();
+    const url = page.url();
+    expect(url).toMatch(/\/server-groups\/[^/]+$/);
+
+    await page.reload();
+    await expect(page.getByTestId("server-group-name")).toHaveValue(name);
+
+    // Back returns to the list without saving the unsaved edit.
+    await page.getByTestId("server-group-name").fill("never-saved");
+    await page.goBack();
+    await expect(page).toHaveURL(/\/server-groups\/?$/);
+    await expect(page.getByText(name)).toBeVisible();
+    await expect(page.getByText("never-saved")).toHaveCount(0);
+  });
+
+  test("an unknown uid shows the not-found state", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto(`${GROUPS_URL}/00000000-0000-0000-0000-000000000000`);
+    await expect(page.getByTestId("entity-not-found")).toBeVisible();
+    await expect(page.getByTestId("server-group-name")).toHaveCount(0);
+  });
+
+  test("a viewer is refused on the edit routes", async ({ page }) => {
+    await loginAs(page, "viewer", "viewer");
+    await page.goto(`${GROUPS_URL}/00000000-0000-0000-0000-000000000000`);
+    await expect(page.getByText("Access Denied")).toBeVisible();
   });
 });

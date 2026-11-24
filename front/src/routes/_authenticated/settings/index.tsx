@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { parameterRouteKey } from "@/lib/parameter-key";
 import {
   useInstance,
   useUpdateInstancePublic,
@@ -7,17 +8,13 @@ import {
   useUpdateInstanceRetention,
   useUpdateInstanceTagging,
   useParameters,
-  useUpdateParameter,
   useDeleteParameter,
   useVersion,
   type GlobalParameter,
   type InstanceInfo,
   type PublicEndpoints,
 } from "@/api";
-import {
-  DeleteWindowWarning,
-  formatSeconds,
-} from "@/components/shared/RetentionDuration";
+import { DeleteWindowWarning, formatSeconds } from "@/components/shared/RetentionDuration";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -49,14 +46,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -66,12 +55,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ChevronDown, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -856,31 +840,12 @@ function ProtocolOverrideRow({
 
 function RawParametersSection() {
   const { data: params, isLoading } = useParameters();
-  const updateParam = useUpdateParameter({
-    onSuccess: () => toast.success("Parameter updated"),
-    onError: (e) => toast.error(e.message),
-  });
   const deleteParam = useDeleteParameter({
     onSuccess: () => toast.success("Parameter deleted"),
     onError: (e) => toast.error(e.message),
   });
 
-  const [editTarget, setEditTarget] = useState<GlobalParameter | null>(null);
-  const [editValue, setEditValue] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<GlobalParameter | null>(null);
-
-  const openEdit = (p: GlobalParameter) => {
-    setEditTarget(p);
-    setEditValue(p.value);
-  };
-
-  const handleEdit = () => {
-    if (!editTarget) return;
-    updateParam.mutate(
-      { group: editTarget.group_key, key: editTarget.key, value: editValue },
-      { onSuccess: () => setEditTarget(null) }
-    );
-  };
 
   return (
     <Collapsible data-testid="raw-parameters-section">
@@ -931,11 +896,17 @@ function RawParametersSection() {
                       <TableCell>
                         <div className="flex gap-1">
                           <Button
+                            asChild
                             variant="ghost"
                             size="icon"
-                            onClick={() => openEdit(p)}
+                            data-testid={`edit-parameter-${p.group_key}-${p.key}`}
                           >
-                            <Pencil className="h-4 w-4" />
+                            <Link
+                              to="/settings/parameters/$key"
+                              params={{ key: parameterRouteKey(p) }}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Link>
                           </Button>
                           <Button
                             variant="ghost"
@@ -954,31 +925,6 @@ function RawParametersSection() {
           </CardContent>
         </CollapsibleContent>
       </Card>
-
-      {/* Edit dialog */}
-      <Dialog open={!!editTarget} onOpenChange={(o) => !o && setEditTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit parameter</DialogTitle>
-            <DialogDescription>
-              {editTarget?.group_key} / {editTarget?.key}
-            </DialogDescription>
-          </DialogHeader>
-          <Textarea
-            value={editValue}
-            onChange={(e) => setEditValue(e.target.value)}
-            rows={4}
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditTarget(null)}>
-              Cancel
-            </Button>
-            <Button onClick={handleEdit} disabled={updateParam.isPending}>
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Delete confirmation dialog */}
       <AlertDialog

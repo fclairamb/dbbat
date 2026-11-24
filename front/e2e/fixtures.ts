@@ -54,4 +54,17 @@ export const test = base.extend<{ authenticatedPage: Page }>({
   },
 });
 
+/**
+ * A server page section saves on its own and stays on the page (so the other
+ * sections' unsaved edits survive). Wait for its success toast, then go back to
+ * the servers list to read the result.
+ */
+export async function afterSectionSave(page: Page) {
+  await expect(
+    page.getByText(/updated|renamed to/i).first(),
+  ).toBeVisible({ timeout: 10000 });
+  await page.goto("servers");
+  await page.waitForLoadState("networkidle");
+}
+
 export { expect };

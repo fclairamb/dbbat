@@ -210,7 +210,7 @@ Once you know which, there are two exits:
 
 - paste the cluster's current bundle into `k8s_ca_cert` — it supersedes the pin
   and clears it, or
-- set `k8s_reset_learned_ca_cert: true` (the edit dialog's "Forget the learned
+- set `k8s_reset_learned_ca_cert: true` (the edit page's "Forget the learned
   CA") to drop the pin so the next connect learns afresh.
 
 The connectivity check reports `k8s_ca_pinned: true` on the run that performed
@@ -251,7 +251,7 @@ kubectl -n data get secret dbbat-token -o jsonpath='{.data.ca\.crt}' | base64 -d
   back to the host's system trust store, because "no CA configured" must never
   quietly mean "trust any publicly trusted certificate for that hostname".
 - Rows with the flag set are labelled as such in the servers list and in the
-  edit dialog, so an insecure row cannot hide once it exists. Rows running on a
+  edit page, so an insecure row cannot hide once it exists. Rows running on a
   first-connect pin are labelled too ("CA pinned (TOFU)").
 
 ## Connectivity check
