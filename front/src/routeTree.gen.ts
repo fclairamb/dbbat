@@ -15,6 +15,7 @@ import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/
 import { Route as AuthenticatedDeviceRouteImport } from './routes/_authenticated/device'
 import { Route as AuthenticatedProfileRouteImport } from './routes/_authenticated/profile'
 import { Route as AuthenticatedApiKeysIndexRouteImport } from './routes/_authenticated/api-keys/index'
+import { Route as AuthenticatedApiKeysNewRouteImport } from './routes/_authenticated/api-keys/new'
 import { Route as AuthenticatedAuditIndexRouteImport } from './routes/_authenticated/audit/index'
 import { Route as AuthenticatedConnectionsIndexRouteImport } from './routes/_authenticated/connections/index'
 import { Route as AuthenticatedConnectionsUidRouteImport } from './routes/_authenticated/connections/$uid'
@@ -72,6 +73,11 @@ const AuthenticatedApiKeysIndexRoute =
     path: '/api-keys/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedApiKeysNewRoute = AuthenticatedApiKeysNewRouteImport.update({
+  id: '/api-keys/new',
+  path: '/api-keys/new',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 const AuthenticatedAuditIndexRoute = AuthenticatedAuditIndexRouteImport.update({
   id: '/audit/',
   path: '/audit/',
@@ -226,6 +232,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/device': typeof AuthenticatedDeviceRoute
   '/profile': typeof AuthenticatedProfileRoute
+  '/api-keys/new': typeof AuthenticatedApiKeysNewRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/grant-definitions/$uid': typeof AuthenticatedGrantDefinitionsUidRoute
   '/grant-definitions/new': typeof AuthenticatedGrantDefinitionsNewRoute
@@ -259,6 +266,7 @@ export interface FileRoutesByTo {
   '/device': typeof AuthenticatedDeviceRoute
   '/profile': typeof AuthenticatedProfileRoute
   '/': typeof AuthenticatedIndexRoute
+  '/api-keys/new': typeof AuthenticatedApiKeysNewRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/grant-definitions/$uid': typeof AuthenticatedGrantDefinitionsUidRoute
   '/grant-definitions/new': typeof AuthenticatedGrantDefinitionsNewRoute
@@ -294,6 +302,7 @@ export interface FileRoutesById {
   '/_authenticated/device': typeof AuthenticatedDeviceRoute
   '/_authenticated/profile': typeof AuthenticatedProfileRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/api-keys/new': typeof AuthenticatedApiKeysNewRoute
   '/_authenticated/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/_authenticated/grant-definitions/$uid': typeof AuthenticatedGrantDefinitionsUidRoute
   '/_authenticated/grant-definitions/new': typeof AuthenticatedGrantDefinitionsNewRoute
@@ -329,6 +338,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/device'
     | '/profile'
+    | '/api-keys/new'
     | '/connections/$uid'
     | '/grant-definitions/$uid'
     | '/grant-definitions/new'
@@ -362,6 +372,7 @@ export interface FileRouteTypes {
     | '/device'
     | '/profile'
     | '/'
+    | '/api-keys/new'
     | '/connections/$uid'
     | '/grant-definitions/$uid'
     | '/grant-definitions/new'
@@ -396,6 +407,7 @@ export interface FileRouteTypes {
     | '/_authenticated/device'
     | '/_authenticated/profile'
     | '/_authenticated/'
+    | '/_authenticated/api-keys/new'
     | '/_authenticated/connections/$uid'
     | '/_authenticated/grant-definitions/$uid'
     | '/_authenticated/grant-definitions/new'
@@ -472,6 +484,13 @@ declare module '@tanstack/react-router' {
       path: '/api-keys'
       fullPath: '/api-keys/'
       preLoaderRoute: typeof AuthenticatedApiKeysIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/api-keys/new': {
+      id: '/_authenticated/api-keys/new'
+      path: '/api-keys/new'
+      fullPath: '/api-keys/new'
+      preLoaderRoute: typeof AuthenticatedApiKeysNewRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/audit/': {
@@ -663,6 +682,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedDeviceRoute: typeof AuthenticatedDeviceRoute
   AuthenticatedProfileRoute: typeof AuthenticatedProfileRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedApiKeysNewRoute: typeof AuthenticatedApiKeysNewRoute
   AuthenticatedConnectionsUidRoute: typeof AuthenticatedConnectionsUidRoute
   AuthenticatedGrantDefinitionsUidRoute: typeof AuthenticatedGrantDefinitionsUidRoute
   AuthenticatedGrantDefinitionsNewRoute: typeof AuthenticatedGrantDefinitionsNewRoute
@@ -696,6 +716,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedDeviceRoute: AuthenticatedDeviceRoute,
   AuthenticatedProfileRoute: AuthenticatedProfileRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedApiKeysNewRoute: AuthenticatedApiKeysNewRoute,
   AuthenticatedConnectionsUidRoute: AuthenticatedConnectionsUidRoute,
   AuthenticatedGrantDefinitionsUidRoute: AuthenticatedGrantDefinitionsUidRoute,
   AuthenticatedGrantDefinitionsNewRoute: AuthenticatedGrantDefinitionsNewRoute,

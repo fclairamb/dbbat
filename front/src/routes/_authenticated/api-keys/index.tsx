@@ -1,8 +1,8 @@
-import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { clearCreatedKey, peekCreatedKey } from "@/lib/created-key";
 import {
   useAPIKeys,
-  useCreateAPIKey,
   useRevokeAPIKey,
   useUsers,
   type APIKey,
@@ -25,11 +25,9 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   AlertDialog,
@@ -42,7 +40,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -52,7 +49,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Plus, Ban, Key, AlertTriangle, AlertCircle, Copy } from "lucide-react";
+import {
+  Plus,
+  Ban,
+  Key,
+  AlertTriangle,
+  AlertCircle,
+  Copy,
+} from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow, format } from "date-fns";
 
@@ -64,8 +68,13 @@ export const Route = createFileRoute("/_authenticated/api-keys/")({
 
 function APIKeysPage() {
   const { user } = useAuth();
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [newKey, setNewKey] = useState<CreateAPIKeyResponse | null>(null);
+  // Set when the create page just minted a key: the list shows it once.
+  const [newKey, setNewKey] = useState<CreateAPIKeyResponse | null>(() =>
+    peekCreatedKey(),
+  );
+  useEffect(() => {
+    clearCreatedKey();
+  }, []);
   const [revokeKey, setRevokeKey] = useState<APIKey | null>(null);
 
   const canCreate = canCreateAPIKey(user?.roles);
@@ -265,31 +274,26 @@ function APIKeysPage() {
                 </SelectContent>
               </Select>
             )}
-            <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-              <DialogTrigger asChild>
-                <PermissionButton
-                  disabled={!canCreate}
-                  disabledReason={getDisabledReason(
-                    "create-api-key",
-                    user?.roles,
-                  )}
-                  enabledTooltip={getActionTooltip("create-api-key")}
-                >
+            {canCreate ? (
+              <Button asChild data-testid="create-api-key-button">
+                <Link to="/api-keys/new">
                   <Plus className="mr-2 h-4 w-4" />
                   Create Key
-                </PermissionButton>
-              </DialogTrigger>
-              {/* Same reason as /servers and /grants: a DialogContent left
-                  mounted keeps its form state across opens and holds its
-                  full-viewport overlay in the DOM for the whole fade-out,
-                  where it can swallow a click on this trigger. */}
-              {isCreateOpen && (
-                <CreateKeyDialog
-                  onClose={() => setIsCreateOpen(false)}
-                  onCreated={setNewKey}
-                />
-              )}
-            </Dialog>
+                </Link>
+              </Button>
+            ) : (
+              <PermissionButton
+                disabled
+                disabledReason={getDisabledReason(
+                  "create-api-key",
+                  user?.roles,
+                )}
+                data-testid="create-api-key-button"
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Create Key
+              </PermissionButton>
+            )}
           </div>
         }
       />
@@ -322,77 +326,6 @@ function APIKeysPage() {
       <ShowKeyDialog newKey={newKey} onClose={() => setNewKey(null)} />
       <RevokeKeyDialog apiKey={revokeKey} onClose={() => setRevokeKey(null)} />
     </div>
-  );
-}
-
-function CreateKeyDialog({
-  onClose,
-  onCreated,
-}: {
-  onClose: () => void;
-  onCreated: (key: CreateAPIKeyResponse) => void;
-}) {
-  const [name, setName] = useState("");
-  const [expiresAt, setExpiresAt] = useState("");
-
-  const createKey = useCreateAPIKey({
-    onSuccess: (data) => {
-      onCreated(data);
-      onClose();
-    },
-    onError: (error) => {
-      toast.error(error.message);
-    },
-  });
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    createKey.mutate({
-      name,
-      expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined,
-    });
-  };
-
-  return (
-    <DialogContent>
-      <form onSubmit={handleSubmit}>
-        <DialogHeader>
-          <DialogTitle>Create API Key</DialogTitle>
-          <DialogDescription>
-            Create a new API key for programmatic access.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4 py-4">
-          <div className="space-y-2">
-            <Label htmlFor="name">Name</Label>
-            <Input
-              id="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="My API Key"
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="expiresAt">Expires At (optional)</Label>
-            <Input
-              id="expiresAt"
-              type="date"
-              value={expiresAt}
-              onChange={(e) => setExpiresAt(e.target.value)}
-            />
-          </div>
-        </div>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button type="submit" disabled={createKey.isPending || !name}>
-            Create
-          </Button>
-        </DialogFooter>
-      </form>
-    </DialogContent>
   );
 }
 
