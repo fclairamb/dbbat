@@ -1083,6 +1083,9 @@ func (s *session) handleQueryResultV2(ttcPayload []byte) {
 			if i < len(result.ColumnTypes) {
 				columns[i].TypeCode = uint8(result.ColumnTypes[i])
 			}
+			if i < len(result.ColumnNational) {
+				columns[i].National = result.ColumnNational[i]
+			}
 		}
 
 		s.tracker.pendingQuery.cursor.columns = columns

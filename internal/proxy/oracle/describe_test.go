@@ -57,28 +57,28 @@ func TestParseColumnDescribes(t *testing.T) {
 		want   []columnDesc
 	}{
 		{"go_ora_compressed.pcapng", compressedSQLMarker, []columnDesc{
-			{"GRP", tnsTypeCHAR}, {"NUM", tnsTypeNUMBER}, {"OPT", tnsTypeVARCHAR},
+			{"GRP", tnsTypeCHAR, false}, {"NUM", tnsTypeNUMBER, false}, {"OPT", tnsTypeVARCHAR, false},
 		}},
 		{"go_ora_numbers.pcapng", numbersSQLMarker, []columnDesc{
-			{"PI", tnsTypeNUMBER},
-			{"AMOUNT", tnsTypeNUMBER},
-			{"MILLION", tnsTypeNUMBER},
-			{"QUARTER", tnsTypeNUMBER},
+			{"PI", tnsTypeNUMBER, false},
+			{"AMOUNT", tnsTypeNUMBER, false},
+			{"MILLION", tnsTypeNUMBER, false},
+			{"QUARTER", tnsTypeNUMBER, false},
 		}},
 		{"go_ora_temporal.pcapng", temporalSQLMarker, []columnDesc{
-			{"DT", tnsTypeDATE}, {"TS", tnsTypeTSDTY}, {"TSTZ", tnsTypeTSTZDTY},
+			{"DT", tnsTypeDATE, false}, {"TS", tnsTypeTSDTY, false}, {"TSTZ", tnsTypeTSTZDTY, false},
 		}},
 		{"go_ora_largeresult.pcapng", largeResultSQLMarker, []columnDesc{
-			{"ID", tnsTypeNUMBER}, {"PAYLOAD", tnsTypeVARCHAR},
+			{"ID", tnsTypeNUMBER, false}, {"PAYLOAD", tnsTypeVARCHAR, false},
 		}},
 		{"go_ora_colcount.pcapng", colCountSQLMarker, []columnDesc{
-			{"N", tnsTypeNUMBER}, {"LEVEL*10", tnsTypeNUMBER},
+			{"N", tnsTypeNUMBER, false}, {"LEVEL*10", tnsTypeNUMBER, false},
 		}},
 		{"go_ora_mixed.pcapng", mixedSQLMarker, []columnDesc{
-			{"ID", tnsTypeNUMBER},
-			{"GRP", tnsTypeNUMBER},
-			{"AMOUNT", tnsTypeNUMBER},
-			{"MAYBE_DAY", tnsTypeDATE},
+			{"ID", tnsTypeNUMBER, false},
+			{"GRP", tnsTypeNUMBER, false},
+			{"AMOUNT", tnsTypeNUMBER, false},
+			{"MAYBE_DAY", tnsTypeDATE, false},
 		}},
 	}
 
@@ -155,10 +155,10 @@ func TestParseColumnDescribes_PythonThinNumberScale(t *testing.T) {
 		want   []columnDesc
 	}{
 		{"SELECT id, name FROM dbbat_array_dml WHERE id BETWEEN", []columnDesc{
-			{"ID", tnsTypeNUMBER}, {"NAME", tnsTypeVARCHAR},
+			{"ID", tnsTypeNUMBER, false}, {"NAME", tnsTypeVARCHAR, false},
 		}},
 		{"SELECT id, note, name FROM dbbat_array_dml", []columnDesc{
-			{"ID", tnsTypeNUMBER}, {"NOTE", tnsTypeVARCHAR}, {"NAME", tnsTypeVARCHAR},
+			{"ID", tnsTypeNUMBER, false}, {"NOTE", tnsTypeVARCHAR, false}, {"NAME", tnsTypeVARCHAR, false},
 		}},
 	}
 
