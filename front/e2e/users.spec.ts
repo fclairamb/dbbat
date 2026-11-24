@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, loginAs } from "./fixtures";
 
 test.describe("Users Management", () => {
   test("should display users list page", async ({ authenticatedPage }) => {
@@ -37,7 +37,7 @@ test.describe("Users Management", () => {
 
       // Take screenshot of create user dialog/form
       await authenticatedPage.screenshot({
-        path: "test-results/screenshots/users-create-dialog.png",
+        path: "test-results/screenshots/users-create-page.png",
       });
 
       // Look for form fields
@@ -70,7 +70,7 @@ test.describe("Users Management", () => {
     // checkbox must be locked in the edit dialog.
     await authenticatedPage.getByTestId("edit-user-admin").click();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeVisible();
     await expect(
       authenticatedPage.getByTestId("edit-user-username")
@@ -84,9 +84,9 @@ test.describe("Users Management", () => {
     });
 
     // Close the dialog without changes
-    await authenticatedPage.keyboard.press("Escape");
+    await authenticatedPage.getByTestId("form-cancel").click();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeHidden();
   });
 
@@ -108,7 +108,7 @@ test.describe("Users Management", () => {
     // Promote: open the edit dialog and check the Administrator role
     await authenticatedPage.getByTestId("edit-user-connector").click();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeVisible();
     await expect(
       authenticatedPage.getByTestId("edit-user-username")
@@ -127,7 +127,7 @@ test.describe("Users Management", () => {
 
     await authenticatedPage.getByTestId("edit-user-submit").click();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeHidden();
 
     // Verify the admin badge now shows in the connector row
@@ -143,14 +143,14 @@ test.describe("Users Management", () => {
     // Demote: uncheck the Administrator role again
     await authenticatedPage.getByTestId("edit-user-connector").click();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeVisible();
     await expect(adminCheckbox).toHaveAttribute("aria-checked", "true");
     await adminCheckbox.click();
     await expect(adminCheckbox).toHaveAttribute("aria-checked", "false");
     await authenticatedPage.getByTestId("edit-user-submit").click();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeHidden();
 
     // Verify the admin badge is gone from the connector row
@@ -192,7 +192,7 @@ test.describe("Users Management", () => {
     // last sync, groups included.
     await authenticatedPage.getByTestId("edit-user-viewer").click();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeVisible();
     await expect(
       authenticatedPage.getByTestId("managed-role-badge-viewer")
@@ -205,11 +205,11 @@ test.describe("Users Management", () => {
       path: "test-results/screenshots/users-edit-sso-managed.png",
     });
 
-    await authenticatedPage.keyboard.press("Escape");
-    await expect(authenticatedPage.getByTestId("edit-user-dialog")).toBeHidden();
+    await authenticatedPage.getByTestId("form-cancel").click();
+    await expect(authenticatedPage.getByTestId("edit-user-page")).toBeHidden();
 
     // Touching a managed role must be confirmed. Cancelling leaves the edit
-    // dialog open with the change still pending, not saved.
+    // page open with the change still pending, not saved.
     await authenticatedPage.getByTestId("edit-user-connector").click();
     const viewerCheckbox = authenticatedPage.getByTestId(
       "edit-user-role-viewer"
@@ -231,7 +231,7 @@ test.describe("Users Management", () => {
     await authenticatedPage.getByTestId("edit-user-managed-roles-cancel").click();
     await expect(warning).toBeHidden();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeVisible();
 
     // Confirming saves it: the role is editable, just not durable.
@@ -240,7 +240,7 @@ test.describe("Users Management", () => {
       .getByTestId("edit-user-managed-roles-confirm")
       .click();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeHidden();
 
     const connectorRow = authenticatedPage.getByRole("row").filter({
@@ -258,7 +258,7 @@ test.describe("Users Management", () => {
       .getByTestId("edit-user-managed-roles-confirm")
       .click();
     await expect(
-      authenticatedPage.getByTestId("edit-user-dialog")
+      authenticatedPage.getByTestId("edit-user-page")
     ).toBeHidden();
     await expect(
       connectorRow.getByText("viewer", { exact: true })
@@ -314,5 +314,70 @@ test.describe("Users Management", () => {
       has: authenticatedPage.getByTestId("edit-user-admin"),
     });
     await expect(adminRow.getByText("Never", { exact: true })).toBeVisible();
+  });
+
+  test("create user page creates a user and returns to the list", async ({
+    authenticatedPage: page,
+  }) => {
+    const username = `page-user-${Date.now()}`;
+    await page.goto("users");
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("create-user-button").click();
+    await expect(page.getByTestId("create-user-page")).toBeVisible();
+    await expect(page).toHaveURL(/\/users\/new$/);
+
+    await page.locator("#username").fill(username);
+    await page.locator("#password").fill("a-Long-passw0rd!");
+    await page.getByTestId("create-user-submit").click();
+
+    await expect(page).toHaveURL(/\/users\/?$/);
+    await expect(page.getByTestId(`edit-user-${username}`)).toBeVisible();
+  });
+
+  test("edit page opens by URL, survives reload and back returns to the list", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto("users");
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("edit-user-connector").click();
+    await expect(page.getByTestId("edit-user-page")).toBeVisible();
+    const url = page.url();
+    expect(url).toMatch(/\/users\/[^/]+$/);
+
+    await page.reload();
+    await expect(page.getByTestId("edit-user-username")).toHaveValue(
+      "connector"
+    );
+
+    await page.goto(url);
+    await expect(page.getByTestId("edit-user-username")).toHaveValue(
+      "connector"
+    );
+
+    // An unsaved change is dropped when going back.
+    await page.getByTestId("edit-user-role-viewer").click();
+    await page.goBack();
+    await page.goto("users");
+    await page.getByTestId("edit-user-connector").click();
+    await expect(page.getByTestId("edit-user-role-viewer")).toHaveAttribute(
+      "aria-checked",
+      "false"
+    );
+  });
+
+  test("an unknown uid shows the not-found state", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto("users/00000000-0000-0000-0000-000000000000");
+    await expect(page.getByTestId("entity-not-found")).toBeVisible();
+    await expect(page.getByTestId("edit-user-username")).toHaveCount(0);
+  });
+
+  test("a viewer is refused on the user edit routes", async ({ page }) => {
+    await loginAs(page, "viewer", "viewer");
+    await page.goto("users/new");
+    await expect(page.getByText("Access Denied")).toBeVisible();
+    await page.goto("users/00000000-0000-0000-0000-000000000000");
+    await expect(page.getByText("Access Denied")).toBeVisible();
   });
 });

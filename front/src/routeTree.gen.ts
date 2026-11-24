@@ -33,6 +33,8 @@ import { Route as AuthenticatedUserGroupsIndexRouteImport } from './routes/_auth
 import { Route as AuthenticatedUserGroupsUidRouteImport } from './routes/_authenticated/user-groups/$uid'
 import { Route as AuthenticatedUserGroupsNewRouteImport } from './routes/_authenticated/user-groups/new'
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
+import { Route as AuthenticatedUsersUidRouteImport } from './routes/_authenticated/users/$uid'
+import { Route as AuthenticatedUsersNewRouteImport } from './routes/_authenticated/users/new'
 
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
   id: '/_authenticated',
@@ -169,6 +171,16 @@ const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
   path: '/users/',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedUsersUidRoute = AuthenticatedUsersUidRouteImport.update({
+  id: '/users/$uid',
+  path: '/users/$uid',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedUsersNewRoute = AuthenticatedUsersNewRouteImport.update({
+  id: '/users/new',
+  path: '/users/new',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
@@ -181,6 +193,8 @@ export interface FileRoutesByFullPath {
   '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
   '/user-groups/$uid': typeof AuthenticatedUserGroupsUidRoute
   '/user-groups/new': typeof AuthenticatedUserGroupsNewRoute
+  '/users/$uid': typeof AuthenticatedUsersUidRoute
+  '/users/new': typeof AuthenticatedUsersNewRoute
   '/api-keys/': typeof AuthenticatedApiKeysIndexRoute
   '/audit/': typeof AuthenticatedAuditIndexRoute
   '/connections/': typeof AuthenticatedConnectionsIndexRoute
@@ -206,6 +220,8 @@ export interface FileRoutesByTo {
   '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
   '/user-groups/$uid': typeof AuthenticatedUserGroupsUidRoute
   '/user-groups/new': typeof AuthenticatedUserGroupsNewRoute
+  '/users/$uid': typeof AuthenticatedUsersUidRoute
+  '/users/new': typeof AuthenticatedUsersNewRoute
   '/api-keys': typeof AuthenticatedApiKeysIndexRoute
   '/audit': typeof AuthenticatedAuditIndexRoute
   '/connections': typeof AuthenticatedConnectionsIndexRoute
@@ -233,6 +249,8 @@ export interface FileRoutesById {
   '/_authenticated/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
   '/_authenticated/user-groups/$uid': typeof AuthenticatedUserGroupsUidRoute
   '/_authenticated/user-groups/new': typeof AuthenticatedUserGroupsNewRoute
+  '/_authenticated/users/$uid': typeof AuthenticatedUsersUidRoute
+  '/_authenticated/users/new': typeof AuthenticatedUsersNewRoute
   '/_authenticated/api-keys/': typeof AuthenticatedApiKeysIndexRoute
   '/_authenticated/audit/': typeof AuthenticatedAuditIndexRoute
   '/_authenticated/connections/': typeof AuthenticatedConnectionsIndexRoute
@@ -260,6 +278,8 @@ export interface FileRouteTypes {
     | '/server-groups/new'
     | '/user-groups/$uid'
     | '/user-groups/new'
+    | '/users/$uid'
+    | '/users/new'
     | '/api-keys/'
     | '/audit/'
     | '/connections/'
@@ -285,6 +305,8 @@ export interface FileRouteTypes {
     | '/server-groups/new'
     | '/user-groups/$uid'
     | '/user-groups/new'
+    | '/users/$uid'
+    | '/users/new'
     | '/api-keys'
     | '/audit'
     | '/connections'
@@ -311,6 +333,8 @@ export interface FileRouteTypes {
     | '/_authenticated/server-groups/new'
     | '/_authenticated/user-groups/$uid'
     | '/_authenticated/user-groups/new'
+    | '/_authenticated/users/$uid'
+    | '/_authenticated/users/new'
     | '/_authenticated/api-keys/'
     | '/_authenticated/audit/'
     | '/_authenticated/connections/'
@@ -501,6 +525,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedUsersIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/users/$uid': {
+      id: '/_authenticated/users/$uid'
+      path: '/users/$uid'
+      fullPath: '/users/$uid'
+      preLoaderRoute: typeof AuthenticatedUsersUidRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/users/new': {
+      id: '/_authenticated/users/new'
+      path: '/users/new'
+      fullPath: '/users/new'
+      preLoaderRoute: typeof AuthenticatedUsersNewRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
   }
 }
 
@@ -514,6 +552,8 @@ interface AuthenticatedRouteChildren {
   AuthenticatedServerGroupsNewRoute: typeof AuthenticatedServerGroupsNewRoute
   AuthenticatedUserGroupsUidRoute: typeof AuthenticatedUserGroupsUidRoute
   AuthenticatedUserGroupsNewRoute: typeof AuthenticatedUserGroupsNewRoute
+  AuthenticatedUsersUidRoute: typeof AuthenticatedUsersUidRoute
+  AuthenticatedUsersNewRoute: typeof AuthenticatedUsersNewRoute
   AuthenticatedApiKeysIndexRoute: typeof AuthenticatedApiKeysIndexRoute
   AuthenticatedAuditIndexRoute: typeof AuthenticatedAuditIndexRoute
   AuthenticatedConnectionsIndexRoute: typeof AuthenticatedConnectionsIndexRoute
@@ -539,6 +579,8 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedServerGroupsNewRoute: AuthenticatedServerGroupsNewRoute,
   AuthenticatedUserGroupsUidRoute: AuthenticatedUserGroupsUidRoute,
   AuthenticatedUserGroupsNewRoute: AuthenticatedUserGroupsNewRoute,
+  AuthenticatedUsersUidRoute: AuthenticatedUsersUidRoute,
+  AuthenticatedUsersNewRoute: AuthenticatedUsersNewRoute,
   AuthenticatedApiKeysIndexRoute: AuthenticatedApiKeysIndexRoute,
   AuthenticatedAuditIndexRoute: AuthenticatedAuditIndexRoute,
   AuthenticatedConnectionsIndexRoute: AuthenticatedConnectionsIndexRoute,
