@@ -377,7 +377,10 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	warnStatementTimeout(ctx, cfg, logger)
 
-	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader, logger)
+	// The proxies count login failures in the API's own tracker; test mode
+	// counts but never refuses, as the API skips its backoff there.
+	loginThrottles := loginThrottleFactory(apiServer.AuthFailureTracker(), dataStore, logger, cfg.RunMode != config.RunModeTest)
+	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader, loginThrottles, logger)
 
 	sweeper, err := startRetention(ctx, cfg, dataStore, apiServer, logger)
 	if err != nil {
@@ -394,6 +397,23 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		rowWriter, sweeper, oauthPurger, heartbeat, dumpUploader)
 
 	return awaitShutdown(ctx, logger, servers...)
+}
+
+// loginThrottleFactory returns the constructor of each listener's login
+// throttle, all of them on the one tracker the REST API uses: a dbbat password
+// is one secret whichever port it is guessed on, and two counters would double
+// the guessing budget.
+func loginThrottleFactory(
+	tracker *cache.AuthFailureTracker, dataStore *store.Store, logger *slog.Logger, enforce bool,
+) func(listener string) *shared.LoginThrottle {
+	var auditStore shared.LoginAuditStore
+	if dataStore != nil {
+		auditStore = dataStore
+	}
+
+	return func(listener string) *shared.LoginThrottle {
+		return shared.NewLoginThrottle(tracker, auditStore, logger, listener, enforce)
+	}
 }
 
 // proxySet holds the protocol listeners this process started. Every field
@@ -416,14 +436,15 @@ func startProxies(
 	approvalDeps shared.ApprovalDeps,
 	rowWriter *shared.RowWriter,
 	dumpUploader *dump.Uploader,
+	loginThrottles func(listener string) *shared.LoginThrottle,
 	logger *slog.Logger,
 ) proxySet {
 	set := proxySet{
-		postgres: startPostgresProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		postgres: startPostgresProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, loginThrottles, logger),
 		oracle:   startOracleProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
-		mysql:    startMySQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
-		mongo:    startMongoProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
-		mssql:    startMSSQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		mysql:    startMySQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, loginThrottles, logger),
+		mongo:    startMongoProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, loginThrottles, logger),
+		mssql:    startMSSQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, loginThrottles, logger),
 	}
 
 	// One resolver for the whole process: the store memoizes the parameters,
@@ -638,6 +659,7 @@ func startPostgresProxy(
 	authCache *cache.AuthCache,
 	approvalDeps shared.ApprovalDeps,
 	rowWriter *shared.RowWriter,
+	loginThrottles func(listener string) *shared.LoginThrottle,
 	logger *slog.Logger,
 ) *postgresql.Server {
 	srv, err := postgresql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, authCache, cfg.PG, logger)
@@ -646,6 +668,7 @@ func startPostgresProxy(
 		os.Exit(1)
 	}
 
+	srv.SetLoginThrottle(loginThrottles(store.ProtocolPostgreSQL))
 	srv.SetApprovalDeps(approvalDeps)
 	srv.SetRowWriter(rowWriter)
 
@@ -709,6 +732,7 @@ func startMySQLProxy(
 	authCache *cache.AuthCache,
 	approvalDeps shared.ApprovalDeps,
 	rowWriter *shared.RowWriter,
+	loginThrottles func(listener string) *shared.LoginThrottle,
 	logger *slog.Logger,
 ) *mysql.Server {
 	if cfg.ListenMySQL == "" {
@@ -721,6 +745,7 @@ func startMySQLProxy(
 		os.Exit(1)
 	}
 
+	srv.SetLoginThrottle(loginThrottles(store.ProtocolMySQL))
 	srv.SetApprovalDeps(approvalDeps)
 	srv.SetRowWriter(rowWriter)
 
@@ -745,6 +770,7 @@ func startMongoProxy(
 	authCache *cache.AuthCache,
 	approvalDeps shared.ApprovalDeps,
 	rowWriter *shared.RowWriter,
+	loginThrottles func(listener string) *shared.LoginThrottle,
 	logger *slog.Logger,
 ) *mongodb.Server {
 	if cfg.ListenMongo == "" {
@@ -757,6 +783,7 @@ func startMongoProxy(
 		os.Exit(1)
 	}
 
+	srv.SetLoginThrottle(loginThrottles(store.ProtocolMongoDB))
 	srv.SetApprovalDeps(approvalDeps)
 	srv.SetRowWriter(rowWriter)
 
@@ -783,6 +810,7 @@ func startMSSQLProxy(
 	authCache *cache.AuthCache,
 	approvalDeps shared.ApprovalDeps,
 	rowWriter *shared.RowWriter,
+	loginThrottles func(listener string) *shared.LoginThrottle,
 	logger *slog.Logger,
 ) *mssql.Server {
 	if cfg.ListenMSSQL == "" {
@@ -795,6 +823,7 @@ func startMSSQLProxy(
 		os.Exit(1)
 	}
 
+	srv.SetLoginThrottle(loginThrottles(store.ProtocolMSSQL))
 	srv.SetApprovalDeps(approvalDeps)
 	srv.SetRowWriter(rowWriter)
 

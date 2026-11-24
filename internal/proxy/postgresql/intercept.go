@@ -569,8 +569,13 @@ func isDDLQuery(sql string) bool {
 // ignores `/* … */` wherever whitespace is allowed, so `/*x*/COPY t TO STDOUT`
 // is a COPY to the server and has to be one here too.
 func isCopyQuery(sql string) bool {
-	return shared.HasNormalizedSQLPrefix(sql, "COPY ")
+	return shared.MatchesNormalizedSQL(strings.TrimSpace(sql), copyQueryPattern)
 }
+
+// copyQueryPattern matches COPY as a whole leading keyword: PostgreSQL accepts
+// any whitespace (tab, newline), a parenthesis or the end of the text after it,
+// not only a space. `copy_log` and `copy_count` are not COPY.
+var copyQueryPattern = regexp.MustCompile(`(?i)^\s*COPY\b`)
 
 // isReadOnlyBypassAttempt checks if a query attempts to disable read-only mode.
 //

@@ -368,6 +368,21 @@ uploads whatever is left there. Every file present at that moment belongs to a
 previous run and is therefore finished, which is what makes the blind sweep
 safe — and what recovers the captures of a run that crashed.
 
+### Deleting a capture is audited
+
+Deleting a capture writes a chained `dump.deleted` entry to `audit_log`, whoever
+does it:
+
+- `DELETE /api/v1/connections/{uid}/dump` records `source: "api"` and the admin
+  as `performed_by`.
+- The retention sweeper (`DBB_RETENTION_DUMPS_DELETE_AFTER`) records
+  `source: "retention"` and no actor, one entry per expired file.
+
+The details carry `connection_uid`, `locations` (`local`, `remote` or both),
+`size_bytes` when known and, for a bucket object, `key`. A delete that fails
+writes no entry. A capture that is gone without such an entry was not removed
+by dbbat.
+
 ## Reading
 
 With standard tooling:

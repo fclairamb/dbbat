@@ -4196,6 +4196,8 @@ export interface components {
              * @description Total number of rows for this query
              */
             total_rows: number;
+            /** @description Present only on rows read from the archive. True when the rows were checked against the SHA-256 sealed in the audit chain; false for an object archived before per-chunk digests existed and too large to fetch whole, whose rows could not be checked. */
+            verified?: boolean;
         };
         AuditEvent: {
             /**

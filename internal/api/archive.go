@@ -44,6 +44,8 @@ func (s *Server) writeArchiveError(c *gin.Context, err error) {
 		msg = "archive object missing: " + err.Error()
 	case errors.Is(err, archive.ErrHashMismatch):
 		msg = "archive object corrupted: " + err.Error()
+	case errors.Is(err, store.ErrArchiveSealMismatch):
+		msg = "archive reference tampered with: " + err.Error()
 	default:
 		msg = "archive read failed: " + err.Error()
 	}
@@ -71,6 +73,12 @@ func (s *Server) archivedQueryRows(c *gin.Context, queryUID uuid.UUID, cursor st
 			return nil, false
 		}
 
+		if errors.Is(err, store.ErrArchiveSealMismatch) {
+			s.writeArchiveError(c, err)
+
+			return nil, true
+		}
+
 		writeInternalError(c, s.logger, err, "failed to read the connection archive")
 
 		return nil, true
@@ -93,6 +101,12 @@ func (s *Server) archivedQueryRows(c *gin.Context, queryUID uuid.UUID, cursor st
 			return nil, true
 		}
 
+		if cur.Offset < 0 {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid cursor")
+
+			return nil, true
+		}
+
 		offset = cur.Offset
 	}
 
@@ -103,14 +117,19 @@ func (s *Server) archivedQueryRows(c *gin.Context, queryUID uuid.UUID, cursor st
 	}
 
 	page, err := archive.ReadQueryRows(ctx, s.archiver.Bucket(),
-		archive.Object{Key: ref.Key, Size: ref.Bytes, SHA256: ref.SHA256}, queryUID, offset, limit+1)
+		archive.Object{
+			Key: ref.Key, Size: ref.Bytes, SHA256: ref.SHA256,
+			ChunkBytes: ref.ChunkBytes, ChunkSHA256: ref.ChunkSHA256,
+			ConnectionUID: query.ConnectionID,
+		}, queryUID, offset, limit+1)
 	if err != nil {
 		s.writeArchiveError(c, err)
 
 		return nil, true
 	}
 
-	result := &store.QueryRowsResult{Rows: make([]store.QueryRow, 0, limit), TotalRows: page.Total}
+	verified := page.Verified
+	result := &store.QueryRowsResult{Rows: make([]store.QueryRow, 0, limit), TotalRows: page.Total, Verified: &verified}
 
 	var size int64
 
@@ -159,6 +178,12 @@ func (s *Server) handleGetConnectionArchiveRows(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, store.ErrArchiveNotFound) || errors.Is(err, store.ErrConnectionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "this connection has no archive")
+
+			return
+		}
+
+		if errors.Is(err, store.ErrArchiveSealMismatch) {
+			s.writeArchiveError(c, err)
 
 			return
 		}

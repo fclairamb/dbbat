@@ -312,6 +312,12 @@ func TestIsCopyQuery(t *testing.T) {
 		{name: "INSERT", sql: "INSERT INTO users (name) VALUES ('test')", expected: false},
 		{name: "SELECT with COPY in string", sql: "SELECT * FROM users WHERE note LIKE '%COPY%'", expected: false},
 		{name: "empty string", sql: "", expected: false},
+		{name: "COPY then tab", sql: "COPY\tusers TO STDOUT", expected: true},
+		{name: "COPY then newline", sql: "COPY\nusers TO STDOUT", expected: true},
+		{name: "COPY subquery", sql: "COPY(SELECT 1) TO STDOUT", expected: true},
+		{name: "alias copy_count", sql: "SELECT 1 AS copy_count", expected: false},
+		{name: "table copy_log", sql: "SELECT * FROM copy_log", expected: false},
+		{name: "table named copy_log first", sql: "copy_log", expected: false},
 
 		// A leading comment changes what the statement looks like to dbbat but not
 		// to PostgreSQL.
@@ -900,6 +906,23 @@ func TestHandleQuery_BlocksCopy(t *testing.T) {
 			controls:  []string{store.ControlBlockCopy},
 			sql:       "COPY users TO STDOUT",
 			expectErr: ErrCopyNotPermitted,
+		},
+		{
+			name:      "block_copy blocks COPY then tab",
+			controls:  []string{store.ControlBlockCopy},
+			sql:       "COPY\tusers TO STDOUT",
+			expectErr: ErrCopyNotPermitted,
+		},
+		{
+			name:      "block_copy blocks COPY then newline",
+			controls:  []string{store.ControlBlockCopy},
+			sql:       "COPY\nusers TO STDOUT",
+			expectErr: ErrCopyNotPermitted,
+		},
+		{
+			name:     "block_copy allows copy_log table",
+			controls: []string{store.ControlBlockCopy},
+			sql:      "SELECT 1 FROM copy_log",
 		},
 		{
 			name:      "block_copy blocks COPY FROM",

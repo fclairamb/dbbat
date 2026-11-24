@@ -100,8 +100,30 @@ with the same parameters, JSON and cursor as before. `GET /connections/{uid}`
 reports `rows_location` (`store`, `archive` or `deleted`). A read that fails
 (object missing, hash mismatch, bucket down, archive not configured) is a 502
 saying which. Objects up to 8 MiB are fetched whole and checked against the
-sealed SHA-256; larger ones are read through range requests (not hash checked).
+sealed SHA-256. A larger one is read through range requests, 1 MiB chunk by
+chunk: the archiver seals the SHA-256 of every chunk (`chunk_bytes`,
+`chunk_sha256`) next to the whole-object hash, and the reader checks each chunk
+it fetches (footer and metadata included) before parsing a byte of it. A chunk
+that differs is a hash mismatch. Every row a page returns must also carry the
+requested statement and connection uids: metadata that points a statement at
+other records is `bad metadata` (502).
 `GET /connections/{uid}/archive/rows` downloads the raw object.
 
+Objects archived before the chunk digests existed have none. Up to 64 MiB they
+are fetched whole and checked against their SHA-256. Above that they are read
+over range requests unchecked, and the response says so with `"verified":
+false` (the UI marks the rows "Unverified archive"). Archived rows that were
+checked carry `"verified": true`; rows still in PostgreSQL carry no `verified`.
+
+The key, size and SHA-256 a read uses come from the chained
+`connection.archived` entry, which must agree with the connection row. A row
+whose archive columns have no authentic entry, or disagree with it, is never
+read (502, `archive reference tampered with`), and an object without a sealed
+hash is a hash mismatch, never an unchecked read.
+
 The audit verifier counts `chains_archived` and `chains_archive_deleted` and does
-not treat their missing rows as a break.
+not treat their missing rows as a break, but only for connections whose archive
+(and deletion) is sealed: the excuse is only as strong as its seal. `archived_at`
+set on a row with no matching `connection.archived` entry excuses nothing, and an
+entry that disagrees with the row is a break. See
+[the audit chain](audit-chain.md#archived-captures).

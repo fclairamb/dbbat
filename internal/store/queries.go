@@ -33,6 +33,10 @@ type QueryRowsResult struct {
 	NextCursor string     `json:"next_cursor,omitempty"`
 	HasMore    bool       `json:"has_more"`
 	TotalRows  int64      `json:"total_rows"`
+	// Verified is set only on rows read from the archive: true when they were
+	// checked against the SHA-256 sealed in the audit chain, false for a legacy
+	// object too large to fetch whole and sealed without chunk digests.
+	Verified *bool `json:"verified,omitempty"`
 }
 
 // QueryRowsCursor represents the pagination cursor state

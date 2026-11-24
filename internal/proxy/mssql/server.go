@@ -37,6 +37,8 @@ type Server struct {
 	store         *store.Store
 	encryptionKey []byte
 	authCache     *cache.AuthCache
+	// loginThrottle is the password-guessing throttle (see shared.LoginThrottle).
+	loginThrottle *shared.LoginThrottle
 	queryStorage  config.QueryStorageConfig
 	dumpConfig    config.DumpConfig
 
@@ -104,6 +106,7 @@ func NewServer(
 	return &Server{
 		tlsConfig:     tlsConfig,
 		store:         dataStore,
+		loginThrottle: shared.NewDefaultLoginThrottle(dataStore, logger, store.ProtocolMSSQL),
 		encryptionKey: encryptionKey,
 		authCache:     authCache,
 		queryStorage:  queryStorage,
@@ -121,6 +124,13 @@ func NewServer(
 // imposes a limit that the grant definition did not itself carry.
 func (s *Server) SetStatementTimeouts(r *shared.StatementTimeoutResolver) {
 	s.statementTimeouts = r
+}
+
+// SetLoginThrottle installs the login throttle the process shares with the
+// REST API. Called by the wiring in main; until then the listener runs its own
+// (see shared.NewDefaultLoginThrottle), so it is never unthrottled.
+func (s *Server) SetLoginThrottle(t *shared.LoginThrottle) {
+	s.loginThrottle = t
 }
 
 // SetApprovalDeps installs the approval-hold collaborators. A server without

@@ -6,15 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -238,250 +236,10 @@ func isAPIKeyAuth(c *gin.Context) bool {
 	return getAuthMethod(c) == authMethodAPIKey
 }
 
-// authFailureTracker throttles password guessing on the credential-checking
-// endpoints. It keeps two counters:
-//
-//   - a backoff per (username, client IP): the escalating delays of
-//     authBackoffDelays. Keying on the source as well as the account is what
-//     stops a stranger who knows a username (admin always exists) from keeping
-//     that account locked out with one wrong password every five minutes: their
-//     failures lock out their own address, not the account.
-//   - a coarse ceiling per username alone (authUsernameCeiling failures per
-//     authUsernameCeilingWindow), the backstop against guessing spread across
-//     many addresses. Crossing it blocks the username from every source until
-//     the window ends, and is logged and audited by the caller (recordFailure
-//     reports the crossing) rather than happening silently.
-type authFailureTracker struct {
-	mu       sync.RWMutex
-	failures map[authFailureKey]*failureRecord
-	ceilings map[string]*ceilingRecord
-}
-
-// authFailureKey is the backoff key: one account as seen from one address.
-type authFailureKey struct {
-	username string
-	ip       string
-}
-
-type failureRecord struct {
-	count       int
-	lastFailure time.Time
-}
-
-// ceilingRecord counts a username's failures, from any source, in a fixed
-// window starting at its first failure.
-type ceilingRecord struct {
-	count       int
-	windowStart time.Time
-}
-
-// Auth failure rate limiting constants
-const (
-	authFailureResetDuration   = 15 * time.Minute
-	authFailureCleanupInterval = 5 * time.Minute
-
-	// authUsernameCeiling failures against one username within
-	// authUsernameCeilingWindow, summed over every source address, put that
-	// username under a guessing burst until the window ends: every wrong
-	// password, from any source, is answered 429 rather than 401, so the
-	// failure feedback stops being useful at scale. The password is still
-	// checked, and a correct one is let through and lifts the ceiling, so the
-	// burst is a backstop against distributed guessing and not a lockout
-	// lever.
-	authUsernameCeiling       = 100
-	authUsernameCeilingWindow = time.Hour
-)
-
-// goroutineNameAuthFailureSweep is what a panic in the stale-entry sweep is
-// logged under. The tracker predates the server's logger and has no access to
-// it, so the sweep reports through slog.Default().
-const goroutineNameAuthFailureSweep = "auth failure tracker sweep"
-
-// Backoff delays based on failure count
-var authBackoffDelays = []struct {
-	minFailures int
-	delay       time.Duration
-}{
-	{10, 5 * time.Minute},
-	{7, 2 * time.Minute},
-	{5, 30 * time.Second},
-	{3, 5 * time.Second},
-}
-
-// newAuthFailureTracker creates a new auth failure tracker
-func newAuthFailureTracker() *authFailureTracker {
-	tracker := &authFailureTracker{
-		failures: make(map[authFailureKey]*failureRecord),
-		ceilings: make(map[string]*ceilingRecord),
-	}
-	go tracker.cleanup()
-	return tracker
-}
-
-// cleanup periodically removes stale entries
-func (t *authFailureTracker) cleanup() {
-	ticker := time.NewTicker(authFailureCleanupInterval)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		// Per turn, so a panic neither ends the process nor retires the sweep:
-		// a tracker that stopped expiring entries would lock users out on stale
-		// failure counts. See safe.RunMaintenance.
-		safe.RunMaintenance(context.Background(), slog.Default(), goroutineNameAuthFailureSweep, func() {
-			t.sweep(time.Now())
-		})
-	}
-}
-
-// sweep drops the entries that no longer throttle anything at now.
-func (t *authFailureTracker) sweep(now time.Time) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	for key, record := range t.failures {
-		if now.Sub(record.lastFailure) > authFailureResetDuration {
-			delete(t.failures, key)
-		}
-	}
-
-	for username, record := range t.ceilings {
-		if now.Sub(record.windowStart) > authUsernameCeilingWindow {
-			delete(t.ceilings, username)
-		}
-	}
-}
-
-// checkRateLimit reports whether username may attempt a password check from
-// ip, under the per-source backoff. Returns (allowed, retryAfter in seconds).
-// The username-wide ceiling is not consulted here: it never stops the
-// password from being checked (see ceilingRetryAfter).
-func (t *authFailureTracker) checkRateLimit(username, ip string) (bool, int) {
-	now := time.Now()
-
-	t.mu.RLock()
-	record, exists := t.failures[authFailureKey{username: username, ip: ip}]
-	var recordCopy failureRecord
-	if exists {
-		recordCopy = *record
-	}
-	t.mu.RUnlock()
-
-	if !exists {
-		return true, 0
-	}
-
-	// Auto-reset after reset duration
-	if now.Sub(recordCopy.lastFailure) > authFailureResetDuration {
-		return true, 0
-	}
-
-	// Find applicable backoff delay
-	for _, backoff := range authBackoffDelays {
-		if recordCopy.count >= backoff.minFailures {
-			blockedUntil := recordCopy.lastFailure.Add(backoff.delay)
-			if now.Before(blockedUntil) {
-				return false, retryAfterSeconds(blockedUntil.Sub(now))
-			}
-			break
-		}
-	}
-
-	return true, 0
-}
-
-// ceilingRetryAfter returns the seconds left in username's guessing burst, or
-// 0 when the username is under its ceiling. During a burst a wrong password
-// is answered 429 with this Retry-After, from every source.
-func (t *authFailureTracker) ceilingRetryAfter(username string) int {
-	now := time.Now()
-
-	t.mu.RLock()
-	ceiling, exists := t.ceilings[username]
-	var ceilingCopy ceilingRecord
-	if exists {
-		ceilingCopy = *ceiling
-	}
-	t.mu.RUnlock()
-
-	if !exists || ceilingCopy.count < authUsernameCeiling {
-		return 0
-	}
-
-	blockedUntil := ceilingCopy.windowStart.Add(authUsernameCeilingWindow)
-	if !now.Before(blockedUntil) {
-		return 0
-	}
-
-	return retryAfterSeconds(blockedUntil.Sub(now))
-}
-
-// retryAfterSeconds rounds a remaining block to whole seconds, at least one.
-func retryAfterSeconds(d time.Duration) int {
-	retryAfter := int(d.Seconds())
-	if retryAfter < 1 {
-		retryAfter = 1
-	}
-
-	return retryAfter
-}
-
-// recordFailure records a failed authentication attempt for username from ip.
-// It returns true exactly once per window: on the failure that brings the
-// username to authUsernameCeiling, so the caller can log and audit it.
-func (t *authFailureTracker) recordFailure(username, ip string) bool {
-	now := time.Now()
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	key := authFailureKey{username: username, ip: ip}
-	record, exists := t.failures[key]
-	switch {
-	case !exists:
-		t.failures[key] = &failureRecord{count: 1, lastFailure: now}
-	case now.Sub(record.lastFailure) > authFailureResetDuration:
-		record.count = 1
-		record.lastFailure = now
-	default:
-		record.count++
-		record.lastFailure = now
-	}
-
-	ceiling, exists := t.ceilings[username]
-	if !exists || now.Sub(ceiling.windowStart) > authUsernameCeilingWindow {
-		ceiling = &ceilingRecord{windowStart: now}
-		t.ceilings[username] = ceiling
-	}
-	ceiling.count++
-
-	return ceiling.count == authUsernameCeiling
-}
-
-// resetFailures clears, on a successful login, the backoff of username from
-// ip and the username-wide ceiling: whoever holds the password has nothing
-// left to guess, so a burst against the account ends with its owner's next
-// correct login. The backoff of the other sources is left alone. It returns
-// the number of failures the ceiling had counted when it was reached, or 0
-// when no guessing burst was active, so the caller can audit the success.
-func (t *authFailureTracker) resetFailures(username, ip string) int {
-	now := time.Now()
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.failures, authFailureKey{username: username, ip: ip})
-
-	ceiling, exists := t.ceilings[username]
-	if !exists {
-		return 0
-	}
-	delete(t.ceilings, username)
-
-	if ceiling.count >= authUsernameCeiling && now.Before(ceiling.windowStart.Add(authUsernameCeilingWindow)) {
-		return ceiling.count
-	}
-
-	return 0
-}
+// authListenerAPI is the listener field of the login-throttle audit entries
+// the REST API writes. The proxies write the same entries, sharing the same
+// counters, with their protocol name there (see shared.LoginThrottle).
+const authListenerAPI = "api"
 
 // checkAuthThrottle applies the per-source backoff before a password check.
 // It writes the 429 and returns false when the attempt is throttled. Test
@@ -492,7 +250,7 @@ func (s *Server) checkAuthThrottle(c *gin.Context, username string) bool {
 		return true
 	}
 
-	allowed, retryAfter := s.authFailureTracker.checkRateLimit(username, c.ClientIP())
+	allowed, retryAfter := s.authFailureTracker.CheckRateLimit(username, c.ClientIP())
 	if !allowed {
 		writeRateLimited(c, retryAfter)
 	}
@@ -509,7 +267,7 @@ func (s *Server) checkAuthThrottle(c *gin.Context, username string) bool {
 func (s *Server) failAuth(c *gin.Context, username, message string) {
 	retryAfter := 0
 	if !s.isTestMode() {
-		retryAfter = s.authFailureTracker.ceilingRetryAfter(username)
+		retryAfter = s.authFailureTracker.CeilingRetryAfter(username)
 	}
 
 	s.noteAuthFailure(c, username)
@@ -526,7 +284,7 @@ func (s *Server) failAuth(c *gin.Context, username, message string) {
 // username to the per-username ceiling, logs and audits the guessing burst.
 func (s *Server) noteAuthFailure(c *gin.Context, username string) {
 	ip := c.ClientIP()
-	if !s.authFailureTracker.recordFailure(username, ip) {
+	if !s.authFailureTracker.RecordFailure(username, ip) {
 		return
 	}
 
@@ -534,8 +292,8 @@ func (s *Server) noteAuthFailure(c *gin.Context, username string) {
 	s.logger.WarnContext(ctx, "username reached the login failure ceiling; wrong passwords are refused from every source",
 		slog.String("username", username),
 		slog.String("client_ip", ip),
-		slog.Int("failures", authUsernameCeiling),
-		slog.Duration("window", authUsernameCeilingWindow))
+		slog.Int("failures", cache.AuthUsernameCeiling),
+		slog.Duration("window", cache.AuthUsernameCeilingWindow))
 
 	if s.store == nil {
 		return
@@ -543,9 +301,10 @@ func (s *Server) noteAuthFailure(c *gin.Context, username string) {
 
 	details, err := json.Marshal(map[string]any{
 		"username":       username,
-		"failures":       authUsernameCeiling,
-		"window_seconds": int(authUsernameCeilingWindow.Seconds()),
+		"failures":       cache.AuthUsernameCeiling,
+		"window_seconds": int(cache.AuthUsernameCeilingWindow.Seconds()),
 		"last_client_ip": ip,
+		"listener":       authListenerAPI,
 	})
 	if err != nil {
 		return
@@ -569,7 +328,7 @@ func (s *Server) noteAuthFailure(c *gin.Context, username string) {
 // logged and audited, so the signal survives the burst being lifted.
 func (s *Server) noteAuthSuccess(c *gin.Context, username string) {
 	ip := c.ClientIP()
-	failures := s.authFailureTracker.resetFailures(username, ip)
+	failures := s.authFailureTracker.ResetFailures(username, ip)
 	if failures == 0 {
 		return
 	}
@@ -588,6 +347,7 @@ func (s *Server) noteAuthSuccess(c *gin.Context, username string) {
 		"username":  username,
 		"failures":  failures,
 		"client_ip": ip,
+		"listener":  authListenerAPI,
 	})
 	if err != nil {
 		return

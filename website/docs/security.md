@@ -45,6 +45,36 @@ account locked out for its owner. Two more limits sit on top:
 
 This prevents brute-force attacks while allowing legitimate users to recover from typos.
 
+#### Database listeners
+
+The PostgreSQL, MySQL/MariaDB, SQL Server and MongoDB listeners accept a dbbat user password, the
+same secret the API checks, so they apply the same throttle, and **share its counters**: a failure on
+a database port and a failure on `POST /auth/login` add up to one guessing budget per username.
+
+- A source in backoff is refused before the password is checked, with the protocol's ordinary
+  authentication error (`authentication failed`, `Access denied`, `Login failed for user`,
+  `AuthenticationFailed`), whatever password it sent. There is no `429` on a database port, and the
+  listener answers this refusal the way it answers a wrong password.
+- Wrong passwords and unknown usernames count as failures; a correct password clears the backoff of
+  its source and lifts the username's ceiling.
+- Reaching the ceiling writes the same `auth.failure_ceiling` audit entry as the API, with a
+  `listener` field (`api`, `postgresql`, `mysql`, `mssql`, `mongodb`) telling where the last failure
+  came in. A correct login that lifts it is audited as `auth.success_during_failure_ceiling`, with
+  the same field.
+- `dbb_` API keys in the password slot are not throttled, as on the API: they are far too long to
+  guess. Oracle accepts API keys only.
+- MongoDB still holds every failed authentication reply for 250 ms; the shared throttle sits in front
+  of both its `PLAIN` and `SCRAM-SHA-256` paths.
+
+The listeners key the backoff on the TCP peer address. dbbat does not speak the PROXY protocol, so
+behind a TCP load balancer every client shares the balancer's address and one client's failures put
+everyone behind it in backoff. Expose the listeners directly, or use a balancer that preserves the
+client address (for example a Kubernetes `Service` with `externalTrafficPolicy: Local`).
+`DBB_TRUSTED_PROXIES` applies to the HTTP API only.
+
+The counters live in the process: several dbbat replicas each count their own. In test mode
+(`DBB_RUN_MODE=test`) failures are counted but never refused, as on the API.
+
 ### Token Types
 
 | Type | Prefix | Lifetime | Use Case |

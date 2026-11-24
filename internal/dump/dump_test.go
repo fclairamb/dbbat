@@ -627,3 +627,18 @@ func TestReader_DirectionFromFlagsOverridesAddressing(t *testing.T) {
 	assert.Equal(t, DirServerToClient, pkt.Direction)
 	assert.Equal(t, []byte{0xAA}, pkt.Data)
 }
+
+func TestCleanupOldFilesDetailedReportsWhatItRemoved(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	name := uuid.New().String() + FileExt
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte("12345"), 0o644))
+	old := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(path, old, old))
+
+	removed, err := CleanupOldFilesDetailed(dir, time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, []RemovedFile{{Name: name, Size: 5}}, removed)
+}

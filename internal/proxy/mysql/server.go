@@ -41,7 +41,9 @@ type Server struct {
 	// storage. nil — the default — keeps them on local disk only.
 	dumpUploader *dump.Uploader
 	authCache    *cache.AuthCache
-	logger       *slog.Logger
+	// loginThrottle is the password-guessing throttle (see shared.LoginThrottle).
+	loginThrottle *shared.LoginThrottle
+	logger        *slog.Logger
 
 	// Shared go-mysql server config used for every accepted connection.
 	gomysqlServer *gomysqlserver.Server
@@ -116,6 +118,7 @@ func NewServer(
 
 	s := &Server{
 		store:         dataStore,
+		loginThrottle: shared.NewDefaultLoginThrottle(dataStore, logger, store.ProtocolMySQL),
 		rowWriter:     rowWriter,
 		encryptionKey: encryptionKey,
 		queryStorage:  queryStorage,
@@ -279,6 +282,13 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 // imposes a limit that the grant definition did not itself carry.
 func (s *Server) SetStatementTimeouts(r *shared.StatementTimeoutResolver) {
 	s.statementTimeouts = r
+}
+
+// SetLoginThrottle installs the login throttle the process shares with the
+// REST API. Called by the wiring in main; until then the listener runs its own
+// (see shared.NewDefaultLoginThrottle), so it is never unthrottled.
+func (s *Server) SetLoginThrottle(t *shared.LoginThrottle) {
+	s.loginThrottle = t
 }
 
 // SetApprovalDeps installs the approval-hold collaborators. A server without

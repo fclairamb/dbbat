@@ -60,12 +60,18 @@ func (s *Session) handleScramContinue(responseTo int32, body bson.Raw) (bool, er
 	if err != nil || !s.scramConv.Valid() {
 		s.logger.InfoContext(s.ctx, "MongoDB SCRAM authentication failed", slog.Any("error", err))
 
+		if s.scramUser != nil {
+			s.server.loginThrottle.Failure(s.ctx, s.scramUser.Username, s.sourceIP())
+		}
+
 		return false, s.failAuth(responseTo)
 	}
 
 	if s.scramUser == nil {
 		return false, s.failAuth(responseTo)
 	}
+
+	s.server.loginThrottle.Success(s.ctx, s.scramUser.Username, s.sourceIP())
 
 	if err := s.authorizeAndEstablish(responseTo, s.scramUser, s.scramUserDBHint); err != nil {
 		return false, err
@@ -94,6 +100,14 @@ func (s *Session) scramCredentialLookup(username string) (scram.StoredCredential
 
 	user, err := s.server.store.GetUserByUsername(s.ctx, bareUser)
 	if err != nil {
+		s.server.loginThrottle.Failure(s.ctx, bareUser, s.sourceIP())
+
+		return scram.StoredCredentials{}, ErrAuthenticationFailed
+	}
+
+	// A source in login backoff gets no salt and no proof check: the
+	// conversation fails here like any other authentication failure.
+	if !s.server.loginThrottle.Allow(s.ctx, user.Username, s.sourceIP()) {
 		return scram.StoredCredentials{}, ErrAuthenticationFailed
 	}
 

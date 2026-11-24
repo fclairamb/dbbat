@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -327,12 +330,52 @@ func (s *retentionSweeper) sweepDumps(ctx context.Context, w config.RetentionWin
 		return
 	}
 
-	deleted, err := dump.CleanupOldFiles(s.cfg.Dump.Dir, w.Dumps)
+	removed, err := dump.CleanupOldFilesDetailed(s.cfg.Dump.Dir, w.Dumps)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "dump cleanup failed", slog.Any("error", err))
-	} else if deleted > 0 {
-		s.logger.InfoContext(ctx, "dump cleanup", slog.Int("deleted", deleted))
+
+		return
 	}
+
+	if len(removed) == 0 {
+		return
+	}
+
+	s.logger.InfoContext(ctx, "dump cleanup", slog.Int("deleted", len(removed)))
+
+	if err := s.store.LogAuditEvents(ctx, dumpDeletedEvents(removed)...); err != nil {
+		s.logger.ErrorContext(ctx, "failed to record the expired captures", slog.Any("error", err))
+	}
+}
+
+// dumpDeletedEvents is one dump.deleted entry per expired capture, source
+// "retention" and no actor. Files whose name is not a connection UID (legacy
+// leftovers) are named by file rather than by UID.
+func dumpDeletedEvents(removed []dump.RemovedFile) []*store.AuditEvent {
+	events := make([]*store.AuditEvent, 0, len(removed))
+
+	for _, f := range removed {
+		details := map[string]any{
+			"source":     "retention",
+			"locations":  []string{"local"},
+			"size_bytes": f.Size,
+			"file":       f.Name,
+		}
+
+		base := strings.TrimSuffix(f.Name, filepath.Ext(f.Name))
+		if uid, err := uuid.Parse(base); err == nil {
+			details["connection_uid"] = uid
+		}
+
+		raw, err := json.Marshal(details)
+		if err != nil {
+			continue
+		}
+
+		events = append(events, &store.AuditEvent{EventType: store.AuditEventDumpDeleted, Details: raw})
+	}
+
+	return events
 }
 
 // Shutdown stops the sweeper. It never waits for an in-flight pass: the batched

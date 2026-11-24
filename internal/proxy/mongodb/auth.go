@@ -16,7 +16,9 @@ import (
 )
 
 // authFailDelay slows brute-force attempts: replies to failed auth are held
-// briefly before the connection is torn down (contract §5).
+// briefly before the connection is torn down (contract §5). It is no counter:
+// parallel connections make it moot, so the shared login throttle
+// (shared.LoginThrottle) sits in front of the password and SCRAM checks too.
 const authFailDelay = 250 * time.Millisecond
 
 // handleSaslStart dispatches a saslStart on its mechanism (contract §5): PLAIN
@@ -209,14 +211,25 @@ func parsePlainPayload(body bson.Raw) (string, string, bool) {
 }
 
 // verifyCredentials checks the cleartext against the user's Argon2id hash, or
-// interprets it as a dbb_ API key.
+// interprets it as a dbb_ API key. A source in login backoff is refused before
+// any hash is computed, with the same failure a wrong password gets (see
+// shared.LoginThrottle). API keys are not throttled.
 func (s *Session) verifyCredentials(username, password string) (*store.User, error) {
 	if isAPIKey(password) {
 		return s.authenticateAPIKey(username, password)
 	}
 
+	throttle := s.server.loginThrottle
+	sourceIP := s.sourceIP()
+
 	user, err := s.server.store.GetUserByUsername(s.ctx, username)
 	if err != nil {
+		throttle.Failure(s.ctx, username, sourceIP)
+
+		return nil, ErrAuthenticationFailed
+	}
+
+	if !throttle.Allow(s.ctx, user.Username, sourceIP) {
 		return nil, ErrAuthenticationFailed
 	}
 
@@ -232,10 +245,23 @@ func (s *Session) verifyCredentials(username, password string) (*store.User, err
 	}
 
 	if verr != nil || !valid {
+		throttle.Failure(s.ctx, user.Username, sourceIP)
+
 		return nil, ErrAuthenticationFailed
 	}
 
+	throttle.Success(s.ctx, user.Username, sourceIP)
+
 	return user, nil
+}
+
+// sourceIP is the client's address, the key of the login throttle.
+func (s *Session) sourceIP() string {
+	if s.clientConn == nil {
+		return ""
+	}
+
+	return shared.SourceIP(s.clientConn.RemoteAddr())
 }
 
 // authenticateAPIKey validates a dbb_ API key and checks it belongs to the

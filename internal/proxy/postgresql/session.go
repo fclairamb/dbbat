@@ -178,7 +178,10 @@ type Session struct {
 	// session ends. nil = local-only captures (the default).
 	dumpUploader *dump.Uploader
 	authCache    *cache.AuthCache
-	tlsConfig    *tls.Config // nil when TLS is disabled
+	// loginThrottle refuses password checks from a source in login backoff
+	// and counts the failures (see shared.LoginThrottle). nil throttles nothing.
+	loginThrottle *shared.LoginThrottle
+	tlsConfig     *tls.Config // nil when TLS is disabled
 
 	// Session state
 	user     *store.User
@@ -1514,7 +1517,7 @@ func (s *Session) ensureRowSink(query *pendingQuery) *shared.QuerySink {
 
 // proxyUpstreamToClient proxies messages from upstream to client.
 //
-//nolint:cyclop // Protocol handling with many message types inherently has high complexity
+//nolint:cyclop,gocognit // Protocol handling with many message types inherently has high complexity
 func (s *Session) proxyUpstreamToClient() error {
 	defer s.markUpstreamRelayEnded()
 
@@ -1537,6 +1540,10 @@ func (s *Session) proxyUpstreamToClient() error {
 		// finishes queries — all of which the client leg also touches. Nothing
 		// in here does socket I/O, so holding the lock across it cannot stall
 		// the client leg on the network.
+		if err := s.refuseUpstreamCopy(msg); err != nil {
+			return err
+		}
+
 		s.bookMu.Lock()
 
 		switch m := msg.(type) {
@@ -1648,6 +1655,24 @@ func (s *Session) proxyUpstreamToClient() error {
 			return verr
 		}
 	}
+}
+
+// refuseUpstreamCopy is the second line of defense for block_copy: the text
+// check on the client's statement can miss a spelling the server still accepts,
+// so a copy the server starts anyway ends the session before the client sees it.
+func (s *Session) refuseUpstreamCopy(msg pgproto3.BackendMessage) error {
+	if s.grant == nil || !s.grant.ShouldBlockCopy() {
+		return nil
+	}
+
+	switch msg.(type) {
+	case *pgproto3.CopyInResponse, *pgproto3.CopyOutResponse:
+		s.logger.WarnContext(s.ctx, "upstream started a COPY on a block_copy grant, closing session")
+
+		return ErrCopyNotPermitted
+	}
+
+	return nil
 }
 
 // simpleQueryResult carries a simple Query's outcome from its terminators to

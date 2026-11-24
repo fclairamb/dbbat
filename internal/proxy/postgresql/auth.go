@@ -58,6 +58,7 @@ func (s *Session) authenticate() error {
 	// Look up user
 	user, err := s.store.GetUserByUsername(s.ctx, username)
 	if err != nil {
+		s.loginThrottle.Failure(s.ctx, username, shared.SourceIP(s.clientConn.RemoteAddr()))
 		s.sendError("authentication failed")
 
 		return fmt.Errorf("user not found: %w", err)
@@ -194,6 +195,15 @@ func (s *Session) verifyPassword() error {
 		return nil
 	}
 
+	// A source in login backoff is refused before any hash is computed, with
+	// the same answer a wrong password gets, whatever the password is.
+	sourceIP := shared.SourceIP(s.clientConn.RemoteAddr())
+	if !s.loginThrottle.Allow(s.ctx, s.user.Username, sourceIP) {
+		s.sendError("authentication failed")
+
+		return ErrInvalidPassword
+	}
+
 	// Verify password (using cache if available)
 	var valid bool
 	if s.authCache != nil {
@@ -204,10 +214,13 @@ func (s *Session) verifyPassword() error {
 	}
 
 	if err != nil || !valid {
+		s.loginThrottle.Failure(s.ctx, s.user.Username, sourceIP)
 		s.sendError("authentication failed")
 
 		return ErrInvalidPassword
 	}
+
+	s.loginThrottle.Success(s.ctx, s.user.Username, sourceIP)
 
 	return nil
 }

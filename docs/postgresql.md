@@ -63,6 +63,17 @@ DBBat sends `AuthenticationCleartextPassword` (`R`) to the client. Inside a TLS 
 
 Both DBBat user passwords (Argon2id) and DBBat API keys (prefix `dbb_`) are accepted as the password. API key verification is independent of the user password path.
 
+## Login throttle
+
+Password logins share the REST API's login throttle and its counters: after
+three failures from one address the address is refused, before the password is
+checked, with the ordinary authentication error, for an escalating delay (5 s up
+to 5 min); a username that reaches 100 failures in an hour, from all addresses,
+is audited as `auth.failure_ceiling` with `"listener": "postgresql"`. API keys are not
+throttled. The backoff is keyed on the TCP peer address: behind a TCP load
+balancer (no PROXY protocol support) every client shares the balancer's address.
+See the security page of the website docs (Database listeners).
+
 ## Finding a session in pg_stat_activity
 
 Every proxied session's `application_name` is dbbat-branded and carries the

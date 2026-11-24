@@ -627,6 +627,25 @@ A store written before this change keeps working: the `connection.closed`
 entries it already holds are compared as they are, and captures sealed before it
 simply have no copy.
 
+### Archived captures
+
+When the [rows archive](archive.md) moves a connection's captured rows to the
+bucket, they leave `query_rows` by design, and the row walk does not count them
+missing. That excuse is only as strong as its seal. `connections.archived_at`,
+`archive_key` and `archive_rows_sha256` are plain columns of an unchained table:
+setting `archived_at` by hand needs no key, and if that alone excused a session,
+whoever can write the store could delete its result rows and still verify clean.
+
+So a connection's captures are counted as `chains_archived` (and not walked) only
+when an authentic `connection.archived` entry exists for it, its MAC valid under
+the chain key, and its key, SHA-256, size and row count equal the row's columns.
+`chains_archive_deleted` takes, in addition, an authentic
+`connection.archive_deleted` entry naming the sealed key. Without such an entry
+the captures are walked as if `archived_at` were NULL, so their missing rows are a
+break. An entry that disagrees with the row is a break of its own: `archive seal
+does not match the connection row: <field> differs`. The archiver always writes
+the entry before the columns, so every connection it archived has one.
+
 ## Coverage
 
 The audit chain covers every column of an `audit_log` row: `uid`, `event_type`,

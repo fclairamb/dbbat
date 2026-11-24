@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -354,6 +355,7 @@ func TestLogin_UsernameCeilingThrottlesWrongPasswordsAndIsAudited(t *testing.T) 
 	require.NoError(t, json.Unmarshal(events[0].Details, &details))
 	assert.Equal(t, "alice", details["username"])
 	assert.Equal(t, "192.0.2.200", details["last_client_ip"])
+	assert.Equal(t, "api", details["listener"])
 }
 
 // The ceiling is not a lockout lever: past it, the owner's correct password
@@ -382,7 +384,8 @@ func TestLogin_UsernameCeilingLetsTheCorrectPasswordThrough(t *testing.T) {
 	require.NoError(t, json.Unmarshal(events[0].Details, &details))
 	assert.Equal(t, "alice", details["username"])
 	assert.Equal(t, "203.0.113.1", details["client_ip"])
-	assert.EqualValues(t, authUsernameCeiling, details["failures"])
+	assert.Equal(t, "api", details["listener"])
+	assert.EqualValues(t, cache.AuthUsernameCeiling, details["failures"])
 
 	// The ceiling is gone: a wrong password from yet another address meets
 	// only the per-source backoff, which has nothing against it.
@@ -403,8 +406,8 @@ func TestLogin_UsernameCeilingLetsTheCorrectPasswordThrough(t *testing.T) {
 func reachCeiling(t *testing.T, server *Server, router *gin.Engine) {
 	t.Helper()
 
-	for i := 0; i < authUsernameCeiling-1; i++ {
-		server.authFailureTracker.recordFailure("alice", fmt.Sprintf("10.9.%d.%d", i/256, i%256))
+	for i := 0; i < cache.AuthUsernameCeiling-1; i++ {
+		server.authFailureTracker.RecordFailure("alice", fmt.Sprintf("10.9.%d.%d", i/256, i%256))
 	}
 
 	w := postLoginFrom(router, "192.0.2.200", "wrong")
@@ -458,10 +461,10 @@ func TestLoginRoutes_PreAuthIPRateLimit(t *testing.T) {
 }
 
 // fillCeiling puts key at the per-username ceiling straight through the
-// tracker: authUsernameCeiling failures from as many distinct addresses.
+// tracker: cache.AuthUsernameCeiling failures from as many distinct addresses.
 func fillCeiling(server *Server, key string) {
-	for i := 0; i < authUsernameCeiling; i++ {
-		server.authFailureTracker.recordFailure(key, fmt.Sprintf("10.8.%d.%d", i/256, i%256))
+	for i := 0; i < cache.AuthUsernameCeiling; i++ {
+		server.authFailureTracker.RecordFailure(key, fmt.Sprintf("10.8.%d.%d", i/256, i%256))
 	}
 }
 

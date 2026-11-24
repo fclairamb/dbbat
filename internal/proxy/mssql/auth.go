@@ -36,7 +36,7 @@ func (s *session) authenticate(ctx context.Context, login *Login7) error {
 	// dbbat user, so the connection row and the audit log keep recording it.
 	username, serverHint := shared.ParseUsername(login.UserName)
 
-	user, err := s.verifyCredentials(ctx, username, login.Password)
+	user, err := s.verifyCredentials(ctx, username, login.Password, shared.SourceIP(s.conn.RemoteAddr()))
 	if err != nil {
 		return err
 	}
@@ -89,17 +89,27 @@ func checkQuotas(grant *store.Grant, usage *cache.UsageHandle) error {
 // verifyCredentials checks the LOGIN7 password against the user's Argon2id
 // hash, or interprets it as an API key when it carries the dbb_ prefix.
 //
-// Every failure — unknown user, wrong password, store outage — comes back as
-// the same ErrAuthFailed, and the caller renders one message for all of them.
-// Telling a caller which half was wrong is the enumeration oracle dbbat does
-// not give anywhere else either.
-func (s *session) verifyCredentials(ctx context.Context, username, password string) (*store.User, error) {
+// Every failure — unknown user, wrong password, store outage, a source in
+// login backoff — comes back as the same ErrAuthFailed, and the caller renders
+// one message for all of them. Telling a caller which half was wrong is the
+// enumeration oracle dbbat does not give anywhere else either. sourceIP keys
+// the login throttle; a source in backoff is refused before any hash is
+// computed. API keys are not throttled.
+func (s *session) verifyCredentials(ctx context.Context, username, password, sourceIP string) (*store.User, error) {
 	if isAPIKey(password) {
 		return s.authenticateAPIKey(ctx, username, password)
 	}
 
+	throttle := s.server.loginThrottle
+
 	user, err := s.server.store.GetUserByUsername(ctx, username)
 	if err != nil {
+		throttle.Failure(ctx, username, sourceIP)
+
+		return nil, ErrAuthFailed
+	}
+
+	if !throttle.Allow(ctx, user.Username, sourceIP) {
 		return nil, ErrAuthFailed
 	}
 
@@ -115,8 +125,12 @@ func (s *session) verifyCredentials(ctx context.Context, username, password stri
 	}
 
 	if verifErr != nil || !valid {
+		throttle.Failure(ctx, user.Username, sourceIP)
+
 		return nil, ErrAuthFailed
 	}
+
+	throttle.Success(ctx, user.Username, sourceIP)
 
 	return user, nil
 }

@@ -274,7 +274,7 @@ func (a *Archiver) ArchiveConnection(ctx context.Context, cand store.ArchiveCand
 		return seal, fmt.Errorf("open archive object: %w", err)
 	}
 
-	hw := &hashingWriter{w: bw, h: sha256.New()}
+	hw := &hashingWriter{w: bw, h: sha256.New(), chunks: newChunkHasher(ChunkBytes)}
 
 	pw := parquet.NewGenericWriter[RowRecord](hw,
 		parquet.Compression(&zstd.Codec{}),
@@ -354,6 +354,14 @@ func (a *Archiver) ArchiveConnection(ctx context.Context, cand store.ArchiveCand
 
 	seal.Bytes = hw.n
 	seal.SHA256 = hex.EncodeToString(hw.h.Sum(nil))
+
+	// An object read over range requests is checked chunk by chunk; a smaller
+	// one is fetched whole and needs only the whole-object hash.
+	if hw.n > WholeObjectLimit {
+		seal.ChunkBytes = ChunkBytes
+		seal.ChunkSHA256 = hw.chunks.Sums()
+	}
+
 	seal.Rows = position
 	seal.Statements = int64(len(offsets))
 
@@ -455,15 +463,19 @@ func (a *Archiver) fileDir() string {
 	return a.dir
 }
 
+// hashingWriter computes the whole-object SHA-256, the per-chunk digests and
+// the size of what it writes.
 type hashingWriter struct {
-	w io.Writer
-	h hash.Hash
-	n int64
+	w      io.Writer
+	h      hash.Hash
+	chunks *chunkHasher
+	n      int64
 }
 
 func (h *hashingWriter) Write(p []byte) (int, error) {
 	n, err := h.w.Write(p)
 	h.h.Write(p[:n])
+	h.chunks.Write(p[:n])
 	h.n += int64(n)
 
 	return n, err

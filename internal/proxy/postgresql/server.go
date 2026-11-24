@@ -29,7 +29,9 @@ type Server struct {
 	// storage. nil — the default — keeps them on local disk only.
 	dumpUploader *dump.Uploader
 	authCache    *cache.AuthCache
-	logger       *slog.Logger
+	// loginThrottle is the password-guessing throttle (see shared.LoginThrottle).
+	loginThrottle *shared.LoginThrottle
+	logger        *slog.Logger
 
 	// rowWriter batches captured result rows off the capture path. Defaults
 	// to a writer private to this server; main.go replaces it with the
@@ -108,6 +110,7 @@ func NewServer(
 
 	return &Server{
 		store:         dataStore,
+		loginThrottle: shared.NewDefaultLoginThrottle(dataStore, logger, store.ProtocolPostgreSQL),
 		rowWriter:     rowWriter,
 		encryptionKey: encryptionKey,
 		queryStorage:  queryStorage,
@@ -127,6 +130,13 @@ func NewServer(
 // imposes a limit that the grant definition did not itself carry.
 func (s *Server) SetStatementTimeouts(r *shared.StatementTimeoutResolver) {
 	s.statementTimeouts = r
+}
+
+// SetLoginThrottle installs the login throttle the process shares with the
+// REST API. Called by the wiring in main; until then the listener runs its own
+// (see shared.NewDefaultLoginThrottle), so it is never unthrottled.
+func (s *Server) SetLoginThrottle(t *shared.LoginThrottle) {
+	s.loginThrottle = t
 }
 
 // SetApprovalDeps installs the approval-hold collaborators. Called by the
@@ -295,6 +305,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.dumpConfig, s.authCache, s.tlsConfig, s.rowWriter)
 	session.approvalDeps = s.approvalDeps
+	session.loginThrottle = s.loginThrottle
 	session.cancels = s.cancels
 	session.statementTimeouts = s.statementTimeouts
 	session.dumpUploader = s.dumpUploader
