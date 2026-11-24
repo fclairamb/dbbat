@@ -1,32 +1,17 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
   useUserGroups,
-  useCreateUserGroup,
-  useUpdateUserGroup,
   useDeleteUserGroup,
   useUsers,
   type UserGroup,
-  type CreateUserGroupRequest,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
-import { MultiSelect } from "@/components/shared/MultiSelect";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -51,8 +36,6 @@ function UserGroupsPage() {
   const { data: groups = [], isLoading } = useUserGroups({ enabled: isAdmin });
   const { data: users = [] } = useUsers();
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editing, setEditing] = useState<UserGroup | null>(null);
   const [deleting, setDeleting] = useState<UserGroup | null>(null);
 
   const remove = useDeleteUserGroup({
@@ -72,7 +55,18 @@ function UserGroupsPage() {
       header: "Name",
       cell: (g: UserGroup) => (
         <div className="flex flex-col">
-          <span className="font-medium">{g.name}</span>
+          {isAdmin ? (
+            <Link
+              to="/user-groups/$uid"
+              params={{ uid: g.uid }}
+              className="font-medium hover:underline"
+              data-testid={`user-group-link-${g.uid}`}
+            >
+              {g.name}
+            </Link>
+          ) : (
+            <span className="font-medium">{g.name}</span>
+          )}
           {g.description && (
             <span className="text-xs text-muted-foreground">
               {g.description}
@@ -107,15 +101,14 @@ function UserGroupsPage() {
         isAdmin ? (
           <div className="flex gap-1 justify-end">
             <Button
+              asChild
               size="sm"
               variant="ghost"
-              onClick={() => {
-                setEditing(g);
-                setDialogOpen(true);
-              }}
               data-testid={`edit-user-group-${g.uid}`}
             >
-              <Pencil className="h-4 w-4" />
+              <Link to="/user-groups/$uid" params={{ uid: g.uid }}>
+                <Pencil className="h-4 w-4" />
+              </Link>
             </Button>
             <Button
               size="sm"
@@ -137,30 +130,12 @@ function UserGroupsPage() {
         description="Organizational groups (data-analysts, SRE, …) used to scope grant definitions. Distinct from roles, which are functional."
         actions={
           isAdmin && (
-            <Dialog
-              open={dialogOpen}
-              onOpenChange={(o) => {
-                setDialogOpen(o);
-                if (!o) setEditing(null);
-              }}
-            >
-              <DialogTrigger asChild>
-                <Button data-testid="create-user-group-button">
-                  <Plus className="h-4 w-4 mr-2" />
-                  New Group
-                </Button>
-              </DialogTrigger>
-              {dialogOpen && (
-                <GroupDialog
-                  key={editing?.uid ?? "new"}
-                  editing={editing}
-                  onClose={() => {
-                    setDialogOpen(false);
-                    setEditing(null);
-                  }}
-                />
-              )}
-            </Dialog>
+            <Button asChild data-testid="create-user-group-button">
+              <Link to="/user-groups/new">
+                <Plus className="h-4 w-4 mr-2" />
+                New Group
+              </Link>
+            </Button>
           )
         }
       />
@@ -198,112 +173,5 @@ function UserGroupsPage() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
-  );
-}
-
-function GroupDialog({
-  editing,
-  onClose,
-}: {
-  editing: UserGroup | null;
-  onClose: () => void;
-}) {
-  const { data: users = [] } = useUsers();
-
-  const [name, setName] = useState(editing?.name ?? "");
-  const [description, setDescription] = useState(editing?.description ?? "");
-  const [memberUids, setMemberUids] = useState<string[]>(
-    editing?.member_uids ?? []
-  );
-
-  const create = useCreateUserGroup({
-    onSuccess: () => {
-      toast.success("Group created");
-      onClose();
-    },
-    onError: (e) => toast.error(e.message),
-  });
-  const update = useUpdateUserGroup({
-    onSuccess: () => {
-      toast.success("Group updated");
-      onClose();
-    },
-    onError: (e) => toast.error(e.message),
-  });
-
-  const onSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-
-    const body: CreateUserGroupRequest = {
-      name,
-      description,
-      member_uids: memberUids,
-    };
-
-    if (editing) {
-      update.mutate({ uid: editing.uid, body });
-    } else {
-      create.mutate(body);
-    }
-  };
-
-  return (
-    <DialogContent>
-      <form onSubmit={onSubmit}>
-        <DialogHeader>
-          <DialogTitle>{editing ? "Edit group" : "New group"}</DialogTitle>
-          <DialogDescription>
-            Groups let a grant definition apply to a subset of users instead of
-            everyone.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
-          <div className="space-y-2">
-            <Label htmlFor="group-name">Name</Label>
-            <Input
-              id="group-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="data-analysts"
-              maxLength={64}
-              required
-              data-testid="user-group-name"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="group-desc">Description</Label>
-            <Input
-              id="group-desc"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Analysts who self-serve read-only access"
-              data-testid="user-group-description"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Members</Label>
-            <MultiSelect
-              options={users.map((u) => ({ value: u.uid, label: u.username }))}
-              selected={memberUids}
-              onChange={setMemberUids}
-              placeholder="No members"
-              testId="user-group-members"
-            />
-          </div>
-        </div>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            type="submit"
-            disabled={create.isPending || update.isPending}
-            data-testid="user-group-submit"
-          >
-            {editing ? "Save" : "Create"}
-          </Button>
-        </DialogFooter>
-      </form>
-    </DialogContent>
   );
 }

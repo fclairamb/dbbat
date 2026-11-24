@@ -1,5 +1,5 @@
 import { type Page } from "@playwright/test";
-import { test, expect } from "./fixtures";
+import { test, expect, loginAs } from "./fixtures";
 
 /**
  * Coverage for user groups and the grant-definition scoping they enable.
@@ -12,9 +12,9 @@ import { test, expect } from "./fixtures";
 const GROUPS_URL = "user-groups";
 const DEFS_URL = "grant-definitions";
 
-async function openCreateGroupDialog(page: Page) {
+async function openCreateGroupPage(page: Page) {
   await page.getByTestId("create-user-group-button").click();
-  await page.waitForSelector('[role="dialog"]');
+  await expect(page.getByTestId("new-user-group-page")).toBeVisible();
   await expect(page.getByTestId("user-group-name")).toBeVisible();
 }
 
@@ -28,7 +28,7 @@ test.describe("User Groups", () => {
     await page.waitForLoadState("networkidle");
     await expect(page).toHaveURL(/\/user-groups/);
 
-    await openCreateGroupDialog(page);
+    await openCreateGroupPage(page);
     await page.getByTestId("user-group-name").fill(name);
     await page
       .getByTestId("user-group-description")
@@ -60,7 +60,7 @@ test.describe("User Groups", () => {
     await page.goto(GROUPS_URL);
     await page.waitForLoadState("networkidle");
 
-    await openCreateGroupDialog(page);
+    await openCreateGroupPage(page);
     await page.getByTestId("user-group-name").fill(groupName);
     await page.getByTestId("user-group-submit").click();
     await expect(page.getByText(groupName)).toBeVisible();
@@ -69,7 +69,7 @@ test.describe("User Groups", () => {
     await page.waitForLoadState("networkidle");
 
     await page.getByTestId("create-grant-definition-button").click();
-    await page.waitForSelector('[role="dialog"]');
+    await expect(page.getByTestId("new-definition-page")).toBeVisible();
 
     const groupPicker = page.getByTestId("grant-definition-user-groups");
     await expect(groupPicker).toBeVisible();
@@ -96,7 +96,7 @@ test.describe("User Groups", () => {
 
     await page.goto(GROUPS_URL);
     await page.waitForLoadState("networkidle");
-    await openCreateGroupDialog(page);
+    await openCreateGroupPage(page);
     await page.getByTestId("user-group-name").fill(groupName);
     await page.getByTestId("user-group-submit").click();
     await expect(page.getByText(groupName)).toBeVisible();
@@ -104,7 +104,7 @@ test.describe("User Groups", () => {
     await page.goto(DEFS_URL);
     await page.waitForLoadState("networkidle");
     await page.getByTestId("create-grant-definition-button").click();
-    await page.waitForSelector('[role="dialog"]');
+    await expect(page.getByTestId("new-definition-page")).toBeVisible();
 
     await page.getByTestId("grant-definition-name").fill(defName);
     await page.getByTestId("grant-definition-duration-value").fill("2");
@@ -124,11 +124,55 @@ test.describe("User Groups", () => {
     await page.locator(`[data-testid^="edit-grant-definition-"]`).first();
     const editButton = row.locator('[data-testid^="edit-grant-definition-"]');
     await editButton.click();
-    await page.waitForSelector('[role="dialog"]');
+    await expect(page.getByTestId("edit-definition-page")).toBeVisible();
 
     const checkbox = page.getByTestId("grant-definition-user-groups").locator(
       'button[role="checkbox"][data-state="checked"]'
     );
     await expect(checkbox).toHaveCount(1);
+  });
+
+  test("user group edit page opens by URL, survives reload and back returns to the list", async ({
+    authenticatedPage: page,
+  }) => {
+    const name = `deeplink-${Date.now()}`;
+    await page.goto(GROUPS_URL);
+    await page.waitForLoadState("networkidle");
+    await openCreateGroupPage(page);
+    await page.getByTestId("user-group-name").fill(name);
+    await page.getByTestId("user-group-submit").click();
+    await expect(page).toHaveURL(/\/user-groups\/?$/);
+
+    const row = page.locator("tr", { hasText: name });
+    await row.locator('[data-testid^="edit-user-group-"]').click();
+    await expect(page.getByTestId("edit-user-group-page")).toBeVisible();
+    const url = page.url();
+    expect(url).toMatch(/\/user-groups\/[^/]+$/);
+
+    await page.reload();
+    await expect(page.getByTestId("user-group-name")).toHaveValue(name);
+
+    // Back returns to the list without saving the unsaved edit.
+    await page.getByTestId("user-group-name").fill("never-saved");
+    await page.goBack();
+    await expect(page).toHaveURL(/\/user-groups\/?$/);
+    await expect(page.getByText(name)).toBeVisible();
+    await expect(page.getByText("never-saved")).toHaveCount(0);
+  });
+
+  test("an unknown uid shows the not-found state", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto(`${GROUPS_URL}/00000000-0000-0000-0000-000000000000`);
+    await expect(page.getByTestId("entity-not-found")).toBeVisible();
+    await expect(page.getByTestId("user-group-name")).toHaveCount(0);
+  });
+
+  test("a viewer is refused on the edit routes", async ({ page }) => {
+    await loginAs(page, "viewer", "viewer");
+    await page.goto(`${GROUPS_URL}/new`);
+    await expect(page.getByText("Access Denied")).toBeVisible();
+    await page.goto(`${GROUPS_URL}/00000000-0000-0000-0000-000000000000`);
+    await expect(page.getByText("Access Denied")).toBeVisible();
   });
 });

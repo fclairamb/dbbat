@@ -25,9 +25,13 @@ import { Route as AuthenticatedGrantsIndexRouteImport } from './routes/_authenti
 import { Route as AuthenticatedQueriesIndexRouteImport } from './routes/_authenticated/queries/index'
 import { Route as AuthenticatedQueriesUidRouteImport } from './routes/_authenticated/queries/$uid'
 import { Route as AuthenticatedServerGroupsIndexRouteImport } from './routes/_authenticated/server-groups/index'
+import { Route as AuthenticatedServerGroupsUidRouteImport } from './routes/_authenticated/server-groups/$uid'
+import { Route as AuthenticatedServerGroupsNewRouteImport } from './routes/_authenticated/server-groups/new'
 import { Route as AuthenticatedServersIndexRouteImport } from './routes/_authenticated/servers/index'
 import { Route as AuthenticatedSettingsIndexRouteImport } from './routes/_authenticated/settings/index'
 import { Route as AuthenticatedUserGroupsIndexRouteImport } from './routes/_authenticated/user-groups/index'
+import { Route as AuthenticatedUserGroupsUidRouteImport } from './routes/_authenticated/user-groups/$uid'
+import { Route as AuthenticatedUserGroupsNewRouteImport } from './routes/_authenticated/user-groups/new'
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
 
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
@@ -118,6 +122,18 @@ const AuthenticatedServerGroupsIndexRoute =
     path: '/server-groups/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedServerGroupsUidRoute =
+  AuthenticatedServerGroupsUidRouteImport.update({
+    id: '/server-groups/$uid',
+    path: '/server-groups/$uid',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedServerGroupsNewRoute =
+  AuthenticatedServerGroupsNewRouteImport.update({
+    id: '/server-groups/new',
+    path: '/server-groups/new',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedServersIndexRoute =
   AuthenticatedServersIndexRouteImport.update({
     id: '/servers/',
@@ -136,6 +152,18 @@ const AuthenticatedUserGroupsIndexRoute =
     path: '/user-groups/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedUserGroupsUidRoute =
+  AuthenticatedUserGroupsUidRouteImport.update({
+    id: '/user-groups/$uid',
+    path: '/user-groups/$uid',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedUserGroupsNewRoute =
+  AuthenticatedUserGroupsNewRouteImport.update({
+    id: '/user-groups/new',
+    path: '/user-groups/new',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
   id: '/users/',
   path: '/users/',
@@ -149,6 +177,10 @@ export interface FileRoutesByFullPath {
   '/profile': typeof AuthenticatedProfileRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
+  '/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
+  '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
+  '/user-groups/$uid': typeof AuthenticatedUserGroupsUidRoute
+  '/user-groups/new': typeof AuthenticatedUserGroupsNewRoute
   '/api-keys/': typeof AuthenticatedApiKeysIndexRoute
   '/audit/': typeof AuthenticatedAuditIndexRoute
   '/connections/': typeof AuthenticatedConnectionsIndexRoute
@@ -170,6 +202,10 @@ export interface FileRoutesByTo {
   '/': typeof AuthenticatedIndexRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
+  '/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
+  '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
+  '/user-groups/$uid': typeof AuthenticatedUserGroupsUidRoute
+  '/user-groups/new': typeof AuthenticatedUserGroupsNewRoute
   '/api-keys': typeof AuthenticatedApiKeysIndexRoute
   '/audit': typeof AuthenticatedAuditIndexRoute
   '/connections': typeof AuthenticatedConnectionsIndexRoute
@@ -193,6 +229,10 @@ export interface FileRoutesById {
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/_authenticated/queries/$uid': typeof AuthenticatedQueriesUidRoute
+  '/_authenticated/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
+  '/_authenticated/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
+  '/_authenticated/user-groups/$uid': typeof AuthenticatedUserGroupsUidRoute
+  '/_authenticated/user-groups/new': typeof AuthenticatedUserGroupsNewRoute
   '/_authenticated/api-keys/': typeof AuthenticatedApiKeysIndexRoute
   '/_authenticated/audit/': typeof AuthenticatedAuditIndexRoute
   '/_authenticated/connections/': typeof AuthenticatedConnectionsIndexRoute
@@ -216,6 +256,10 @@ export interface FileRouteTypes {
     | '/profile'
     | '/connections/$uid'
     | '/queries/$uid'
+    | '/server-groups/$uid'
+    | '/server-groups/new'
+    | '/user-groups/$uid'
+    | '/user-groups/new'
     | '/api-keys/'
     | '/audit/'
     | '/connections/'
@@ -237,6 +281,10 @@ export interface FileRouteTypes {
     | '/'
     | '/connections/$uid'
     | '/queries/$uid'
+    | '/server-groups/$uid'
+    | '/server-groups/new'
+    | '/user-groups/$uid'
+    | '/user-groups/new'
     | '/api-keys'
     | '/audit'
     | '/connections'
@@ -259,6 +307,10 @@ export interface FileRouteTypes {
     | '/_authenticated/'
     | '/_authenticated/connections/$uid'
     | '/_authenticated/queries/$uid'
+    | '/_authenticated/server-groups/$uid'
+    | '/_authenticated/server-groups/new'
+    | '/_authenticated/user-groups/$uid'
+    | '/_authenticated/user-groups/new'
     | '/_authenticated/api-keys/'
     | '/_authenticated/audit/'
     | '/_authenticated/connections/'
@@ -393,6 +445,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedServerGroupsIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/server-groups/$uid': {
+      id: '/_authenticated/server-groups/$uid'
+      path: '/server-groups/$uid'
+      fullPath: '/server-groups/$uid'
+      preLoaderRoute: typeof AuthenticatedServerGroupsUidRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/server-groups/new': {
+      id: '/_authenticated/server-groups/new'
+      path: '/server-groups/new'
+      fullPath: '/server-groups/new'
+      preLoaderRoute: typeof AuthenticatedServerGroupsNewRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/servers/': {
       id: '/_authenticated/servers/'
       path: '/servers'
@@ -414,6 +480,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedUserGroupsIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/user-groups/$uid': {
+      id: '/_authenticated/user-groups/$uid'
+      path: '/user-groups/$uid'
+      fullPath: '/user-groups/$uid'
+      preLoaderRoute: typeof AuthenticatedUserGroupsUidRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/user-groups/new': {
+      id: '/_authenticated/user-groups/new'
+      path: '/user-groups/new'
+      fullPath: '/user-groups/new'
+      preLoaderRoute: typeof AuthenticatedUserGroupsNewRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/users/': {
       id: '/_authenticated/users/'
       path: '/users'
@@ -430,6 +510,10 @@ interface AuthenticatedRouteChildren {
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedConnectionsUidRoute: typeof AuthenticatedConnectionsUidRoute
   AuthenticatedQueriesUidRoute: typeof AuthenticatedQueriesUidRoute
+  AuthenticatedServerGroupsUidRoute: typeof AuthenticatedServerGroupsUidRoute
+  AuthenticatedServerGroupsNewRoute: typeof AuthenticatedServerGroupsNewRoute
+  AuthenticatedUserGroupsUidRoute: typeof AuthenticatedUserGroupsUidRoute
+  AuthenticatedUserGroupsNewRoute: typeof AuthenticatedUserGroupsNewRoute
   AuthenticatedApiKeysIndexRoute: typeof AuthenticatedApiKeysIndexRoute
   AuthenticatedAuditIndexRoute: typeof AuthenticatedAuditIndexRoute
   AuthenticatedConnectionsIndexRoute: typeof AuthenticatedConnectionsIndexRoute
@@ -451,6 +535,10 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedConnectionsUidRoute: AuthenticatedConnectionsUidRoute,
   AuthenticatedQueriesUidRoute: AuthenticatedQueriesUidRoute,
+  AuthenticatedServerGroupsUidRoute: AuthenticatedServerGroupsUidRoute,
+  AuthenticatedServerGroupsNewRoute: AuthenticatedServerGroupsNewRoute,
+  AuthenticatedUserGroupsUidRoute: AuthenticatedUserGroupsUidRoute,
+  AuthenticatedUserGroupsNewRoute: AuthenticatedUserGroupsNewRoute,
   AuthenticatedApiKeysIndexRoute: AuthenticatedApiKeysIndexRoute,
   AuthenticatedAuditIndexRoute: AuthenticatedAuditIndexRoute,
   AuthenticatedConnectionsIndexRoute: AuthenticatedConnectionsIndexRoute,
