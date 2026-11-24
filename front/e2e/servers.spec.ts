@@ -520,6 +520,9 @@ test.describe("Servers Management", () => {
     await expect(
       authenticatedPage.getByTestId("database-rename-section"),
     ).toBeVisible();
+
+    // Nothing was renamed: the list still holds the original name.
+    await authenticatedPage.goto("servers");
     await expect(
       authenticatedPage.locator("tr", { hasText: name }).first(),
     ).toBeVisible();

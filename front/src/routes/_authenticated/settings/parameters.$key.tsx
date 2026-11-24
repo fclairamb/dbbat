@@ -21,7 +21,12 @@ function EditParameterPage() {
   if (!isAdmin) return <AccessDenied requiredRole="admin" />;
   if (isLoading) return <PageLoader />;
 
-  const parameter = params?.find((p) => parameterRouteKey(p) === key);
+  // The router hands the segment over decoded on a client-side navigation and,
+  // depending on the reload path, still percent-encoded: accept both.
+  const parameter = params?.find((p) => {
+    const k = parameterRouteKey(p);
+    return k === key || encodeURIComponent(k) === key;
+  });
   if (!parameter) {
     return (
       <EntityNotFound
@@ -31,5 +36,13 @@ function EditParameterPage() {
       />
     );
   }
-  return <ParameterForm key={parameter.uid} parameter={parameter} />;
+  // Keyed on the stored value too: the list may have been cached before the
+  // last save, and the form must re-seed from the fresh row rather than edit a
+  // stale one.
+  return (
+    <ParameterForm
+      key={`${parameter.uid}:${parameter.value}`}
+      parameter={parameter}
+    />
+  );
 }

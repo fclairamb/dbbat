@@ -196,6 +196,9 @@ test.describe("Settings — parameter edit route", () => {
       .first()
       .click();
     await expect(page.getByTestId("edit-parameter-page")).toBeVisible();
+    // The list may have been cached before the last save; the page re-seeds
+    // from the refetched row, so read the value once it has settled.
+    await page.waitForLoadState("networkidle");
   }
 
   test("the edit page opens by URL, survives reload and back returns to settings", async ({
