@@ -24,6 +24,7 @@ import { Route as AuthenticatedGrantDefinitionsUidRouteImport } from './routes/_
 import { Route as AuthenticatedGrantDefinitionsNewRouteImport } from './routes/_authenticated/grant-definitions/new'
 import { Route as AuthenticatedGrantRequestsIndexRouteImport } from './routes/_authenticated/grant-requests/index'
 import { Route as AuthenticatedGrantsIndexRouteImport } from './routes/_authenticated/grants/index'
+import { Route as AuthenticatedGrantsNewRouteImport } from './routes/_authenticated/grants/new'
 import { Route as AuthenticatedQueriesIndexRouteImport } from './routes/_authenticated/queries/index'
 import { Route as AuthenticatedQueriesUidRouteImport } from './routes/_authenticated/queries/$uid'
 import { Route as AuthenticatedServerGroupsIndexRouteImport } from './routes/_authenticated/server-groups/index'
@@ -123,6 +124,11 @@ const AuthenticatedGrantsIndexRoute =
     path: '/grants/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedGrantsNewRoute = AuthenticatedGrantsNewRouteImport.update({
+  id: '/grants/new',
+  path: '/grants/new',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 const AuthenticatedQueriesIndexRoute =
   AuthenticatedQueriesIndexRouteImport.update({
     id: '/queries/',
@@ -216,6 +222,7 @@ export interface FileRoutesByFullPath {
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/grant-definitions/$uid': typeof AuthenticatedGrantDefinitionsUidRoute
   '/grant-definitions/new': typeof AuthenticatedGrantDefinitionsNewRoute
+  '/grants/new': typeof AuthenticatedGrantsNewRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
   '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
@@ -247,6 +254,7 @@ export interface FileRoutesByTo {
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/grant-definitions/$uid': typeof AuthenticatedGrantDefinitionsUidRoute
   '/grant-definitions/new': typeof AuthenticatedGrantDefinitionsNewRoute
+  '/grants/new': typeof AuthenticatedGrantsNewRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
   '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
@@ -280,6 +288,7 @@ export interface FileRoutesById {
   '/_authenticated/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/_authenticated/grant-definitions/$uid': typeof AuthenticatedGrantDefinitionsUidRoute
   '/_authenticated/grant-definitions/new': typeof AuthenticatedGrantDefinitionsNewRoute
+  '/_authenticated/grants/new': typeof AuthenticatedGrantsNewRoute
   '/_authenticated/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/_authenticated/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
   '/_authenticated/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
@@ -313,6 +322,7 @@ export interface FileRouteTypes {
     | '/connections/$uid'
     | '/grant-definitions/$uid'
     | '/grant-definitions/new'
+    | '/grants/new'
     | '/queries/$uid'
     | '/server-groups/$uid'
     | '/server-groups/new'
@@ -344,6 +354,7 @@ export interface FileRouteTypes {
     | '/connections/$uid'
     | '/grant-definitions/$uid'
     | '/grant-definitions/new'
+    | '/grants/new'
     | '/queries/$uid'
     | '/server-groups/$uid'
     | '/server-groups/new'
@@ -376,6 +387,7 @@ export interface FileRouteTypes {
     | '/_authenticated/connections/$uid'
     | '/_authenticated/grant-definitions/$uid'
     | '/_authenticated/grant-definitions/new'
+    | '/_authenticated/grants/new'
     | '/_authenticated/queries/$uid'
     | '/_authenticated/server-groups/$uid'
     | '/_authenticated/server-groups/new'
@@ -512,6 +524,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedGrantsIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/grants/new': {
+      id: '/_authenticated/grants/new'
+      path: '/grants/new'
+      fullPath: '/grants/new'
+      preLoaderRoute: typeof AuthenticatedGrantsNewRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/queries/': {
       id: '/_authenticated/queries/'
       path: '/queries'
@@ -627,6 +646,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedConnectionsUidRoute: typeof AuthenticatedConnectionsUidRoute
   AuthenticatedGrantDefinitionsUidRoute: typeof AuthenticatedGrantDefinitionsUidRoute
   AuthenticatedGrantDefinitionsNewRoute: typeof AuthenticatedGrantDefinitionsNewRoute
+  AuthenticatedGrantsNewRoute: typeof AuthenticatedGrantsNewRoute
   AuthenticatedQueriesUidRoute: typeof AuthenticatedQueriesUidRoute
   AuthenticatedServerGroupsUidRoute: typeof AuthenticatedServerGroupsUidRoute
   AuthenticatedServerGroupsNewRoute: typeof AuthenticatedServerGroupsNewRoute
@@ -658,6 +678,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedConnectionsUidRoute: AuthenticatedConnectionsUidRoute,
   AuthenticatedGrantDefinitionsUidRoute: AuthenticatedGrantDefinitionsUidRoute,
   AuthenticatedGrantDefinitionsNewRoute: AuthenticatedGrantDefinitionsNewRoute,
+  AuthenticatedGrantsNewRoute: AuthenticatedGrantsNewRoute,
   AuthenticatedQueriesUidRoute: AuthenticatedQueriesUidRoute,
   AuthenticatedServerGroupsUidRoute: AuthenticatedServerGroupsUidRoute,
   AuthenticatedServerGroupsNewRoute: AuthenticatedServerGroupsNewRoute,
