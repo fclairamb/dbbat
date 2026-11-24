@@ -236,25 +236,42 @@ func TestSessionClose_LastDMLIsSealedByItsOwnResponse(t *testing.T) {
 // prefix among them — arrives here claiming to be an OER.
 //
 // For a *success* OER, which is what this replays, the bit is still the only
-// thing separating those, and it stays required: there is no error text such a
-// run could be proved with. A later measurement found that failures do arrive
-// here without the bit and carry a diagnostic that proves them — see
-// failed_stmt_replay_test.go, which pins how narrow that opening is.
+// thing separating those **inside a row stream**, and it stays required there:
+// there is no error text such a run could be proved with. A later measurement
+// found that failures do arrive here without the bit and carry a diagnostic
+// that proves them — see failed_stmt_replay_test.go, which pins how narrow that
+// opening is. Outside a row stream a bit-less success is what python-oracledb's
+// DML re-executions end on, and it completes there under the cursor bounds —
+// see TestDumpReplay_BitlessStatusOEREndsItsCall for the measurement.
 func TestHandleOERStatus_StillRequiresTheEndOfCallBit(t *testing.T) {
 	t.Parallel()
 
-	t.Run("no bit, no completion", func(t *testing.T) {
+	t.Run("no bit, mid row stream, no completion", func(t *testing.T) {
 		t.Parallel()
 
 		s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
-		require.NoError(t, s.handleOALL8(buildOALL8("UPDATE emp SET sal = 1", nil, 4)))
+		require.NoError(t, s.handleOALL8(buildOALL8("SELECT sal FROM emp", nil, 4)))
+		s.tracker.pendingQuery.cursor.columns = []columnDef{{Name: "SAL"}}
 
 		// The very bytes handleResponse now completes on, arriving as a
-		// standalone marker instead of inside a Response.
+		// standalone marker in the middle of a fetch.
 		s.handleOERStatus(pythonThinOERBytes)
 
 		assert.NotNil(t, s.tracker.pendingQuery,
-			"a bare 0x04 run without the end-of-call bit must not complete a query")
+			"a bare 0x04 run without the end-of-call bit must not complete a query mid-fetch")
+	})
+
+	t.Run("no bit, no row stream, completion with the row count", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+		recorder := newRecordingCompletionStore()
+		s.completionStore = recorder
+		require.NoError(t, s.handleOALL8(buildOALL8("UPDATE emp SET sal = 1", nil, 4)))
+
+		s.handleOERStatus(pythonThinOERBytes)
+
+		assert.Nil(t, s.tracker.pendingQuery, "a DML re-execution's status ends its call")
 	})
 
 	t.Run("with the bit, completion as before", func(t *testing.T) {

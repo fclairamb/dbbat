@@ -408,28 +408,52 @@ const cursorReexecMaxID = 0xFFFF
 // in a re-execution: rows to fetch, execute options, execute flags.
 const cursorReexecTrailingFields = 3
 
-// decodeCursorReexec extracts the cursor id from a piggyback re-execution —
-// func 0x03, sub-op 0x4e (SELECT) or 0x04 (everything else). This is what a
-// modern thin client puts on the wire to re-run a statement it already parsed;
-// the statement text is never resent.
+// cursorReexec is a decoded piggyback re-execution.
+type cursorReexec struct {
+	CursorID uint16
+	// Iterations is the execution count the frame declares: the number of bind
+	// rows on a DML re-execution (sub-op 0x04), the rows to prefetch on a
+	// SELECT one (0x4e), which carries a single bind row.
+	Iterations int
+	// Binds is the bind data behind the four header integers — one or more
+	// rows, each the 0x07 row-data marker and the values — or nil when the
+	// statement binds nothing.
+	Binds []byte
+	// Fetch says the re-execution is a SELECT's (sub-op 0x4e).
+	Fetch bool
+}
+
+// decodeCursorReexec decodes a piggyback re-execution — func 0x03, sub-op 0x4e
+// (SELECT) or 0x04 (everything else). This is what a modern thin client puts on
+// the wire to re-run a statement it already parsed; the statement text is never
+// resent, but its binds are, every time.
 //
 // Layout, verified byte-for-byte against testdata/go_ora_cursor_reexec.pcapng,
-// testdata/go_ora_dml_cursor_reexec.pcapng and
-// testdata/python_thin_cursor_reexec.pcapng:
+// testdata/go_ora_dml_cursor_reexec.pcapng,
+// testdata/python_thin_cursor_reexec.pcapng and, for the bind rows,
+// testdata/python_thin_array_dml.pcapng:
 //
 //	[0]    0x03 (piggyback)
 //	[1]    0x4e or 0x04 (sub-op)
 //	[2]    TTC sequence number
 //	[3]    0x00 — present only from TTC version 18 (v315+) on
-//	[4..]  cursorID, rowsToFetch, execOptions, execFlags — TTC compressed ints
+//	[4..]  cursorID, iterations, execOptions, execFlags — TTC compressed ints
+//	[..]   (0x07 bind values)* — one row per iteration, when the statement binds
 //
 // The trailing zero of the function header is what distinguishes the two
 // framings: pre-v315 clients emit a 3-byte header, so the fields start one byte
-// earlier. Only the cursor id is read — the rest of the frame says how to run
-// the statement, not which statement it is.
-func decodeCursorReexec(ttcPayload []byte) (uint16, error) {
+// earlier.
+//
+// The frame must end after the four integers or continue with a 0x07 row-data
+// marker. That used to be "must end", which kept another piggyback sub-op from
+// being mistaken for one, and also refused every re-execution of a statement
+// with binds — python-oracledb and go-ora both write the bind rows right there —
+// so those went upstream unlogged and ungated. The bind rows themselves are
+// read by the caller, which knows the statement and so how many values a row
+// holds.
+func decodeCursorReexec(ttcPayload []byte) (cursorReexec, error) {
 	if len(ttcPayload) < 5 || ttcPayload[0] != byte(TTCFuncPiggyback) || !IsPiggybackCursorReexec(ttcPayload) {
-		return 0, ErrNotCursorReexec
+		return cursorReexec{}, ErrNotCursorReexec
 	}
 
 	// TTC >= 18 pads the function header with a zero byte; older ones do not.
@@ -440,30 +464,62 @@ func decodeCursorReexec(ttcPayload []byte) (uint16, error) {
 
 	cursorID, n := readCompressedInt(ttcPayload[pos:])
 	if n == 0 || cursorID <= 0 || cursorID > cursorReexecMaxID {
-		return 0, fmt.Errorf("%w: cursor id decoded as %d", ErrNotCursorReexec, cursorID)
+		return cursorReexec{}, fmt.Errorf("%w: cursor id decoded as %d", ErrNotCursorReexec, cursorID)
 	}
 
-	// The other three fields are not read, only walked: a re-execution is
-	// exactly these four integers and nothing else, and requiring them to
-	// consume the frame to the byte is what keeps some *other* piggyback
-	// sub-op from being mistaken for one and gated against a cursor it has
-	// nothing to do with.
 	pos += n
 
-	for range cursorReexecTrailingFields {
-		_, n := readCompressedInt(ttcPayload[pos:])
+	var fields [cursorReexecTrailingFields]int
+
+	for i := range fields {
+		v, n := readCompressedInt(ttcPayload[pos:])
 		if n == 0 {
-			return 0, fmt.Errorf("%w: truncated execution fields", ErrNotCursorReexec)
+			return cursorReexec{}, fmt.Errorf("%w: truncated execution fields", ErrNotCursorReexec)
 		}
 
+		fields[i] = v
 		pos += n
 	}
 
-	if pos != len(ttcPayload) {
-		return 0, fmt.Errorf("%w: %d trailing bytes", ErrNotCursorReexec, len(ttcPayload)-pos)
+	reexec := cursorReexec{
+		CursorID:   uint16(cursorID),
+		Iterations: fields[0],
+		Fetch:      ttcPayload[1] == PiggybackSubReexecSel,
 	}
 
-	return uint16(cursorID), nil
+	if pos == len(ttcPayload) {
+		return reexec, nil
+	}
+
+	if ttcPayload[pos] != ttcMsgRowData {
+		return cursorReexec{}, fmt.Errorf("%w: %d trailing bytes", ErrNotCursorReexec, len(ttcPayload)-pos)
+	}
+
+	reexec.Binds = ttcPayload[pos:]
+
+	return reexec, nil
+}
+
+// reexecBinds reads the bind rows a re-execution carries for a statement with
+// count bind values per row. A DML re-execution carries one row per iteration
+// and a SELECT one a single row; a run that reads otherwise is not recorded,
+// because it would be a guess.
+func reexecBinds(reexec cursorReexec, count int) execBinds {
+	binds, ok := readBindRows(reexec.Binds, count)
+	if !ok {
+		return execBinds{}
+	}
+
+	want := 1
+	if !reexec.Fetch && reexec.Iterations > 0 {
+		want = reexec.Iterations
+	}
+
+	if binds.count != want {
+		return execBinds{}
+	}
+
+	return binds
 }
 
 // ErrNotCloseCursors reports that a payload is not a decodable close-cursors
@@ -874,9 +930,11 @@ func decodeCloseCursorsAt(ttcPayload []byte) ([]uint16, int, error) {
 
 // OALL8Result contains the decoded fields from an OALL8 (parse+execute) message.
 type OALL8Result struct {
-	SQL        string
-	CursorID   uint16
-	BindValues []string
+	SQL      string
+	CursorID uint16
+	// Binds is what the execution bound: one row, or every row of an array
+	// execution. See execBinds.
+	Binds execBinds
 	// Truncated reports that SQL is a *prefix* of the statement the client
 	// sent: the run dbbat extracted was cut by the end of the frame rather
 	// than by the TTC framing behind the statement. It is never merely
@@ -978,9 +1036,9 @@ func decodeOALL8(ttcPayload []byte) (*OALL8Result, error) {
 	}
 
 	return &OALL8Result{
-		SQL:        sqlText,
-		CursorID:   cursorID,
-		BindValues: bindValues,
+		SQL:      sqlText,
+		CursorID: cursorID,
+		Binds:    singleBindRow(bindValues),
 	}, nil
 }
 
@@ -1043,9 +1101,9 @@ func decodePiggybackExecSQL(ttcPayload []byte, wide64 bool) (*OALL8Result, error
 	}
 
 	return &OALL8Result{
-		SQL:        stmt.Text,
-		BindValues: extractPiggybackBinds(ttcPayload, stmt),
-		Truncated:  truncated,
+		SQL:       stmt.Text,
+		Binds:     extractExecBinds(ttcPayload, stmt, wide64),
+		Truncated: truncated,
 	}, nil
 }
 
@@ -1070,19 +1128,7 @@ func extractPiggybackBinds(payload []byte, stmt execStatement) []string {
 		return nil
 	}
 
-	// Don't scan into the SQL text itself.
-	lo := 0
-	if idx := findBytes(payload, []byte(stmt.Raw)); idx >= 0 {
-		lo = idx + len(stmt.Raw)
-	}
-
-	// A chunked statement (CLR long form) does not sit contiguously in the
-	// payload, so the search above cannot find it and the floor would collapse
-	// to 0 — the guessed-wrong outcome the anchor exists to rule out. The
-	// locate knows where the statement's wire bytes end and says so.
-	if stmt.End > lo {
-		lo = stmt.End
-	}
+	lo := bindScanFloor(payload, stmt)
 
 	// Scan from the tail so the tightest (real) value run is found before any
 	// bind-definition bytes that might also parse as length-prefixed values.
@@ -1101,6 +1147,71 @@ func extractPiggybackBinds(payload []byte, stmt execStatement) []string {
 	}
 
 	return nil
+}
+
+// bindScanFloor is the offset a bind scan must not go below: the end of the
+// statement text, so its own bytes are never read as values.
+func bindScanFloor(payload []byte, stmt execStatement) int {
+	lo := 0
+	if idx := findBytes(payload, []byte(stmt.Raw)); idx >= 0 {
+		lo = idx + len(stmt.Raw)
+	}
+
+	// A chunked statement (CLR long form) does not sit contiguously in the
+	// payload, so the search above cannot find it and the floor would collapse
+	// to 0 — the guessed-wrong outcome the anchor exists to rule out. The
+	// locate knows where the statement's wire bytes end and says so.
+	if stmt.End > lo {
+		lo = stmt.End
+	}
+
+	return lo
+}
+
+// extractExecBinds recovers what a statement-carrying execute bound: every bind
+// row of an array execution, or the one row of an ordinary one.
+//
+// An executemany is one `03 5e` whose al8i4[1] says how many iterations it runs
+// and whose tail holds that many rows, each `07` then the values. Reading only
+// one of them — what extractPiggybackBinds alone does — logged a 30-row
+// UPDATE with the binds of its last row and nothing to say there were 29 more.
+// A call that also fetches is a query: al8i4[1] is its prefetch size there, and
+// it carries one bind row.
+//
+// When the header declares a batch but the rows do not read whole (a frame cut
+// short, a bind shape this package does not know), the batch size is kept and
+// the values are not guessed.
+func extractExecBinds(payload []byte, stmt execStatement, wide64 bool) execBinds {
+	count := countBindPlaceholders(stmt.Text)
+	if count == 0 {
+		return execBinds{}
+	}
+
+	lo := bindScanFloor(payload, stmt)
+
+	body, sqlEnd := payload, stmt.End
+	if !isPiggybackExecHeader(payload) {
+		end, ok := closeCursorsEnd(payload)
+		if !ok {
+			end = len(payload)
+		}
+
+		body, sqlEnd = payload[end:], stmt.End-end
+	}
+
+	if iterations, fetch, ok := execIterations(body, sqlEnd, wide64); ok && !fetch && iterations > 1 {
+		if binds, ok := findBindRowsFromTail(payload, lo, count, iterations); ok {
+			return binds
+		}
+
+		return execBinds{count: iterations}
+	}
+
+	if binds, ok := findBindRowsFromTail(payload, lo, count, 1); ok {
+		return binds
+	}
+
+	return singleBindRow(extractPiggybackBinds(payload, stmt))
 }
 
 // readLenPrefixedValues reads exactly count single-byte-length-prefixed values
@@ -1185,14 +1296,8 @@ func decodeExecSQL(ttcPayload []byte, wide64 bool) (*OALL8Result, error) {
 	// the close list to that op and decode it properly. The old 50-75 window
 	// scanned *past* the list into the stapled SQL and routinely landed inside
 	// the statement text — see decodeExecStatement.
-	if sql, ok := decodeExecStatement(ttcPayload, wide64); ok {
-		return &OALL8Result{SQL: sql}, nil
-	}
-
-	if end, ok := closeCursorsEnd(ttcPayload); ok {
-		if sql, ok := decodeExecStatement(ttcPayload[end:], wide64); ok {
-			return &OALL8Result{SQL: sql}, nil
-		}
+	if stmt, ok := decodeExecStatementText(ttcPayload, wide64); ok {
+		return &OALL8Result{SQL: stmt.Text, Binds: extractExecBinds(ttcPayload, stmt, wide64)}, nil
 	}
 
 	// Same reading as decodePiggybackExecSQL's, for the same reason: an execute
@@ -2025,10 +2130,88 @@ func compressedRowDataStartAt(data []byte, at, numCols int) int {
 	return pos + 1
 }
 
+// compressedContinuationRowStart walks the thin ROW_HEADER at the head of a
+// continuation packet and returns the offset of its first row value and the
+// columns that row carries.
+//
+// The layout is python-oracledb's _process_row_header, and the two recordings
+// of testdata/python_thin_array_dml.pcapng that carry one agree with it:
+//
+//	06 · flags · numRequests ub2 · iteration ub4 · numIters ub4 · bufferLen ub2
+//	   · bitVectorLen ub4 · [repeated length ub1 · bit vector] · rxhrid ub4 · 07
+//
+// numRequests is the column count and must be the describe's; a bit vector of
+// the wrong length, or one naming no column, fails the read. A non-zero rxhrid
+// (a chunked row id this package has never seen) fails it too, so the caller's
+// older scan answers instead.
+func compressedContinuationRowStart(data []byte, numCols int) (int, []int, bool) {
+	if numCols <= 0 || len(data) < 3 || data[0] != ttcMsgRowHeader || !isRowHeaderFlag(data[1]) {
+		return 0, nil, false
+	}
+
+	pos := 2
+
+	var fields [5]int
+
+	for i := range fields {
+		val, n := readCompressedInt(data[pos:])
+		if n == 0 {
+			return 0, nil, false
+		}
+
+		fields[i] = val
+		pos += n
+	}
+
+	if fields[0] != numCols {
+		return 0, nil, false
+	}
+
+	active := allColumns(numCols)
+
+	if bitVectorLen := fields[4]; bitVectorLen > 0 {
+		if bitVectorLen != (numCols+7)/8 || pos+1+bitVectorLen > len(data) {
+			return 0, nil, false
+		}
+
+		pos++ // the length, repeated
+
+		active = bitmaskColumns(data[pos:pos+bitVectorLen], numCols)
+		if len(active) == 0 {
+			return 0, nil, false
+		}
+
+		pos += bitVectorLen
+	}
+
+	rxhrid, n := readCompressedInt(data[pos:])
+	if n == 0 || rxhrid != 0 {
+		return 0, nil, false
+	}
+
+	pos += n
+
+	if pos >= len(data) || data[pos] != ttcMsgBindOutput {
+		return 0, nil, false
+	}
+
+	return pos + 1, active, true
+}
+
 // decodeOracleRawValue converts raw Oracle bytes to a readable string.
 func decodeOracleRawValue(b []byte) string {
 	// Try as readable ASCII first
 	if isReadableASCII(b) {
+		return string(b)
+	}
+
+	// Then as text with non-ASCII characters in it, in the UTF-8 every thin
+	// client negotiates. Without this an accented name was stored as hex. It
+	// cannot capture a value the readings below own: a positive NUMBER opens
+	// with a byte of 0xC1 or more followed by mantissa bytes of at most 0x65,
+	// which is never valid UTF-8, and a DATE or TIMESTAMP carries control bytes
+	// (its month, its day).
+	if isPrintableUTF8Text(b) {
 		return string(b)
 	}
 
@@ -2374,6 +2557,22 @@ func parseContinuationRows(
 		return parseRowStream(payload, start, numCols, allColumns(numCols), nil, colTypes, shape, lob)
 	}
 
+	// A thin continuation opens with the ROW_HEADER too, with the bit vector of
+	// the columns its first row carries. Walked, not scanned: the scan below
+	// takes the first 0x07 for the ROW_DATA byte, and the bit vector of a
+	// three-column fetch whose first row carries every column *is* 0x07 — which
+	// read a phantom row out of the header at every packet boundary.
+	if !shape.fixedWidth {
+		if start, active, ok := compressedContinuationRowStart(payload, numCols); ok {
+			prev := make([]string, numCols)
+			if len(prevRow) == numCols {
+				copy(prev, prevRow)
+			}
+
+			return parseRowStream(payload, start, numCols, active, prev, colTypes, shape, lob)
+		}
+	}
+
 	// Find the first 0x07 in the header area (marks start of row data).
 	headerEnd := -1
 	for i := 1; i < 25 && i < len(payload); i++ {
@@ -2432,6 +2631,28 @@ func decodeRowValue(colTypes []int, col int, b []byte) string {
 	}
 
 	return decodeOracleRawValue(b)
+}
+
+// isPrintableUTF8Text reports whether b is valid UTF-8 with no control
+// character other than tab, newline and carriage return. The control-character
+// rule is what keeps an NVARCHAR2 value — UTF-16 on the wire, so a NUL in front
+// of every ASCII letter — out of it.
+func isPrintableUTF8Text(b []byte) bool {
+	if len(b) == 0 || !utf8.Valid(b) {
+		return false
+	}
+
+	for _, c := range b {
+		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+			return false
+		}
+
+		if c == 0x7F {
+			return false
+		}
+	}
+
+	return true
 }
 
 // rowValueShape says how a column's value is laid out in the row stream. Only
@@ -3201,7 +3422,12 @@ func readRowColumn(
 
 		return readInlineLongColumn(payload, offset, shape, colTypes, col)
 
-	case rowValueScalar, rowValueObjectImage:
+	case rowValueScalar:
+		if payload[offset] == clrLongFormMarker {
+			return readLongFormScalarColumn(payload, offset, shape, colTypes, col)
+		}
+
+	case rowValueObjectImage:
 	}
 
 	valLen := int(payload[offset])
@@ -3249,6 +3475,65 @@ func readRowColumn(
 
 		return decodeRowValue(colTypes, col, raw), offset, true
 	}
+}
+
+// rowLongFormValueMaxLen bounds a scalar value read in the CLR long form: a
+// VARCHAR2 under MAX_STRING_SIZE=EXTENDED holds up to 32767 bytes.
+const rowLongFormValueMaxLen = 32767
+
+// readLongFormScalarColumn reads a scalar value the server sent in the CLR long
+// form — 0xFE, chunks, a zero-length terminator — rather than behind a length
+// byte.
+//
+// A server does that for any value past 252 bytes, and also for short values
+// whenever it converts them to the client's character set: measured on a
+// production 19c whose database charset is single-byte, every VARCHAR2 value
+// with an accent in it arrived as `fe 01 0a <10 bytes> 01 01 <1 byte> 00`,
+// split at the conversion boundary, while ASCII-only values in the same column
+// kept the short form. The scalar reader used to take the 0xFE for a length of
+// 254: it stored the next 254 bytes as hex, read the following column out of
+// the middle of them, and lost the rest of the packet.
+//
+// Chunk lengths follow the session's dialect, exactly as a LONG column's do
+// (readInlineLongColumn / readFixedInlineLongColumn): TTC compressed integers
+// on a thin session that negotiated the big chunk form, single bytes on one
+// that did not, ub4 little-endian on OCI. The caller holds the row to ending on
+// a row marker, as it does every framed read.
+func readLongFormScalarColumn(
+	payload []byte, offset int, shape oerShape, colTypes []int, col int,
+) (string, int, bool) {
+	var (
+		raw  []byte
+		next int
+	)
+
+	if shape.fixedWidth {
+		var ok bool
+
+		raw, next, ok = readFixedChunkedCLR(payload, offset)
+		if !ok {
+			return "", 0, false
+		}
+	} else {
+		var consumed int
+
+		raw, consumed = readCLRVariant(payload[offset:], shape.bigClrChunks)
+		if consumed == 0 {
+			return "", 0, false
+		}
+
+		next = offset + consumed
+	}
+
+	if len(raw) > rowLongFormValueMaxLen {
+		return "", 0, false
+	}
+
+	if len(raw) == 0 {
+		return "", next, true
+	}
+
+	return decodeRowValue(colTypes, col, raw), next, true
 }
 
 // rowEndsAtMarker reports whether offset sits on something that can legitimately
@@ -3373,6 +3658,11 @@ func parseRowStream(
 		skipped := false
 
 		for _, col := range activeCols {
+			// A scalar in the CLR long form is framed like a LONG is, so its row
+			// is held to the same terminator check.
+			framed := rowValueShapeOf(colTypes, col) != rowValueScalar ||
+				(offset < len(payload) && payload[offset] == clrLongFormMarker)
+
 			decoded, next, ok := readRowColumn(payload, offset, shape, colTypes, col, lob)
 			if !ok {
 				valid = false
@@ -3380,7 +3670,7 @@ func parseRowStream(
 				break
 			}
 
-			skipped = skipped || rowValueShapeOf(colTypes, col) != rowValueScalar
+			skipped = skipped || framed
 			row[col] = decoded
 			cur[col] = decoded
 			offset = next

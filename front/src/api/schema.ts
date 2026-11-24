@@ -4149,6 +4149,22 @@ export interface components {
             format_codes?: number[];
             /** @description PostgreSQL type OIDs */
             type_oids?: number[];
+            /**
+             * @description Every bind row of an array execution (python-oracledb's executemany,
+             *     a JDBC batch, go-ora's bulk bind), one row per iteration in wire
+             *     order, present only when the execution ran more than one. `values`
+             *     is then the first row. At most 1000 rows are kept; see
+             *     `batch_truncated`. Oracle only.
+             */
+            batch?: string[][];
+            /**
+             * @description How many bind rows the execution carried. Equals the length of
+             *     `batch` unless the batch was cut at the capture limit. Present only
+             *     for an array execution.
+             */
+            batch_size?: number;
+            /** @description True when `batch` holds fewer rows than `batch_size`. */
+            batch_truncated?: boolean;
         };
         QueryWithRows: components["schemas"]["Query"] & {
             /** @description Result rows (from SELECT or COPY operations) */
