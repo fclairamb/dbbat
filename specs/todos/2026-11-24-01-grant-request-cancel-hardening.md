@@ -1,35 +1,30 @@
-# Grant request cancel: authz test, e2e, confirm step
+# Grant request cancel: e2e test, web confirm step
 
 ## Goal
 
-Lock down the existing "requester cancels their own pending grant request"
-flow with tests, and make the UI action harder to trigger by accident.
+Cover the web UI's "requester withdraws their own pending grant request" flow
+end to end, and make its button harder to trigger by accident.
 
 ## Why
 
-The feature shipped with the original grant request workflow (743fe20):
-`POST /api/v1/grant-requests/{uid}/cancel` → `handleCancelGrantRequest`
-(`internal/api/grant_requests.go`), `Store.CancelGrantRequest`, audit event
-`grant_request.cancelled`, Slack message updated through
-`notify.GrantActionCancelled`, and a Cancel button on the grant requests page.
+Cancel is requester-only on every path: `POST /api/v1/grant-requests/{uid}/cancel`
+(`handleCancelGrantRequest`), the Slack 🚫 Withdraw button, and the Cancel
+button on the grant requests page. All go through `mayCancelGrantRequest` and
+`cancelGrantRequest` in `internal/api/grant_requests.go`. The REST rule is
+pinned by `TestCancelGrantRequest_RequesterOnly`.
 
 What is missing:
-- Only one store test (`TestCancelGrantRequest`) covers the happy path. No API
-  test checks the authorization rules: another non-admin user gets 403, an admin
-  can cancel, a request that is not pending gets 409.
 - No Playwright test drives the Cancel button.
 - The button is an icon (`Ban`, tooltip "Cancel") and cancels on a single
-  click, with no confirmation. Approve and deny sit right next to it for anyone
-  who is both requester and approver.
+  click, with no confirmation. Approve and deny sit right next to it in the
+  same row. The Slack Withdraw button already has a confirm dialog.
 
 ## Implementation
 
-- API test in `internal/api/` covering: requester → 200, other connector → 403,
-  admin (not the requester) → 403,
-  request already cancelled or approved → 409, unknown uid → 404.
 - E2E in `front/e2e/`: a connector files a request, cancels it, and the row
-  shows `cancelled`.
+  shows `cancelled`. An admin viewing the same pending request sees no Cancel
+  button.
 - `front/src/routes/_authenticated/grant-requests/index.tsx`: put
-  `cancel.mutate` behind a small confirm dialog (reuse the existing
-  `AlertDialog` pattern) and add a visible label or clearer tooltip such as
-  "Withdraw request".
+  `cancel.mutate` behind a small confirm dialog (`front/src/components/ui/alert-dialog.tsx`)
+  and use a clearer label or tooltip such as "Withdraw request", matching the
+  Slack button.

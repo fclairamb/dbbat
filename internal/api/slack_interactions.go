@@ -240,7 +240,7 @@ func parseSlackInteraction(body []byte) (slack.InteractionCallback, error) {
 }
 
 // slackDecisionFromCallback extracts the (action, request UID) from a
-// block_actions callback carrying one of our two action IDs. It returns
+// block_actions callback carrying one of our approve/deny/withdraw action IDs. It returns
 // ok=false for any other interaction type, action ID, or a non-UUID value —
 // the caller then no-ops with a 200.
 func slackDecisionFromCallback(cb slack.InteractionCallback) (notify.GrantAction, uuid.UUID, bool) {
@@ -436,11 +436,21 @@ func (s *Server) deny(ctx context.Context, uid uuid.UUID, decider *store.User) (
 }
 
 // mayCancelRequest re-reads the request and runs mayCancelGrantRequest — the
-// same gate as the REST cancel handler. A request that can't be read is
-// refused: there is no owner left to match.
+// same gate as the REST cancel handler. A request that no longer exists lets
+// the click through, so cancel reports "no longer exists" instead of telling
+// the requester they aren't the requester; there is nothing left to cancel.
+// Any other read error refuses: letting it through could cancel on a retry
+// that the owner check never saw.
 func (s *Server) mayCancelRequest(ctx context.Context, user *store.User, requestUID uuid.UUID) bool {
 	req, err := s.store.GetGrantRequest(ctx, requestUID)
+	if errors.Is(err, store.ErrGrantRequestNotFound) {
+		return true
+	}
+
 	if err != nil {
+		s.logger.WarnContext(ctx, "slack interaction: withdraw gate lookup failed",
+			slog.String("grant_request_uid", requestUID.String()), slog.Any("error", err))
+
 		return false
 	}
 

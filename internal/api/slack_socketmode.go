@@ -121,7 +121,7 @@ func socketInteractionCallback(evt socketmode.Event) (slack.InteractionCallback,
 // dispatchSlackCallback runs the decision pipeline for an already-parsed
 // interaction callback (Socket Mode delivers callbacks directly, without the
 // HTTP form/signature step). It returns false when the callback isn't one of
-// our Approve/Deny block actions. Processing happens in a goroutine with its
+// our Approve/Deny/Withdraw block actions. Processing happens in a goroutine with its
 // own timeout, mirroring the HTTP path.
 func (s *Server) dispatchSlackCallback(decider slackDecider, callback slack.InteractionCallback) bool {
 	if s.dispatchSlackQueryDecision(callback) {

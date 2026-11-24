@@ -242,3 +242,50 @@ func TestListGrantRequests_EmbedsLiveDefinition(t *testing.T) {
 	require.Equal(t, next.Name, got.Definition.Name)
 	require.True(t, got.Definition.AutoApprove, "the live version's auto_approve should be visible")
 }
+
+// TestCancelGrantRequest_RequesterOnly pins the REST cancel gate: only the
+// requester withdraws their own request. An admin denies instead.
+func TestCancelGrantRequest_RequesterOnly(t *testing.T) {
+	t.Parallel()
+
+	f := newServerApproverFixture(t, "gr_cancel")
+
+	cancelAs := func(user *store.User, req *store.GrantRequest) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/grant-requests/x/cancel", nil)
+		c.Params = gin.Params{{Key: "uid", Value: req.UID.String()}}
+		c.Set(contextKeyUser, user)
+
+		f.server.handleCancelGrantRequest(c)
+
+		return w
+	}
+
+	req := f.newGrantRequest(t, "gr-cancel-1", f.requester)
+
+	if w := cancelAs(f.admin, req); w.Code != http.StatusForbidden {
+		t.Fatalf("admin cancel got %d, want 403", w.Code)
+	}
+
+	if w := cancelAs(f.outsider, req); w.Code != http.StatusForbidden {
+		t.Fatalf("other user cancel got %d, want 403", w.Code)
+	}
+
+	if w := cancelAs(f.requester, req); w.Code != http.StatusOK {
+		t.Fatalf("requester cancel got %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	if w := cancelAs(f.requester, req); w.Code != http.StatusConflict {
+		t.Fatalf("second cancel got %d, want 409", w.Code)
+	}
+
+	got, err := f.dataStore.GetGrantRequest(f.ctx, req.UID)
+	if err != nil {
+		t.Fatalf("GetGrantRequest(): %v", err)
+	}
+
+	if got.Status != store.GrantRequestCancelled {
+		t.Errorf("status = %q, want %q", got.Status, store.GrantRequestCancelled)
+	}
+}
