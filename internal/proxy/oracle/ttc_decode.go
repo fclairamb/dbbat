@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -19,6 +20,77 @@ type columnDef struct {
 	Precision uint8
 	Scale     uint8
 	Nullable  bool
+	// National is true for a national-character column (csfrm 2), whose values
+	// are UTF-16BE on the wire.
+	National bool
+}
+
+// colTypeNational marks a column type, in the slices handed to the row
+// decoders, as a national-character column. It is a bit above the one-byte
+// TTC type code, so colType strips it for every comparison; slices meant for
+// the define-block matching never carry it.
+const colTypeNational = 0x100
+
+// colType returns the TTC type code of column col, without the national mark,
+// or 0 when out of range.
+func colType(colTypes []int, col int) int {
+	if col < 0 || col >= len(colTypes) {
+		return 0
+	}
+
+	return colTypes[col] &^ colTypeNational
+}
+
+// rowColumnTypes is columnTypeCodes with the national mark of each column, for
+// the row decoders.
+func rowColumnTypes(columns []columnDef) []int {
+	types := columnTypeCodes(columns)
+	if types == nil {
+		return nil
+	}
+
+	for i, c := range columns {
+		if c.National {
+			types[i] |= colTypeNational
+		}
+	}
+
+	return types
+}
+
+// describeRowTypes is describeColumnTypes with the national mark of each
+// column, for the row decoders.
+func describeRowTypes(descs []columnDesc) []int {
+	types := describeColumnTypes(descs)
+	for i, d := range descs {
+		if d.National {
+			types[i] |= colTypeNational
+		}
+	}
+
+	return types
+}
+
+// decodeUTF16BE decodes a national-character value. It reports false for an odd
+// length or bytes that are not UTF-16, so the caller keeps its other readings.
+func decodeUTF16BE(b []byte) (string, bool) {
+	if len(b) == 0 || len(b)%2 != 0 {
+		return "", false
+	}
+
+	u := make([]uint16, len(b)/2)
+	for i := range u {
+		u[i] = binary.BigEndian.Uint16(b[2*i:])
+	}
+
+	r := utf16.Decode(u)
+	for _, c := range r {
+		if c == utf8.RuneError || (c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+			return "", false
+		}
+	}
+
+	return string(r), true
 }
 
 // columnTypeCodes returns the per-column TTC type codes for type-aware value
@@ -1595,8 +1667,10 @@ type QueryResultV2 struct {
 	// ColumnTypes holds the TTC type code per column when it is known from the
 	// describe records (nil otherwise — values are then decoded heuristically).
 	ColumnTypes []int
-	Rows        [][]string
-	NoData      bool // true if ORA-01403 (normal end-of-data)
+	// ColumnNational is true per column whose describe says csfrm 2.
+	ColumnNational []bool
+	Rows           [][]string
+	NoData         bool // true if ORA-01403 (normal end-of-data)
 }
 
 // decodeQueryResultV2 extracts column names and row values from a v315+
@@ -1639,9 +1713,21 @@ func decodeQueryResultV2(ttcPayload []byte, shape oerShape, lob lobRowShape) *Qu
 	// end-of-data discriminator in session.statusOERMayEndTheCall, which the
 	// corpus separates cleanly from the 149 running-count objects that really do
 	// travel inside the stream.
+	var rowTypes []int
+
 	if descs := parseColumnDescribes(ttcPayload, shape); descs != nil {
 		result.Columns = describeColumnNames(descs)
 		result.ColumnTypes = describeColumnTypes(descs)
+		for i, d := range descs {
+			if d.National {
+				if result.ColumnNational == nil {
+					result.ColumnNational = make([]bool, len(descs))
+				}
+
+				result.ColumnNational[i] = true
+			}
+		}
+		rowTypes = describeRowTypes(descs)
 	} else {
 		result.Columns = scanAndPadColumnNames(ttcPayload)
 	}
@@ -1654,7 +1740,7 @@ func decodeQueryResultV2(ttcPayload []byte, shape oerShape, lob lobRowShape) *Qu
 	// Row values appear after the column definitions. We look for a marker
 	// pattern that separates column defs from row data.
 	// The row data area starts roughly after the column definitions.
-	result.Rows = scanRowValues(ttcPayload, len(result.Columns), result.ColumnTypes, shape, lob)
+	result.Rows = scanRowValues(ttcPayload, len(result.Columns), rowTypes, shape, lob)
 
 	return result
 }
@@ -2614,7 +2700,11 @@ func parseContinuationRows(
 // established string/temporal formats.
 func decodeRowValue(colTypes []int, col int, b []byte) string {
 	if col >= 0 && col < len(colTypes) {
-		switch colTypes[col] {
+		if s, ok := decodeNationalValue(colTypes, col, b); ok {
+			return s
+		}
+
+		switch colType(colTypes, col) {
 		case tnsTypeNUMBER:
 			if s, ok := formatOracleNumber(b); ok {
 				return s
@@ -2631,6 +2721,23 @@ func decodeRowValue(colTypes []int, col int, b []byte) string {
 	}
 
 	return decodeOracleRawValue(b)
+}
+
+// decodeNationalValue decodes the value of a national VARCHAR2 / CHAR column,
+// or of an NCLOB a thin client had the server inline (go_ora_lob.pcapng: `nn`
+// arrives as 006e006e),
+// as UTF-16BE, and only on the describe's say-so: UTF-16 of ASCII text is
+// valid UTF-8 with NULs in it, so a guess would have no footing.
+func decodeNationalValue(colTypes []int, col int, b []byte) (string, bool) {
+	if colTypes[col]&colTypeNational == 0 {
+		return "", false
+	}
+
+	if t := colType(colTypes, col); t != tnsTypeVARCHAR && t != tnsTypeCHAR && t != tnsTypeCLOB {
+		return "", false
+	}
+
+	return decodeUTF16BE(b)
 }
 
 // isPrintableUTF8Text reports whether b is valid UTF-8 with no control
@@ -2686,7 +2793,7 @@ func rowValueShapeOf(colTypes []int, col int) rowValueShape {
 		return rowValueScalar
 	}
 
-	switch colTypes[col] {
+	switch colType(colTypes, col) {
 	case tnsTypeCLOB, tnsTypeBLOB, tnsTypeBFILE:
 		return rowValueLOBLocator
 	case tnsTypeOPAQUE, tnsTypeNamedObject:
@@ -3017,7 +3124,7 @@ func skipPrefetchedLOBValue(
 // isCharacterLOBColumn reports whether a describe's type code is a LOB with a
 // character set — the two fields a prefetched BLOB has no use for.
 func isCharacterLOBColumn(colTypes []int, col int) bool {
-	return col < len(colTypes) && colTypes[col] == tnsTypeCLOB
+	return colType(colTypes, col) == tnsTypeCLOB
 }
 
 // lobLocatorMaxLen bounds a locator's declared length. A CLR spells its length
@@ -3374,7 +3481,7 @@ func decodeOpaqueImageBody(body []byte) (string, bool) {
 // every other NULL.
 func lobLocatorPlaceholder(colTypes []int, col int) string {
 	if col >= 0 && col < len(colTypes) {
-		switch colTypes[col] {
+		switch colType(colTypes, col) {
 		case tnsTypeBLOB:
 			return "<BLOB locator>"
 		case tnsTypeBFILE:

@@ -411,3 +411,66 @@ func nextDataPacket(packets []dump.Packet, i int) int {
 
 	return -1
 }
+
+// stmtlessBatchDump is python-oracledb thin running an executemany, then the
+// same executemany with values longer than the first call's buffers: the second
+// goes out as a `03 5e` with no statement text, carrying every bind row.
+// Regenerate with TestCapture_PythonThinStatementlessBatch; synthetic values.
+const stmtlessBatchDump = "python_thin_stmtless_batch.pcapng"
+
+const stmtlessBatchInsert = "INSERT INTO dbbat_stmtless (id, name) VALUES (:1, :2)"
+
+// TestDumpReplay_StatementlessExecRecordsEveryBindRow: the statement-less
+// re-execution of a batch is recorded with its 8 rows, not the last one alone.
+func TestDumpReplay_StatementlessExecRecordsEveryBindRow(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+	recorder := &collectingCompletionStore{}
+	s.completionStore = recorder
+
+	replayObservingCLRChunks(t, s, stmtlessBatchDump)
+
+	var queries []*store.Query
+
+	require.Eventually(t, func() bool {
+		queries = recorder.createdQueries()
+
+		for _, q := range queries {
+			if q.SQLText == "DROP TABLE dbbat_stmtless" {
+				return true
+			}
+		}
+
+		return false
+	}, 5*time.Second, 10*time.Millisecond)
+
+	time.Sleep(50 * time.Millisecond)
+
+	byFirstBind := queriesWithSQL(recorder.createdQueries(), stmtlessBatchInsert)
+
+	first := byFirstBind["1"]
+	require.NotNil(t, first)
+	assert.Equal(t, 5, first.Parameters.BatchSize)
+
+	second := byFirstBind["6"]
+	require.NotNil(t, second, "the statement-less re-execution must be recorded")
+	require.NotNil(t, second.Parameters)
+	assert.Equal(t, 8, second.Parameters.BatchSize)
+	require.Len(t, second.Parameters.Batch, 8)
+	assert.Equal(t, int64(8), rowsAffected(second))
+	assert.Equal(t, "13", second.Parameters.Batch[7][0])
+	assert.Equal(t, strings.Repeat("longer value 13 ", 4), second.Parameters.Batch[7][1])
+}
+
+// TestExecNoStatementIterations_RejectsOddHeaders: a header that does not walk
+// as written falls back to the single-row reading instead of guessing.
+func TestExecNoStatementIterations_RejectsOddHeaders(t *testing.T) {
+	t.Parallel()
+
+	_, ok := execNoStatementIterations([]byte{0x03, 0x5e, 0x08, 0x00, 0x02, 0x80, 0x28, 0x01, 0x0b, 0x00, 0x00, 0x01})
+	assert.False(t, ok)
+
+	_, ok = execNoStatementIterations(nil)
+	assert.False(t, ok)
+}
