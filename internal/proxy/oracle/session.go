@@ -3793,7 +3793,7 @@ func (s *session) handleContinuation(ttcPayload []byte) {
 
 	if numCols > 0 {
 		rows := parseContinuationRows(
-			ttcPayload, numCols, s.tracker.pendingQuery.lastRow, columnTypeCodes(columns),
+			ttcPayload, numCols, s.tracker.pendingQuery.lastRow, rowColumnTypes(columns),
 			s.oerShapeSnapshot(), s.pendingLOBRowShape())
 
 		for _, row := range rows {

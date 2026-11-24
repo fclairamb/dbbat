@@ -39,9 +39,16 @@ var numberScaleTypes = map[int]bool{
 
 // columnDesc is a column's identity from its describe record: its name and TTC
 // type code (see the tnsType* constants).
+// charsetFormNational is the describe's charset form (csfrm) of a national
+// character column.
+const charsetFormNational = 2
+
 type columnDesc struct {
 	Name string
 	Type int
+	// National is true when the column's charset form is 2 (NVARCHAR2, NCHAR):
+	// its values travel in the national charset, AL16UTF16 by default.
+	National bool
 }
 
 // parseColumnDescribes decodes the per-column definition records from a describe
@@ -77,7 +84,22 @@ func parseColumnDescribes(ttcPayload []byte, shape oerShape) []columnDesc {
 		return cols
 	}
 
-	return parseColumnDescribesMode(ttcPayload, true, shape)
+	if cols := parseColumnDescribesMode(ttcPayload, true, shape); cols != nil {
+		return cols
+	}
+
+	// Last resort: python-oracledb thin against 23ai spells the scale of a
+	// NUMBER-family column as a single signed byte (0x81 for the -127 float
+	// sentinel) where go-ora and the JDBC driver send a compressed int
+	// (0x81 0x7f). Read as a compressed int, the 0x81 swallows the first byte
+	// of the max-length that follows and the record drifts. It is tried last,
+	// so no payload that parses under the compressed-int reading is ever
+	// re-read.
+	if cols := parseColumnDescribesScale(ttcPayload, false, shape, true); cols != nil {
+		return cols
+	}
+
+	return parseColumnDescribesScale(ttcPayload, true, shape, true)
 }
 
 // parseColumnDescribesMode decodes the column records using either the classic
@@ -86,6 +108,12 @@ func parseColumnDescribes(ttcPayload []byte, shape oerShape) []columnDesc {
 // the count is implausible, a record runs off the end, or a decoded type code is
 // not a known TNSType (a strong signal of a misaligned parse).
 func parseColumnDescribesMode(ttcPayload []byte, modern bool, shape oerShape) []columnDesc {
+	return parseColumnDescribesScale(ttcPayload, modern, shape, false)
+}
+
+// parseColumnDescribesScale is parseColumnDescribesMode with the scale encoding
+// of NUMBER-family columns chosen: a compressed int, or one signed byte.
+func parseColumnDescribesScale(ttcPayload []byte, modern bool, shape oerShape, byteScale bool) []columnDesc {
 	count, start, ok := describeWireLayout(ttcPayload, shape)
 	if !ok || count <= 0 || count > 1000 {
 		return nil
@@ -93,7 +121,7 @@ func parseColumnDescribesMode(ttcPayload []byte, modern bool, shape oerShape) []
 
 	c := &dcursor{
 		buf: ttcPayload, pos: start, wide: shape.fixedWidth, wide64: shape.fixedWidth64,
-		pre23: shape.serverPredates(ttcFieldVersion23_1),
+		pre23: shape.serverPredates(ttcFieldVersion23_1), byteScale: byteScale,
 	}
 	cols := make([]columnDesc, 0, count)
 
@@ -103,7 +131,7 @@ func parseColumnDescribesMode(ttcPayload []byte, modern bool, shape oerShape) []
 			return nil
 		}
 
-		cols = append(cols, columnDesc{Name: name, Type: typ})
+		cols = append(cols, columnDesc{Name: name, Type: typ, National: c.national})
 	}
 
 	return cols
@@ -308,6 +336,12 @@ type dcursor struct {
 	// column record ends in wide64ColumnRecordTailLenPre23 bytes rather than
 	// wide64ColumnRecordTailLen.
 	pre23 bool
+	// byteScale reads a NUMBER-family column's scale as one signed byte instead
+	// of a compressed int; see parseColumnDescribes.
+	byteScale bool
+	// national is set by parseColumnDescribe to whether the record it just read
+	// has the national charset form (csfrm 2).
+	national bool
 }
 
 // skip advances past n bytes that are read by no field, failing the cursor if
@@ -452,6 +486,8 @@ func (c *dcursor) dlc() []byte {
 // are consumed too — data-use-case domain schema/name, an annotations block, and
 // three further ints — which sets where the next record starts.
 func parseColumnDescribe(c *dcursor, modern bool) (string, int) {
+	c.national = false
+
 	if c.wide64 {
 		return parseColumnDescribeWide64(c)
 	}
@@ -468,7 +504,7 @@ func parseColumnDescribe(c *dcursor, modern bool) (string, int) {
 		// Measured on a NUMBER(10,2) (precision 10, scale 2 in consecutive
 		// bytes) and on `1/3`, whose scale byte is 0x81 = -127.
 		c.byte()
-	case numberScaleTypes[dataType]:
+	case numberScaleTypes[dataType] && !c.byteScale:
 		c.intw(2) // scale (compressed)
 	default:
 		c.byte() // scale
@@ -486,14 +522,14 @@ func parseColumnDescribe(c *dcursor, modern bool) (string, int) {
 	// four-byte length and 16-byte payload pin where it must end.
 	c.intw(1)
 
-	c.dlc()   // toID
-	c.intw(2) // version
-	c.intw(2) // charsetID
-	c.byte()  // charsetForm (go-ora reads it uncompressed: one byte either way)
-	c.intw(4) // maxCharLen
-	c.intw(4) // oaccollid (TTCVersion ≥ 8, always true for modern servers)
-	c.byte()  // allowNull
-	c.byte()  // v7 name length (unused; the DLC below carries the real length)
+	c.dlc()                                      // toID
+	c.intw(2)                                    // version
+	c.intw(2)                                    // charsetID
+	c.national = c.byte() == charsetFormNational // charsetForm (go-ora reads it uncompressed: one byte either way)
+	c.intw(4)                                    // maxCharLen
+	c.intw(4)                                    // oaccollid (TTCVersion ≥ 8, always true for modern servers)
+	c.byte()                                     // allowNull
+	c.byte()                                     // v7 name length (unused; the DLC below carries the real length)
 
 	name := c.dlc() // column name
 	c.dlc()         // schema name
@@ -595,13 +631,13 @@ func parseColumnDescribeWide64(c *dcursor) (string, int) {
 
 	wide64TypeOID(c)
 
-	c.byte()  // version (one byte here; two in the 4-byte dialect)
-	c.intw(2) // charsetID
-	c.intw(2) // charsetForm (two bytes here; one in the 4-byte dialect)
-	c.intw(4) // maxCharLen
-	c.intw(4) // oaccollid
-	c.byte()  // allowNull
-	c.byte()  // v7 name length (unused; the DLC below carries the real length)
+	c.byte()                                      // version (one byte here; two in the 4-byte dialect)
+	c.intw(2)                                     // charsetID
+	c.national = c.intw(2) == charsetFormNational // charsetForm (two bytes here; one in the 4-byte dialect)
+	c.intw(4)                                     // maxCharLen
+	c.intw(4)                                     // oaccollid
+	c.byte()                                      // allowNull
+	c.byte()                                      // v7 name length (unused; the DLC below carries the real length)
 
 	name := c.dlc() // column name
 	c.dlc()         // schema name

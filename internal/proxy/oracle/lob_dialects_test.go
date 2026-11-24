@@ -145,7 +145,7 @@ func TestThinLOBFetchCarriesTheContentInsteadOfALocator(t *testing.T) {
 		"cccccc",
 		"7a7a",
 		"dddddd",
-		"006e006e",
+		"nn",
 		"eeeeee",
 		"ffffff",
 		"",

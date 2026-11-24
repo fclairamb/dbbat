@@ -156,7 +156,7 @@ var ociLOBColumns = []columnDesc{
 	{Name: "C3", Type: tnsTypeCHAR},
 	{Name: "D3", Type: tnsTypeBLOB},
 	{Name: "C4", Type: tnsTypeCHAR},
-	{Name: "D4", Type: tnsTypeCLOB},
+	{Name: "D4", Type: tnsTypeCLOB, National: true}, // an NCLOB: csfrm 2
 	{Name: "C5", Type: tnsTypeCHAR},
 	{Name: "X1", Type: tnsTypeOPAQUE},
 	{Name: "C6", Type: tnsTypeCHAR},

@@ -236,3 +236,97 @@ func execIterations(body []byte, sqlEnd int, wide64 bool) (int, bool, bool) {
 
 	return iterations, header.options&execOptionFetch != 0, true
 }
+
+// execNoStatementTailFields is how many single-zero fields stand between the
+// 12.2 oaccolid pointers' head (the dml-rowcounts pair) and the end of the thin
+// exec header, in the shape a plain execution writes them. See
+// execNoStatementIterations.
+const execNoStatementTailFields = 8
+
+// execNoStatementIterations is execIterations for a thin `03 5e` that declares
+// no statement: with no text to anchor on, the header is walked field by field
+// to its end — python-oracledb `_write_execute_message`: options, cursor id,
+// the cursor flag, the sql length (0), the al8i4 pointer and its length 13, the
+// al8o4 pair, the prefetch sizes, the binds pointer and count, the al8app..al8kvl
+// pointers, the defines, registration, object, blv and dnam fields, the
+// dml-rowcounts pair and the 12.2 tail — and al8i4[0] (the parse flag) and
+// al8i4[1] (the execution count) are read right behind it.
+//
+// It returns the iterations, whether the call also fetches (then al8i4[1] is a
+// prefetch size, not a batch), and the offset just past al8i4[1], where the
+// bind rows can start no earlier than.
+//
+// It answers false for anything that does not walk exactly as written above (a
+// non-zero field where an empty one is expected is a shape this reading was not
+// built for), and the caller falls back to the one row it can find.
+func execNoStatementIterations(body []byte) (execNoStatementBatch, bool) {
+	header, ok := execThinHeader(body)
+	if !ok || header.sqlLen.value != 0 {
+		return execNoStatementBatch{}, false
+	}
+
+	pos := header.sqlLen.at + header.sqlLen.width
+
+	// ptr marks a one-byte pointer flag, u a compressed integer.
+	type field struct {
+		ptr  bool
+		want int // expected value, -1 for any
+	}
+
+	fields := []field{
+		{true, 1}, {false, 13}, // al8i4 pointer, length
+		{true, 0}, {true, 0}, // al8o4, al8o4l
+		{false, -1}, {false, -1}, {false, -1}, // prefetch buffer, prefetch rows, max long
+		{true, -1}, {false, -1}, // binds pointer, count
+		{true, 0}, {true, 0}, {true, 0}, {true, 0}, {true, 0}, // al8app, al8txn, al8txl, al8kv, al8kvl
+		{true, 0}, {false, 0}, {false, 0}, // al8doac, defines, registration id
+		{true, 0}, {true, 1}, {true, 0}, {false, 0}, // objlist, objlen, blv, blvl
+		{true, 0}, {false, 0}, {false, 0}, // dnam, dnaml, regid_msb
+		{true, 0}, {false, 0}, // al8pidmlrc, its length
+	}
+
+	for range execNoStatementTailFields {
+		fields = append(fields, field{true, 0})
+	}
+
+	for _, f := range fields {
+		if pos >= len(body) {
+			return execNoStatementBatch{}, false
+		}
+
+		value, n := int(body[pos]), 1
+		if !f.ptr {
+			value, n = readCompressedInt(body[pos:])
+			if n == 0 {
+				return execNoStatementBatch{}, false
+			}
+		}
+
+		if f.want >= 0 && value != f.want {
+			return execNoStatementBatch{}, false
+		}
+
+		pos += n
+	}
+
+	_, n := readCompressedInt(body[pos:])
+	if n == 0 {
+		return execNoStatementBatch{}, false
+	}
+
+	pos += n
+
+	iterations, m := readCompressedInt(body[pos:])
+	if m == 0 || iterations <= 0 {
+		return execNoStatementBatch{}, false
+	}
+
+	return execNoStatementBatch{iterations: iterations, fetch: header.options&execOptionFetch != 0, rowsAt: pos + m}, true
+}
+
+// execNoStatementBatch is what execNoStatementIterations reads off a header.
+type execNoStatementBatch struct {
+	iterations int
+	fetch      bool // the call also fetches: iterations is a prefetch size
+	rowsAt     int  // offset just past al8i4[1], where the bind rows start
+}

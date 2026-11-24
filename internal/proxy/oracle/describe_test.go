@@ -57,28 +57,28 @@ func TestParseColumnDescribes(t *testing.T) {
 		want   []columnDesc
 	}{
 		{"go_ora_compressed.pcapng", compressedSQLMarker, []columnDesc{
-			{"GRP", tnsTypeCHAR}, {"NUM", tnsTypeNUMBER}, {"OPT", tnsTypeVARCHAR},
+			{"GRP", tnsTypeCHAR, false}, {"NUM", tnsTypeNUMBER, false}, {"OPT", tnsTypeVARCHAR, false},
 		}},
 		{"go_ora_numbers.pcapng", numbersSQLMarker, []columnDesc{
-			{"PI", tnsTypeNUMBER},
-			{"AMOUNT", tnsTypeNUMBER},
-			{"MILLION", tnsTypeNUMBER},
-			{"QUARTER", tnsTypeNUMBER},
+			{"PI", tnsTypeNUMBER, false},
+			{"AMOUNT", tnsTypeNUMBER, false},
+			{"MILLION", tnsTypeNUMBER, false},
+			{"QUARTER", tnsTypeNUMBER, false},
 		}},
 		{"go_ora_temporal.pcapng", temporalSQLMarker, []columnDesc{
-			{"DT", tnsTypeDATE}, {"TS", tnsTypeTSDTY}, {"TSTZ", tnsTypeTSTZDTY},
+			{"DT", tnsTypeDATE, false}, {"TS", tnsTypeTSDTY, false}, {"TSTZ", tnsTypeTSTZDTY, false},
 		}},
 		{"go_ora_largeresult.pcapng", largeResultSQLMarker, []columnDesc{
-			{"ID", tnsTypeNUMBER}, {"PAYLOAD", tnsTypeVARCHAR},
+			{"ID", tnsTypeNUMBER, false}, {"PAYLOAD", tnsTypeVARCHAR, false},
 		}},
 		{"go_ora_colcount.pcapng", colCountSQLMarker, []columnDesc{
-			{"N", tnsTypeNUMBER}, {"LEVEL*10", tnsTypeNUMBER},
+			{"N", tnsTypeNUMBER, false}, {"LEVEL*10", tnsTypeNUMBER, false},
 		}},
 		{"go_ora_mixed.pcapng", mixedSQLMarker, []columnDesc{
-			{"ID", tnsTypeNUMBER},
-			{"GRP", tnsTypeNUMBER},
-			{"AMOUNT", tnsTypeNUMBER},
-			{"MAYBE_DAY", tnsTypeDATE},
+			{"ID", tnsTypeNUMBER, false},
+			{"GRP", tnsTypeNUMBER, false},
+			{"AMOUNT", tnsTypeNUMBER, false},
+			{"MAYBE_DAY", tnsTypeDATE, false},
 		}},
 	}
 
@@ -137,4 +137,44 @@ func TestParseColumnDescribes_Fallback(t *testing.T) {
 	assert.Nil(t, parseColumnDescribes([]byte{0x10}, oerShape{}), "truncated header")
 	// A describe header claiming columns but with no record bytes must bail.
 	assert.Nil(t, parseColumnDescribes([]byte{0x10, 0x00, 0x01, 0x02, 0x01, 0x03, 0x00}, oerShape{}))
+}
+
+// TestParseColumnDescribes_PythonThinNumberScale pins the describes of
+// python-oracledb thin against 23ai, whose NUMBER columns spell the scale as one
+// signed byte (0x81, the -127 float sentinel) instead of the compressed int
+// go-ora and JDBC send. Read the old way the scale swallowed the first byte of
+// the max-length, every record after it drifted and the whole describe was
+// discarded, leaving ColumnTypes empty and row values typed by guesswork.
+func TestParseColumnDescribes_PythonThinNumberScale(t *testing.T) {
+	t.Parallel()
+
+	td := loadTestDump(t, "python_thin_array_dml.pcapng")
+
+	cases := []struct {
+		marker string
+		want   []columnDesc
+	}{
+		{"SELECT id, name FROM dbbat_array_dml WHERE id BETWEEN", []columnDesc{
+			{"ID", tnsTypeNUMBER, false}, {"NAME", tnsTypeVARCHAR, false},
+		}},
+		{"SELECT id, note, name FROM dbbat_array_dml", []columnDesc{
+			{"ID", tnsTypeNUMBER, false}, {"NOTE", tnsTypeVARCHAR, false}, {"NAME", tnsTypeVARCHAR, false},
+		}},
+	}
+
+	for _, tc := range cases {
+		ttc := firstQueryResultFor(t, td, tc.marker)
+
+		assert.Equal(t, tc.want, parseColumnDescribes(ttc, oerShape{}), tc.marker)
+
+		result := decodeQueryResultV2(ttc, oerShape{}, lobRowLocator)
+		require.NotNil(t, result, tc.marker)
+
+		types := make([]int, len(tc.want))
+		for i, d := range tc.want {
+			types[i] = d.Type
+		}
+
+		assert.Equal(t, types, result.ColumnTypes, tc.marker)
+	}
 }

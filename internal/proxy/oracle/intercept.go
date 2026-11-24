@@ -456,9 +456,32 @@ func (s *session) handleCursorReexec(cursorID uint16, frame []byte) error {
 		return s.refuseUnknownCursor(cursorID)
 	}
 
-	binds, _ := findBindRowsFromTail(frame, 0, countBindPlaceholders(cursor.sql), 1)
+	return s.regateCursor(cursor, statementlessExecBinds(frame, countBindPlaceholders(cursor.sql)))
+}
 
-	return s.regateCursor(cursor, binds)
+// statementlessExecBinds reads the bind rows of a statement-less `03 5e`: every
+// row of an array execution (al8i4[1] iterations, located by walking the header
+// since there is no statement text to anchor on), else the one row at the tail.
+func statementlessExecBinds(frame []byte, count int) execBinds {
+	body, base := frame, 0
+
+	if len(frame) > 0 && !isPiggybackExecHeader(frame) {
+		if end, ok := closeCursorsEnd(frame); ok && end < len(frame) {
+			body, base = frame[end:], end
+		}
+	}
+
+	if b, ok := execNoStatementIterations(body); ok && !b.fetch && b.iterations > 1 {
+		if binds, ok := findBindRowsFromTail(frame, base+b.rowsAt, count, b.iterations); ok {
+			return binds
+		}
+
+		return execBinds{count: b.iterations}
+	}
+
+	binds, _ := findBindRowsFromTail(frame, 0, count, 1)
+
+	return binds
 }
 
 // refuseUnknownCursor decides what to do with a re-execution naming a cursor
@@ -1082,6 +1105,9 @@ func (s *session) handleQueryResultV2(ttcPayload []byte) {
 			columns[i] = columnDef{Name: name}
 			if i < len(result.ColumnTypes) {
 				columns[i].TypeCode = uint8(result.ColumnTypes[i])
+			}
+			if i < len(result.ColumnNational) {
+				columns[i].National = result.ColumnNational[i]
 			}
 		}
 

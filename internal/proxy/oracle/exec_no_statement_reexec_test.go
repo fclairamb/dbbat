@@ -328,18 +328,24 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// UPDATE whose bind got longer than the buffer it was declared with: the
 	// metadata has to be sent again, so the re-execution takes the full execute
 	// op, with the cursor id and no statement, its bind row at the tail.
+	//
+	// python_thin_stmtless_batch.pcapng's one is the same shape carrying a whole
+	// executemany: 8 bind rows behind al8i4[1] = 8, which
+	// execNoStatementIterations reads off the header since there is no
+	// statement text to anchor on.
 	assert.Equal(t, map[string]int{
-		"python_thin_array_dml.pcapng": 1,
-		"ojdbc6_legacy.pcapng":         1,
-		"go_ora_refcursor.pcapng":      3,
-		"jdbc_thin_refcursor.pcapng":   3,
-		"python_thin_refcursor.pcapng": 5,
-		"sqlplus_refcursor.pcapng":     2,
-		"go_ora_lob.pcapng":            1,
-		"python_thin_lob.pcapng":       1,
-		"go_ora_long.pcapng":           2,
-		"go_ora_lob_big.pcapng":        1,
-		"jdbc_thin_lob.pcapng":         1,
+		"python_thin_stmtless_batch.pcapng": 1,
+		"python_thin_array_dml.pcapng":      1,
+		"ojdbc6_legacy.pcapng":              1,
+		"go_ora_refcursor.pcapng":           3,
+		"jdbc_thin_refcursor.pcapng":        3,
+		"python_thin_refcursor.pcapng":      5,
+		"sqlplus_refcursor.pcapng":          2,
+		"go_ora_lob.pcapng":                 1,
+		"python_thin_lob.pcapng":            1,
+		"go_ora_long.pcapng":                2,
+		"go_ora_lob_big.pcapng":             1,
+		"jdbc_thin_lob.pcapng":              1,
 	}, reexecs, "only these recordings carry an execute that declares no statement")
 }
 
