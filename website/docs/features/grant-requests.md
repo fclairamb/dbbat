@@ -75,6 +75,8 @@ POST /api/v1/grant-requests/:uid/cancel
 
 Approval atomically transitions `pending → approved` and builds a real grant from the definition plus the request's user and server, linked back as `resulting_grant_id`. It returns `409` if the request is no longer pending, or if its definition has since been deactivated.
 
+Cancel is the requester withdrawing their own pending request, and only theirs. Admins and approvers cannot cancel someone else's request; they deny it.
+
 Requests carry one of: `pending`, `approved`, `denied`, `cancelled`, `expired`.
 
 ### Who Decides
@@ -112,7 +114,7 @@ Each row of `GET /api/v1/grant-requests` reports `approver_role` for the calling
 
 ### Who Gets Notified
 
-When Slack notifications are configured, the pending message @-mentions every admin **and** every member of the access-approver groups resolved for the target server, de-duplicated. The Approve / Deny buttons authorize against exactly the rule above — clicking one as somebody who may not decide returns an ephemeral refusal — and both Slack transports (the inbound signing-secret endpoint and Socket Mode) go through the same check. The message's deep link lands on the grant-requests page, which now lists an approver's decidable requests alongside their own.
+When Slack notifications are configured, the pending message @-mentions every admin **and** every member of the access-approver groups resolved for the target server, de-duplicated. The Approve / Deny buttons authorize against exactly the rule above — clicking one as somebody who may not decide returns an ephemeral refusal — and both Slack transports (the inbound signing-secret endpoint and Socket Mode) go through the same check. The same message carries a 🚫 Withdraw button for the requester: it runs the cancel rule, so anyone other than the requester, admins included, gets an ephemeral refusal. The message's deep link lands on the grant-requests page, which now lists an approver's decidable requests alongside their own.
 
 ## Auto-Approval
 
@@ -134,7 +136,7 @@ What stays the same, and what changes:
 | Justification | Optional | **Required** — the request is rejected without one |
 | Admin decision | Required | None |
 | `decided_by` | The approving admin | `null` — no human decided |
-| Slack notification | With ✅ Approve / ❌ Deny buttons | Sent **without** buttons |
+| Slack notification | With ✅ Approve / ❌ Deny / 🚫 Withdraw buttons | Sent **without** buttons |
 | Audit trail | `grant_request.created` + the decision event | `grant_request.created` + a decision tagged `auto_approve` |
 
 :::note

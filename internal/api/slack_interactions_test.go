@@ -95,14 +95,19 @@ type stubDecider struct {
 	// mayDecide overrides the stub's admin-based authorization answer, so a
 	// test can play a non-admin who *is* an access approver.
 	mayDecide *bool
+	// mayCancel overrides the requester gate for Withdraw clicks.
+	mayCancel *bool
 
 	approveOutcome *decideOutcome
 	approveErr     error
 	denyOutcome    *decideOutcome
 	denyErr        error
+	cancelOutcome  *decideOutcome
+	cancelErr      error
 
 	approveCalled  bool
 	denyCalled     bool
+	cancelCalled   bool
 	rerenderCalled bool
 	threadReplied  bool
 	lastDeciderUID uuid.UUID
@@ -171,6 +176,19 @@ func (s *stubDecider) deny(_ context.Context, uid uuid.UUID, decider *store.User
 	_ = uid
 
 	return s.denyOutcome, s.denyErr
+}
+
+func (s *stubDecider) mayCancelRequest(_ context.Context, _ *store.User, _ uuid.UUID) bool {
+	return s.mayCancel != nil && *s.mayCancel
+}
+
+func (s *stubDecider) cancel(_ context.Context, _ uuid.UUID, by *store.User) (*decideOutcome, error) {
+	s.mu.Lock()
+	s.cancelCalled = true
+	s.lastDeciderUID = by.UID
+	s.mu.Unlock()
+
+	return s.cancelOutcome, s.cancelErr
 }
 
 func (s *stubDecider) rerenderRequest(_ context.Context, _ uuid.UUID) {
@@ -481,6 +499,112 @@ func TestSlackInteraction_NonAdminEphemeralNoStore(t *testing.T) {
 	}
 }
 
+// TestSlackInteraction_RequesterWithdraws: the requester — refused by the
+// approve/deny gate — clicks Withdraw and the request is withdrawn, never
+// approved or denied.
+func TestSlackInteraction_RequesterWithdraws(t *testing.T) {
+	t.Parallel()
+
+	dec := newStubDecider()
+	dec.user = nonAdminUser()
+	yes, no := true, false
+	dec.mayCancel = &yes
+	dec.mayDecide = &no
+	dec.cancelOutcome = sampleOutcome(notify.GrantActionCancelled)
+
+	body := slackInteractionBody(t, notify.ActionCancel, uuid.NewString(), "U0REQ", "")
+	c := newSignedSlackRequest(t, body)
+
+	testServer().serveSlackInteraction(c, testSigningSecret, dec)
+
+	if c.Writer.Status() != http.StatusOK {
+		t.Fatalf("status = %d, want 200", c.Writer.Status())
+	}
+
+	dec.waitDone(t)
+
+	dec.mu.Lock()
+	defer dec.mu.Unlock()
+
+	if !dec.cancelCalled {
+		t.Error("cancel not called")
+	}
+
+	if dec.approveCalled || dec.denyCalled {
+		t.Error("withdraw must not approve or deny")
+	}
+
+	if dec.lastDeciderUID != dec.user.UID {
+		t.Errorf("canceller UID = %v, want requester %v", dec.lastDeciderUID, dec.user.UID)
+	}
+
+	if !dec.threadReplied {
+		t.Error("thread reply not posted on success")
+	}
+}
+
+// TestSlackInteraction_NonRequesterWithdrawRefused: an approver who may
+// decide the request still may not withdraw it on the requester's behalf.
+func TestSlackInteraction_NonRequesterWithdrawRefused(t *testing.T) {
+	t.Parallel()
+
+	eph := newEphemeralRecorder(t)
+
+	dec := newStubDecider()
+	dec.user = nonAdminUser()
+	yes, no := true, false
+	dec.mayDecide = &yes
+	dec.mayCancel = &no
+
+	body := slackInteractionBody(t, notify.ActionCancel, uuid.NewString(), "U0APP", eph.srv.URL)
+	c := newSignedSlackRequest(t, body)
+
+	testServer().serveSlackInteraction(c, testSigningSecret, dec)
+
+	if c.Writer.Status() != http.StatusOK {
+		t.Fatalf("status = %d, want 200", c.Writer.Status())
+	}
+
+	eph.wait(t)
+
+	if got := eph.lastPost(); got != msgNotRequester {
+		t.Errorf("ephemeral = %q, want %q", got, msgNotRequester)
+	}
+
+	dec.mu.Lock()
+	defer dec.mu.Unlock()
+
+	if dec.cancelCalled || dec.approveCalled || dec.denyCalled {
+		t.Error("store must be untouched for a non-requester withdraw")
+	}
+}
+
+func TestMayCancelGrantRequest(t *testing.T) {
+	t.Parallel()
+
+	requester := nonAdminUser()
+	other := nonAdminUser()
+	admin := adminUser()
+	req := &store.GrantRequest{UID: uuid.New(), UserID: requester.UID}
+
+	cases := []struct {
+		name string
+		user *store.User
+		want bool
+	}{
+		{"requester", requester, true},
+		{"admin", admin, false},
+		{"other user", other, false},
+		{"nil user", nil, false},
+	}
+
+	for _, tc := range cases {
+		if got := mayCancelGrantRequest(tc.user, req); got != tc.want {
+			t.Errorf("%s: mayCancelGrantRequest = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestSlackInteraction_UnlinkedUserEphemeralNoStore(t *testing.T) {
 	t.Parallel()
 
@@ -617,6 +741,10 @@ func TestThreadReplyText(t *testing.T) {
 
 	if got := threadReplyText(notify.GrantActionCancelled, "", nil); !strings.Contains(got, "🚫") || !strings.Contains(got, "requester") {
 		t.Errorf("cancel reply = %q", got)
+	}
+
+	if got := threadReplyText(notify.GrantActionCancelled, "U0REQ", nil); !strings.Contains(got, "<@U0REQ>") || !strings.Contains(got, "withdrawn") {
+		t.Errorf("withdraw reply = %q", got)
 	}
 }
 

@@ -38,12 +38,16 @@ const (
 	GrantActionCancelled GrantAction = "cancelled" //nolint:misspell // matches DB lifecycle value
 )
 
-// Slack interaction action IDs carried by the Approve / Deny buttons. The
-// inbound interaction handler matches on these; kept here so the button
-// rendering and the handler can't drift.
+// Slack interaction action IDs carried by the Approve / Deny / Withdraw
+// buttons. The inbound interaction handler matches on these; kept here so the
+// button rendering and the handler can't drift.
 const (
 	ActionApprove = "grant_request_approve"
 	ActionDeny    = "grant_request_deny"
+	// ActionCancel is the requester's own Withdraw button. A channel message
+	// is the same for every viewer, so it is shown to everyone; the handler
+	// lets only the requester through.
+	ActionCancel = "grant_request_cancel"
 )
 
 // ErrChannelMissing is returned by NewSlackNotifier when a bot token is
@@ -569,9 +573,9 @@ func mentionLine(ev GrantRequestEvent) string {
 	return line
 }
 
-// actionsBlock renders the Approve / Deny buttons. Both carry the request
-// UID as value and a native confirm dialog to guard against fat-finger
-// decisions.
+// actionsBlock renders the Approve / Deny / Withdraw buttons. All carry the
+// request UID as value and a native confirm dialog to guard against
+// fat-finger decisions.
 func actionsBlock(requestUID string) *slack.ActionBlock {
 	approve := slack.NewButtonBlockElement(
 		ActionApprove, requestUID,
@@ -593,7 +597,17 @@ func actionsBlock(requestUID string) *slack.ActionBlock {
 		slack.NewTextBlockObject("plain_text", "Cancel", false, false),
 	))
 
-	return slack.NewActionBlock("grant_request_actions", approve, deny)
+	withdraw := slack.NewButtonBlockElement(
+		ActionCancel, requestUID,
+		slack.NewTextBlockObject("plain_text", "🚫 Withdraw", true, false),
+	).WithConfirm(slack.NewConfirmationBlockObject(
+		slack.NewTextBlockObject("plain_text", "Withdraw your request?", false, false),
+		slack.NewTextBlockObject("plain_text", "This cancels the request. It cannot be undone.", false, false),
+		slack.NewTextBlockObject("plain_text", "Withdraw", false, false),
+		slack.NewTextBlockObject("plain_text", "Keep", false, false),
+	))
+
+	return slack.NewActionBlock("grant_request_actions", approve, deny, withdraw)
 }
 
 // slackMention renders a Slack @-mention for a linked user (<@ID>) or falls

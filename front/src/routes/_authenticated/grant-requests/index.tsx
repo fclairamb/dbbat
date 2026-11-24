@@ -266,7 +266,7 @@ function GrantRequestsPage() {
                 </Button>
               </>
             )}
-            {(isAdmin || r.user_id === user?.uid) && (
+            {r.user_id === user?.uid && (
               <Button
                 size="sm"
                 variant="ghost"
