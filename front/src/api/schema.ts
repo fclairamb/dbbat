@@ -1307,7 +1307,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel grant request (requester or admin) */
+        /** Cancel grant request (requester only) */
         post: operations["cancelGrantRequest"];
         delete?: never;
         options?: never;
