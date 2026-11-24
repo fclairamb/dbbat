@@ -72,11 +72,11 @@ Sorting has to happen in the database, not on the fetched page: the same reasoni
   `duration_ms` / `rows_affected` for those sorts to stay fast with no filter.
   `connections` (about 61k rows) does not.
 
-## Open questions
+## Decisions (Florent, 2026-11-24)
 
-- **Sort by User and Database too?** They are ids in the row and names in the UI, so sorting
-  by name needs a join on `users` / `servers`. Recommended: not in this spec; the filters
-  already narrow by user and server, and the numeric columns are what sorting is for.
-- **Sort Status?** Recommended: no; "Active only" and the approval filter already cover it.
-- **Add indexes for the query sorts in this PR?** Recommended: only if the measurement under
-  "To verify" shows an unfiltered sort above about 500 ms on a realistic volume.
+- **No sort on User and Database.** They are ids in the row and names in the UI, so sorting
+  by name needs a join on `users` / `servers`; the filters already narrow by user and server.
+- **No sort on Status.** "Active only" and the approval filter already cover it.
+- **Indexes for the query sorts only if measured.** Add one in this PR only if an
+  unfiltered sort on `duration_ms` or `rows_affected` takes more than about 500 ms on a
+  realistic volume (see "To verify"); otherwise leave the schema alone.
