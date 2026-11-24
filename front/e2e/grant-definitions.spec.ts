@@ -1,8 +1,8 @@
 import { type Page } from "@playwright/test";
-import { test, expect } from "./fixtures";
+import { test, expect, loginAs } from "./fixtures";
 
 /**
- * Regression coverage for the grant-definition edit dialog.
+ * Regression coverage for the grant-definition edit page.
  *
  * Bug: `DefinitionDialog` was mounted once (with `editing = null`) and seeded
  * all of its form fields from the `editing` prop via `useState` initializers,
@@ -10,7 +10,7 @@ import { test, expect } from "./fixtures";
  * already-mounted dialog never re-read it, so the edit form opened empty —
  * silently overwriting the definition with blank/default values on save.
  *
- * The fix keys the dialog on `editing?.uid ?? "new"` so it remounts (and its
+ * The fix keys the page on `editing?.uid ?? "new"` so it remounts (and its
  * initializers re-run) whenever the target changes. These tests lock that in,
  * plus the sibling staleness paths (Edit A -> New, Edit A -> Edit B).
  */
@@ -25,7 +25,7 @@ async function openCreateDialog(page: Page) {
 }
 
 /**
- * Fill the definition dialog with the given values. Assumes the dialog is open
+ * Fill the definition page with the given values. Assumes the page is open
  * and freshly mounted (blank).
  */
 async function fillDefinition(
@@ -52,7 +52,7 @@ async function fillDefinition(
   await page.getByRole("option", { name: opts.durationUnitLabel }).click();
 
   // Set every control deterministically (check the desired ones, uncheck the
-  // rest) so the helper is idempotent regardless of any state the dialog may
+  // rest) so the helper is idempotent regardless of any state the page may
   // have retained from a prior open.
   for (const c of ["read_only", "block_copy", "block_ddl"]) {
     const box = page.locator(`#def-${c}`);
@@ -74,10 +74,10 @@ async function fillDefinition(
   }
 }
 
-/** Submit the dialog and wait for it to close. */
+/** Submit the page and wait for it to close. */
 async function submitDialog(page: Page) {
   await page.getByTestId("grant-definition-submit").click();
-  await expect(page.locator('[role="dialog"]')).toBeHidden();
+  await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
 }
 
 /** Locate the table row for a definition by its (unique) name. */
@@ -85,17 +85,17 @@ function rowByName(page: Page, name: string) {
   return page.locator("tr", { hasText: name });
 }
 
-/** Open the edit dialog for the definition whose row contains `name`. */
+/** Open the edit page for the definition whose row contains `name`. */
 async function openEditDialog(page: Page, name: string) {
   const row = rowByName(page, name);
   await expect(row).toBeVisible();
   await row.locator('[data-testid^="edit-grant-definition-"]').click();
-  await page.waitForSelector('[role="dialog"]');
+  await expect(page.getByTestId("edit-definition-page")).toBeVisible();
   await expect(page.getByTestId("grant-definition-name")).toBeVisible();
 }
 
-test.describe("Grant Definition edit dialog prefill", () => {
-  test("edit dialog is pre-filled with the definition's saved values", async ({
+test.describe("Grant Definition edit page prefill", () => {
+  test("edit page is pre-filled with the definition's saved values", async ({
     authenticatedPage: page,
   }) => {
     await page.goto(DEFS_URL);
@@ -211,7 +211,7 @@ test.describe("Grant Definition edit dialog prefill", () => {
     await openEditDialog(page, name);
     await expect(page.getByTestId("grant-definition-name")).toHaveValue(name);
     await page.getByRole("button", { name: "Cancel" }).click();
-    await expect(page.locator('[role="dialog"]')).toBeHidden();
+    await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
 
     // New must be blank — not carrying A's values.
     await openCreateDialog(page);
@@ -292,7 +292,7 @@ test.describe("Grant Definition edit dialog prefill", () => {
     await openEditDialog(page, nameA);
     await expect(page.getByTestId("grant-definition-name")).toHaveValue(nameA);
     await page.getByRole("button", { name: "Cancel" }).click();
-    await expect(page.locator('[role="dialog"]')).toBeHidden();
+    await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
 
     await openEditDialog(page, nameB);
     await expect(page.getByTestId("grant-definition-name")).toHaveValue(nameB);
@@ -478,7 +478,7 @@ test.describe("Grant definition deactivated visibility toggle", () => {
  * un-bounding a definition that was meant to inherit a limit, or bounding the
  * dump/ETL definition the `0` exists for.
  *
- * These tests drive the three states through the dialog and back.
+ * These tests drive the three states through the page and back.
  */
 test.describe("Grant Definition statement timeout", () => {
   test("empty, zero and a positive value are three distinct saved states", async ({
@@ -511,8 +511,8 @@ test.describe("Grant Definition statement timeout", () => {
     await expect(
       page.getByTestId("grant-definition-statement-timeout")
     ).toHaveValue("");
-    await page.keyboard.press("Escape");
-    await expect(page.locator('[role="dialog"]')).toBeHidden();
+    await page.getByTestId("form-cancel").click();
+    await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
 
     // 2. An explicit 0: no limit, overriding the global one. It must come back
     //    as "0" and not as an empty field.
@@ -531,8 +531,8 @@ test.describe("Grant Definition statement timeout", () => {
     await expect(
       page.getByTestId("grant-definition-statement-timeout")
     ).toHaveValue("0");
-    await page.keyboard.press("Escape");
-    await expect(page.locator('[role="dialog"]')).toBeHidden();
+    await page.getByTestId("form-cancel").click();
+    await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
 
     // 3. A positive value round-trips as itself.
     await openCreateDialog(page);
@@ -560,8 +560,8 @@ test.describe("Grant Definition statement timeout", () => {
     await expect(
       page.getByTestId("grant-definition-statement-timeout")
     ).toHaveValue("");
-    await page.keyboard.press("Escape");
-    await expect(page.locator('[role="dialog"]')).toBeHidden();
+    await page.getByTestId("form-cancel").click();
+    await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
   });
 });
 
@@ -597,8 +597,8 @@ test.describe("Grant Definition byte soft limit", () => {
 
     await openEditDialog(page, offName);
     await expect(field()).toHaveValue("0");
-    await page.keyboard.press("Escape");
-    await expect(page.locator('[role="dialog"]')).toBeHidden();
+    await page.getByTestId("form-cancel").click();
+    await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
 
     // A positive step round-trips, and clearing it restores inheritance.
     await openCreateDialog(page);
@@ -619,7 +619,80 @@ test.describe("Grant Definition byte soft limit", () => {
 
     await openEditDialog(page, stepName);
     await expect(field()).toHaveValue("");
-    await page.keyboard.press("Escape");
-    await expect(page.locator('[role="dialog"]')).toBeHidden();
+    await page.getByTestId("form-cancel").click();
+    await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
+  });
+});
+
+test.describe("Grant Definition routes", () => {
+  test("edit page opens by URL, survives reload and back returns to the list", async ({
+    authenticatedPage: page,
+  }) => {
+    const name = `route-def-${Date.now()}`;
+    await page.goto(DEFS_URL);
+    await page.waitForLoadState("networkidle");
+    await openCreateDialog(page);
+    await page.getByTestId("grant-definition-name").fill(name);
+    await page.getByTestId("grant-definition-duration-value").fill("2");
+    await submitDialog(page);
+    await expect(page).toHaveURL(/\/grant-definitions\/?$/);
+
+    await rowByName(page, name)
+      .locator('[data-testid^="edit-grant-definition-"]')
+      .click();
+    await expect(page.getByTestId("edit-definition-page")).toBeVisible();
+    const url = page.url();
+    expect(url).toMatch(/\/grant-definitions\/[^/]+$/);
+
+    await page.reload();
+    await expect(page.getByTestId("grant-definition-name")).toHaveValue(name);
+
+    await page.getByTestId("grant-definition-name").fill("never-saved");
+    await page.goBack();
+    await expect(page).toHaveURL(/\/grant-definitions\/?$/);
+    await expect(rowByName(page, name)).toBeVisible();
+    await expect(page.getByText("never-saved")).toHaveCount(0);
+  });
+
+  test("saving lands on the list with the new version; the old uid no longer resolves", async ({
+    authenticatedPage: page,
+  }) => {
+    const name = `versioned-def-${Date.now()}`;
+    await page.goto(DEFS_URL);
+    await page.waitForLoadState("networkidle");
+    await openCreateDialog(page);
+    await page.getByTestId("grant-definition-name").fill(name);
+    await page.getByTestId("grant-definition-duration-value").fill("2");
+    await submitDialog(page);
+
+    await rowByName(page, name)
+      .locator('[data-testid^="edit-grant-definition-"]')
+      .click();
+    await expect(page.getByTestId("edit-definition-page")).toBeVisible();
+    const oldUrl = page.url();
+    await page.getByTestId("grant-definition-description").fill("v2");
+    await submitDialog(page);
+
+    // Lands on the list, which now shows the successor version.
+    await expect(page).toHaveURL(/\/grant-definitions\/?$/);
+    await expect(rowByName(page, name)).toContainText("v2");
+
+    // The superseded uid is archived: not-found, never an editable form.
+    await page.goto(oldUrl);
+    await expect(page.getByTestId("entity-not-found")).toBeVisible();
+    await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
+  });
+
+  test("an unknown uid shows the not-found state", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto(`${DEFS_URL}/00000000-0000-0000-0000-000000000000`);
+    await expect(page.getByTestId("entity-not-found")).toBeVisible();
+  });
+
+  test("a viewer is refused on the edit routes", async ({ page }) => {
+    await loginAs(page, "viewer", "viewer");
+    await page.goto(`${DEFS_URL}/00000000-0000-0000-0000-000000000000`);
+    await expect(page.getByText("Access Denied")).toBeVisible();
   });
 });

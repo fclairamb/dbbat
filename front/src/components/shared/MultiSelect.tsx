@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 
@@ -28,6 +30,12 @@ export function MultiSelect({
   emptyMessage?: string;
   testId?: string;
 }) {
+  const [filter, setFilter] = useState("");
+  const needle = filter.trim().toLowerCase();
+  const visible = needle
+    ? options.filter((o) => o.label.toLowerCase().includes(needle))
+    : options;
+
   const toggle = (value: string) =>
     onChange(
       selected.includes(value)
@@ -45,8 +53,17 @@ export function MultiSelect({
 
   return (
     <div className="space-y-2" data-testid={testId}>
-      <div className="max-h-40 overflow-y-auto rounded-md border p-2 space-y-1.5">
-        {options.map((option) => (
+      {options.length > 5 && (
+        <Input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter…"
+          className="h-8"
+          data-testid={`${testId ?? "multiselect"}-search`}
+        />
+      )}
+      <div className="max-h-64 overflow-y-auto rounded-md border p-2 space-y-1.5">
+        {visible.map((option) => (
           <div key={option.value} className="flex items-center gap-2">
             <Checkbox
               id={`${testId ?? "multiselect"}-${option.value}`}

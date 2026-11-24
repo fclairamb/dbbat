@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, afterSectionSave } from "./fixtures";
 
 /**
  * Retention settings: the instance card, and the windows on a server group.
@@ -86,7 +86,7 @@ test.describe("Retention", () => {
     // Reopen: the value comes back in its largest unit.
     const row = page.locator("tr", { hasText: name });
     await row.locator('[data-testid^="edit-server-group-"]').click();
-    await page.waitForSelector('[role="dialog"]');
+    await expect(page.getByTestId("server-group-name")).toBeVisible();
     await expect(page.getByTestId("server-group-delete-after-amount")).toHaveValue(
       "30",
     );
@@ -115,7 +115,7 @@ test.describe("Retention", () => {
     await expect(row).toBeVisible({ timeout: 10000 });
     await row.locator('[data-testid^="database-edit-"]').click();
 
-    const dialog = page.getByTestId("database-edit-dialog");
+    const dialog = page.getByTestId("database-edit-section");
     await expect(dialog).toBeVisible();
 
     // 2 hours, written as hours and read back as hours.
@@ -127,7 +127,7 @@ test.describe("Retention", () => {
     await expect(page.getByTestId("database-edit-delete-warning")).toBeVisible();
 
     await page.getByTestId("database-edit-submit").click();
-    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+    await afterSectionSave(page);
 
     await page.reload();
     await page.waitForLoadState("networkidle");

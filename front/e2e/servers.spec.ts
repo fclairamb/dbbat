@@ -1,4 +1,4 @@
-import { test, expect } from "./fixtures";
+import { test, expect, loginAs, afterSectionSave } from "./fixtures";
 
 // Regression guard for the HTML `pattern=` attribute going silently dead:
 // browsers compile `pattern=` under the `v` (unicodeSets) regex flag, where
@@ -130,7 +130,7 @@ test.describe("Servers Management", () => {
     await authenticatedPage.goto("servers");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    // Open the first database's detail dialog by clicking its table row.
+    // Open the first database's detail page by clicking its table row.
     const firstRow = authenticatedPage.locator("tbody tr").first();
     if ((await firstRow.count()) === 0) {
       test.skip(true, "no databases available in this environment");
@@ -138,7 +138,7 @@ test.describe("Servers Management", () => {
     }
     await firstRow.click();
 
-    const dialog = authenticatedPage.getByTestId("database-details-dialog");
+    const dialog = authenticatedPage.getByTestId("database-details-section");
     await expect(dialog).toBeVisible();
 
     // Admin callers have no API key, so the URL is rendered with the placeholder.
@@ -229,17 +229,17 @@ test.describe("Servers Management", () => {
     const row = sshSection.locator("tr", { hasText: name });
     await expect(row).toBeVisible({ timeout: 10000 });
 
-    // Open the edit dialog for that row and change its description.
+    // Open the edit page for that row and change its description.
     await row.locator('[data-testid^="ssh-server-edit-"]').click();
 
-    const editDialog = authenticatedPage.getByTestId("ssh-server-edit-dialog");
+    const editDialog = authenticatedPage.getByTestId("ssh-server-edit-section");
     await expect(editDialog).toBeVisible();
     await authenticatedPage
       .getByTestId("ssh-server-edit-description-input")
       .fill(updatedDescription);
     await authenticatedPage.getByTestId("ssh-server-edit-submit").click();
 
-    await expect(editDialog).not.toBeVisible();
+    await afterSectionSave(authenticatedPage);
     await expect(row.getByText(updatedDescription)).toBeVisible({
       timeout: 10000,
     });
@@ -453,7 +453,7 @@ test.describe("Servers Management", () => {
 
     await row.locator('[data-testid^="database-rename-"]').click();
 
-    const dialog = authenticatedPage.getByTestId("database-rename-dialog");
+    const dialog = authenticatedPage.getByTestId("database-rename-section");
     await expect(dialog).toBeVisible();
 
     // Untouched, there is nothing to warn about yet.
@@ -470,8 +470,9 @@ test.describe("Servers Management", () => {
     await expect(warning).toContainText(/connection target/i);
 
     await authenticatedPage.getByTestId("database-rename-submit").click();
+    await authenticatedPage.getByTestId("database-rename-confirm").click();
 
-    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+    await afterSectionSave(authenticatedPage);
     await expect(
       authenticatedPage.locator("tr", { hasText: after }).first(),
     ).toBeVisible({ timeout: 10000 });
@@ -480,7 +481,7 @@ test.describe("Servers Management", () => {
     ).toHaveCount(0);
   });
 
-  test("the rename dialog rejects a leading-hyphen name before it reaches the server", async ({
+  test("the rename section rejects a leading-hyphen name before it reaches the server", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("servers");
@@ -502,7 +503,7 @@ test.describe("Servers Management", () => {
 
     await row.locator('[data-testid^="database-rename-"]').click();
     await expect(
-      authenticatedPage.getByTestId("database-rename-dialog"),
+      authenticatedPage.getByTestId("database-rename-section"),
     ).toBeVisible();
 
     const input = authenticatedPage.getByTestId("database-rename-input");
@@ -520,14 +521,17 @@ test.describe("Servers Management", () => {
     );
     expect(isValid).toBe(false);
     await expect(
-      authenticatedPage.getByTestId("database-rename-dialog"),
+      authenticatedPage.getByTestId("database-rename-section"),
     ).toBeVisible();
+
+    // Nothing was renamed: the list still holds the original name.
+    await authenticatedPage.goto("servers");
     await expect(
       authenticatedPage.locator("tr", { hasText: name }).first(),
     ).toBeVisible();
   });
 
-  test("a tunnel row can be renamed from its edit dialog", async ({
+  test("a tunnel row can be renamed from its edit page", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("servers");
@@ -553,7 +557,7 @@ test.describe("Servers Management", () => {
     await expect(row).toBeVisible({ timeout: 10000 });
 
     await row.locator('[data-testid^="ssh-server-edit-"]').click();
-    const editDialog = authenticatedPage.getByTestId("ssh-server-edit-dialog");
+    const editDialog = authenticatedPage.getByTestId("ssh-server-edit-section");
     await expect(editDialog).toBeVisible();
 
     await authenticatedPage
@@ -568,14 +572,14 @@ test.describe("Servers Management", () => {
 
     await authenticatedPage.getByTestId("ssh-server-edit-submit").click();
 
-    await expect(editDialog).not.toBeVisible({ timeout: 10000 });
+    await afterSectionSave(authenticatedPage);
     await expect(sshSection.getByText(after)).toBeVisible({ timeout: 10000 });
   });
 
   // The bastion in front of a cluster's API server used to be set-once: the
-  // create dialog offered it and the edit dialog did not, so changing it meant
+  // create dialog offered it and the edit page did not, so changing it meant
   // deleting the cluster and orphaning every database row dialed through it.
-  test("a Kubernetes cluster's bastion can be set and cleared from its edit dialog", async ({
+  test("a Kubernetes cluster's bastion can be set and cleared from its edit page", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("servers");
@@ -603,7 +607,7 @@ test.describe("Servers Management", () => {
       sshSection.locator("tr", { hasText: bastionName }),
     ).toBeVisible({ timeout: 10000 });
 
-    // …and a cluster created *without* one, so the edit dialog is what sets it.
+    // …and a cluster created *without* one, so the edit page is what sets it.
     await authenticatedPage.getByTestId("add-database-button").click();
     await authenticatedPage.getByTestId("protocol-select").click();
     await authenticatedPage.getByTestId("protocol-option-kubernetes").click();
@@ -622,13 +626,13 @@ test.describe("Servers Management", () => {
 
     const openClusterEdit = async () => {
       await clusterRow.locator('[data-testid^="ssh-server-edit-"]').click();
-      const dialog = authenticatedPage.getByTestId("ssh-server-edit-dialog");
+      const dialog = authenticatedPage.getByTestId("ssh-server-edit-section");
       await expect(dialog).toBeVisible();
       return dialog;
     };
 
     // Seeded from the row: nothing in front of it yet.
-    let dialog = await openClusterEdit();
+    await openClusterEdit();
     const viaSelect = authenticatedPage.getByTestId(
       "k8s-server-edit-via-select",
     );
@@ -640,14 +644,14 @@ test.describe("Servers Management", () => {
       .click();
     await expect(viaSelect).toContainText(bastionName);
     await authenticatedPage.getByTestId("ssh-server-edit-submit").click();
-    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+    await afterSectionSave(authenticatedPage);
 
     // Re-read it from the server, not from the form state we just typed into.
     await authenticatedPage.reload();
     await authenticatedPage.waitForLoadState("networkidle");
     await expect(clusterRow).toBeVisible({ timeout: 10000 });
 
-    dialog = await openClusterEdit();
+    await openClusterEdit();
     await expect(
       authenticatedPage.getByTestId("k8s-server-edit-via-select"),
     ).toContainText(bastionName);
@@ -659,7 +663,7 @@ test.describe("Servers Management", () => {
       .getByRole("option", { name: "Direct (no tunnel)" })
       .click();
     await authenticatedPage.getByTestId("ssh-server-edit-submit").click();
-    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+    await afterSectionSave(authenticatedPage);
 
     await authenticatedPage.reload();
     await authenticatedPage.waitForLoadState("networkidle");
@@ -674,7 +678,7 @@ test.describe("Servers Management", () => {
   // An SSH bastion has no via selector of its own: chaining one behind another
   // is configured on the row that dials, and the create dialog does not offer
   // it either.
-  test("an SSH bastion's edit dialog offers no via selector", async ({
+  test("an SSH bastion's edit page offers no via selector", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("servers");
@@ -699,7 +703,7 @@ test.describe("Servers Management", () => {
 
     await row.locator('[data-testid^="ssh-server-edit-"]').click();
     await expect(
-      authenticatedPage.getByTestId("ssh-server-edit-dialog"),
+      authenticatedPage.getByTestId("ssh-server-edit-section"),
     ).toBeVisible();
     await expect(
       authenticatedPage.getByTestId("k8s-server-edit-via-select"),
@@ -735,7 +739,7 @@ test.describe("Database row editing", () => {
 
     await row.locator('[data-testid^="database-edit-"]').click();
 
-    const dialog = authenticatedPage.getByTestId("database-edit-dialog");
+    const dialog = authenticatedPage.getByTestId("database-edit-section");
     await expect(dialog).toBeVisible();
 
     // The protocol is deliberately not a field here: it is the one edit that
@@ -766,7 +770,7 @@ test.describe("Database row editing", () => {
     ).toContainText(/reference this row/i, { timeout: 10000 });
 
     await authenticatedPage.getByTestId("database-edit-submit").click();
-    await expect(dialog).not.toBeVisible({ timeout: 10000 });
+    await afterSectionSave(authenticatedPage);
 
     // Re-read the row: the edit landed, and the name is untouched.
     await authenticatedPage.reload();
@@ -811,7 +815,7 @@ test.describe("Database row editing", () => {
 
     await row.locator('[data-testid^="database-edit-"]').click();
     await expect(
-      authenticatedPage.getByTestId("database-edit-dialog"),
+      authenticatedPage.getByTestId("database-edit-section"),
     ).toBeVisible();
 
     // One field, and a password rotation: the form sends exactly those two.
@@ -822,9 +826,7 @@ test.describe("Database row editing", () => {
       .getByTestId("database-edit-password-input")
       .fill("rotated-secret");
     await authenticatedPage.getByTestId("database-edit-submit").click();
-    await expect(
-      authenticatedPage.getByTestId("database-edit-dialog"),
-    ).not.toBeVisible({ timeout: 10000 });
+    await afterSectionSave(authenticatedPage);
 
     const servers = await request.get(`${API_BASE}/servers`, {
       headers: auth,
@@ -861,5 +863,132 @@ test.describe("Database row editing", () => {
     expect(fields).not.toHaveProperty("host");
     // And the secret is never the value.
     expect(JSON.stringify(mine!.details)).not.toContain("rotated-secret");
+  });
+});
+
+test.describe("Server routes", () => {
+  test("the edit page opens by URL, survives reload and back returns to the list", async ({
+    authenticatedPage: page,
+  }) => {
+    const name = `e2e_route_${Date.now()}`;
+    await page.goto("servers");
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("add-database-button").click();
+    await page.waitForSelector('[role="dialog"]');
+    await page.getByTestId("database-name-input").fill(name);
+    await page.locator("#host").fill("route.example.com");
+    await page.locator("#databaseName").fill("postgres");
+    await page.locator("#username").fill("route_user");
+    await page.locator("#password").fill("route-secret");
+    await page.getByTestId("database-create-submit").click();
+    const row = page.locator("tr", { hasText: name }).first();
+    await expect(row).toBeVisible({ timeout: 10000 });
+    await expect(page).toHaveURL(/\/servers\/?$/);
+
+    await row.locator('[data-testid^="database-edit-"]').click();
+    await expect(page.getByTestId("server-page")).toBeVisible();
+    await expect(page.getByTestId("database-edit-section")).toBeVisible();
+    // Rename, approvers and details live on the same page.
+    await expect(page.getByTestId("database-rename-section")).toBeVisible();
+    await expect(page.getByTestId("server-approvers-section")).toBeVisible();
+    await expect(page.getByTestId("database-details-section")).toBeVisible();
+    const url = page.url();
+    expect(url).toMatch(/\/servers\/[^/]+$/);
+
+    await page.reload();
+    await expect(page.getByTestId("database-edit-host-input")).toHaveValue(
+      "route.example.com",
+    );
+
+    await page.goto(url);
+    await expect(page.getByTestId("database-edit-host-input")).toHaveValue(
+      "route.example.com",
+    );
+
+    // Back returns to the list without saving the unsaved edit.
+    await page.getByTestId("database-edit-host-input").fill("never-saved.test");
+    await page.goBack();
+    await page.goto("servers");
+    await expect(page.getByText("never-saved.test")).toHaveCount(0);
+    await expect(page.locator("tr", { hasText: name }).first()).toBeVisible();
+  });
+
+  test("renaming asks for confirmation, and saving one section leaves the others' unsaved changes untouched", async ({
+    authenticatedPage: page,
+  }) => {
+    const stamp = Date.now();
+    const before = `e2e_sect_${stamp}`;
+    const after = `e2e_sect_renamed_${stamp}`;
+    await page.goto("servers");
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("add-database-button").click();
+    await page.waitForSelector('[role="dialog"]');
+    await page.getByTestId("database-name-input").fill(before);
+    await page.locator("#host").fill("sections.example.com");
+    await page.locator("#databaseName").fill("postgres");
+    await page.locator("#username").fill("sect_user");
+    await page.locator("#password").fill("sect-secret");
+    await page.getByTestId("database-create-submit").click();
+    const row = page.locator("tr", { hasText: before }).first();
+    await expect(row).toBeVisible({ timeout: 10000 });
+    await row.locator('[data-testid^="database-rename-"]').click();
+    await expect(page.getByTestId("server-page")).toBeVisible();
+
+    // An unsaved change in another section...
+    const description = page.getByTestId("database-edit-description-input");
+    await description.fill("unsaved-description");
+
+    // ...while the rename asks before it saves.
+    await page.getByTestId("database-rename-input").fill(after);
+    await page.getByTestId("database-rename-submit").click();
+    await expect(
+      page.getByTestId("database-rename-confirm-dialog"),
+    ).toBeVisible();
+    await page.getByTestId("database-rename-confirm-cancel").click();
+    await expect(
+      page.getByTestId("database-rename-confirm-dialog"),
+    ).toHaveCount(0);
+
+    // Cancelling the confirmation renamed nothing.
+    await page.getByTestId("database-rename-submit").click();
+    await page.getByTestId("database-rename-confirm").click();
+    await expect(page.getByText(`Renamed to "${after}"`)).toBeVisible({
+      timeout: 10000,
+    });
+
+    // The rename section saved; the edit section still holds its unsaved
+    // value, and that value was not sent along.
+    await expect(description).toHaveValue("unsaved-description");
+    await page.goto("servers");
+    const renamed = page.locator("tr", { hasText: after }).first();
+    await expect(renamed).toBeVisible({ timeout: 10000 });
+    await expect(renamed).not.toContainText("unsaved-description");
+    await expect(page.locator("tr", { hasText: before })).toHaveCount(0);
+  });
+
+  test("an unknown uid shows the not-found state", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto("servers/00000000-0000-0000-0000-000000000000");
+    await expect(page.getByTestId("entity-not-found")).toBeVisible();
+    await expect(page.getByTestId("database-edit-section")).toHaveCount(0);
+  });
+
+  test("a viewer gets a read-only server page", async ({
+    page,
+  }) => {
+    await loginAs(page, "viewer", "viewer");
+    await page.goto("servers");
+    await page.waitForLoadState("networkidle");
+    const firstRow = page.locator("tbody tr").first();
+    if ((await firstRow.count()) === 0) {
+      test.skip(true, "no databases available in this environment");
+      return;
+    }
+    await firstRow.click();
+    await expect(page.getByTestId("database-details-section")).toBeVisible();
+    await expect(page.getByTestId("database-edit-section")).toHaveCount(0);
+    await expect(page.getByTestId("database-rename-section")).toHaveCount(0);
+    await expect(page.getByTestId("server-approvers-section")).toHaveCount(0);
   });
 });

@@ -1631,6 +1631,9 @@ export function useUpdateInstanceRetention(options?: {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["instance"] });
+      // Instance settings are stored as global parameters; keep the raw
+      // parameter list (and its edit page) from serving the pre-save value.
+      queryClient.invalidateQueries({ queryKey: ["parameters"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -1654,6 +1657,9 @@ export function useUpdateInstancePublic(options?: {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["instance"] });
+      // Instance settings are stored as global parameters; keep the raw
+      // parameter list (and its edit page) from serving the pre-save value.
+      queryClient.invalidateQueries({ queryKey: ["parameters"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -1679,6 +1685,9 @@ export function useUpdateInstanceLimits(options?: {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["instance"] });
+      // Instance settings are stored as global parameters; keep the raw
+      // parameter list (and its edit page) from serving the pre-save value.
+      queryClient.invalidateQueries({ queryKey: ["parameters"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -1706,6 +1715,9 @@ export function useUpdateInstanceTagging(options?: {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["instance"] });
+      // Instance settings are stored as global parameters; keep the raw
+      // parameter list (and its edit page) from serving the pre-save value.
+      queryClient.invalidateQueries({ queryKey: ["parameters"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
