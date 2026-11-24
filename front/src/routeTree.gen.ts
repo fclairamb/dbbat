@@ -20,6 +20,8 @@ import { Route as AuthenticatedConnectionsIndexRouteImport } from './routes/_aut
 import { Route as AuthenticatedConnectionsUidRouteImport } from './routes/_authenticated/connections/$uid'
 import { Route as AuthenticatedDatabasesIndexRouteImport } from './routes/_authenticated/databases/index'
 import { Route as AuthenticatedGrantDefinitionsIndexRouteImport } from './routes/_authenticated/grant-definitions/index'
+import { Route as AuthenticatedGrantDefinitionsUidRouteImport } from './routes/_authenticated/grant-definitions/$uid'
+import { Route as AuthenticatedGrantDefinitionsNewRouteImport } from './routes/_authenticated/grant-definitions/new'
 import { Route as AuthenticatedGrantRequestsIndexRouteImport } from './routes/_authenticated/grant-requests/index'
 import { Route as AuthenticatedGrantsIndexRouteImport } from './routes/_authenticated/grants/index'
 import { Route as AuthenticatedQueriesIndexRouteImport } from './routes/_authenticated/queries/index'
@@ -93,6 +95,18 @@ const AuthenticatedGrantDefinitionsIndexRoute =
   AuthenticatedGrantDefinitionsIndexRouteImport.update({
     id: '/grant-definitions/',
     path: '/grant-definitions/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedGrantDefinitionsUidRoute =
+  AuthenticatedGrantDefinitionsUidRouteImport.update({
+    id: '/grant-definitions/$uid',
+    path: '/grant-definitions/$uid',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedGrantDefinitionsNewRoute =
+  AuthenticatedGrantDefinitionsNewRouteImport.update({
+    id: '/grant-definitions/new',
+    path: '/grant-definitions/new',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
 const AuthenticatedGrantRequestsIndexRoute =
@@ -188,6 +202,8 @@ export interface FileRoutesByFullPath {
   '/device': typeof AuthenticatedDeviceRoute
   '/profile': typeof AuthenticatedProfileRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
+  '/grant-definitions/$uid': typeof AuthenticatedGrantDefinitionsUidRoute
+  '/grant-definitions/new': typeof AuthenticatedGrantDefinitionsNewRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
   '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
@@ -215,6 +231,8 @@ export interface FileRoutesByTo {
   '/profile': typeof AuthenticatedProfileRoute
   '/': typeof AuthenticatedIndexRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
+  '/grant-definitions/$uid': typeof AuthenticatedGrantDefinitionsUidRoute
+  '/grant-definitions/new': typeof AuthenticatedGrantDefinitionsNewRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
   '/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
@@ -244,6 +262,8 @@ export interface FileRoutesById {
   '/_authenticated/profile': typeof AuthenticatedProfileRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/connections/$uid': typeof AuthenticatedConnectionsUidRoute
+  '/_authenticated/grant-definitions/$uid': typeof AuthenticatedGrantDefinitionsUidRoute
+  '/_authenticated/grant-definitions/new': typeof AuthenticatedGrantDefinitionsNewRoute
   '/_authenticated/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/_authenticated/server-groups/$uid': typeof AuthenticatedServerGroupsUidRoute
   '/_authenticated/server-groups/new': typeof AuthenticatedServerGroupsNewRoute
@@ -273,6 +293,8 @@ export interface FileRouteTypes {
     | '/device'
     | '/profile'
     | '/connections/$uid'
+    | '/grant-definitions/$uid'
+    | '/grant-definitions/new'
     | '/queries/$uid'
     | '/server-groups/$uid'
     | '/server-groups/new'
@@ -300,6 +322,8 @@ export interface FileRouteTypes {
     | '/profile'
     | '/'
     | '/connections/$uid'
+    | '/grant-definitions/$uid'
+    | '/grant-definitions/new'
     | '/queries/$uid'
     | '/server-groups/$uid'
     | '/server-groups/new'
@@ -328,6 +352,8 @@ export interface FileRouteTypes {
     | '/_authenticated/profile'
     | '/_authenticated/'
     | '/_authenticated/connections/$uid'
+    | '/_authenticated/grant-definitions/$uid'
+    | '/_authenticated/grant-definitions/new'
     | '/_authenticated/queries/$uid'
     | '/_authenticated/server-groups/$uid'
     | '/_authenticated/server-groups/new'
@@ -432,6 +458,20 @@ declare module '@tanstack/react-router' {
       path: '/grant-definitions'
       fullPath: '/grant-definitions/'
       preLoaderRoute: typeof AuthenticatedGrantDefinitionsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/grant-definitions/$uid': {
+      id: '/_authenticated/grant-definitions/$uid'
+      path: '/grant-definitions/$uid'
+      fullPath: '/grant-definitions/$uid'
+      preLoaderRoute: typeof AuthenticatedGrantDefinitionsUidRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/grant-definitions/new': {
+      id: '/_authenticated/grant-definitions/new'
+      path: '/grant-definitions/new'
+      fullPath: '/grant-definitions/new'
+      preLoaderRoute: typeof AuthenticatedGrantDefinitionsNewRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/grant-requests/': {
@@ -547,6 +587,8 @@ interface AuthenticatedRouteChildren {
   AuthenticatedProfileRoute: typeof AuthenticatedProfileRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedConnectionsUidRoute: typeof AuthenticatedConnectionsUidRoute
+  AuthenticatedGrantDefinitionsUidRoute: typeof AuthenticatedGrantDefinitionsUidRoute
+  AuthenticatedGrantDefinitionsNewRoute: typeof AuthenticatedGrantDefinitionsNewRoute
   AuthenticatedQueriesUidRoute: typeof AuthenticatedQueriesUidRoute
   AuthenticatedServerGroupsUidRoute: typeof AuthenticatedServerGroupsUidRoute
   AuthenticatedServerGroupsNewRoute: typeof AuthenticatedServerGroupsNewRoute
@@ -574,6 +616,8 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedProfileRoute: AuthenticatedProfileRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedConnectionsUidRoute: AuthenticatedConnectionsUidRoute,
+  AuthenticatedGrantDefinitionsUidRoute: AuthenticatedGrantDefinitionsUidRoute,
+  AuthenticatedGrantDefinitionsNewRoute: AuthenticatedGrantDefinitionsNewRoute,
   AuthenticatedQueriesUidRoute: AuthenticatedQueriesUidRoute,
   AuthenticatedServerGroupsUidRoute: AuthenticatedServerGroupsUidRoute,
   AuthenticatedServerGroupsNewRoute: AuthenticatedServerGroupsNewRoute,

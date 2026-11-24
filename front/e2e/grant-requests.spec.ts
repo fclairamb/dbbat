@@ -12,13 +12,13 @@ const DEFS_URL = "grant-definitions";
 
 async function openCreateDialog(page: Page) {
   await page.getByTestId("create-grant-definition-button").click();
-  await page.waitForSelector('[role="dialog"]');
+  await expect(page.getByTestId("new-definition-page")).toBeVisible();
   await expect(page.getByTestId("grant-definition-name")).toBeVisible();
 }
 
 async function submitDialog(page: Page) {
   await page.getByTestId("grant-definition-submit").click();
-  await expect(page.locator('[role="dialog"]')).toBeHidden();
+  await expect(page.getByTestId("grant-definition-name")).toHaveCount(0);
 }
 
 async function submitRequest(

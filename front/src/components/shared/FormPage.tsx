@@ -1,13 +1,12 @@
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft, SearchX } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { PageHeader } from "@/components/shared/PageHeader";
 
 interface FormPageProps {
   /** data-testid of the page container, e.g. "edit-user-page". */
   testId: string;
   title: string;
-  description?: string;
+  description?: React.ReactNode;
   /** List route the back link and Cancel return to. */
   backTo: string;
   backLabel: string;
@@ -51,7 +50,12 @@ export function FormPage({
         <ArrowLeft className="h-4 w-4" />
         {backLabel}
       </Link>
-      <PageHeader title={title} description={description} />
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+        {description && (
+          <p className="text-sm text-muted-foreground">{description}</p>
+        )}
+      </div>
       <form onSubmit={onSubmit} className="mt-6">
         <div className="space-y-6">{children}</div>
         <div className="sticky bottom-0 -mx-4 mt-8 flex justify-end gap-2 border-t bg-background px-4 py-3">
