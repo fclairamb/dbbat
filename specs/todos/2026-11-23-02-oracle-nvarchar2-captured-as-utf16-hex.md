@@ -25,3 +25,7 @@ rendering is what is left.
   with NULs in it, which `isPrintableUTF8Text` already refuses, so it stays hex.
 - Record a fixture with an NVARCHAR2 column (python-oracledb and go-ora) and
   pin the rendered value.
+- NCLOB inline: evidence is `testdata/go_ora_lob.pcapng` (D4 = `TO_NCLOB('nn')`,
+  describe csfrm 2, value `006e006e` on the wire), so `decodeNationalValue`
+  also decodes `tnsTypeCLOB` as UTF-16BE; the replay now reads `nn`. Clients
+  that receive only a locator carry no value, so there is nothing to decode.

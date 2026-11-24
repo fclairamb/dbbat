@@ -59,7 +59,8 @@ func replayCapturedRowsUnder(t *testing.T, td *testDump, sqlMarker string, force
 		started  bool
 		done     bool
 		columns  []string
-		colTypes []int
+		colTypes []int // the describe's codes, as the define block is matched on
+		rowTypes []int // colTypes with the national mark, as the row decoders read them
 		lastRow  []string
 		rows     [][]string
 		lobShape lobRowShape
@@ -130,6 +131,15 @@ func replayCapturedRowsUnder(t *testing.T, td *testDump, sqlMarker string, force
 			if len(result.Columns) > 0 {
 				columns = result.Columns
 				colTypes = result.ColumnTypes
+				rowTypes = append([]int(nil), colTypes...)
+
+				// The national mark rides on the types, as it does on the
+				// session's cursor columns (rowColumnTypes).
+				for i, national := range result.ColumnNational {
+					if national && i < len(rowTypes) {
+						rowTypes[i] |= colTypeNational
+					}
+				}
 			}
 
 			for _, row := range result.Rows {
@@ -137,7 +147,7 @@ func replayCapturedRowsUnder(t *testing.T, td *testDump, sqlMarker string, force
 				lastRow = row
 			}
 		case TTCFuncContinuation:
-			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow, colTypes, oer, lobShape)
+			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow, rowTypes, oer, lobShape)
 			for _, row := range contRows {
 				strRow := make([]string, len(row))
 				for i, v := range row {

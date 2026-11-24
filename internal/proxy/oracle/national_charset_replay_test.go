@@ -36,3 +36,16 @@ func TestDumpReplay_NVarchar2AsText(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeRowValue_InlineNCLOB pins the inline NCLOB reading: a national CLOB
+// column's inlined value is UTF-16BE (go_ora_lob.pcapng, D4 = TO_NCLOB('nn'),
+// 006e006e on the wire), while a plain CLOB is never reinterpreted.
+func TestDecodeRowValue_InlineNCLOB(t *testing.T) {
+	t.Parallel()
+
+	utf16 := []byte{0x00, 0x42, 0x00, 0xe2, 0x00, 0x74}
+
+	assert.Equal(t, "Bât", decodeRowValue([]int{tnsTypeCLOB | colTypeNational}, 0, utf16))
+	assert.Equal(t, "006e006e", decodeRowValue([]int{tnsTypeCLOB}, 0, []byte{0, 'n', 0, 'n'}),
+		"without the describe's csfrm 2 nothing is guessed")
+}

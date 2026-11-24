@@ -828,6 +828,14 @@ blank padding). Recordings: `testdata/python_thin_nvarchar2.pcapng` and
 `TestCapture_GoOraNVarchar2`; a VARCHAR2, NVARCHAR2 and NCHAR column holding
 `Bâtiment 1`), replayed by `national_charset_replay_test.go`.
 
+An **NCLOB** is decoded the same way when its value is inline on the wire. A
+thin client (go-ora's default) asks for LOB bodies up front, and the row then
+carries the value, in AL16UTF16: `testdata/go_ora_lob.pcapng` holds
+`TO_NCLOB('nn')` as `006e006e` under a describe with csfrm 2, captured as `nn`
+(`TestThinLOBFetchCarriesTheContentInsteadOfALocator`). Where only a locator
+travels (python-oracledb thin, sqlplus, JDBC thin's locator part) there is no
+value to decode and the column is the `<CLOB locator>` marker, as for any CLOB.
+
 A python-oracledb DML re-execution is answered by a **standalone** `0x04`
 reporting success without the end-of-call bit, which no reading accepted. It
 completes the call now outside a row stream, under the same bounds

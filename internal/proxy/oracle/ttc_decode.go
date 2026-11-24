@@ -2723,7 +2723,9 @@ func decodeRowValue(colTypes []int, col int, b []byte) string {
 	return decodeOracleRawValue(b)
 }
 
-// decodeNationalValue decodes the value of a national VARCHAR2 / CHAR column
+// decodeNationalValue decodes the value of a national VARCHAR2 / CHAR column,
+// or of an NCLOB a thin client had the server inline (go_ora_lob.pcapng: `nn`
+// arrives as 006e006e),
 // as UTF-16BE, and only on the describe's say-so: UTF-16 of ASCII text is
 // valid UTF-8 with NULs in it, so a guess would have no footing.
 func decodeNationalValue(colTypes []int, col int, b []byte) (string, bool) {
@@ -2731,7 +2733,7 @@ func decodeNationalValue(colTypes []int, col int, b []byte) (string, bool) {
 		return "", false
 	}
 
-	if t := colType(colTypes, col); t != tnsTypeVARCHAR && t != tnsTypeCHAR {
+	if t := colType(colTypes, col); t != tnsTypeVARCHAR && t != tnsTypeCHAR && t != tnsTypeCLOB {
 		return "", false
 	}
 
