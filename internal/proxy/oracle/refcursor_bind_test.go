@@ -26,6 +26,12 @@ const (
 	pythonThinRefCursorDump = "python_thin_refcursor.pcapng"
 	jdbcThinRefCursorDump   = "jdbc_thin_refcursor.pcapng"
 	ociRefCursorDump        = "sqlplus_refcursor.pcapng"
+
+	// goOra18cCursorLearningDump is a whole TestIntegration_CursorIDLearningMissRate
+	// session against Oracle 18c XE, recorded by the nightly's capture_dumps run.
+	// Its REF-cursor step drives the five cursors dbbat_learn_refcur hands out.
+	// See cursor_learning_18c_replay_test.go.
+	goOra18cCursorLearningDump = "go_ora_cursor_learning_18c.pcapng"
 )
 
 // ociRefCursorBindOutputs is the OCI half of the same session, kept as a hex
@@ -399,9 +405,10 @@ func TestOCIScalarOutBindsYieldNoRefCursorID(t *testing.T) {
 // **compressed** encoding. They are the ones the cross-encoding check sweeps:
 // none of them may decode under the fixed-width reading.
 var thinRefCursorDumps = map[string]bool{
-	goOraRefCursorDump:      true,
-	pythonThinRefCursorDump: true,
-	jdbcThinRefCursorDump:   true,
+	goOraRefCursorDump:         true,
+	pythonThinRefCursorDump:    true,
+	jdbcThinRefCursorDump:      true,
+	goOra18cCursorLearningDump: true,
 }
 
 // refCursorDumps are the only recordings in the corpus that hold a REF cursor.
@@ -413,10 +420,11 @@ var thinRefCursorDumps = map[string]bool{
 // reading, so it is excused from the silence sweep but must not be fed to the
 // cross-encoding one, which asserts the opposite.
 var refCursorDumps = map[string]bool{
-	goOraRefCursorDump:      true,
-	pythonThinRefCursorDump: true,
-	jdbcThinRefCursorDump:   true,
-	ociRefCursorDump:        true,
+	goOraRefCursorDump:         true,
+	pythonThinRefCursorDump:    true,
+	jdbcThinRefCursorDump:      true,
+	ociRefCursorDump:           true,
+	goOra18cCursorLearningDump: true,
 }
 
 // TestDumpReplay_RefCursorLocatorIsSilentOnOrdinaryTraffic is the false-positive

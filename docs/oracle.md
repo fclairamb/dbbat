@@ -852,9 +852,19 @@ dbbat has a statement with no id and, later, an id with no statement.
 
 `learnCursorID` reads it off the responses to each execute
 (`findCursorIDInResponse`): the OER's seventh field. The reading is anchored
-rather than trusting — seven compressed ints, error code success or ORA-01403, a
-sequence number inside its 16-bit field, a 16-bit cursor id — because a run of
-row bytes can otherwise parse as an OER.
+rather than trusting — seven compressed ints, a non-zero call status, error code
+success or ORA-01403, a sequence number inside its 16-bit field, a 16-bit cursor
+id — because a run of row bytes can otherwise parse as an OER.
+
+The call-status bound came last, from Oracle 18c XE. Its QueryResult for
+`SELECT :1 AS a, … :5 AS e FROM dual` carries, inside the fifth column's
+describe, a `0x04` whose compressed reading is status 0, sequence 7, error 0,
+cursor 2, 70 bytes ahead of the call's real OER (status 1, ORA-01403, cursor 8).
+The scan took the first one, filed the statement under cursor 2, and every
+re-execution named 8, a cursor dbbat did not hold (ORA-01031 under a
+restrictive grant). The fixed-width reading already refused a zero status; a
+real OER never reports one in either encoding. Replayed from the 18c nightly's
+own capture in `cursor_learning_18c_replay_test.go`.
 
 It has three sources, and they are **ranked** rather than raced
 (`cursorIDSource`):
