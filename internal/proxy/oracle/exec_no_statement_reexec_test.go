@@ -333,11 +333,15 @@ func TestOJDBC6ReexecDoesNotDisturbTheParsePath(t *testing.T) {
 	// executemany: 8 bind rows behind al8i4[1] = 8, which
 	// execNoStatementIterations reads off the header since there is no
 	// statement text to anchor on.
+	//
+	// go_ora_cursor_learning_18c.pcapng's five are its REF-cursor step, the
+	// same frames as go_ora_refcursor.pcapng's, one per drive, on Oracle 18c.
 	assert.Equal(t, map[string]int{
 		"python_thin_stmtless_batch.pcapng": 1,
 		"python_thin_array_dml.pcapng":      1,
 		"ojdbc6_legacy.pcapng":              1,
 		"go_ora_refcursor.pcapng":           3,
+		"go_ora_cursor_learning_18c.pcapng": 5,
 		"jdbc_thin_refcursor.pcapng":        3,
 		"python_thin_refcursor.pcapng":      5,
 		"sqlplus_refcursor.pcapng":          2,
