@@ -530,12 +530,23 @@ func locatePlausibleOER(shape oerShape, payload []byte) (*oerInfo, int) {
 // success or end-of-data (an OER reporting a real failure assigns no cursor),
 // the sequence number must fit its 16-bit field, and the cursor id must be a
 // plausible 16-bit id.
+//
+// The call status must also be non-zero, as decodeOERFieldsAtLayout already
+// demands of the fixed-width encoding: every OER a server sends reports at least
+// one status bit. Oracle 18c's describe for a five-bind SELECT carries a 0x04
+// whose compressed reading passes every other bound with status 0 and cursor 2,
+// ahead of the call's real OER naming cursor 8, and the scan learned the 2 (see
+// TestDumpReplay_18cBindHeavySelectLearnsItsOwnCursorID).
 func plausibleStatusOER(info *oerInfo) bool {
 	if info == nil {
 		return false
 	}
 
 	if info.ErrorCode != 0 && info.ErrorCode != oraNoDataFound {
+		return false
+	}
+
+	if info.CallStatus == 0 {
 		return false
 	}
 
