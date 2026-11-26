@@ -245,14 +245,44 @@ func (s *Store) SealAndCommitArchive(ctx context.Context, seal ArchiveSeal) erro
 			return ErrConnectionNotFound
 		}
 
-		_, err = tx.ExecContext(ctx, `DELETE FROM query_rows WHERE query_id IN (
-			SELECT uid FROM queries WHERE connection_id = ?)`, seal.ConnectionUID)
-		if err != nil {
-			return fmt.Errorf("delete archived rows: %w", err)
-		}
-
-		return nil
+		return deleteConnectionRows(ctx, tx, seal.ConnectionUID)
 	})
+}
+
+// archiveDeleteBatch bounds one DELETE of archived rows. Rows of a connection
+// are spread over the disk, about one page read each, so a batch stays well
+// under the driver's 10 s read timeout even on a loaded store.
+const archiveDeleteBatch = 2000
+
+// deleteConnectionRows deletes the captured rows of a connection inside tx,
+// statement by statement and in batches. One DELETE over the whole connection
+// ran past the driver's read timeout on connections with millions of rows, and
+// the abandoned statement kept running on the server. All batches share the
+// transaction, so the connection still flips to archived atomically.
+func deleteConnectionRows(ctx context.Context, tx bun.Tx, connectionUID uuid.UUID) error {
+	var queryUIDs []uuid.UUID
+
+	if err := tx.NewSelect().Table("queries").Column("uid").
+		Where("connection_id = ?", connectionUID).
+		Scan(ctx, &queryUIDs); err != nil {
+		return fmt.Errorf("list archived statements: %w", err)
+	}
+
+	for _, queryUID := range queryUIDs {
+		for {
+			res, err := tx.ExecContext(ctx, `DELETE FROM query_rows WHERE uid IN (
+				SELECT uid FROM query_rows WHERE query_id = ? LIMIT ?)`, queryUID, archiveDeleteBatch)
+			if err != nil {
+				return fmt.Errorf("delete archived rows: %w", err)
+			}
+
+			if n, _ := res.RowsAffected(); n < archiveDeleteBatch {
+				break
+			}
+		}
+	}
+
+	return nil
 }
 
 // ReleaseArchiveClaim drops the lease of a connection whose archive failed, so

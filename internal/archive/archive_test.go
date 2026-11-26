@@ -505,3 +505,27 @@ func TestStreamConnectionRowsOrder(t *testing.T) { //nolint:paralleltest // sequ
 
 	assert.Equal(t, want, got)
 }
+
+// TestArchiveDeletesRowsPastOneBatch archives statements larger than one delete
+// batch, and exactly one batch, and checks no row is left in PostgreSQL.
+func TestArchiveDeletesRowsPastOneBatch(t *testing.T) { //nolint:paralleltest // sequential tests share one database
+	s := testStore(t)
+	ctx := context.Background()
+
+	f := newFixture(t, s, "delete-batches", i64(3600), nil, []int{4500, 2000, 1}, 2*time.Hour)
+	a := openArchiver(t, s, t.TempDir())
+
+	res, err := a.Pass(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Archived)
+
+	for i, q := range f.queries {
+		page, err := s.GetQueryRows(ctx, q, "", 100)
+		require.NoError(t, err)
+		assert.Empty(t, page.Rows, "statement %d keeps no row in PostgreSQL", i)
+	}
+
+	ref, err := s.GetConnectionArchive(ctx, f.conn.UID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(6501), ref.Rows)
+}
