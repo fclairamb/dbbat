@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.3](https://github.com/fclairamb/dbbat/compare/v0.34.2...v0.34.3) (2026-11-26)
+
+
+### Bug Fixes
+
+* **retention:** archiving no longer fails on connections with millions of captured rows: once uploaded, their rows were deleted in one statement that ran past the 10 s read timeout, so they stayed in PostgreSQL and the connection was redone on every pass. They are now deleted in batches, in the same transaction ([#544](https://github.com/fclairamb/dbbat/issues/544)) ([2d5a2e4](https://github.com/fclairamb/dbbat/commit/2d5a2e4ea070c5f0075da5c0e9c7a5e7faef644e))
+
 ## [0.34.2](https://github.com/fclairamb/dbbat/compare/v0.34.1...v0.34.2) (2026-11-26)
 
 
