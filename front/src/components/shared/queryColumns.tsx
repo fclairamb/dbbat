@@ -4,6 +4,8 @@ import type { Column } from "@/components/shared/DataTable";
 import { UnverifiedBadge } from "@/components/shared/UnverifiedBadge";
 import { Badge } from "@/components/ui/badge";
 import { ApprovalStatusBadge } from "@/components/shared/ApprovalStatusBadge";
+import { SortHeader } from "@/components/shared/SortHeader";
+import type { SortState } from "@/lib/sort";
 import { formatDistanceToNow } from "date-fns";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -14,17 +16,29 @@ interface BuildQueryColumnsOptions {
   // non-admin roles — only uid/name are used here.
   databases: { uid: string; name: string }[] | undefined;
   size?: number;
+  /** Active sort; with `onSort` it makes Duration and Rows sortable. */
+  sort?: SortState;
+  onSort?: (next: SortState) => void;
 }
 
 export function buildQueryColumns({
   users,
   databases,
   size = DEFAULT_PAGE_SIZE,
+  sort,
+  onSort,
 }: BuildQueryColumnsOptions): Column<Query>[] {
   const getUserName = (uid: string | null | undefined) =>
     uid ? users?.find((u) => u.uid === uid)?.username ?? uid : "-";
   const getDbName = (uid: string | null | undefined) =>
     uid ? databases?.find((d) => d.uid === uid)?.name ?? uid : "-";
+
+  const title = (label: string, sortKey: string) =>
+    sort && onSort ? (
+      <SortHeader label={label} sortKey={sortKey} current={sort} onSort={onSort} />
+    ) : (
+      label
+    );
 
   return [
     {
@@ -84,7 +98,7 @@ export function buildQueryColumns({
     },
     {
       key: "duration_ms",
-      header: "Duration",
+      header: title("Duration", "duration_ms"),
       cell: (q) => (
         <span className="text-sm whitespace-nowrap">
           {q.duration_ms != null ? `${q.duration_ms.toFixed(1)}ms` : "-"}
@@ -93,7 +107,7 @@ export function buildQueryColumns({
     },
     {
       key: "rows_affected",
-      header: "Rows",
+      header: title("Rows", "rows_affected"),
       cell: (q) => <span className="text-sm">{q.rows_affected ?? "-"}</span>,
     },
     {

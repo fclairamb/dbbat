@@ -1086,7 +1086,7 @@ func (s *Store) buildListConnectionsQuery(
 		q = q.Where("right(uid::text, 12) = ?", filter.UIDSuffix)
 	}
 
-	q = q.Order("uid DESC")
+	q = q.OrderExpr(connectionOrderExpr(filter.Sort, filter.Order))
 
 	if filter.Limit > 0 {
 		q = q.Limit(int64(filter.Limit))

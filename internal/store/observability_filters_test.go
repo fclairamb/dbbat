@@ -1095,6 +1095,14 @@ func TestFilteredPaginationUsesAnIndex(t *testing.T) {
 			},
 		},
 		{
+			// An explicit default sort is the uid order: it must not cost the walk.
+			name: "explicit default sort", streams: true,
+			filter: ConnectionFilter{
+				UserID: &f.user.UID, Sort: ConnectionSortConnectedAt, Order: SortDesc,
+				BeforeUID: &cursor, Limit: 50,
+			},
+		},
+		{
 			// The lineage subquery is correlated through grant_uid; it must not
 			// force a sort either.
 			name: "grant policy + provenance", streams: true,
@@ -1158,6 +1166,13 @@ func TestFilteredPaginationUsesAnIndex(t *testing.T) {
 		{
 			name:   "cursor only",
 			filter: QueryFilter{BeforeUID: &cursor, Limit: 50},
+		},
+		{
+			name: "explicit default sort",
+			filter: QueryFilter{
+				UserID: &f.user.UID, Sort: QuerySortExecutedAt, Order: SortDesc,
+				BeforeUID: &cursor, Limit: 50,
+			},
 		},
 		{
 			name: "server group + provenance",

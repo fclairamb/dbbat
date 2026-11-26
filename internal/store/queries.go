@@ -929,7 +929,7 @@ func (s *Store) buildListQueriesQuery(
 		q = q.Where("q.uid < ?", *filter.BeforeUID)
 	}
 
-	q = q.Order("q.uid DESC")
+	q = q.OrderExpr(queryOrderExpr(filter.Sort, filter.Order))
 
 	if filter.Limit > 0 {
 		q = q.Limit(int64(filter.Limit))

@@ -12,6 +12,7 @@ import {
   type ObservabilityFilters,
 } from "@/components/shared/ObservabilityFilterBar";
 import { DataTable } from "@/components/shared/DataTable";
+import { parseSortSearch, type SortState } from "@/lib/sort";
 import { buildQueryColumns } from "@/components/shared/queryColumns";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
@@ -24,10 +25,13 @@ import { AccessDenied } from "@/components/shared/AccessDenied";
 
 const DEFAULT_PAGE_SIZE = 50;
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
+const SORT_KEYS = ["duration_ms", "rows_affected"] as const;
 
-type QuerySearch = ObservabilityFilters & {
+type QuerySearch = ObservabilityFilters & SortState & {
   connection_id?: string;
   before?: string;
+  /** Row offset: pages a non-default sort, where the uid cursor does not hold. */
+  offset?: number;
   size: number;
 };
 
@@ -48,6 +52,8 @@ export const Route = createFileRoute("/_authenticated/queries/")({
     grant_uid: asString(search.grant_uid),
     grant_provenance: asString(search.grant_provenance),
     approval_status: asString(search.approval_status),
+    ...parseSortSearch(search, SORT_KEYS),
+    offset: Number(search.offset) > 0 ? Number(search.offset) : undefined,
   }),
   component: QueriesPage,
 });
@@ -55,13 +61,16 @@ export const Route = createFileRoute("/_authenticated/queries/")({
 function QueriesPage() {
   const { user } = useAuth();
   const search = Route.useSearch();
-  const { connection_id, before, size } = search;
+  const { connection_id, before, size, sort, order, offset } = search;
   const navigate = Route.useNavigate();
   // Server-side, all of it — see the note on the connections listing.
   const { data: queries, isLoading, refetch } = useQueries({
     connection_id,
     before,
     limit: size,
+    sort,
+    order,
+    offset,
     user_id: search.user_id,
     database_id: search.database_id,
     server_group_uid: search.server_group_uid,
@@ -79,12 +88,22 @@ function QueriesPage() {
   // set silently hides the head of the new one.
   const applyFilters = (patch: ObservabilityFilters) => {
     navigate({
-      search: (prev) => ({ ...prev, ...patch, before: undefined }),
+      search: (prev) => ({ ...prev, ...patch, before: undefined, offset: undefined }),
       replace: true,
     });
   };
 
-  const isFirstPage = !before;
+  // Changing the sort goes back to the first page.
+  const applySort = (next: SortState) => {
+    navigate({
+      search: (prev) => ({ ...prev, ...next, before: undefined, offset: undefined }),
+      replace: true,
+    });
+  };
+
+  const isFirstPage = !before && !offset;
+  // The uid cursor only holds for the default order; a sorted list pages by offset.
+  const sorted = !!sort;
 
   const previousFirstUid = useRef<string | null>(null);
 
@@ -107,7 +126,13 @@ function QueriesPage() {
     return <AccessDenied requiredRole="viewer" />;
   }
 
-  const columns = buildQueryColumns({ users, databases, size });
+  const columns = buildQueryColumns({
+    users,
+    databases,
+    size,
+    sort: { sort, order },
+    onSort: applySort,
+  });
 
   const lastUid = queries && queries.length > 0 ? queries[queries.length - 1].uid : undefined;
   const hasMore = queries && queries.length >= size;
@@ -185,7 +210,7 @@ function QueriesPage() {
             >
               <Link
                 to="/queries"
-                search={(prev) => ({ ...prev, before: undefined, size: opt })}
+                search={(prev) => ({ ...prev, before: undefined, offset: undefined, size: opt })}
               >
                 {opt}
               </Link>
@@ -198,18 +223,27 @@ function QueriesPage() {
             <Button variant="outline" size="sm" asChild>
               <Link
                 to="/queries"
-                search={(prev) => ({ ...prev, before: undefined, size })}
+                search={(prev) => ({
+                  ...prev,
+                  before: undefined,
+                  offset: sorted && offset && offset > size ? offset - size : undefined,
+                  size,
+                })}
               >
                 <ChevronLeft className="h-4 w-4 mr-1" />
                 Newer
               </Link>
             </Button>
           )}
-          {hasMore && lastUid && (
+          {hasMore && (sorted || lastUid) && (
             <Button variant="outline" size="sm" asChild>
               <Link
                 to="/queries"
-                search={(prev) => ({ ...prev, before: lastUid, size })}
+                search={(prev) =>
+                  sorted
+                    ? { ...prev, before: undefined, offset: (offset ?? 0) + size, size }
+                    : { ...prev, before: lastUid, size }
+                }
               >
                 Older
                 <ChevronRight className="h-4 w-4 ml-1" />

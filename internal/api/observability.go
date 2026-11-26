@@ -169,6 +169,50 @@ func parseUIDSuffixQuery(c *gin.Context, out *string) bool {
 	return true
 }
 
+// parseLimitOffset reads `limit` (default 100) and `offset`; unparseable
+// values are ignored, as everywhere else in the listings.
+func parseLimitOffset(c *gin.Context) (int, int) {
+	limit, offset := 100, 0
+
+	if raw := c.Query("limit"); raw != "" {
+		limit = 0
+		if val, err := strconv.Atoi(raw); err == nil {
+			limit = val
+		}
+	}
+
+	if val, err := strconv.Atoi(c.Query("offset")); err == nil {
+		offset = val
+	}
+
+	return limit, offset
+}
+
+// parseListSort reads and validates `sort` and `order`, and refuses `before`
+// (a uid keyset) combined with a non-default sort. It writes the 400 itself.
+func parseListSort(c *gin.Context, validKey func(string) bool, isDefault func(string) bool, sort, order *string) bool {
+	*sort = c.Query("sort")
+	*order = c.Query("order")
+
+	if _, ok := c.GetQuery("sort"); ok && !validKey(*sort) {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid sort key")
+		return false
+	}
+
+	if _, ok := c.GetQuery("order"); ok && !store.ValidSortOrder(*order) {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "order must be asc or desc")
+		return false
+	}
+
+	if !isDefault(*sort) && c.Query("before") != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+			"before cannot be combined with a non-default sort; page with offset")
+		return false
+	}
+
+	return true
+}
+
 // handleListConnections lists connections based on user role
 func (s *Server) handleListConnections(c *gin.Context) {
 	currentUser := getCurrentUser(c)
@@ -196,6 +240,10 @@ func (s *Server) handleListConnections(c *gin.Context) {
 	// the UI used to narrow the fetched page instead, which answered "no live
 	// sessions" whenever the live ones were not among the newest rows.
 	if !parseStrictBoolQuery(c, "active", &filter.ActiveOnly) {
+		return
+	}
+
+	if !parseListSort(c, store.ValidConnectionSort, store.IsDefaultConnectionSort, &filter.Sort, &filter.Order) {
 		return
 	}
 
@@ -507,25 +555,17 @@ func (s *Server) handleListQueries(c *gin.Context) {
 		}
 	}
 
+	if !parseListSort(c, store.ValidQuerySort, store.IsDefaultQuerySort, &filter.Sort, &filter.Order) {
+		return
+	}
+
 	if before := c.Query("before"); before != "" {
 		if uid, err := uuid.Parse(before); err == nil {
 			filter.BeforeUID = &uid
 		}
 	}
 
-	if limit := c.Query("limit"); limit != "" {
-		if val, err := strconv.Atoi(limit); err == nil {
-			filter.Limit = val
-		}
-	} else {
-		filter.Limit = 100 // Default limit
-	}
-
-	if offset := c.Query("offset"); offset != "" {
-		if val, err := strconv.Atoi(offset); err == nil {
-			filter.Offset = val
-		}
-	}
+	filter.Limit, filter.Offset = parseLimitOffset(c)
 
 	queries, err := s.store.ListQueries(c.Request.Context(), filter)
 	if err != nil {

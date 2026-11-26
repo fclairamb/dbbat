@@ -7136,6 +7136,16 @@ export interface operations {
                  *     silently dropped.
                  */
                 uid_suffix?: string;
+                /**
+                 * @description Sort key, applied in the database over every matching row.
+                 *     `connected_at` (the default) orders by uid, i.e. newest first. `duration` is the running duration for an open session.
+                 *     Ties fall back to newest first. An unknown key is refused with 400.
+                 *     `before` only pages the default sort: combining it with another
+                 *     key is refused with 400, page with `offset` instead.
+                 */
+                sort?: "connected_at" | "duration" | "queries" | "bytes_transferred";
+                /** @description Sort direction. Anything else is refused with 400. */
+                order?: "asc" | "desc";
                 /** @description Maximum number of results to return */
                 limit?: components["parameters"]["Limit"];
                 /** @description Number of results to skip for pagination */
@@ -7529,6 +7539,16 @@ export interface operations {
                 start_time?: string;
                 /** @description Filter by end time (RFC3339 format) */
                 end_time?: string;
+                /**
+                 * @description Sort key, applied in the database over every matching row.
+                 *     `executed_at` (the default) orders by uid, i.e. newest first. A `NULL` value (a statement still running) sorts last in both directions.
+                 *     Ties fall back to newest first. An unknown key is refused with 400.
+                 *     `before` only pages the default sort: combining it with another
+                 *     key is refused with 400, page with `offset` instead.
+                 */
+                sort?: "executed_at" | "duration_ms" | "rows_affected";
+                /** @description Sort direction. Anything else is refused with 400. */
+                order?: "asc" | "desc";
                 /** @description Maximum number of results to return */
                 limit?: components["parameters"]["Limit"];
                 /** @description Number of results to skip for pagination */

@@ -2723,6 +2723,25 @@ paths:
           schema:
             type: string
             pattern: '^[0-9a-fA-F]{12}$'
+        - name: sort
+          in: query
+          description: |
+            Sort key, applied in the database over every matching row.
+            `connected_at` (the default) orders by uid, i.e. newest first. `duration` is the running duration for an open session.
+            Ties fall back to newest first. An unknown key is refused with 400.
+            `before` only pages the default sort: combining it with another
+            key is refused with 400, page with `offset` instead.
+          schema:
+            type: string
+            enum: [connected_at, duration, queries, bytes_transferred]
+            default: connected_at
+        - name: order
+          in: query
+          description: Sort direction. Anything else is refused with 400.
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Offset'
       responses:
@@ -3316,6 +3335,25 @@ paths:
           schema:
             type: string
             format: date-time
+        - name: sort
+          in: query
+          description: |
+            Sort key, applied in the database over every matching row.
+            `executed_at` (the default) orders by uid, i.e. newest first. A `NULL` value (a statement still running) sorts last in both directions.
+            Ties fall back to newest first. An unknown key is refused with 400.
+            `before` only pages the default sort: combining it with another
+            key is refused with 400, page with `offset` instead.
+          schema:
+            type: string
+            enum: [executed_at, duration_ms, rows_affected]
+            default: executed_at
+        - name: order
+          in: query
+          description: Sort direction. Anything else is refused with 400.
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Offset'
       responses:

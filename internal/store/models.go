@@ -588,6 +588,13 @@ type ConnectionFilter struct {
 	Limit      int
 	Offset     int
 
+	// Sort is one of the ConnectionSort* keys ("" means the default, newest
+	// first by uid) and Order one of SortAsc/SortDesc ("" means descending).
+	// Applied in the database so the order is over every matching row, not
+	// over the fetched page.
+	Sort  string
+	Order string
+
 	// ServerGroupUID narrows to the servers a group contains **right now**.
 	// Membership is resolved live at query time, never snapshotted, matching
 	// how grant scope is resolved everywhere else — so a filtered view is a
@@ -839,6 +846,11 @@ type QueryFilter struct {
 	BeforeUID    *uuid.UUID // Cursor: return queries with UID < this value (for stable pagination)
 	Limit        int
 	Offset       int
+
+	// Sort is one of the QuerySort* keys ("" means the default, newest first
+	// by uid) and Order one of SortAsc/SortDesc ("" means descending).
+	Sort  string
+	Order string
 
 	// ServerGroupUID, GrantUID, GrantDefinitionUID and GrantProvenance are the
 	// session-scoped filters — see ConnectionFilter for their semantics. They
