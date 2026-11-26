@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.1](https://github.com/fclairamb/dbbat/compare/v0.34.0...v0.34.1) (2026-11-26)
+
+
+### Performance Improvements
+
+* **retention:** the archive pass and the delete passes no longer time out on a large store: picking the connections due for archival probed every captured row at once (48 s on 86M rows, past the 10 s read timeout, so nothing was archived), it now checks each connection on its own (0.13 s) ([#540](https://github.com/fclairamb/dbbat/issues/540)) ([8bae0c5](https://github.com/fclairamb/dbbat/commit/8bae0c5e22bcf1dc1e8de76e8b43781b3d591102))
+
 ## [0.34.0](https://github.com/fclairamb/dbbat/compare/v0.33.2...v0.34.0) (2026-11-26)
 
 
