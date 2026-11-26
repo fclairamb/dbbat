@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.3](https://github.com/fclairamb/dbbat/compare/v0.34.2...v0.34.3) (2026-11-26)
+
+
+### Bug Fixes
+
+* **store:** delete archived rows in batches ([#544](https://github.com/fclairamb/dbbat/issues/544)) ([2d5a2e4](https://github.com/fclairamb/dbbat/commit/2d5a2e4ea070c5f0075da5c0e9c7a5e7faef644e))
+
 ## [0.34.2](https://github.com/fclairamb/dbbat/compare/v0.34.1...v0.34.2) (2026-11-26)
 
 
