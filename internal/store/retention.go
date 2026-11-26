@@ -567,9 +567,18 @@ func (s *Store) deleteStatementsPastWindow(
 // a failing bucket has not taken yet.
 func archivePending(alias string) string {
 	return alias + `.disconnected_at IS NOT NULL AND ` + alias + `.archived_at IS NULL AND ` +
-		alias + `.disconnected_at < ? AND EXISTS (
-			SELECT 1 FROM queries q2 JOIN query_rows qr ON qr.query_id = q2.uid
-			WHERE q2.connection_id = ` + alias + `.uid)`
+		alias + `.disconnected_at < ? AND ` + hasCapturedRows(alias)
+}
+
+// hasCapturedRows is the SQL condition "this connection captured at least one
+// result row". A LIMIT 1 scalar subquery, not EXISTS: PostgreSQL turns an
+// EXISTS into a semi-join and, with a large query_rows, hashes all of it (48s
+// over 86M rows on a production store, past the driver's read timeout) where
+// probing the indexes once per connection takes milliseconds. COALESCE keeps it
+// false rather than NULL under NOT.
+func hasCapturedRows(alias string) string {
+	return `COALESCE((SELECT true FROM queries q2 JOIN query_rows qr ON qr.query_id = q2.uid
+			WHERE q2.connection_id = ` + alias + `.uid LIMIT 1), false)`
 }
 
 func (s *Store) deleteConnectionsPastWindow(
