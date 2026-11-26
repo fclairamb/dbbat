@@ -5,17 +5,15 @@
 
 ### Features
 
-* **grants:** let the requester withdraw their request from Slack ([#534](https://github.com/fclairamb/dbbat/issues/534)) ([e0ca298](https://github.com/fclairamb/dbbat/commit/e0ca298cb14c421862233dba71ac7d8207e78156))
-* **ui:** confirm before withdrawing a grant request ([#536](https://github.com/fclairamb/dbbat/issues/536)) ([e212b8b](https://github.com/fclairamb/dbbat/commit/e212b8b0ef713dddb0ff75d61db3d6ba930d6426))
-* **ui:** edit pages with their own routes instead of modal dialogs ([#532](https://github.com/fclairamb/dbbat/issues/532)) ([106d71d](https://github.com/fclairamb/dbbat/commit/106d71d7cff1c08298f254da3b7bcd4ebd78f96d))
-* **ui:** sort the connections and queries lists by column ([#533](https://github.com/fclairamb/dbbat/issues/533)) ([451f0d8](https://github.com/fclairamb/dbbat/commit/451f0d82fd920777d1176ee061aa8225a1647d71))
+* **grants:** a requester can withdraw their pending access request straight from Slack, and the UI now asks for confirmation before withdrawing one ([#534](https://github.com/fclairamb/dbbat/issues/534), [#536](https://github.com/fclairamb/dbbat/issues/536)) ([e0ca298](https://github.com/fclairamb/dbbat/commit/e0ca298cb14c421862233dba71ac7d8207e78156), [e212b8b](https://github.com/fclairamb/dbbat/commit/e212b8b0ef713dddb0ff75d61db3d6ba930d6426))
+* **ui:** edit pages now have their own routes (linkable, back-button friendly) instead of modal dialogs ([#532](https://github.com/fclairamb/dbbat/issues/532)) ([106d71d](https://github.com/fclairamb/dbbat/commit/106d71d7cff1c08298f254da3b7bcd4ebd78f96d))
+* **ui:** the connections and queries lists can be sorted by column ([#533](https://github.com/fclairamb/dbbat/issues/533)) ([451f0d8](https://github.com/fclairamb/dbbat/commit/451f0d82fd920777d1176ee061aa8225a1647d71))
 
 
 ### Bug Fixes
 
-* **deps:** update kubernetes monorepo to v0.37.3 ([#539](https://github.com/fclairamb/dbbat/issues/539)) ([1bbe7ad](https://github.com/fclairamb/dbbat/commit/1bbe7adf0c6621bfcb766087f0d6ceb586961f62))
-* **deps:** update module github.com/gopacket/gopacket to v1.8.1 ([#538](https://github.com/fclairamb/dbbat/issues/538)) ([2a6fd4d](https://github.com/fclairamb/dbbat/commit/2a6fd4d6132859812b4a6efb152c681d852a7e9f))
-* **oracle:** refuse a zero call status when scanning for a cursor id's OER ([#537](https://github.com/fclairamb/dbbat/issues/537)) ([43819cb](https://github.com/fclairamb/dbbat/commit/43819cbc870cf0b438ef786103a1da5ad73aa8d7))
+* **oracle:** a zero call status is no longer mistaken for a cursor id's OER error while scanning responses ([#537](https://github.com/fclairamb/dbbat/issues/537)) ([43819cb](https://github.com/fclairamb/dbbat/commit/43819cbc870cf0b438ef786103a1da5ad73aa8d7))
+* **deps:** update kubernetes monorepo to v0.37.3 and gopacket to v1.8.1 ([#539](https://github.com/fclairamb/dbbat/issues/539), [#538](https://github.com/fclairamb/dbbat/issues/538)) ([1bbe7ad](https://github.com/fclairamb/dbbat/commit/1bbe7adf0c6621bfcb766087f0d6ceb586961f62), [2a6fd4d](https://github.com/fclairamb/dbbat/commit/2a6fd4d6132859812b4a6efb152c681d852a7e9f))
 
 ## [0.33.2](https://github.com/fclairamb/dbbat/compare/v0.33.1...v0.33.2) (2026-11-24)
 
