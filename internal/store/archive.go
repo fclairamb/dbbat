@@ -75,8 +75,7 @@ func (s *Store) ClaimArchiveCandidates(
 				  AND c.archived_at IS NULL
 				  AND c.disconnected_at < ?
 				  AND (c.archive_claimed_at IS NULL OR c.archive_claimed_at < ?)
-				  AND EXISTS (SELECT 1 FROM queries q JOIN query_rows qr ON qr.query_id = q.uid
-				              WHERE q.connection_id = c.uid)
+				  AND `+hasCapturedRows("c")+`
 				ORDER BY c.disconnected_at
 				LIMIT ?
 				FOR UPDATE OF c SKIP LOCKED
