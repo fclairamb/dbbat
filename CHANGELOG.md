@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.2](https://github.com/fclairamb/dbbat/compare/v0.34.1...v0.34.2) (2026-11-26)
+
+
+### Bug Fixes
+
+* **store:** stream archived rows one statement at a time ([#542](https://github.com/fclairamb/dbbat/issues/542)) ([2a4484e](https://github.com/fclairamb/dbbat/commit/2a4484e66e4588ad9aa6f24b4663ad39b23dde31))
+
 ## [0.34.1](https://github.com/fclairamb/dbbat/compare/v0.34.0...v0.34.1) (2026-11-26)
 
 
