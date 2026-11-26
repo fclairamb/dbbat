@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.1](https://github.com/fclairamb/dbbat/compare/v0.34.0...v0.34.1) (2026-11-26)
+
+
+### Performance Improvements
+
+* **store:** probe captured rows per connection in the archive claim ([#540](https://github.com/fclairamb/dbbat/issues/540)) ([8bae0c5](https://github.com/fclairamb/dbbat/commit/8bae0c5e22bcf1dc1e8de76e8b43781b3d591102))
+
 ## [0.34.0](https://github.com/fclairamb/dbbat/compare/v0.33.2...v0.34.0) (2026-11-26)
 
 
