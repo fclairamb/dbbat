@@ -5,7 +5,7 @@
 
 ### Bug Fixes
 
-* **store:** stream archived rows one statement at a time ([#542](https://github.com/fclairamb/dbbat/issues/542)) ([2a4484e](https://github.com/fclairamb/dbbat/commit/2a4484e66e4588ad9aa6f24b4663ad39b23dde31))
+* **retention:** archiving no longer stalls on connections with many captured rows: their rows were sorted before the first one was sent, which took over a minute on a large store (past the 10 s read timeout) and left the abandoned read running on the database. Rows are now read one statement at a time and arrive continuously ([#542](https://github.com/fclairamb/dbbat/issues/542)) ([2a4484e](https://github.com/fclairamb/dbbat/commit/2a4484e66e4588ad9aa6f24b4663ad39b23dde31))
 
 ## [0.34.1](https://github.com/fclairamb/dbbat/compare/v0.34.0...v0.34.1) (2026-11-26)
 
