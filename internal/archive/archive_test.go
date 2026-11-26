@@ -459,3 +459,49 @@ func TestArchiveDeletionRechecksPolicy(t *testing.T) { //nolint:paralleltest // 
 	assert.False(t, due, "the lengthened window protects the archive")
 	assert.Len(t, listFiles(t, dir), 1)
 }
+
+// TestStreamConnectionRowsOrder checks the archive order (statement order, then
+// row_number) holds when rows were stored out of order, since the per-statement
+// read no longer asks PostgreSQL to sort.
+func TestStreamConnectionRowsOrder(t *testing.T) { //nolint:paralleltest // sequential tests share one database
+	s := testStore(t)
+	ctx := context.Background()
+	f := newFixture(t, s, "stream-order", nil, nil, []int{0, 0, 0}, time.Hour)
+
+	// Store each statement's rows in reverse, the last statement first.
+	for i := len(f.queries) - 1; i >= 0; i-- {
+		var pending []store.PendingQueryRow
+
+		for r := 4; r >= 1; r-- {
+			raw := []byte(`{"q":` + string(rune('0'+i)) + `,"r":` + string(rune('0'+r)) + `}`)
+			pending = append(pending, store.PendingQueryRow{
+				QueryID: f.queries[i], RowNumber: r, RowData: raw, RowSizeBytes: int64(len(raw)),
+			})
+		}
+
+		require.NoError(t, s.StoreQueryRows(ctx, pending))
+	}
+
+	type pos struct {
+		query uuid.UUID
+		row   int
+	}
+
+	var got []pos
+
+	require.NoError(t, s.StreamConnectionRows(ctx, f.conn.UID, func(r store.ArchivedRow) error {
+		got = append(got, pos{r.QueryUID, r.RowNumber})
+
+		return nil
+	}))
+
+	var want []pos
+
+	for _, q := range f.queries {
+		for r := 1; r <= 4; r++ {
+			want = append(want, pos{q, r})
+		}
+	}
+
+	assert.Equal(t, want, got)
+}

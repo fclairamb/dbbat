@@ -1,11 +1,14 @@
 package store
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -107,37 +110,84 @@ type ArchivedRow struct {
 }
 
 // StreamConnectionRows calls fn for every captured row of a connection, in
-// archive order: statement order (executed_at, uid), then row_number. It also
-// reports, through the statement callback, each statement's first position, so
-// the archiver can write the offsets.
+// archive order: statement order (executed_at, uid), then (row_number, uid).
+//
+// It reads one statement at a time and sorts that statement's rows in Go. A
+// single ORDER BY over the whole connection made PostgreSQL read and sort every
+// row before sending the first one: on a store where a connection's rows are
+// spread over the disk (about one page read per row) that took over a minute,
+// past the driver's 10 s read timeout, and the abandoned query kept running.
+// On connections with millions of rows the planner even chose a full scan of
+// query_rows. Per statement, the lookup always goes through
+// idx_query_rows_query_id, and memory holds at most one statement's rows.
 func (s *Store) StreamConnectionRows(ctx context.Context, connectionUID uuid.UUID, fn func(ArchivedRow) error) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT qr.query_id, qr.uid, qr.row_number, qr.row_data::text, qr.row_size_bytes
-		FROM query_rows qr JOIN queries q ON q.uid = qr.query_id
-		WHERE q.connection_id = ?
-		ORDER BY q.executed_at, q.uid, qr.row_number`, connectionUID)
+	var queryUIDs []uuid.UUID
+
+	if err := s.db.NewSelect().Table("queries").Column("uid").
+		Where("connection_id = ?", connectionUID).
+		Order("executed_at", "uid").
+		Scan(ctx, &queryUIDs); err != nil {
+		return fmt.Errorf("list connection statements: %w", err)
+	}
+
+	var batch []ArchivedRow
+
+	for _, queryUID := range queryUIDs {
+		var err error
+
+		batch, err = s.statementRows(ctx, queryUID, batch[:0])
+		if err != nil {
+			return err
+		}
+
+		for _, r := range batch {
+			if err := fn(r); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// statementRows appends the captured rows of one statement to dst, sorted by
+// (row_number, uid). uid ties are compared bytewise, which is PostgreSQL's
+// uuid ordering.
+func (s *Store) statementRows(ctx context.Context, queryUID uuid.UUID, dst []ArchivedRow) ([]ArchivedRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT uid, row_number, row_data::text, row_size_bytes
+		FROM query_rows WHERE query_id = ?`, queryUID)
 	if err != nil {
-		return fmt.Errorf("stream connection rows: %w", err)
+		return nil, fmt.Errorf("stream statement rows: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
-		var r ArchivedRow
+		r := ArchivedRow{QueryUID: queryUID}
 
 		var data string
 
-		if err := rows.Scan(&r.QueryUID, &r.RowUID, &r.RowNumber, &data, &r.RowSizeBytes); err != nil {
-			return fmt.Errorf("scan connection row: %w", err)
+		if err := rows.Scan(&r.RowUID, &r.RowNumber, &data, &r.RowSizeBytes); err != nil {
+			return nil, fmt.Errorf("scan statement row: %w", err)
 		}
 
 		r.RowData = []byte(data)
-
-		if err := fn(r); err != nil {
-			return err
-		}
+		dst = append(dst, r)
 	}
 
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("stream statement rows: %w", err)
+	}
+
+	slices.SortFunc(dst, func(a, b ArchivedRow) int {
+		if c := cmp.Compare(a.RowNumber, b.RowNumber); c != 0 {
+			return c
+		}
+
+		return bytes.Compare(a.RowUID[:], b.RowUID[:])
+	})
+
+	return dst, nil
 }
 
 // ArchiveSeal is what the archiver records about one written object.
