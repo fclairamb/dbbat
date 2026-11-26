@@ -10,6 +10,7 @@ import {
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { Button } from "@/components/ui/button";
 import { PermissionButton } from "@/components/shared/PermissionButton";
 import { useAuth } from "@/contexts/AuthContext";
@@ -298,6 +299,7 @@ function UsersPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={navItem("/users")!.icon}
         title="Users"
         description="Manage user accounts"
         actions={
@@ -309,7 +311,7 @@ function UsersPage() {
                 enabledTooltip={getActionTooltip("create-user")}
               >
                 <Plus className="mr-2 h-4 w-4" />
-                Create User
+                New User
               </PermissionButton>
             </DialogTrigger>
             <CreateUserDialog onClose={() => setIsCreateOpen(false)} />

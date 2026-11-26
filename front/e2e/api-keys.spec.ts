@@ -44,7 +44,7 @@ test.describe("API keys — Oracle capability", () => {
     await page.goto("api-keys");
     await page.waitForLoadState("networkidle");
 
-    await page.getByRole("button", { name: "Create Key" }).click();
+    await page.getByRole("button", { name: "New API Key" }).click();
     await page.getByLabel("Name").fill("oracle-capability-probe");
     await page.getByRole("button", { name: "Create", exact: true }).click();
 

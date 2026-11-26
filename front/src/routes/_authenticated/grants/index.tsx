@@ -13,6 +13,7 @@ import {
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Button } from "@/components/ui/button";
 import { PermissionButton } from "@/components/shared/PermissionButton";
@@ -346,6 +347,7 @@ function GrantsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={navItem("/grants")!.icon}
         title="Grants"
         description="Database access, issued from grant definitions"
         actions={

@@ -72,7 +72,7 @@ export function UserGroupForm({
     <FormPage
       dialog={!editing}
       testId={editing ? "edit-user-group-page" : undefined}
-      title={editing ? "Edit group" : "New group"}
+      title={editing ? editing.name : "New User Group"}
       description="Groups let a grant definition apply to a subset of users instead of everyone."
       backTo="/user-groups"
       backLabel="User Groups"

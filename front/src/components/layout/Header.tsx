@@ -12,6 +12,7 @@ import {
 import { Link, useMatches } from "@tanstack/react-router";
 import { useBreadcrumbContext } from "@/contexts/BreadcrumbContext";
 import { PendingApprovalsIndicator } from "@/components/shared/PendingApprovalsIndicator";
+import { navItem } from "@/lib/navigation";
 
 interface Crumb {
   title: string;
@@ -32,7 +33,7 @@ export function Header() {
   const segments = pathname.split("/").filter(Boolean);
 
   if (segments.length === 0) {
-    breadcrumbs.push({ title: "Dashboard", href: "/" });
+    breadcrumbs.push({ title: navItem("/")!.title, href: "/" });
   } else {
     let href = "";
     const leafHref = `/${segments.join("/")}`;
@@ -46,7 +47,7 @@ export function Header() {
       }
       // A page may publish a friendlier crumb (e.g. a SQL preview) for its own
       // path via the breadcrumb context; fall back to a formatted segment.
-      const title = entries[href]?.title || formatSegment(segment);
+      const title = entries[href]?.title || formatSegment(segment, href);
       if (title) {
         breadcrumbs.push({ title, href });
       }
@@ -54,20 +55,24 @@ export function Header() {
   }
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
+    <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4 sm:px-6">
       <SidebarTrigger className="-ml-1" />
       <Separator orientation="vertical" className="mr-2 h-4" />
-      <Breadcrumb>
-        <BreadcrumbList>
+      <Breadcrumb className="min-w-0 flex-1">
+        <BreadcrumbList className="flex-nowrap">
           {breadcrumbs.map((crumb, index) => (
             // The separator must be a *sibling* of the item, not nested inside
             // it: both render an <li>, and an <li> inside an <li> is invalid
             // HTML that React reports as a hydration error.
             <Fragment key={crumb.href || index}>
               {index > 0 && <BreadcrumbSeparator />}
-              <BreadcrumbItem>
+              <BreadcrumbItem
+                className={
+                  index === breadcrumbs.length - 1 ? "min-w-0" : "shrink-0"
+                }
+              >
                 {index === breadcrumbs.length - 1 ? (
-                  <BreadcrumbPage>{crumb.title}</BreadcrumbPage>
+                  <BreadcrumbPage className="truncate">{crumb.title}</BreadcrumbPage>
                 ) : (
                   <BreadcrumbLink asChild>
                     {/* exact match only: a parent crumb (e.g. "Queries" on a
@@ -88,20 +93,22 @@ export function Header() {
   );
 }
 
-function formatSegment(segment: string): string {
-  // For a UUID detail segment with no published override, fall back to a short
-  // id rather than the literal "Details" (which made every detail page's
-  // breadcrumb look identical).
+function formatSegment(segment: string, href: string): string {
+  // A section crumb carries the sidebar's own name ("API Keys", "Audit Log").
+  const section = navItem(href);
+  if (section) return section.title;
+
+  // An entity crumb is its name, published by the page (DetailHeader does it).
+  // Until it is, show an ellipsis: a raw uid is never a title.
   if (
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
       segment,
     )
   ) {
-    return segment.slice(0, 8);
+    return "…";
   }
 
-  // Capitalize and format
-  return segment
+  return decodeURIComponent(segment)
     .split("-")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");

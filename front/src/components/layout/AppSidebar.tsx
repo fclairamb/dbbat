@@ -1,20 +1,11 @@
 import { useState } from "react";
 import { Link, useLocation } from "@tanstack/react-router";
 import {
-  Database,
-  Users,
-  Shield,
-  Activity,
-  Search,
-  FileText,
-  Key,
-  LayoutDashboard,
   LogOut,
   Moon,
   Sun,
   LockKeyhole,
   Gamepad2,
-  Settings,
   User,
 } from "lucide-react";
 
@@ -56,28 +47,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useTheme } from "@/hooks/use-theme";
-
-const mainNavItems = [
-  { title: "Dashboard", icon: LayoutDashboard, href: "/" },
-  { title: "Users", icon: Users, href: "/users" },
-  { title: "User Groups", icon: Users, href: "/user-groups" },
-  { title: "Servers", icon: Database, href: "/servers" },
-  { title: "Server Groups", icon: Database, href: "/server-groups" },
-  { title: "Grants", icon: Shield, href: "/grants" },
-  { title: "Grant Definitions", icon: Shield, href: "/grant-definitions" },
-  { title: "Grant Requests", icon: Shield, href: "/grant-requests" },
-];
-
-const observabilityNavItems = [
-  { title: "Connections", icon: Activity, href: "/connections" },
-  { title: "Queries", icon: Search, href: "/queries" },
-  { title: "Audit Log", icon: FileText, href: "/audit" },
-];
-
-const settingsNavItems = [
-  { title: "Settings", icon: Settings, href: "/settings" },
-  { title: "API Keys", icon: Key, href: "/api-keys" },
-];
+import {
+  designReferenceNavItem,
+  isInSection,
+  mainNavItems,
+  observabilityNavItems,
+  settingsNavItems,
+} from "@/lib/navigation";
 
 export function AppSidebar() {
   const location = useLocation();
@@ -87,6 +63,12 @@ export function AppSidebar() {
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
 
   const isDemo = versionInfo?.run_mode === "demo";
+  // The design reference is a contributor tool: listed while developing or in
+  // test mode, reachable by URL everywhere.
+  const visibleSettingsNavItems =
+    import.meta.env.DEV || versionInfo?.run_mode === "test"
+      ? [...settingsNavItems, designReferenceNavItem]
+      : settingsNavItems;
 
   // Filter navigation items based on user roles
   const filteredMainNavItems = mainNavItems.filter((item) => {
@@ -156,7 +138,7 @@ export function AppSidebar() {
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton
                     asChild
-                    isActive={location.pathname === item.href}
+                    isActive={isInSection(location.pathname, item.href)}
                     tooltip={item.title}
                   >
                     <Link to={item.href}>
@@ -178,7 +160,7 @@ export function AppSidebar() {
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton
                     asChild
-                    isActive={location.pathname === item.href}
+                    isActive={isInSection(location.pathname, item.href)}
                     tooltip={item.title}
                   >
                     <Link to={item.href}>
@@ -196,11 +178,11 @@ export function AppSidebar() {
           <SidebarGroupLabel>Settings</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {settingsNavItems.map((item) => (
+              {visibleSettingsNavItems.map((item) => (
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton
                     asChild
-                    isActive={location.pathname === item.href}
+                    isActive={isInSection(location.pathname, item.href)}
                     tooltip={item.title}
                   >
                     <Link to={item.href}>

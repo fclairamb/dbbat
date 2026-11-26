@@ -4,6 +4,7 @@ import { StatCard } from "@/components/shared/StatCard";
 import { DataTable } from "@/components/shared/DataTable";
 import { buildQueryColumns } from "@/components/shared/queryColumns";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { Users, Database, Activity, Search } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewQueries } from "@/lib/permissions";
@@ -35,6 +36,7 @@ function DashboardPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={navItem("/")!.icon}
         title="Dashboard"
         description="Overview of your DBBat proxy"
       />

@@ -10,6 +10,7 @@ import {
   type ServerGroup,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogTrigger } from "@/components/ui/dialog";
@@ -120,6 +121,7 @@ function ServerGroupsPage() {
               size="sm"
               variant="ghost"
               data-testid={`edit-server-group-${g.uid}`}
+              aria-label={`Edit server group ${g.name}`}
             >
               <Link to="/server-groups/$uid" params={{ uid: g.uid }}>
                 <Pencil className="h-4 w-4" />
@@ -130,6 +132,8 @@ function ServerGroupsPage() {
               variant="ghost"
               onClick={() => setDeleting(g)}
               data-testid={`delete-server-group-${g.uid}`}
+              aria-label={`Delete server group ${g.name}`}
+              className="text-destructive hover:text-destructive"
             >
               <Trash2 className="h-4 w-4" />
             </Button>
@@ -139,8 +143,9 @@ function ServerGroupsPage() {
   ];
 
   return (
-    <div className="container mx-auto py-6">
+    <div className="space-y-6">
       <PageHeader
+        icon={navItem("/server-groups")!.icon}
         title="Server Groups"
         description="Named sets of database servers (the analytics replicas, all staging databases, …). Grant definitions scope on them, and grants bind to them — so membership is what decides reach."
         actions={
@@ -149,7 +154,7 @@ function ServerGroupsPage() {
               <DialogTrigger asChild>
                 <Button data-testid="create-server-group-button">
                   <Plus className="h-4 w-4 mr-2" />
-                  New Group
+                  New Server Group
                 </Button>
               </DialogTrigger>
               {createOpen && <ServerGroupForm editing={null} onDone={() => setCreateOpen(false)} />}

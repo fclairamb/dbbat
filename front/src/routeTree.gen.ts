@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
+import { Route as AuthenticatedDesignReferenceRouteImport } from './routes/_authenticated/design-reference'
 import { Route as AuthenticatedDeviceRouteImport } from './routes/_authenticated/device'
 import { Route as AuthenticatedProfileRouteImport } from './routes/_authenticated/profile'
 import { Route as AuthenticatedApiKeysIndexRouteImport } from './routes/_authenticated/api-keys/index'
@@ -50,6 +51,12 @@ const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedDesignReferenceRoute =
+  AuthenticatedDesignReferenceRouteImport.update({
+    id: '/design-reference',
+    path: '/design-reference',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedDeviceRoute = AuthenticatedDeviceRouteImport.update({
   id: '/device',
   path: '/device',
@@ -185,6 +192,7 @@ const AuthenticatedSettingsParametersKeyRoute =
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/login': typeof LoginRoute
+  '/design-reference': typeof AuthenticatedDesignReferenceRoute
   '/device': typeof AuthenticatedDeviceRoute
   '/profile': typeof AuthenticatedProfileRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
@@ -211,6 +219,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
+  '/design-reference': typeof AuthenticatedDesignReferenceRoute
   '/device': typeof AuthenticatedDeviceRoute
   '/profile': typeof AuthenticatedProfileRoute
   '/': typeof AuthenticatedIndexRoute
@@ -240,6 +249,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
+  '/_authenticated/design-reference': typeof AuthenticatedDesignReferenceRoute
   '/_authenticated/device': typeof AuthenticatedDeviceRoute
   '/_authenticated/profile': typeof AuthenticatedProfileRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
@@ -270,6 +280,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
+    | '/design-reference'
     | '/device'
     | '/profile'
     | '/connections/$uid'
@@ -296,6 +307,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
+    | '/design-reference'
     | '/device'
     | '/profile'
     | '/'
@@ -324,6 +336,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_authenticated'
     | '/login'
+    | '/_authenticated/design-reference'
     | '/_authenticated/device'
     | '/_authenticated/profile'
     | '/_authenticated/'
@@ -376,6 +389,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AuthenticatedIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/design-reference': {
+      id: '/_authenticated/design-reference'
+      path: '/design-reference'
+      fullPath: '/design-reference'
+      preLoaderRoute: typeof AuthenticatedDesignReferenceRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/device': {
@@ -543,6 +563,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthenticatedRouteChildren {
+  AuthenticatedDesignReferenceRoute: typeof AuthenticatedDesignReferenceRoute
   AuthenticatedDeviceRoute: typeof AuthenticatedDeviceRoute
   AuthenticatedProfileRoute: typeof AuthenticatedProfileRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
@@ -570,6 +591,7 @@ interface AuthenticatedRouteChildren {
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
+  AuthenticatedDesignReferenceRoute: AuthenticatedDesignReferenceRoute,
   AuthenticatedDeviceRoute: AuthenticatedDeviceRoute,
   AuthenticatedProfileRoute: AuthenticatedProfileRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,

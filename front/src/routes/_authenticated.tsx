@@ -84,8 +84,12 @@ function AuthenticatedLayout() {
         <AppSidebar />
         <SidebarInset>
           <Header />
-          <main className="flex-1 overflow-auto p-4 md:p-6">
-            <Outlet />
+          {/* The layout owns the gutter and the centered column: pages never
+              add their own outer padding, container or max width. */}
+          <main className="flex-1 overflow-auto px-4 py-4 sm:px-6 sm:py-6">
+            <div className="mx-auto w-full max-w-[1400px]">
+              <Outlet />
+            </div>
           </main>
         </SidebarInset>
       </SidebarProvider>

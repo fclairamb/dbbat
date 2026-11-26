@@ -8,6 +8,7 @@ import {
   useUnlinkIdentity,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { PageLoader } from "@/components/shared/LoadingSpinner";
 import { Button } from "@/components/ui/button";
 import {
@@ -63,6 +64,7 @@ function ProfilePage() {
   return (
     <div className="space-y-6" data-testid="profile-page">
       <PageHeader
+        icon={navItem("/profile")!.icon}
         title="Profile"
         description={`Signed in as ${user?.username ?? ""}`}
       />

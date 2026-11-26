@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useAuditEvents, useUsers, type AuditEvent } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { UnverifiedBadge } from "@/components/shared/UnverifiedBadge";
 import { Badge } from "@/components/ui/badge";
@@ -134,7 +135,8 @@ function AuditPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Audit Logs"
+        icon={navItem("/audit")!.icon}
+        title="Audit Log"
         description="View system activity and changes"
         actions={
           isFirstPage ? (

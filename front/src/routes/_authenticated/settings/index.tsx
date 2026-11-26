@@ -16,6 +16,7 @@ import {
 } from "@/api";
 import { DeleteWindowWarning, formatSeconds } from "@/components/shared/RetentionDuration";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -71,6 +72,7 @@ function SettingsPage() {
     return (
       <div className="space-y-6">
         <PageHeader
+          icon={navItem("/settings")!.icon}
           title="Settings"
           description="Instance configuration and public endpoint advertisement"
         />
@@ -88,6 +90,7 @@ function SettingsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={navItem("/settings")!.icon}
         title="Settings"
         description="Instance configuration and public endpoint advertisement"
       />
@@ -900,6 +903,7 @@ function RawParametersSection() {
                             variant="ghost"
                             size="icon"
                             data-testid={`edit-parameter-${p.group_key}-${p.key}`}
+                            aria-label={`Edit ${p.group_key} / ${p.key}`}
                           >
                             <Link
                               to="/settings/parameters/$key"
@@ -911,9 +915,12 @@ function RawParametersSection() {
                           <Button
                             variant="ghost"
                             size="icon"
+                            className="text-destructive hover:text-destructive"
                             onClick={() => setDeleteTarget(p)}
+                            data-testid={`delete-parameter-${p.group_key}-${p.key}`}
+                            aria-label={`Delete ${p.group_key} / ${p.key}`}
                           >
-                            <Trash2 className="h-4 w-4 text-destructive" />
+                            <Trash2 className="h-4 w-4" />
                           </Button>
                         </div>
                       </TableCell>

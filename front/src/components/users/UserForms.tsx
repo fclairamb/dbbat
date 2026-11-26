@@ -152,7 +152,7 @@ export function CreateUserDialog({ onClose }: { onClose: () => void }) {
     <DialogContent data-testid="create-user-dialog">
       <form onSubmit={handleSubmit}>
         <DialogHeader>
-          <DialogTitle>Create User</DialogTitle>
+          <DialogTitle>New User</DialogTitle>
           <DialogDescription>Add a new user to the system.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-4">
@@ -277,8 +277,8 @@ export function EditUserForm({
     <>
       <FormPage
         testId="edit-user-page"
-        title="Edit User"
-        description={`Manage roles for "${targetUser.username}".`}
+        title={targetUser.username}
+        description="Roles and user groups of this account."
         backTo="/users"
         backLabel="Users"
         onSubmit={handleSubmit}

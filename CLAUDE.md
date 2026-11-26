@@ -60,7 +60,7 @@ This list is enforced by the `scopes:` input of `.github/workflows/semantic-pr.y
 - **CLI**: `urfave/cli/v3`
 - **Config**: `knadh/koanf`
 - **Logging**: `log/slog`
-- **Frontend**: React 19 + TypeScript + Vite (see `front/CLAUDE.md`). Edit forms are pages with their own route (`<entity>/$uid`); create forms are dialogs on the list page
+- **Frontend**: React 19 + TypeScript + Vite (see `front/CLAUDE.md`). **The design reference page (`/app/design-reference`, source `front/src/routes/_authenticated/design-reference.tsx`) defines the UI rules: read it before any frontend change.** Edit forms are pages with their own route (`<entity>/$uid`); create forms are dialogs on the list page
 - **Capture format**: Protocol-agnostic pcapng, readable by tcpdump/Wireshark (`docs/dump-format.md`)
 - **Live stream + approvals**: WebSocket event stream and pattern-triggered approval holds (`docs/approvals.md`)
 - **Tamper-evident audit trail**: `audit_log`, `queries` and `query_rows` are HMAC-chained with a key HKDF-derived from `DBB_KEY`; `dbbat audit verify` walks the chains (`docs/audit-chain.md`)

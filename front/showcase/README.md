@@ -4,7 +4,7 @@ Regenerates the website's marketing media into `website/static/img/showcase/`:
 
 | Asset | Scenario |
 |---|---|
-| `add-server.png` | The Add Server dialog, filled |
+| `add-server.png` | The New Server dialog, filled |
 | `grant-request.png` | The Request access dialog, filled |
 | `query-list.png` | The query list, populated by real proxy traffic |
 | `query-results.png` | A query's captured result rows |

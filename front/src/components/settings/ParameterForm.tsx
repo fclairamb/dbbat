@@ -33,8 +33,8 @@ export function ParameterForm({ parameter }: { parameter: GlobalParameter }) {
   return (
     <FormPage
       testId="edit-parameter-page"
-      title="Edit parameter"
-      description={`${parameter.group_key} / ${parameter.key}`}
+      title={`${parameter.group_key} / ${parameter.key}`}
+      description="Instance parameter, stored in the dbbat database."
       backTo="/settings"
       backLabel="Settings"
       onSubmit={onSubmit}

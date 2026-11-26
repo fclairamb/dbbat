@@ -199,7 +199,7 @@ export function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
     <FormPage
       dialog
       dialogClassName="max-w-md"
-      title={<>Add Server</>}
+      title="New Server"
       description={<>Configure a new target database connection.</>}
       backTo="/servers"
       backLabel="Servers"
