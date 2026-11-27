@@ -17,6 +17,7 @@ import { SortHeader } from "@/components/shared/SortHeader";
 import { parseSortSearch, type SortState } from "@/lib/sort";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -289,6 +290,7 @@ function ConnectionsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={navItem("/connections")!.icon}
         title="Connections"
         description="View proxy connection history"
         actions={

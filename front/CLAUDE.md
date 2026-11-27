@@ -372,6 +372,30 @@ Components are designed to be:
 - **Queries**: Browse query logs with execution times and results
 - **Audit Log**: Track all access control changes
 
+## Design reference
+
+Live: `http://localhost:5173/app/design-reference` (listed in the sidebar in dev and test
+mode, reachable by URL everywhere). Source:
+[`src/routes/_authenticated/design-reference.tsx`](src/routes/_authenticated/design-reference.tsx).
+
+- Read it before any frontend change: new page, tweak, one-off component.
+- It states every UI rule next to a live example and the code to copy. Reuse what it shows
+  rather than raw Radix or custom markup.
+- If a page needs a pattern or primitive that is not there, add it to the reference page in
+  the same change. A rule that lives only in a page's code is not a rule.
+
+The rules a page most often gets wrong:
+- **Layout**: `_authenticated.tsx` owns the gutter and the centered `max-w-[1400px]`
+  column. A page's root is `<div className="space-y-6">`: no `container`, no `mx-auto`,
+  no outer padding.
+- **List pages** open with `PageHeader`, icon from `navItem(href)` (`src/lib/navigation.ts`,
+  the single list of sections, names and icons).
+- **Detail and edit pages** open with `DetailHeader` (or `FormPage`, which renders it): a
+  `← Parent › Name` breadcrumb that is the way back, then the record's **name** as title.
+  Never "Edit X", never a uid. It publishes the name to the top-bar breadcrumb. No "Back to …"
+  buttons elsewhere.
+- **Create** buttons and dialogs say "New <Resource>". Delete is red with a `Trash2` icon.
+
 ## Development Guidelines
 
 ### Adding a New Route

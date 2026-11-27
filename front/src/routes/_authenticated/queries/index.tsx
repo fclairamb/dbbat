@@ -15,6 +15,7 @@ import { DataTable } from "@/components/shared/DataTable";
 import { parseSortSearch, type SortState } from "@/lib/sort";
 import { buildQueryColumns } from "@/components/shared/queryColumns";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -140,6 +141,7 @@ function QueriesPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={navItem("/queries")!.icon}
         title="Queries"
         description="View executed query history"
         actions={

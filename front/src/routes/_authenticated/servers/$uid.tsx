@@ -1,11 +1,10 @@
 import { useEffect } from "react";
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowLeft } from "lucide-react";
+import { createFileRoute } from "@tanstack/react-router";
 
 import { useDatabases, useTunnelServers } from "@/api";
+import { DetailHeader } from "@/components/shared/DetailHeader";
 import { EntityNotFound } from "@/components/shared/FormPage";
 import { PageLoader } from "@/components/shared/LoadingSpinner";
-import { Button } from "@/components/ui/button";
 import {
   EditDatabaseForm,
   EditServerApproversForm,
@@ -31,7 +30,6 @@ export const Route = createFileRoute("/_authenticated/servers/$uid")({
 function ServerPage() {
   const { uid } = Route.useParams();
   const { user } = useAuth();
-  const navigate = useNavigate();
   const canUpdate = canUpdateDatabase(user?.roles);
   const { data: databases, isLoading } = useDatabases();
   const { data: tunnelServers, isLoading: tunnelsLoading } = useTunnelServers(
@@ -47,7 +45,6 @@ function ServerPage() {
 
   if (!ready) return <PageLoader />;
 
-  const goBack = () => navigate({ to: "/servers" });
   // Each section saves on its own and stays on the page, so the unsaved edits
   // of the other sections are still there.
   const refreshed = () => {};
@@ -64,19 +61,11 @@ function ServerPage() {
     );
   }
 
-  const name = (db ?? tunnel)?.name;
+  const name = (db ?? tunnel)?.name ?? "";
 
   return (
-    <div className="container mx-auto py-6" data-testid="server-page">
-      <Link
-        to="/servers"
-        className="mb-4 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        data-testid="back-to-list"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Servers
-      </Link>
-      <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
+    <div data-testid="server-page">
+      <DetailHeader backTo="/servers" backLabel="Servers" title={name} />
 
       <div className="mt-6 space-y-6">
         {db && <ServerDetailsSection db={db} />}
@@ -105,17 +94,6 @@ function ServerPage() {
         {tunnel && canUpdate && (
           <EditSSHServerForm key={tunnel.uid} server={tunnel} onSaved={refreshed} />
         )}
-      </div>
-
-      <div className="sticky bottom-0 -mx-4 mt-8 flex justify-end border-t bg-background px-4 py-3">
-        <Button
-          type="button"
-          variant="outline"
-          onClick={goBack}
-          data-testid="form-cancel"
-        >
-          Back to servers
-        </Button>
       </div>
     </div>
   );

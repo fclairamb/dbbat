@@ -1,6 +1,8 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowLeft, SearchX } from "lucide-react";
+import { SearchX } from "lucide-react";
+import { DetailHeader, useCurrentPathname } from "@/components/shared/DetailHeader";
 import { Button } from "@/components/ui/button";
+import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
 import {
   DialogContent,
   DialogDescription,
@@ -20,9 +22,13 @@ interface FormPageProps {
   dialog?: boolean;
   /** Extra classes for the DialogContent in dialog mode. */
   dialogClassName?: string;
-  title: React.ReactNode;
+  /**
+   * Edit page: the entity's name, never "Edit X" nor a uid. Create dialog: the
+   * action ("New server group").
+   */
+  title: string;
   description?: React.ReactNode;
-  /** List route the back link and Cancel return to. */
+  /** List route the breadcrumb and Cancel return to. */
   backTo: string;
   backLabel: string;
   onSubmit: (e: React.FormEvent) => void;
@@ -36,9 +42,10 @@ interface FormPageProps {
 }
 
 /**
- * Page chrome shared by every create/edit form: back link, header, the form
- * body at page width, and a sticky Save/Cancel footer so the actions are always
- * reachable however long the form grows.
+ * Page chrome shared by every create/edit form: the detail header (breadcrumb
+ * back to the list, the entity's name), the form body, and a sticky
+ * Save/Cancel footer so the actions are always reachable however long the form
+ * grows.
  */
 export function FormPage({
   testId,
@@ -90,24 +97,18 @@ export function FormPage({
     );
   }
   return (
-    <div className="container mx-auto py-6" data-testid={testId}>
-      <Link
-        to={backTo}
-        className="mb-4 inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        data-testid="back-to-list"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        {backLabel}
-      </Link>
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        {description && (
-          <p className="text-sm text-muted-foreground">{description}</p>
-        )}
-      </div>
+    <div data-testid={testId}>
+      <DetailHeader
+        backTo={backTo}
+        backLabel={backLabel}
+        title={title}
+        meta={description}
+      />
       <form onSubmit={onSubmit} className="mt-6">
         <div className="space-y-6">{children}</div>
-        <div className="sticky bottom-0 -mx-4 mt-8 flex justify-end gap-2 border-t bg-background px-4 py-3">
+        {/* Bleeds over the layout gutter (16px, 24px from sm) so the bar
+            spans the content column edge to edge. */}
+        <div className="sticky bottom-0 -mx-4 mt-8 flex justify-end gap-2 border-t bg-background px-4 py-3 sm:-mx-6 sm:px-6">
           <Button
             type="button"
             variant="outline"
@@ -141,9 +142,10 @@ export function EntityNotFound({
   backLabel: string;
   detail?: string;
 }) {
+  useBreadcrumbTitle(useCurrentPathname(), "Not found");
   return (
     <div
-      className="container mx-auto flex flex-col items-center gap-3 py-16 text-center"
+      className="flex flex-col items-center gap-3 py-16 text-center"
       data-testid="entity-not-found"
     >
       <SearchX className="h-10 w-10 text-muted-foreground" />

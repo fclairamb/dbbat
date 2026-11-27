@@ -11,6 +11,7 @@ import {
   type UpdateGrantDefinitionRequest,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogTrigger } from "@/components/ui/dialog";
@@ -292,6 +293,7 @@ function GrantDefinitionsPage() {
               size="sm"
               variant="ghost"
               data-testid={`edit-grant-definition-${d.uid}`}
+              aria-label={`Edit grant definition ${d.name}`}
             >
               <Link to="/grant-definitions/$uid" params={{ uid: d.uid }}>
                 <Pencil className="h-4 w-4" />
@@ -302,6 +304,8 @@ function GrantDefinitionsPage() {
               variant="ghost"
               onClick={() => setDeactivating(d)}
               data-testid={`deactivate-grant-definition-${d.uid}`}
+              aria-label={`Deactivate grant definition ${d.name}`}
+              className="text-destructive hover:text-destructive"
             >
               <Trash2 className="h-4 w-4" />
             </Button>
@@ -311,8 +315,9 @@ function GrantDefinitionsPage() {
   ];
 
   return (
-    <div className="container mx-auto py-6">
+    <div className="space-y-6">
       <PageHeader
+        icon={navItem("/grant-definitions")!.icon}
         title="Grant Definitions"
         description="Templates for the grant request workflow. Active definitions appear in the request UI."
         actions={
@@ -331,7 +336,7 @@ function GrantDefinitionsPage() {
                 <DialogTrigger asChild>
                   <Button data-testid="create-grant-definition-button">
                     <Plus className="h-4 w-4 mr-2" />
-                    New Definition
+                    New Grant Definition
                   </Button>
                 </DialogTrigger>
                 {createOpen && <GrantDefinitionForm editing={null} onDone={() => setCreateOpen(false)} />}

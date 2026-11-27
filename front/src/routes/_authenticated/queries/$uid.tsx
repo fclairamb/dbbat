@@ -7,7 +7,8 @@ import {
   useUsers,
   useDatabases,
 } from "@/api";
-import { PageHeader } from "@/components/shared/PageHeader";
+import { DetailHeader } from "@/components/shared/DetailHeader";
+import { EntityNotFound } from "@/components/shared/FormPage";
 import { PageLoader, LoadingSpinner } from "@/components/shared/LoadingSpinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { UnverifiedBadge } from "@/components/shared/UnverifiedBadge";
@@ -26,10 +27,6 @@ import { format } from "date-fns";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewQueries } from "@/lib/permissions";
 import { AccessDenied } from "@/components/shared/AccessDenied";
-import {
-  useBreadcrumbItems,
-  useBreadcrumbTitle,
-} from "@/contexts/BreadcrumbContext";
 import { sqlPreview } from "@/lib/sql";
 
 const DEFAULT_PAGE_SIZE = 100;
@@ -47,34 +44,11 @@ function QueryDetailPage() {
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
 
-  // Publish a "Queries › SELECT …" breadcrumb once the SQL text is loaded.
-  useBreadcrumbTitle(
-    `/queries/${uid}`,
-    query?.sql_text ? sqlPreview(query.sql_text) : undefined,
-  );
-
-  // Publish a connection crumb between "Queries" and the SQL preview once
-  // the query (and its required connection_id) has loaded. It links to the
-  // connection's own detail page, and its label upgrades from the short UID
-  // (loading fallback) to the resolved "username @ database" form once the
-  // connection has been fetched.
+  // The connection this statement ran in, as "username @ database": the
+  // middle crumb of "Queries › admin @ prod › SELECT …". Never a uid.
   const connectionLabel = connection
-    ? `${users?.find((u) => u.uid === connection.user_id)?.username ?? connection.user_id} @ ${databases?.find((d) => d.uid === connection.database_id)?.name ?? connection.database_id}`
-    : query
-      ? query.connection_id.slice(0, 8)
-      : undefined;
-
-  useBreadcrumbItems(
-    `/queries/${uid}`,
-    query
-      ? [
-          {
-            title: connectionLabel ?? query.connection_id.slice(0, 8),
-            href: `/connections/${query.connection_id}`,
-          },
-        ]
-      : undefined,
-  );
+    ? `${users?.find((u) => u.uid === connection.user_id)?.username ?? "Unknown user"} @ ${databases?.find((d) => d.uid === connection.database_id)?.name ?? "unknown server"}`
+    : "Connection";
 
   // Rows pagination state (local, not URL-based)
   const [cursor, setCursor] = useState<string | undefined>();
@@ -123,9 +97,11 @@ function QueryDetailPage() {
 
   if (!query) {
     return (
-      <div className="text-center text-muted-foreground py-12">
-        Query not found
-      </div>
+      <EntityNotFound
+        what="Query"
+        backTo="/queries"
+        backLabel="Back to queries"
+      />
     );
   }
 
@@ -138,9 +114,14 @@ function QueryDetailPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Query Details"
-        description={`Executed ${format(new Date(query.executed_at), "PPpp")}`}
+      <DetailHeader
+        backTo="/queries"
+        backLabel="Queries"
+        parents={[
+          { title: connectionLabel, href: `/connections/${query.connection_id}` },
+        ]}
+        title={sqlPreview(query.sql_text) || "Empty statement"}
+        meta={`Executed ${format(new Date(query.executed_at), "PPpp")}`}
       />
 
       <div className="grid gap-6 md:grid-cols-2">

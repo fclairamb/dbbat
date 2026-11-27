@@ -398,7 +398,7 @@ export function GrantDefinitionForm({
     <FormPage
       dialog={!editing}
       testId={editing ? "edit-definition-page" : undefined}
-      title={editing ? "Edit definition" : "New definition"}
+      title={editing ? editing.name : "New Grant Definition"}
       description={
         <span data-testid="definition-page-description">
           A definition is the shape of a grant, and the only source of one:

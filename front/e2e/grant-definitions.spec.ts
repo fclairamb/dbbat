@@ -17,7 +17,7 @@ import { test, expect, loginAs } from "./fixtures";
 
 const DEFS_URL = "grant-definitions";
 
-/** Open the "New Definition" dialog and wait for it to be interactive. */
+/** Open the "New Grant Definition" dialog and wait for it to be interactive. */
 async function openCreateDialog(page: Page) {
   await page.getByTestId("create-grant-definition-button").click();
   await page.waitForSelector('[role="dialog"]');

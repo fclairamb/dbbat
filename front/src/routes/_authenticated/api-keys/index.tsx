@@ -10,6 +10,7 @@ import {
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { CopyableField } from "@/components/shared/CopyableField";
 import { Button } from "@/components/ui/button";
 import { PermissionButton } from "@/components/shared/PermissionButton";
@@ -229,6 +230,7 @@ function APIKeysPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={navItem("/api-keys")!.icon}
         title="API Keys"
         description="Manage API authentication keys"
         actions={
@@ -276,7 +278,7 @@ function APIKeysPage() {
                   enabledTooltip={getActionTooltip("create-api-key")}
                 >
                   <Plus className="mr-2 h-4 w-4" />
-                  Create Key
+                  New API Key
                 </PermissionButton>
               </DialogTrigger>
               {/* Same reason as /servers and /grants: a DialogContent left
@@ -357,7 +359,7 @@ function CreateKeyDialog({
     <DialogContent>
       <form onSubmit={handleSubmit}>
         <DialogHeader>
-          <DialogTitle>Create API Key</DialogTitle>
+          <DialogTitle>New API Key</DialogTitle>
           <DialogDescription>
             Create a new API key for programmatic access.
           </DialogDescription>

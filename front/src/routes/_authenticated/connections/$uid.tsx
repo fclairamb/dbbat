@@ -8,7 +8,8 @@ import {
   useDownloadConnectionDump,
   useTerminateConnection,
 } from "@/api";
-import { PageHeader } from "@/components/shared/PageHeader";
+import { DetailHeader } from "@/components/shared/DetailHeader";
+import { EntityNotFound } from "@/components/shared/FormPage";
 import { PageLoader } from "@/components/shared/LoadingSpinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -33,7 +34,6 @@ import {
 import { Download, Ban } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
-import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { useEventStream } from "@/hooks/use-event-stream";
 import { ConnectionQueryFeed } from "@/components/shared/ConnectionQueryFeed";
@@ -98,8 +98,8 @@ function ConnectionDetailPage() {
   const { isAdmin } = useAuth();
   const { data: connection, isLoading: isLoadingConnection } =
     useConnection(uid);
-  const { data: users } = useUsers();
-  const { data: databases } = useDatabases();
+  const { data: users, isLoading: isLoadingUsers } = useUsers();
+  const { data: databases, isLoading: isLoadingDatabases } = useDatabases();
   const queryClient = useQueryClient();
   const [isTerminateOpen, setIsTerminateOpen] = useState(false);
   const downloadDump = useDownloadConnectionDump(uid, {
@@ -139,24 +139,17 @@ function ConnectionDetailPage() {
   const getDbName = (databaseId: string) =>
     databases?.find((d) => d.uid === databaseId)?.name ?? databaseId;
 
-  // Publish a "Connections › username @ database" breadcrumb once the
-  // connection (and the users/databases needed to resolve it) has loaded.
-  useBreadcrumbTitle(
-    `/connections/${uid}`,
-    connection
-      ? `${getUserName(connection.user_id)} @ ${getDbName(connection.database_id)}`
-      : undefined,
-  );
-
-  if (isLoadingConnection) {
+  if (isLoadingConnection || isLoadingUsers || isLoadingDatabases) {
     return <PageLoader />;
   }
 
   if (!connection) {
     return (
-      <div className="text-center text-muted-foreground py-12">
-        Connection not found
-      </div>
+      <EntityNotFound
+        what="Connection"
+        backTo="/connections"
+        backLabel="Back to connections"
+      />
     );
   }
 
@@ -180,9 +173,47 @@ function ConnectionDetailPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title={`${getUserName(connection.user_id)} @ ${getDbName(connection.database_id)}`}
-        description={`Connected ${format(new Date(connection.connected_at), "PPpp")}`}
+      <DetailHeader
+        backTo="/connections"
+        backLabel="Connections"
+        // Names only: a non-admin's user list holds just themselves, and a
+        // uid is never a title.
+        title={`${users?.find((u) => u.uid === connection.user_id)?.username ?? "Unknown user"} @ ${databases?.find((d) => d.uid === connection.database_id)?.name ?? "unknown server"}`}
+        meta={`Connected ${format(new Date(connection.connected_at), "PPpp")}`}
+        badges={
+          <>
+            {connection.disconnected_at ? (
+              connection.termination_reason ? (
+                // A session dbbat ended is not the same fact as one that ended
+                // — the badge says which, so the page does not read as an
+                // ordinary disconnect when it was a kill.
+                <Badge
+                  variant="destructive"
+                  data-testid="connection-terminated-badge"
+                >
+                  Terminated
+                </Badge>
+              ) : (
+                <Badge variant="secondary">Disconnected</Badge>
+              )
+            ) : (
+              <Badge variant="default">Active</Badge>
+            )}
+            {connection.rows_location === "archive" && (
+              <Badge variant="outline" data-testid="connection-archived-badge">
+                Archived
+              </Badge>
+            )}
+            {connection.rows_location === "deleted" && (
+              <Badge
+                variant="outline"
+                data-testid="connection-archive-deleted-badge"
+              >
+                Archive deleted
+              </Badge>
+            )}
+          </>
+        }
         actions={
           <>
             {isAdmin && connection.dump?.available && (
@@ -220,36 +251,6 @@ function ConnectionDetailPage() {
                 <Ban className="h-4 w-4 mr-1.5" />
                 Terminate session
               </Button>
-            )}
-            {connection.disconnected_at ? (
-              connection.termination_reason ? (
-                // A session dbbat ended is not the same fact as one that ended
-                // — the badge says which, so the page does not read as an
-                // ordinary disconnect when it was a kill.
-                <Badge
-                  variant="destructive"
-                  data-testid="connection-terminated-badge"
-                >
-                  Terminated
-                </Badge>
-              ) : (
-                <Badge variant="secondary">Disconnected</Badge>
-              )
-            ) : (
-              <Badge variant="default">Active</Badge>
-            )}
-            {connection.rows_location === "archive" && (
-              <Badge variant="outline" data-testid="connection-archived-badge">
-                Archived
-              </Badge>
-            )}
-            {connection.rows_location === "deleted" && (
-              <Badge
-                variant="outline"
-                data-testid="connection-archive-deleted-badge"
-              >
-                Archive deleted
-              </Badge>
             )}
           </>
         }

@@ -18,6 +18,7 @@ import {
 import {
   PageHeader,
 } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import {
   Button,
 } from "@/components/ui/button";
@@ -186,6 +187,7 @@ function ServersPage() {
           />
           <PermissionButton
             data-testid={`ssh-server-edit-${srv.uid}`}
+            aria-label={`Edit ${srv.name}`}
             variant="ghost"
             size="icon"
             disabled={!canUpdate}
@@ -200,6 +202,7 @@ function ServersPage() {
           </PermissionButton>
           <PermissionButton
             data-testid={`ssh-server-delete-${srv.uid}`}
+            aria-label={`Delete ${srv.name}`}
             variant="ghost"
             size="icon"
             disabled={!canDelete}
@@ -209,6 +212,7 @@ function ServersPage() {
               e.stopPropagation();
               setDeleteDb(srv);
             }}
+            className="text-destructive hover:text-destructive"
           >
             <Trash2 className="h-4 w-4" />
           </PermissionButton>
@@ -327,6 +331,7 @@ function ServersPage() {
           {canUpdate && isFullDatabase(db) && (
             <PermissionButton
               data-testid={`database-edit-${db.uid}`}
+              aria-label={`Edit ${db.name}`}
               variant="ghost"
               size="icon"
               disabled={!canUpdate}
@@ -388,6 +393,9 @@ function ServersPage() {
               e.stopPropagation();
               setDeleteDb(db);
             }}
+            className="text-destructive hover:text-destructive"
+            data-testid={`database-delete-${db.uid}`}
+            aria-label={`Delete ${db.name}`}
           >
             <Trash2 className="h-4 w-4" />
           </PermissionButton>
@@ -400,6 +408,7 @@ function ServersPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        icon={navItem("/servers")!.icon}
         title="Servers"
         description="Manage target database configurations and SSH bastions"
         actions={
@@ -415,7 +424,7 @@ function ServersPage() {
                 enabledTooltip={getActionTooltip("create-database")}
               >
                 <Plus className="mr-2 h-4 w-4" />
-                Add Server
+                New Server
               </PermissionButton>
             </DialogTrigger>
             {/* Mounted only while open: left mounted, the closed DialogContent

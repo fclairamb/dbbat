@@ -110,7 +110,7 @@ export function ServerGroupForm({
     <FormPage
       dialog={!editing}
       testId={editing ? "edit-server-group-page" : undefined}
-      title={editing ? "Edit server group" : "New server group"}
+      title={editing ? editing.name : "New Server Group"}
       description="A grant definition scopes on server groups instead of listing servers, and a grant binds to the group it was issued under."
       backTo="/server-groups"
       backLabel="Server Groups"

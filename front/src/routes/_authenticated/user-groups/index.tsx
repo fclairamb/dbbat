@@ -10,6 +10,7 @@ import {
   type UserGroup,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogTrigger } from "@/components/ui/dialog";
@@ -108,6 +109,7 @@ function UserGroupsPage() {
               size="sm"
               variant="ghost"
               data-testid={`edit-user-group-${g.uid}`}
+              aria-label={`Edit user group ${g.name}`}
             >
               <Link to="/user-groups/$uid" params={{ uid: g.uid }}>
                 <Pencil className="h-4 w-4" />
@@ -118,6 +120,8 @@ function UserGroupsPage() {
               variant="ghost"
               onClick={() => setDeleting(g)}
               data-testid={`delete-user-group-${g.uid}`}
+              aria-label={`Delete user group ${g.name}`}
+              className="text-destructive hover:text-destructive"
             >
               <Trash2 className="h-4 w-4" />
             </Button>
@@ -127,8 +131,9 @@ function UserGroupsPage() {
   ];
 
   return (
-    <div className="container mx-auto py-6">
+    <div className="space-y-6">
       <PageHeader
+        icon={navItem("/user-groups")!.icon}
         title="User Groups"
         description="Organizational groups (data-analysts, SRE, …) used to scope grant definitions. Distinct from roles, which are functional."
         actions={
@@ -137,7 +142,7 @@ function UserGroupsPage() {
               <DialogTrigger asChild>
                 <Button data-testid="create-user-group-button">
                   <Plus className="h-4 w-4 mr-2" />
-                  New Group
+                  New User Group
                 </Button>
               </DialogTrigger>
               {createOpen && <UserGroupForm editing={null} onDone={() => setCreateOpen(false)} />}

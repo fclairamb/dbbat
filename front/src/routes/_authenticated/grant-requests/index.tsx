@@ -16,6 +16,7 @@ import {
   type GrantRequest,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { navItem } from "@/lib/navigation";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Button } from "@/components/ui/button";
 import {
@@ -301,8 +302,9 @@ function GrantRequestsPage() {
   ];
 
   return (
-    <div className="container mx-auto py-6">
+    <div className="space-y-6">
       <PageHeader
+        icon={navItem("/grant-requests")!.icon}
         title="Grant Requests"
         description={
           isAdmin
