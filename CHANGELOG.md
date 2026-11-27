@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.4](https://github.com/fclairamb/dbbat/compare/v0.34.3...v0.34.4) (2026-11-27)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/go-sql-driver/mysql to v1.11.0 ([#547](https://github.com/fclairamb/dbbat/issues/547)) ([2a8c686](https://github.com/fclairamb/dbbat/commit/2a8c6867b9b1839de0f99c63ff67a5fb10e9f4cb))
+
 ## [0.34.3](https://github.com/fclairamb/dbbat/compare/v0.34.2...v0.34.3) (2026-11-26)
 
 
